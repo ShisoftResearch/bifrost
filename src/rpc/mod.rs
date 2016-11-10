@@ -1,5 +1,4 @@
 mod server;
-mod client;
 mod connection;
 
 use std::net::SocketAddr;
@@ -55,24 +54,23 @@ impl <CF> Server <CF> where CF: FnMut(&Vec<u8>, &mut connection::Connection) {
 }
 
 struct Client {
-    stream: Mutex<TcpStream>
+    stream: TcpStream
 }
 
 impl Client {
     pub fn send_message(&mut self, data: Vec<u8>) -> Vec<u8> { //TODO: package segment
-        let mut stream = self.stream.get_mut().unwrap();
         let mut buf = [0u8; 8];
         BigEndian::write_u64(&mut buf, data.len() as u64);
-        stream.write_all(buf.as_ref()).unwrap();
-        stream.write_all(data.as_ref()).unwrap();
+        self.stream.write_all(buf.as_ref()).unwrap();
+        self.stream.write_all(data.as_ref()).unwrap();
 
         let mut buf = [0u8; 8];
-        stream.read(&mut buf).unwrap();
+        self.stream.read(&mut buf).unwrap();
         let msg_len = BigEndian::read_u64(&mut buf);
         let mut r = Vec::<u8>::with_capacity(msg_len as usize);
 
         loop {
-            let s_ref = <TcpStream as Read>::by_ref(&mut stream);
+            let s_ref = <TcpStream as Read>::by_ref(&mut self.stream);
             match s_ref.take(msg_len).read(&mut r) {
                 Ok(0) => {
                     break;
@@ -90,13 +88,13 @@ impl Client {
 }
 
 struct Clients {
-    clients: Arc<RwLock<HashMap<String, Arc<Client>>>>
+    clients: Arc<RwLock<HashMap<String, Arc<Mutex<Client>>>>>
 }
 
 impl Clients {
-    fn new() -> Clients {
+    pub fn new() -> Clients {
         Clients {
-            clients: Arc::new(RwLock::new(HashMap::<String, Arc<Client>>::default()))
+            clients: Arc::new(RwLock::new(HashMap::<String, Arc<Mutex<Client>>>::default()))
         }
     }
     fn chk_client_for(&mut self, addr: &String) {
@@ -113,16 +111,45 @@ impl Clients {
             let socket_addr = addr.parse::<SocketAddr>()
                 .ok().expect("Failed to parse host:port string");
             (*map).entry(addr.clone()).or_insert_with(move || {
-                Arc::new(Client {
-                    stream: Mutex::new(TcpStream::connect(&socket_addr).unwrap())
-                })
+                Arc::new(Mutex::new(
+                    Client {
+                        stream: TcpStream::connect(&socket_addr).unwrap()
+                    }
+                ))
             });
         }
     }
-    pub fn client_for (&mut self, addr: String) -> Arc<Client> {
+    pub fn client_for (&mut self, addr: String) -> Arc<Mutex<Client>> {
         self.chk_client_for(&addr);
         let map = self.clients.clone();
         let c = map.read().unwrap();
         c[&addr].clone()
+    }
+}
+
+struct Service <SCF, CCF> {
+    server: Server<SCF>,
+    clients: Clients,
+    server_port: u32,
+    client_callback: CCF
+}
+
+impl <SCF, CCF> Service <SCF, CCF>
+where SCF: FnMut(&Vec<u8>, &mut connection::Connection),
+      CCF: FnMut(&Vec<u8>){
+    pub fn new(server_port: u32, server_callback: SCF, client_callback: CCF) -> Service<SCF, CCF> {
+        let server_addr = format!("0.0.0.0:{}", server_port);
+        Service {
+            server_port: server_port,
+            server: Server::<SCF>::new(server_addr, server_callback),
+            clients: Clients::new(),
+            client_callback: client_callback,
+        }
+    }
+    pub fn send_message (&mut self, server_addr: String, data: Vec<u8>) {
+        let client_lock = self.clients.client_for(server_addr).clone();
+        let mut client = client_lock.lock().unwrap();
+        let feedback = client.send_message(data);
+        (self.client_callback)(&feedback)
     }
 }
