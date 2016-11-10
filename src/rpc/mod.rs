@@ -65,7 +65,7 @@ impl Client {
         self.stream.write_all(data.as_ref()).unwrap();
 
         let mut buf = [0u8; 8];
-        self.stream.read(&mut buf).unwrap();
+        while self.stream.read(&mut buf).is_err() {}
         let msg_len = BigEndian::read_u64(&mut buf);
         let mut r = Vec::<u8>::with_capacity(msg_len as usize);
 
@@ -136,12 +136,12 @@ impl <CCF> Clients <CCF> where CCF: FnMut(&Vec<u8>) {
 }
 
 pub fn new<SCF, CCF>(server_port: u32, server_callback: SCF, client_callback: CCF)
-    -> (Arc<Server<SCF>>, Arc<Mutex<Clients<CCF>>>)
+    -> (Arc<Mutex<Server<SCF>>>, Arc<Mutex<Clients<CCF>>>)
 where SCF: FnMut(&Vec<u8>, &mut connection::Connection),
       CCF: FnMut(&Vec<u8>){
     let server_addr = format!("0.0.0.0:{}", server_port);
     (
-        Arc::new(Server::<SCF>::new(server_addr, server_callback)),
+        Arc::new(Mutex::new(Server::<SCF>::new(server_addr, server_callback))),
         Arc::new(Mutex::new(Clients::<CCF>::new(client_callback)))
     )
 }
