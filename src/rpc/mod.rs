@@ -16,7 +16,7 @@ use std::rc::Rc;
 use byteorder::{ByteOrder, BigEndian};
 use std::io::prelude::*;
 
-struct Server<CF> {
+pub struct Server<CF> {
     addr: SocketAddr,
     poll: Poll,
     server: server::Server<CF>
@@ -53,7 +53,7 @@ impl <CF> Server <CF> where CF: FnMut(&Vec<u8>, &mut connection::Connection) {
     }
 }
 
-struct Client {
+pub struct Client {
     stream: TcpStream
 }
 
@@ -87,14 +87,16 @@ impl Client {
     }
 }
 
-struct Clients {
-    clients: Arc<RwLock<HashMap<String, Arc<Mutex<Client>>>>>
+pub struct Clients <CCF> {
+    clients: Arc<RwLock<HashMap<String, Arc<Mutex<Client>>>>>,
+    callback: CCF
 }
 
-impl Clients {
-    pub fn new() -> Clients {
+impl <CCF> Clients <CCF> where CCF: FnMut(&Vec<u8>) {
+    pub fn new(callback: CCF) -> Clients<CCF> {
         Clients {
-            clients: Arc::new(RwLock::new(HashMap::<String, Arc<Mutex<Client>>>::default()))
+            clients: Arc::new(RwLock::new(HashMap::<String, Arc<Mutex<Client>>>::default())),
+            callback: callback
         }
     }
     fn chk_client_for(&mut self, addr: &String) {
@@ -125,31 +127,21 @@ impl Clients {
         let c = map.read().unwrap();
         c[&addr].clone()
     }
-}
-
-pub struct Service <SCF, CCF> {
-    server: Server<SCF>,
-    clients: Clients,
-    server_port: u32,
-    client_callback: CCF
-}
-
-impl <SCF, CCF> Service <SCF, CCF>
-where SCF: FnMut(&Vec<u8>, &mut connection::Connection),
-      CCF: FnMut(&Vec<u8>){
-    pub fn new(server_port: u32, server_callback: SCF, client_callback: CCF) -> Service<SCF, CCF> {
-        let server_addr = format!("0.0.0.0:{}", server_port);
-        Service {
-            server_port: server_port,
-            server: Server::<SCF>::new(server_addr, server_callback),
-            clients: Clients::new(),
-            client_callback: client_callback,
-        }
-    }
     pub fn send_message (&mut self, server_addr: String, data: Vec<u8>) {
-        let client_lock = self.clients.client_for(server_addr).clone();
+        let client_lock = self.client_for(server_addr).clone();
         let mut client = client_lock.lock().unwrap();
         let feedback = client.send_message(data);
-        (self.client_callback)(&feedback)
+        (self.callback)(&feedback)
     }
+}
+
+pub fn new<SCF, CCF>(server_port: u32, server_callback: SCF, client_callback: CCF)
+    -> (Arc<Server<SCF>>, Arc<Mutex<Clients<CCF>>>)
+where SCF: FnMut(&Vec<u8>, &mut connection::Connection),
+      CCF: FnMut(&Vec<u8>){
+    let server_addr = format!("0.0.0.0:{}", server_port);
+    (
+        Arc::new(Server::<SCF>::new(server_addr, server_callback)),
+        Arc::new(Mutex::new(Clients::<CCF>::new(client_callback)))
+    )
 }
