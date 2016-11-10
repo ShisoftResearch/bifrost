@@ -4,3 +4,8 @@ version = "0.1.0"
 authors = ["Hao Shi <shisoftgenius@gmail.com>"]
 
 [dependencies]
+byteorder = "0.3"
+env_logger = "0.3.1"
+log = "0.3.1"
+mio = "0.6.0"
+slab = "0.3.0"
