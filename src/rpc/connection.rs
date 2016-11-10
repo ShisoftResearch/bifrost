@@ -225,7 +225,8 @@ impl Connection {
     /// This will cause the connection to register interests in write events with the poller.
     /// The connection can still safely have an interest in read events. The read and write buffers
     /// operate independently of each other.
-    pub fn send_message(&mut self, message: Rc<Vec<u8>>) -> io::Result<()> {
+    pub fn send_message(&mut self, message: Vec<u8>) -> io::Result<()> {
+        let message = Rc::new(message);
         trace!("connection send_message; token={:?}", self.token);
 
         self.send_queue.push(message);

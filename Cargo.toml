@@ -3,6 +3,12 @@ name = "bifrost"
 version = "0.1.0"
 authors = ["Hao Shi <shisoftgenius@gmail.com>"]
 
+[lib]
+name = "bifrost"
+
+[[test]]
+name = "tests"
+
 [dependencies]
 byteorder = "0.3"
 env_logger = "0.3.1"

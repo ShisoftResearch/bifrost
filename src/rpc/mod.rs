@@ -127,7 +127,7 @@ impl Clients {
     }
 }
 
-struct Service <SCF, CCF> {
+pub struct Service <SCF, CCF> {
     server: Server<SCF>,
     clients: Clients,
     server_port: u32,

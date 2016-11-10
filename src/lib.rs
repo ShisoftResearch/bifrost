@@ -1,3 +1,5 @@
+#![crate_type = "lib"]
+
 extern crate mio;
 extern crate byteorder;
 extern crate slab;
