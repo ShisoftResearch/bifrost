@@ -67,22 +67,10 @@ impl Client {
         let mut buf = [0u8; 8];
         while self.stream.read(&mut buf).is_err() {}
         let msg_len = BigEndian::read_u64(&mut buf);
-        let mut r = Vec::<u8>::with_capacity(msg_len as usize);
-
-        loop {
-            let s_ref = <TcpStream as Read>::by_ref(&mut self.stream);
-            match s_ref.take(msg_len).read(&mut r) {
-                Ok(0) => {
-                    break;
-                },
-                Ok(n) => {
-                    break;
-                },
-                Err(e) => {
-                    panic!("{}", e);
-                }
-            }
-        }
+        debug!("CLIENT: Msg LEN {}", msg_len);
+        let mut r = vec![0u8; msg_len as usize];
+        let s_ref = <TcpStream as Read>::by_ref(&mut self.stream);
+        while s_ref.take(msg_len).read(&mut r).is_err() {}
         r
     }
 }

@@ -5,6 +5,7 @@ use byteorder::{ByteOrder, BigEndian};
 use std::thread;
 use std::num;
 use std::sync::Mutex;
+use std::time::Duration;
 
 #[test]
 fn service () {
@@ -25,27 +26,33 @@ fn service () {
                 move |data, conn| {
                     println!("SERVER RECEIVED");
                     let num = BigEndian::read_u64(data.as_ref());
-                    let mut buf = Vec::<u8>::with_capacity(8);
+                    println!("server received: {}", num);
+                    let mut buf = vec![0u8; 8];
                     BigEndian::write_u64(&mut buf, num + 1);
                     conn.send_message(buf).unwrap();
-                    println!("server received: {}", num);
                 }
             );
             server.start();
         });
     }
-    let NTHREAD = 1;
+    thread::sleep(Duration::from_millis(1000));
+    let NTHREAD = 2;
     let mut threads = Vec::new();
-    for i in 0..NTHREAD {
+    for i in 1..(NTHREAD + 1) {
         let clients = clients.clone();
         let server_addr = server_addr.clone();
         threads.push(thread::spawn(move||{
             let mut buf = [0u8; 8];
-            BigEndian::write_u64(&mut buf, (i as u64).pow(10));
+            BigEndian::write_u64(&mut buf, 10u64.pow(i));
             clients.lock().unwrap().send_message(server_addr, buf.to_vec());
         }));
     }
     for thread in threads {
         thread.join();
+    }
+    for _ in 0..NTHREAD{
+        let num = rx.recv().unwrap();
+        print!("CHECK NUM: {}", num);
+        assert_eq!(num % 10, 3);
     }
 }
