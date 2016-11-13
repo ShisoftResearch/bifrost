@@ -102,22 +102,18 @@ macro_rules! service {
                 fn $fn_name(&self, $($arg:$in_),*) -> std::result::Result<$out, $error>;
            )*
         }
-//        pub struct Server {
-//            event_loop: $crate::rpc::Server<ServerCallback>
-//        }
-//        impl Server {
-//            fn new_(addr: String) -> Server {
-//                Server {
-//                    event_loop: $crate::rpc::Server::new(addr, ServerCallback{})
-//                }
-//            }
-//        }
-//        struct ServerCallback {}
-//        impl FnMut(&Vec<u8>, &mut $crate::rpc::connection::Connection) for ServerCallback {
-//            extern "rust-call" fn call_mut(&mut self,data: &Vec<u8>,conn: &mut $crate::rpc::connection::Connection) -> Self::Output {
-//
-//            }
-//        }
+        pub struct Server {
+            event_loop: $crate::rpc::Server
+        }
+        impl Server {
+            fn new_(addr: String) -> Server {
+                Server {
+                    event_loop: $crate::rpc::Server::new(addr, Box::new(move|data, conn| {
+
+                    }))
+                }
+            }
+        }
     }
 }
 
