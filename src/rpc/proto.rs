@@ -114,9 +114,9 @@ macro_rules! service {
                         let (mut head, mut body) = data.split_at_mut(8);
                         let func_id = BigEndian::read_u64(&mut head);
                         match func_id {
-//                            $(hash_str!(stringify!($fn_name)) => {
-//
-//                            })*
+                            $(hash_str!(stringify!($fn_name)) => {
+
+                            })*
                             _ => {info!("Undefined function id: {}", func_id)}
                         }
                     }))

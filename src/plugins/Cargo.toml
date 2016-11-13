@@ -1,0 +1,7 @@
+[package]
+name = "bifrost-plugins"
+version = "0.1.0"
+authors = ["Hao Shi <shisoftgenius@gmail.com>"]
+
+[lib]
+plugin = true
