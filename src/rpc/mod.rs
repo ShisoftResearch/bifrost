@@ -1,5 +1,6 @@
-mod server;
-mod connection;
+pub mod server;
+pub mod connection;
+pub mod proto;
 
 use std::net::SocketAddr;
 

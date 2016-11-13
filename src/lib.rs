@@ -1,3 +1,5 @@
+#![feature(unboxed_closures)]
+
 #![crate_type = "lib"]
 
 extern crate mio;

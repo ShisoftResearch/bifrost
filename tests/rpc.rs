@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 #[test]
-fn service () {
+fn tcp_transmission () {
     let server_addr = String::from("127.0.0.1:1156");
     let (tx, rx) = channel();
     let clients = Arc::new(Mutex::new(Clients::<_>::new(
@@ -36,7 +36,7 @@ fn service () {
         });
     }
     thread::sleep(Duration::from_millis(1000));
-    let NTHREAD = 2;
+    let NTHREAD = 4;
     let mut threads = Vec::new();
     for i in 1..(NTHREAD + 1) {
         let clients = clients.clone();
