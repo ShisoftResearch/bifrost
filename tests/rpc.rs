@@ -1,7 +1,7 @@
 use bifrost::rpc::*;
 use std::sync::Arc;
 use std::sync::mpsc::channel;
-use byteorder::{ByteOrder, BigEndian};
+use byteorder::{ByteOrder, LittleEndian};
 use std::thread;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -13,7 +13,7 @@ fn tcp_transmission () {
     let clients = Arc::new(Mutex::new(Clients::new(
         Box::new(
             move |data| {
-                let num = BigEndian::read_u64(data.as_ref());
+                let num = LittleEndian::read_u64(data.as_ref());
                 println!("client received: {}", num);
                 tx.send(num + 2).unwrap();
             }
@@ -27,10 +27,10 @@ fn tcp_transmission () {
                 Box::new(
                     move |data, conn| {
                         println!("SERVER RECEIVED");
-                        let num = BigEndian::read_u64(data.as_ref());
+                        let num = LittleEndian::read_u64(data.as_ref());
                         println!("server received: {}", num);
                         let mut buf = vec![0u8; 8];
-                        BigEndian::write_u64(&mut buf, num + 1);
+                        LittleEndian::write_u64(&mut buf, num + 1);
                         conn.send_message(buf).unwrap();
                     }
                 )
@@ -46,7 +46,7 @@ fn tcp_transmission () {
         let server_addr = server_addr.clone();
         threads.push(thread::spawn(move||{
             let mut buf = [0u8; 8];
-            BigEndian::write_u64(&mut buf, 10u64.pow(i));
+            LittleEndian::write_u64(&mut buf, 10u64.pow(i));
             clients.lock().unwrap().send_message(server_addr, buf.to_vec());
         }));
     }

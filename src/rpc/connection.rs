@@ -3,7 +3,7 @@ use std::io::prelude::*;
 use std::io::{Error, ErrorKind};
 use std::rc::Rc;
 
-use byteorder::{ByteOrder, BigEndian};
+use byteorder::{ByteOrder, LittleEndian};
 
 use mio::*;
 use mio::tcp::*;
@@ -133,7 +133,7 @@ impl Connection {
             return Err(Error::new(ErrorKind::InvalidData, "Invalid message length"));
         }
 
-        let msg_len = BigEndian::read_u64(buf.as_ref());
+        let msg_len = LittleEndian::read_u64(buf.as_ref());
         Ok(Some(msg_len))
     }
 
@@ -200,7 +200,7 @@ impl Connection {
 
         let len = buf.len();
         let mut send_buf = [0u8; 8];
-        BigEndian::write_u64(&mut send_buf, len as u64);
+        LittleEndian::write_u64(&mut send_buf, len as u64);
 
         match self.sock.write(&send_buf) {
             Ok(n) => {

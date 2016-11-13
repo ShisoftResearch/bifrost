@@ -9,11 +9,12 @@ use syntax::tokenstream::TokenTree;
 use syntax::ext::base::{ExtCtxt, MacResult, DummyResult, MacEager};
 use syntax::ext::build::AstBuilder;  // trait for expr_usize
 use syntax::ext::quote::rt::Span;
+use syntax::ast::Ident;
 use rustc_plugin::Registry;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
 
-fn hash_str (cx: &mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacResult + 'static> {
+fn hash_ident (cx: &mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacResult + 'static> {
     if args.len() != 1 {
         cx.span_err(
             sp,
@@ -38,5 +39,5 @@ fn hash_str (cx: &mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacResult + 
 
 #[plugin_registrar]
 pub fn plugin_registrar(reg: &mut Registry) {
-    reg.register_macro("hash_str", hash_str);
+    reg.register_macro("hash_ident", hash_ident);
 }

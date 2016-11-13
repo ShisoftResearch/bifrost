@@ -96,7 +96,7 @@ macro_rules! service {
         )*
     ) => {
         use std;
-        use byteorder::{ByteOrder, BigEndian};
+        use byteorder::{ByteOrder, LittleEndian};
 
         pub trait Services: 'static {
            $(
@@ -112,9 +112,9 @@ macro_rules! service {
                 Server {
                     event_loop: $crate::rpc::Server::new(addr, Box::new(move|data, conn| {
                         let (mut head, mut body) = data.split_at_mut(8);
-                        let func_id = BigEndian::read_u64(&mut head);
-                        match func_id {
-                            $(hash_str!(stringify!($fn_name)) => {
+                        let func_id = LittleEndian::read_u64(&mut head);
+                        match func_id as usize {
+                            $(hash_ident!($fn_name) => {
 
                             })*
                             _ => {info!("Undefined function id: {}", func_id)}

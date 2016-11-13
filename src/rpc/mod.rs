@@ -11,7 +11,7 @@ use std::sync::RwLock;
 use std::sync::Mutex;
 use std::sync::Arc;
 use std::collections::HashMap;
-use byteorder::{ByteOrder, BigEndian};
+use byteorder::{ByteOrder, LittleEndian};
 use std::io::prelude::*;
 use self::server::ServerCallback;
 
@@ -59,13 +59,13 @@ pub struct Client {
 impl Client {
     pub fn send_message(&mut self, data: Vec<u8>) -> Vec<u8> { //TODO: package segment
         let mut buf = [0u8; 8];
-        BigEndian::write_u64(&mut buf, data.len() as u64);
+        LittleEndian::write_u64(&mut buf, data.len() as u64);
         self.stream.write_all(buf.as_ref()).unwrap();
         self.stream.write_all(data.as_ref()).unwrap();
 
         let mut buf = [0u8; 8];
         while self.stream.read(&mut buf).is_err() {}
-        let msg_len = BigEndian::read_u64(&mut buf);
+        let msg_len = LittleEndian::read_u64(&mut buf);
         debug!("CLIENT: Msg LEN {}", msg_len);
         let mut r = vec![0u8; msg_len as usize];
         let s_ref = <TcpStream as Read>::by_ref(&mut self.stream);
