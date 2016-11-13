@@ -52,3 +52,10 @@ fn hash_str (cx: &mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacResult + 
 pub fn plugin_registrar(reg: &mut Registry) {
     reg.register_macro("hash_str", hash_str);
 }
+
+#[cfg(test)]
+mod plugin_test {
+    fn hash_str () {
+
+    }
+}

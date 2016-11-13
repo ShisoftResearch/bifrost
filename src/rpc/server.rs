@@ -1,5 +1,4 @@
 use std::io::{self, ErrorKind};
-use std::rc::Rc;
 
 use mio::*;
 use mio::tcp::*;

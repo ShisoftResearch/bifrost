@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::sync::mpsc::channel;
 use byteorder::{ByteOrder, BigEndian};
 use std::thread;
-use std::num;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -40,9 +39,9 @@ fn tcp_transmission () {
         });
     }
     thread::sleep(Duration::from_millis(1000));
-    let NTHREAD = 4;
+    let nthread = 4;
     let mut threads = Vec::new();
-    for i in 1..(NTHREAD + 1) {
+    for i in 1..(nthread + 1) {
         let clients = clients.clone();
         let server_addr = server_addr.clone();
         threads.push(thread::spawn(move||{
@@ -52,9 +51,9 @@ fn tcp_transmission () {
         }));
     }
     for thread in threads {
-        thread.join();
+        let _ = thread.join();
     }
-    for _ in 0..NTHREAD{
+    for _ in 0..nthread {
         let num = rx.recv().unwrap();
         print!("CHECK NUM: {}", num);
         assert_eq!(num % 10, 3);
