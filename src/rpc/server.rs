@@ -4,12 +4,14 @@ use std::rc::Rc;
 use mio::*;
 use mio::tcp::*;
 use slab;
-
 use rpc::connection::Connection;
 
 type Slab<T> = slab::Slab<T, Token>;
 
-pub struct Server<CF>  {
+
+pub type ServerCallback = FnMut(&Vec<u8>, &mut Connection);
+
+pub struct Server {
     // main socket for our server
     sock: TcpListener,
 
@@ -22,11 +24,11 @@ pub struct Server<CF>  {
     // a list of events to process
     events: Events,
 
-    callback: CF
+    callback: Box<ServerCallback>
 }
 
-impl <CF> Server <CF> where CF: FnMut(&Vec<u8>, &mut Connection) {
-    pub fn new(sock: TcpListener, callback: CF) -> Server<CF> {
+impl Server {
+    pub fn new(sock: TcpListener, callback: Box<ServerCallback>) -> Server {
         Server {
             sock: sock,
 

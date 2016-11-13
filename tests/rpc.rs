@@ -11,26 +11,30 @@ use std::time::Duration;
 fn tcp_transmission () {
     let server_addr = String::from("127.0.0.1:1156");
     let (tx, rx) = channel();
-    let clients = Arc::new(Mutex::new(Clients::<_>::new(
-        move |data| {
-            let num = BigEndian::read_u64(data.as_ref());
-            println!("client received: {}", num);
-            tx.send(num + 2).unwrap();
-        }
+    let clients = Arc::new(Mutex::new(Clients::new(
+        Box::new(
+            move |data| {
+                let num = BigEndian::read_u64(data.as_ref());
+                println!("client received: {}", num);
+                tx.send(num + 2).unwrap();
+            }
+        )
     )));
     {
         let server_addr = server_addr.clone();
         thread::spawn(move ||{
             let mut server = Server::new(
                 server_addr,
-                move |data, conn| {
-                    println!("SERVER RECEIVED");
-                    let num = BigEndian::read_u64(data.as_ref());
-                    println!("server received: {}", num);
-                    let mut buf = vec![0u8; 8];
-                    BigEndian::write_u64(&mut buf, num + 1);
-                    conn.send_message(buf).unwrap();
-                }
+                Box::new(
+                    move |data, conn| {
+                        println!("SERVER RECEIVED");
+                        let num = BigEndian::read_u64(data.as_ref());
+                        println!("server received: {}", num);
+                        let mut buf = vec![0u8; 8];
+                        BigEndian::write_u64(&mut buf, num + 1);
+                        conn.send_message(buf).unwrap();
+                    }
+                )
             );
             server.start();
         });

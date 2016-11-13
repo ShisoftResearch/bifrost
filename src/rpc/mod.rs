@@ -16,15 +16,16 @@ use std::mem;
 use std::rc::Rc;
 use byteorder::{ByteOrder, BigEndian};
 use std::io::prelude::*;
+use self::server::ServerCallback;
 
-pub struct Server<CF> {
+pub struct Server {
     addr: SocketAddr,
     poll: Poll,
-    server: server::Server<CF>
+    server: server::Server
 }
 
-impl <CF> Server <CF> where CF: FnMut(&Vec<u8>, &mut connection::Connection) {
-    pub fn new(addr: String, callback: CF) -> Server<CF> {
+impl Server {
+    pub fn new(addr: String, callback: Box<ServerCallback>) -> Server {
         // Before doing anything, let us register a logger. The mio library has really good logging
         // at the _trace_ and _debug_ levels. Having a logger setup is invaluable when trying to
         // figure out why something is not working correctly.
@@ -41,7 +42,7 @@ impl <CF> Server <CF> where CF: FnMut(&Vec<u8>, &mut connection::Connection) {
         // the details of how registering works inside of the `Server` object. One reason I
         // really like this is to get around having to have `const SERVER = Token(0)` at the top of my
         // file. It also keeps our polling options inside `Server`.
-        let actual_server = server::Server::<CF>::new(sock, callback);
+        let actual_server = server::Server::new(sock, callback);
         Server {
             addr: addr,
             poll: poll,
@@ -76,13 +77,15 @@ impl Client {
     }
 }
 
-pub struct Clients <CCF> {
+type ClientCallback = FnMut(&Vec<u8>) + Send;
+
+pub struct Clients {
     clients: Arc<RwLock<HashMap<String, Arc<Mutex<Client>>>>>,
-    callback: CCF
+    callback: Box<ClientCallback>
 }
 
-impl <CCF> Clients <CCF> where CCF: FnMut(&Vec<u8>) {
-    pub fn new(callback: CCF) -> Clients<CCF> {
+impl Clients {
+    pub fn new(callback: Box<ClientCallback>) -> Clients {
         Clients {
             clients: Arc::new(RwLock::new(HashMap::<String, Arc<Mutex<Client>>>::default())),
             callback: callback
@@ -124,13 +127,11 @@ impl <CCF> Clients <CCF> where CCF: FnMut(&Vec<u8>) {
     }
 }
 
-pub fn new<SCF, CCF>(server_port: u32, server_callback: SCF, client_callback: CCF)
-    -> (Arc<Mutex<Server<SCF>>>, Arc<Mutex<Clients<CCF>>>)
-where SCF: FnMut(&Vec<u8>, &mut connection::Connection),
-      CCF: FnMut(&Vec<u8>){
+pub fn new (server_port: u32, server_callback: Box<ServerCallback>, client_callback: Box<ClientCallback>)
+    -> (Arc<Mutex<Server>>, Arc<Mutex<Clients>>) {
     let server_addr = format!("0.0.0.0:{}", server_port);
     (
-        Arc::new(Mutex::new(Server::<SCF>::new(server_addr, server_callback))),
-        Arc::new(Mutex::new(Clients::<CCF>::new(client_callback)))
+        Arc::new(Mutex::new(Server::new(server_addr, server_callback))),
+        Arc::new(Mutex::new(Clients::new(client_callback)))
     )
 }
