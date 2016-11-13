@@ -9,7 +9,7 @@ use rpc::connection::Connection;
 type Slab<T> = slab::Slab<T, Token>;
 
 
-pub type ServerCallback = FnMut(&Vec<u8>, &mut Connection);
+pub type ServerCallback = FnMut(&mut Vec<u8>, &mut Connection);
 
 pub struct Server {
     // main socket for our server
@@ -236,8 +236,8 @@ impl Server {
     fn readable(&mut self, token: Token) -> io::Result<()> {
         debug!("server conn readable; token={:?}", token);
         let connection = &mut self.conns[token]; //TODO: use the function below without conflict the ownership
-        while let Some(message) = try!(connection.readable()) {
-            (self.callback)(&message, connection);
+        while let Some(mut message) = try!(connection.readable()) {
+            (self.callback)(&mut message, connection);
         }
         Ok(())
     }

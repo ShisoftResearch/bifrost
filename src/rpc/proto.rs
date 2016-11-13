@@ -96,6 +96,8 @@ macro_rules! service {
         )*
     ) => {
         use std;
+        use byteorder::{ByteOrder, BigEndian};
+
         pub trait Services: 'static {
            $(
                 $(#[$attr])*
@@ -109,6 +111,8 @@ macro_rules! service {
             fn new_(addr: String) -> Server {
                 Server {
                     event_loop: $crate::rpc::Server::new(addr, Box::new(move|data, conn| {
+                               let (mut head, mut body) = data.split_at_mut(8);
+                               let func_id = BigEndian::read_u64(&mut head);
 
                     }))
                 }
