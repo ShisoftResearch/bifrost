@@ -57,6 +57,13 @@ pub struct Client {
 }
 
 impl Client {
+    pub fn new(addr: &String) -> Client {
+        let socket_addr = addr.parse::<SocketAddr>()
+            .ok().expect("Failed to parse host:port string");
+        Client {
+            stream: TcpStream::connect(&socket_addr).unwrap()
+        }
+    }
     pub fn send_message(&mut self, data: Vec<u8>) -> Vec<u8> { //TODO: package segment
         let mut buf = [0u8; 8];
         LittleEndian::write_u64(&mut buf, data.len() as u64);
@@ -99,13 +106,9 @@ impl Clients {
         }
         {
             let mut map = self.clients.write().unwrap();
-            let socket_addr = addr.parse::<SocketAddr>()
-                .ok().expect("Failed to parse host:port string");
             (*map).entry(addr.clone()).or_insert_with(move || {
                 Arc::new(Mutex::new(
-                    Client {
-                        stream: TcpStream::connect(&socket_addr).unwrap()
-                    }
+                    Client::new(addr)
                 ))
             });
         }
