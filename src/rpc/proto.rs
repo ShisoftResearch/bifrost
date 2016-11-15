@@ -118,13 +118,13 @@ macro_rules! service {
                 }
             )*
         }
-        pub trait Services: Clone + 'static {
+        pub trait Server: Clone + 'static {
            $(
                 $(#[$attr])*
                 fn $fn_name(&self, $($arg:$in_),*) -> std::result::Result<$out, $error>;
            )*
 
-           fn listen(self, addr: String) -> $crate::rpc::Server {
+           fn listen(self, addr: &String) {
                 $crate::rpc::Server::new(addr, Box::new(move|data, conn| {
                         let (mut head, mut body) = data.split_at_mut(8);
                         let func_id = LittleEndian::read_u64(&mut head);
@@ -139,9 +139,9 @@ macro_rules! service {
                                 let encoded: Vec<u8> = bincode::serialize(&s_result, SizeLimit::Infinite).unwrap();
                                 conn.send_message(encoded).unwrap();
                             }),*
-                            _ => {info!("Undefined function id: {}", func_id)}
+                            _ => {println!("Undefined function id: {}", func_id)}
                         }
-                }))
+                })).start();
             }
         }
         mod encoders {

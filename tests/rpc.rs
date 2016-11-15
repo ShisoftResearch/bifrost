@@ -23,7 +23,7 @@ fn tcp_transmission () {
         let server_addr = server_addr.clone();
         thread::spawn(move ||{
             let mut server = Server::new(
-                server_addr,
+                &server_addr,
                 Box::new(
                     move |data, conn| {
                         println!("SERVER RECEIVED");
@@ -57,5 +57,47 @@ fn tcp_transmission () {
         let num = rx.recv().unwrap();
         print!("CHECK NUM: {}", num);
         assert_eq!(num % 10, 3);
+    }
+}
+
+mod simple_service {
+
+    use std::thread;
+    use std::time::Duration;
+
+    service! {
+        rpc hello(name: String) -> String;
+        rpc error(message: String) | String;
+    }
+    #[derive(Clone)]
+    struct HelloServer;
+
+    impl Server for HelloServer {
+        fn hello(&self, name: String) -> Result<String, ()> {
+            Ok(format!("Hello, {}!", name))
+        }
+        fn error(&self, message: String) -> Result<(), String> {
+            Err(message)
+        }
+    }
+    #[test]
+    fn simple_rpc () {
+        let addr = String::from("127.0.0.1:1300");
+        {
+            let addr = addr.clone();
+            thread::spawn(move|| {
+                HelloServer.listen(&addr);
+            });
+        }
+        thread::sleep(Duration::from_millis(1000));
+        let mut client = SyncClient::new(&addr);
+        let response = client.hello(String::from("Jack"));
+        let greeting_str = response.unwrap();
+        println!("SERVER RESPONDED: {}", greeting_str);
+        assert_eq!(greeting_str, String::from("Hello, Jack!"));
+        let expected_err_msg = String::from("This error is a good one");
+        let response = client.error(expected_err_msg.clone());
+        let error_msg = response.err().unwrap();
+        assert_eq!(error_msg, expected_err_msg);
     }
 }

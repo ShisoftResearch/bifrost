@@ -22,12 +22,10 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(addr: String, callback: Box<ServerCallback>) -> Server {
+    pub fn new(addr: &String, callback: Box<ServerCallback>) -> Server {
         // Before doing anything, let us register a logger. The mio library has really good logging
         // at the _trace_ and _debug_ levels. Having a logger setup is invaluable when trying to
         // figure out why something is not working correctly.
-        env_logger::init().ok().expect("Failed to init logger");
-
         let addr = addr.parse::<SocketAddr>()
             .ok().expect("Failed to parse host:port string");
         let sock = TcpListener::bind(&addr).ok().expect("Failed to bind address");
@@ -131,7 +129,7 @@ pub fn new (server_port: u32, server_callback: Box<ServerCallback>, client_callb
     -> (Arc<Mutex<Server>>, Arc<Mutex<Clients>>) {
     let server_addr = format!("0.0.0.0:{}", server_port);
     (
-        Arc::new(Mutex::new(Server::new(server_addr, server_callback))),
+        Arc::new(Mutex::new(Server::new(&server_addr, server_callback))),
         Arc::new(Mutex::new(Clients::new(client_callback)))
     )
 }

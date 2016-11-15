@@ -1,6 +1,6 @@
 #![feature(plugin)]
-#![feature(proc_macro)]
 #![plugin(bifrost_plugins)]
+#![feature(proc_macro)]
 #![crate_type = "lib"]
 
 pub mod rpc;
