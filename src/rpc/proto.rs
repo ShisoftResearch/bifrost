@@ -1,5 +1,3 @@
-pub enum NEVER {}
-
 // this macro expansion design took credits from tarpc by Google Inc.
 #[macro_export]
 macro_rules! service {
@@ -31,7 +29,7 @@ macro_rules! service {
             $( $expanded )*
 
             $(#[$attr])*
-            rpc $fn_name( $( $arg : $in_ ),* ) -> () | $crate::rpc::proto::NEVER;
+            rpc $fn_name( $( $arg : $in_ ),* ) -> () | ();
         }
     };
     (
@@ -49,7 +47,7 @@ macro_rules! service {
             $( $expanded )*
 
             $(#[$attr])*
-            rpc $fn_name( $( $arg : $in_ ),* ) -> $out | $crate::rpc::proto::NEVER;
+            rpc $fn_name( $( $arg : $in_ ),* ) -> $out | ();
         }
     };
     (
@@ -97,6 +95,7 @@ macro_rules! service {
     ) => {
         use std;
         use byteorder::{ByteOrder, LittleEndian};
+        use bincode::{SizeLimit, serde as bincode};
 
         pub trait Services: 'static {
            $(
@@ -104,19 +103,36 @@ macro_rules! service {
                 fn $fn_name(&self, $($arg:$in_),*) -> std::result::Result<$out, $error>;
            )*
         }
+        mod rpc_args {
+            $(
+                #[derive(Serialize, Deserialize, Debug)]
+                pub struct $fn_name {
+                    $($arg:$in_),*
+                }
+            )*
+        }
+        mod rpc_returns {
+            $(
+                #[derive(Serialize, Deserialize, Debug)]
+                pub enum $fn_name {
+                    Result($out),
+                    Error($error)
+                }
+            )*
+        }
         pub struct Server {
             event_loop: $crate::rpc::Server
         }
         impl Server {
-            fn new_(addr: String) -> Server {
+            pub fn new(addr: String) -> Server {
                 Server {
                     event_loop: $crate::rpc::Server::new(addr, Box::new(move|data, conn| {
                         let (mut head, mut body) = data.split_at_mut(8);
                         let func_id = LittleEndian::read_u64(&mut head);
                         match func_id as usize {
                             $(hash_ident!($fn_name) => {
-
-                            })*
+                                let decoded: rpc_args::$fn_name = bincode::deserialize(&body).unwrap();
+                            }),*
                             _ => {info!("Undefined function id: {}", func_id)}
                         }
                     }))
