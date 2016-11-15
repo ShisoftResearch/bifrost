@@ -99,9 +99,9 @@ macro_rules! service {
         use std;
         use byteorder::{ByteOrder, LittleEndian};
         use bincode::{SizeLimit, serde as bincode};
-        use std::sync::Arc;
 
         mod rpc_args {
+            use super::*;
             $(
                 #[derive(Serialize, Deserialize, Debug)]
                 pub struct $fn_name {
@@ -110,6 +110,7 @@ macro_rules! service {
             )*
         }
         mod rpc_returns {
+            use super::*;
             $(
                 #[derive(Serialize, Deserialize, Debug)]
                 pub enum $fn_name {
@@ -147,6 +148,7 @@ macro_rules! service {
         mod encoders {
             use bincode::{SizeLimit, serde as bincode};
             use byteorder::{ByteOrder, LittleEndian};
+            use super::*;
             $(
                 pub fn $fn_name($($arg:$in_),*) -> Vec<u8> {
                     let mut m_id_buf = [0u8; 8];
@@ -197,5 +199,21 @@ mod syntax_test {
         rpc test3(a: u32, b: u32, c: u32, d: u32);
         rpc test4(a: u32, b: u32, c: u32, d: u32) -> bool | String;
         rpc test5(a: u32, b: u32, c: u32, d: u32) | String;
+    }
+}
+
+#[cfg(test)]
+mod struct_test {
+
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct a {
+        b: u32,
+        d: u64,
+        e: String,
+        f: f32
+    }
+
+    service! {
+        rpc test(a: a, b: u32) -> bool;
     }
 }

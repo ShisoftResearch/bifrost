@@ -101,3 +101,56 @@ mod simple_service {
         assert_eq!(error_msg, expected_err_msg);
     }
 }
+
+mod struct_service {
+    use std::thread;
+    use std::time::Duration;
+
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct Greeting {
+        name: String,
+        time: u32
+    }
+
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct Respond {
+        text: String,
+        owner: u32
+    }
+
+    service! {
+        rpc hello(gret: Greeting) -> Respond;
+    }
+    #[derive(Clone)]
+    struct HelloServer;
+
+    impl Server for HelloServer {
+        fn hello(&self, gret: Greeting) -> Result<Respond, ()> {
+            Ok(Respond {
+                text: format!("Hello, {}. It is {} now!", gret.name, gret.time),
+                owner: 42
+            })
+        }
+    }
+    #[test]
+    fn struct_rpc () {
+        let addr = String::from("127.0.0.1:1400");
+        {
+            let addr = addr.clone();
+            thread::spawn(move|| {
+                HelloServer.listen(&addr);
+            });
+        }
+        thread::sleep(Duration::from_millis(1000));
+        let mut client = SyncClient::new(&addr);
+        let response = client.hello(Greeting {
+            name: String::from("Jack"),
+            time: 12
+        });
+        let res = response.unwrap();
+        let greeting_str = res.text;
+        println!("SERVER RESPONDED: {}", greeting_str);
+        assert_eq!(greeting_str, String::from("Hello, Jack. It is 12 now!"));
+        assert_eq!(42, res.owner);
+    }
+}
