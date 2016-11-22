@@ -47,7 +47,7 @@ fn tcp_transmission () {
         threads.push(thread::spawn(move||{
             let mut buf = [0u8; 8];
             LittleEndian::write_u64(&mut buf, 10u64.pow(i));
-            clients.lock().unwrap().send_message(server_addr, buf.to_vec());
+            clients.lock().unwrap().send_message(&server_addr, buf.to_vec());
         }));
     }
     for thread in threads {

@@ -93,12 +93,12 @@ impl Clients {
             callback: callback
         }
     }
-    fn chk_client_for(&mut self, addr: &String) {
+    fn client_for(&mut self, addr: &String) -> Arc<Mutex<Client>> {
         {
             let map = self.clients.read().unwrap();
             let client = (*map).get(addr);
             match client {
-                Some(c) => {return}
+                Some(c) => {return c.clone()}
                 None => {}
             }
         }
@@ -109,15 +109,10 @@ impl Clients {
                     Client::new(addr)
                 ))
             });
+            map[addr].clone()
         }
     }
-    pub fn client_for (&mut self, addr: String) -> Arc<Mutex<Client>> {
-        self.chk_client_for(&addr);
-        let map = self.clients.clone();
-        let c = map.read().unwrap();
-        c[&addr].clone()
-    }
-    pub fn send_message (&mut self, server_addr: String, data: Vec<u8>) {
+    pub fn send_message (&mut self, server_addr: &String, data: Vec<u8>) {
         let client_lock = self.client_for(server_addr).clone();
         let mut client = client_lock.lock().unwrap();
         let feedback = client.send_message(data);

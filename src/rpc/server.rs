@@ -125,7 +125,6 @@ impl Server {
 
     fn ready(&mut self, poll: &mut Poll, token: Token, event: Ready) {
         debug!("{:?} event = {:?}", token, event);
-        println!("token: {:?}", token);
         if event.is_error() {
             warn!("Error event for {:?}", token);
             self.find_connection_by_token(token).mark_reset();
