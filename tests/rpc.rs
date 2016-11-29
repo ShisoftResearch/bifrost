@@ -154,3 +154,48 @@ mod struct_service {
         assert_eq!(42, res.owner);
     }
 }
+
+mod multi_server {
+    use std::thread;
+    use std::time::Duration;
+    service! {
+        rpc query_server_id() -> u32;
+    }
+    #[derive(Clone)]
+    struct IdServer {
+        id: u32
+    }
+    impl Server for IdServer {
+        fn query_server_id(&self) -> Result<u32, ()> {
+            Ok(self.id)
+        }
+    }
+    #[test]
+    fn multi_server_rpc () {
+        let addrs = vec!(
+            String::from("127.0.0.1:1500"),
+            String::from("127.0.0.1:1600"),
+            String::from("127.0.0.1:1700"),
+            String::from("127.0.0.1:1800"),
+        );
+        let mut id = 0;
+        for addr in &addrs {
+            {
+                let addr = addr.clone();
+                id += 1;
+                thread::spawn(move|| {
+                    let svr = IdServer {id: id};
+                    svr.listen(&addr);
+                });
+            }
+        }
+        id = 0;
+        thread::sleep(Duration::from_millis(1000));
+        for addr in &addrs {
+            id += 1;
+            let mut client = SyncClient::new(&addr);
+            let id_res = client.query_server_id();
+            assert_eq!(id_res.unwrap(), id);
+        }
+    }
+}
