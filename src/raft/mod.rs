@@ -1,3 +1,11 @@
+trait RaftMsg {
+    fn encode(&self) -> (usize, Vec<u8>);
+}
+
+trait UserStateMachine {
+    fn snapshot(&self) -> Vec<u8>;
+}
+
 service! {
     rpc AppendEntries(term: u64, leaderId: u64, prev_log_id: u64, prev_log_term: u64, entries: Vec<Vec<u8>>, leader_commit: u64) -> u64; //Err for not success
     rpc RequestVote(term: u64, candidate_id: u64, last_log_id: u64, last_log_term: u64) -> (u64, bool); // term, voteGranted
@@ -8,14 +16,14 @@ service! {
 //Current major problem is inner repeated macro will be recognized as outer macro which breaks expand
 
 #[macro_export]
-macro_rules! raft {
+macro_rules! state_machine {
     (
         $(
             $(#[$attr:meta])*
             def $smt:ident $fn_name:ident( $( $arg:ident : $in_:ty ),* ) $(-> $out:ty)* $(| $error:ty)*;
         )*
     ) => {
-        raft! {{
+        state_machine! {{
             $(
                 $(#[$attr])*
                 def $smt $fn_name( $( $arg : $in_ ),* ) $(-> $out)* $(| $error)*;
@@ -31,7 +39,7 @@ macro_rules! raft {
         }
         $( $expanded:tt )*
     ) => {
-        raft! {
+        state_machine! {
             { $( $unexpanded )* }
 
             $( $expanded )*
@@ -49,7 +57,7 @@ macro_rules! raft {
         }
         $( $expanded:tt )*
     ) => {
-        raft! {
+        state_machine! {
             { $( $unexpanded )* }
 
             $( $expanded )*
@@ -67,7 +75,7 @@ macro_rules! raft {
         }
         $( $expanded:tt )*
     ) => {
-        raft! {
+        state_machine! {
             { $( $unexpanded )* }
 
             $( $expanded )*
@@ -85,7 +93,7 @@ macro_rules! raft {
         }
         $( $expanded:tt )*
     ) => {
-        raft! {
+        state_machine! {
             { $( $unexpanded )* }
 
             $( $expanded )*
@@ -106,11 +114,21 @@ macro_rules! raft {
         use bincode::{SizeLimit, serde as bincode};
 
         mod sm_args {
+            use super::*;
             $(
                 #[derive(Serialize, Deserialize, Debug)]
                 pub struct $fn_name {
                     $(pub $arg:$in_),*
                 }
+                impl $crate::raft::RaftMsg for $fn_name {
+                    fn encode(&self) -> (usize, Vec<u8>) {
+                        (
+                            hash_ident!($fn_name),
+                            bincode::serialize(&self, SizeLimit::Infinite).unwrap()
+                        )
+                    }
+                }
+
             )*
         }
         mod sm_returns {
@@ -122,12 +140,12 @@ macro_rules! raft {
                 }
             )*
         }
-        pub trait StateMachine {
+        pub trait StateMachine: $crate::raft::UserStateMachine {
            $(
                 $(#[$attr])*
                 fn $fn_name(&self, $($arg:$in_),*) -> std::result::Result<$out, $error>;
            )*
-           fn snapshot(&self) -> Vec<u8>;
+
 //           fn dispatch(&self, fn_id: u64, &data: Vec<u8>) -> Option<Vec<u8>> {
 //                match fn_id as usize {
 //                    $(hash_ident!($fn_name) => {
@@ -151,7 +169,7 @@ macro_rules! raft {
 
 #[cfg(test)]
 mod syntax_test {
-    raft! {
+    state_machine! {
         def qry get (key: u64) -> String | ();
         def cmd test(a: u32, b: u32) -> bool;
     }
