@@ -100,8 +100,12 @@ macro_rules! service {
         use bincode::{SizeLimit, serde as bincode};
 
         mod rpc_args {
+            #[allow(unused_variables)]
+            #[allow(unused_imports)]
+
             use super::*;
             $(
+                #[allow(non_camel_case_types)]
                 #[derive(Serialize, Deserialize, Debug)]
                 pub struct $fn_name {
                     $(pub $arg:$in_),*
@@ -109,8 +113,12 @@ macro_rules! service {
             )*
         }
         mod rpc_returns {
+            #[allow(unused_variables)]
+            #[allow(unused_imports)]
+
             use super::*;
             $(
+                #[allow(non_camel_case_types)]
                 #[derive(Serialize, Deserialize, Debug)]
                 pub enum $fn_name {
                     Result($out),
@@ -175,6 +183,7 @@ macro_rules! service {
                 }
             }
            $(
+                #[allow(non_camel_case_types)]
                 $(#[$attr])*
                 fn $fn_name(&mut self, $($arg:$in_),*) -> std::result::Result<$out, $error> {
                     let req_bytes = encoders::$fn_name($($arg),*);
@@ -190,7 +199,6 @@ macro_rules! service {
     }
 }
 
-#[cfg(test)]
 mod syntax_test {
     service! {
         rpc test(a: u32, b: u32) -> bool;
