@@ -37,7 +37,7 @@ impl Server {
 
             // SERVER is Token(1), so start after that
             // we can deal with a max of 126 connections
-            conns: Slab::with_capacity(128),
+            conns: Slab::with_capacity(25535),
 
             // list of events from the poller that the server needs to process
             events: Events::with_capacity(1024),
