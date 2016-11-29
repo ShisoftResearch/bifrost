@@ -3,7 +3,9 @@
 #![feature(proc_macro)]
 #![crate_type = "lib"]
 
+#[macro_use]
 pub mod rpc;
+pub mod raft;
 
 extern crate mio;
 extern crate byteorder;

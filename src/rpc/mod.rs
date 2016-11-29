@@ -1,5 +1,6 @@
 pub mod server;
 pub mod connection;
+#[macro_use]
 pub mod proto;
 
 use std::net::SocketAddr;

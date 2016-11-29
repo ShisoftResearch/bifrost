@@ -1,7 +1,6 @@
-// this macro expansion design took credits from tarpc by Google Inc.
-
 use bincode::{SizeLimit, serde as bincode};
 
+// this macro expansion design took credits from tarpc by Google Inc.
 #[macro_export]
 macro_rules! service {
     (
