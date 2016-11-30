@@ -2,8 +2,9 @@ use rand;
 use rand::Rng;
 use rand::distributions::{IndependentSample, Range};
 use std::thread;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use time;
+use std::time::Duration;
 
 trait RaftMsg {
     fn encode(&self) -> (usize, Vec<u8>);
@@ -169,7 +170,7 @@ macro_rules! state_machine {
     };
 }
 
-const ORDERING: Ordering = Ordering::SeqCst;
+const CHECKER_MS: u64 = 10;
 
 service! {                                                                                            //   sm , fn , data
     rpc AppendEntries(term: u64, leaderId: u64, prev_log_id: u64, prev_log_term: u64, entries: Option<Vec<(u64, u64, Vec<u8>)>>, leader_commit: u64) -> u64; //Err for not success
@@ -189,28 +190,47 @@ fn get_time() -> u64 {
     mills as u64
 }
 
-pub struct RaftServer {
+pub enum Membership {
+    LEADER,
+    FOLLOWER,
+    CANDIDATE,
+}
+
+pub struct RaftMeta {
     term: u64,
     log: u64,
     voted: bool,
     timeout: u64,
-    last_term: AtomicU64,
+    last_checked: u64,
+    membership: Membership,
+}
+
+pub struct RaftServer {
+    meta: Arc<Mutex<RaftMeta>>
 }
 
 impl RaftServer {
     pub fn new() -> RaftServer {
         RaftServer {
-            term: 0,
-            log: 0,
-            voted: false,
-            timeout: gen_rand(100, 500), // 10~500 ms for timeout
-            last_term: AtomicU64::new(get_time()) ,
+            meta: Arc::new(Mutex::new(
+                RaftMeta {
+                    term: 0,
+                    log: 0,
+                    voted: false,
+                    timeout: gen_rand(100, 500), // 10~500 ms for timeout
+                    last_checked: get_time(),
+                    membership: Membership::FOLLOWER,
+                }
+            ))
         }
+    }
+    pub fn become_candidate(&self) {
+
     }
 }
 
-pub fn start_server(server: RaftServer, addr: &String) {
-    let server = Arc::new(server);
+pub fn start_server(addr: &String) -> Arc<RaftServer> {
+    let server = Arc::new(RaftServer::new());
     let addr = addr.clone();
     let svr_ref = server.clone();
     thread::spawn(move ||{
@@ -220,11 +240,26 @@ pub fn start_server(server: RaftServer, addr: &String) {
     thread::spawn(move ||{
         let server = checker_ref;
         loop {
-            if get_time() > (server.timeout + server.last_term.load(ORDERING)) {
+            {
+                let mut meta = server.meta.lock().unwrap();
+                match meta.membership {
+                    Membership::LEADER => {
 
+                    },
+                    Membership::FOLLOWER => {
+                        if get_time() > (meta.timeout + meta.last_checked) { //Timeout, require election
+                            server.become_candidate();
+                        }
+                    },
+                    Membership::CANDIDATE => {
+
+                    }
+                }
             }
+            thread::sleep(Duration::from_millis(CHECKER_MS));
         }
     });
+    server
 }
 
 impl Server for RaftServer {
