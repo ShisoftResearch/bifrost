@@ -69,7 +69,7 @@ mod simple_service {
         rpc hello(name: String) -> String;
         rpc error(message: String) | String;
     }
-    #[derive(Clone)]
+
     struct HelloServer;
 
     impl Server for HelloServer {
@@ -85,8 +85,9 @@ mod simple_service {
         let addr = String::from("127.0.0.1:1300");
         {
             let addr = addr.clone();
+            let server = HelloServer{};
             thread::spawn(move|| {
-                HelloServer.listen(&addr);
+                listen(Arc::new(server), &addr);
             });
         }
         thread::sleep(Duration::from_millis(1000));
@@ -121,7 +122,7 @@ mod struct_service {
     service! {
         rpc hello(gret: Greeting) -> Respond;
     }
-    #[derive(Clone)]
+
     struct HelloServer;
 
     impl Server for HelloServer {
@@ -137,8 +138,9 @@ mod struct_service {
         let addr = String::from("127.0.0.1:1400");
         {
             let addr = addr.clone();
+            let server = HelloServer{};
             thread::spawn(move|| {
-                HelloServer.listen(&addr);
+                listen(Arc::new(server), &addr);
             });
         }
         thread::sleep(Duration::from_millis(1000));
@@ -161,7 +163,7 @@ mod multi_server {
     service! {
         rpc query_server_id() -> u32;
     }
-    #[derive(Clone)]
+
     struct IdServer {
         id: u32
     }
@@ -184,8 +186,8 @@ mod multi_server {
                 let addr = addr.clone();
                 id += 1;
                 thread::spawn(move|| {
-                    let svr = IdServer {id: id};
-                    svr.listen(&addr);
+                    let server = IdServer {id: id};
+                    listen(Arc::new(server), &addr);
                 });
             }
         }

@@ -98,6 +98,7 @@ macro_rules! service {
         use std;
         use byteorder::{ByteOrder, LittleEndian};
         use bincode::{SizeLimit, serde as bincode};
+        use std::sync::Arc;
 
         mod rpc_args {
             #[allow(unused_variables)]
@@ -126,31 +127,30 @@ macro_rules! service {
                 }
             )*
         }
-        pub trait Server: Clone + 'static {
+        pub trait Server {
            $(
                 $(#[$attr])*
                 fn $fn_name(&self, $($arg:$in_),*) -> std::result::Result<$out, $error>;
            )*
-
-           fn listen(self, addr: &String) {
-                $crate::rpc::Server::new(addr, Box::new(move|data, conn| {
-                        let (mut head, mut body) = data.split_at_mut(8);
-                        let func_id = LittleEndian::read_u64(&mut head);
-                        match func_id as usize {
-                            $(hash_ident!($fn_name) => {
-                                let decoded: rpc_args::$fn_name = bincode::deserialize(&body).unwrap();
-                                let f_result = self.$fn_name($(decoded.$arg),*);
-                                let s_result = match f_result {
-                                    Ok(v) => rpc_returns::$fn_name::Result(v),
-                                    Err(e) => rpc_returns::$fn_name::Error(e)
-                                };
-                                let encoded: Vec<u8> = bincode::serialize(&s_result, SizeLimit::Infinite).unwrap();
-                                conn.send_message(encoded).unwrap();
-                            }),*
-                            _ => {println!("Undefined function id: {}", func_id)}
-                        }
-                })).start();
-            }
+        }
+        fn listen(server: Arc<Server>, addr: &String) {
+           $crate::rpc::Server::new(addr, Box::new(move |data, conn| {
+                    let (mut head, mut body) = data.split_at_mut(8);
+                    let func_id = LittleEndian::read_u64(&mut head);
+                    match func_id as usize {
+                        $(hash_ident!($fn_name) => {
+                            let decoded: rpc_args::$fn_name = bincode::deserialize(&body).unwrap();
+                            let f_result = server.$fn_name($(decoded.$arg),*);
+                            let s_result = match f_result {
+                                Ok(v) => rpc_returns::$fn_name::Result(v),
+                                Err(e) => rpc_returns::$fn_name::Error(e)
+                            };
+                            let encoded: Vec<u8> = bincode::serialize(&s_result, SizeLimit::Infinite).unwrap();
+                            conn.send_message(encoded).unwrap();
+                        }),*
+                        _ => {println!("Undefined function id: {}", func_id)}
+                    }
+            })).start();
         }
         mod encoders {
             use bincode::{SizeLimit, serde as bincode};

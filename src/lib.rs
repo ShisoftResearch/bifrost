@@ -2,6 +2,7 @@
 #![plugin(bifrost_plugins)]
 #![feature(proc_macro)]
 #![crate_type = "lib"]
+#![feature(integer_atomics)]
 
 #[macro_use]
 pub mod rpc;
@@ -21,3 +22,4 @@ extern crate log;
 extern crate env_logger;
 
 extern crate rand;
+extern crate time;

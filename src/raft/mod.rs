@@ -1,7 +1,9 @@
-use std::time::Instant;
 use rand;
 use rand::Rng;
 use rand::distributions::{IndependentSample, Range};
+use std::thread;
+use std::sync::atomic::{AtomicU64, Ordering};
+use time;
 
 trait RaftMsg {
     fn encode(&self) -> (usize, Vec<u8>);
@@ -11,6 +13,7 @@ trait UserStateMachine {
     fn snapshot(&self) -> Vec<u8>;
     fn id(&self) -> u64;
 }
+
 
 //TODO: Use higher order macro to merge with rpc service! macro when possible to do this in Rust.
 //Current major problem is inner repeated macro will be recognized as outer macro which breaks expand
@@ -178,13 +181,18 @@ fn gen_rand(lower: u32, higher: u32) -> u32 {
     between.ind_sample(&mut rng) + 1
 }
 
+//fn get_time() -> u64 {
+//    let timespec = time::get_time();
+//
+//}
+
 #[derive(Clone)]
 struct RaftServer {
     term: u64,
     log: u64,
     voted: bool,
     timeout: u32,
-    last_term: Instant,
+    //last_term: AtomicU64,
 }
 
 impl RaftServer {
@@ -193,8 +201,8 @@ impl RaftServer {
             term: 0,
             log: 0,
             voted: false,
-            timeout: gen_rand(10, 500), // 10~500 ms for timeout
-            last_term: Instant::now(),
+            timeout: gen_rand(100, 500), // 10~500 ms for timeout
+            //last_term: AtomicU64,
         }
     }
 }
