@@ -1,15 +1,15 @@
+use std::time::Instant;
+use rand;
+use rand::Rng;
+use rand::distributions::{IndependentSample, Range};
+
 trait RaftMsg {
     fn encode(&self) -> (usize, Vec<u8>);
 }
 
 trait UserStateMachine {
     fn snapshot(&self) -> Vec<u8>;
-}
-
-service! {
-    rpc AppendEntries(term: u64, leaderId: u64, prev_log_id: u64, prev_log_term: u64, entries: Vec<Vec<u8>>, leader_commit: u64) -> u64; //Err for not success
-    rpc RequestVote(term: u64, candidate_id: u64, last_log_id: u64, last_log_term: u64) -> (u64, bool); // term, voteGranted
-    rpc InstallSnapshot(term: u64, leader_id: u64, lasr_included_index: u64, last_included_term: u64, data: Vec<u8>, done: bool) -> u64;
+    fn id(&self) -> u64;
 }
 
 //TODO: Use higher order macro to merge with rpc service! macro when possible to do this in Rust.
@@ -145,26 +145,85 @@ macro_rules! state_machine {
                 $(#[$attr])*
                 fn $fn_name(&self, $($arg:$in_),*) -> std::result::Result<$out, $error>;
            )*
-
-//           fn dispatch(&self, fn_id: u64, &data: Vec<u8>) -> Option<Vec<u8>> {
-//                match fn_id as usize {
-//                    $(hash_ident!($fn_name) => {
-//                        let decoded: sm_args::$fn_name = bincode::deserialize(&data).unwrap();
-//                        let f_result = self.$fn_name($(decoded.$arg),*);
-//                        let s_result = match f_result {
-//                            Ok(v) => sm_returns::$fn_name::Result(v),
-//                            Err(e) => sm_returns::$fn_name::Error(e)
-//                        };
-//                        Some(bincode::serialize(&s_result, SizeLimit::Infinite).unwrap())
-//                    }),*
-//                    _ => {
-//                        println!("Undefined function id: {}", fn_id);
-//                        None
-//                    }
-//                }
-//           }
+           fn dispatch(&self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {
+                match fn_id as usize {
+                    $(hash_ident!($fn_name) => {
+                        let decoded: sm_args::$fn_name = bincode::deserialize(data).unwrap();
+                        let f_result = self.$fn_name($(decoded.$arg),*);
+                        let s_result = match f_result {
+                            Ok(v) => sm_returns::$fn_name::Result(v),
+                            Err(e) => sm_returns::$fn_name::Error(e)
+                        };
+                        Some(bincode::serialize(&s_result, SizeLimit::Infinite).unwrap())
+                    }),*
+                    _ => {
+                        println!("Undefined function id: {}", fn_id);
+                        None
+                    }
+                }
+           }
         }
     };
+}
+
+service! {                                                                                            //   sm , fn , data
+    rpc AppendEntries(term: u64, leaderId: u64, prev_log_id: u64, prev_log_term: u64, entries: Option<Vec<(u64, u64, Vec<u8>)>>, leader_commit: u64) -> u64; //Err for not success
+    rpc RequestVote(term: u64, candidate_id: u64, last_log_id: u64, last_log_term: u64) -> (u64, bool); // term, voteGranted
+    rpc InstallSnapshot(term: u64, leader_id: u64, lasr_included_index: u64, last_included_term: u64, data: Vec<u8>, done: bool) -> u64;
+}
+
+fn gen_rand(lower: u32, higher: u32) -> u32 {
+    let between = Range::new(lower, higher);
+    let mut rng = rand::thread_rng();
+    between.ind_sample(&mut rng) + 1
+}
+
+#[derive(Clone)]
+struct RaftServer {
+    term: u64,
+    log: u64,
+    voted: bool,
+    timeout: u32,
+    last_term: Instant,
+}
+
+impl RaftServer {
+    pub fn new() -> RaftServer {
+        RaftServer {
+            term: 0,
+            log: 0,
+            voted: false,
+            timeout: gen_rand(10, 500), // 10~500 ms for timeout
+            last_term: Instant::now(),
+        }
+    }
+}
+
+impl Server for RaftServer {
+    fn AppendEntries(
+        &self,
+        term: u64, leaderId: u64, prev_log_id: u64,
+        prev_log_term: u64, entries: Option<Vec<(u64, u64, Vec<u8>)>>,
+        leader_commit: u64
+    ) -> Result<u64, ()>  {
+        Ok(0)
+    }
+
+    fn RequestVote(
+        &self,
+        term: u64, candidate_id: u64,
+        last_log_id: u64, last_log_term: u64
+    ) -> Result<(u64, bool), ()> {
+        Ok((0, false))
+    }
+
+    fn InstallSnapshot(
+        &self,
+        term: u64, leader_id: u64, lasr_included_index: u64,
+        last_included_term: u64, data: Vec<u8>, done: bool
+    ) -> Result<u64, ()> {
+        Ok(0)
+    }
 }
 
 #[cfg(test)]
