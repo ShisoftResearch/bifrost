@@ -186,13 +186,12 @@ fn gen_rand(lower: u32, higher: u32) -> u32 {
 //
 //}
 
-#[derive(Clone)]
 struct RaftServer {
     term: u64,
     log: u64,
     voted: bool,
     timeout: u32,
-    //last_term: AtomicU64,
+    last_term: AtomicU64,
 }
 
 impl RaftServer {
@@ -202,7 +201,7 @@ impl RaftServer {
             log: 0,
             voted: false,
             timeout: gen_rand(100, 500), // 10~500 ms for timeout
-            //last_term: AtomicU64,
+            last_term: AtomicU64::new(0) ,
         }
     }
 }

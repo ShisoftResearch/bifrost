@@ -87,7 +87,7 @@ mod simple_service {
             let addr = addr.clone();
             let server = HelloServer{};
             thread::spawn(move|| {
-                listen(Arc::new(server), &addr);
+                listen(Box::new(server), &addr);
             });
         }
         thread::sleep(Duration::from_millis(1000));
@@ -140,7 +140,7 @@ mod struct_service {
             let addr = addr.clone();
             let server = HelloServer{};
             thread::spawn(move|| {
-                listen(Arc::new(server), &addr);
+                listen(Box::new(server), &addr);
             });
         }
         thread::sleep(Duration::from_millis(1000));
@@ -187,7 +187,7 @@ mod multi_server {
                 id += 1;
                 thread::spawn(move|| {
                     let server = IdServer {id: id};
-                    listen(Arc::new(server), &addr);
+                    listen(Box::new(server), &addr);
                 });
             }
         }
