@@ -12,3 +12,24 @@ extern crate bincode;
 extern crate serde_derive;
 
 mod rpc;
+
+mod mutex {
+    use std::sync::Mutex;
+
+//    #[test]
+//    fn reentering_lock() { //FAIL
+//        let l = Mutex::new(false);
+//        {
+//            println!("Locking A");
+//            let a = l.lock().unwrap();
+//            println!("Locked A");
+//            {
+//                println!("Locking B");
+//                let b = l.lock().unwrap();
+//                println!("Locked B");
+//            }
+//            println!("Unlocked B");
+//        }
+//        println!("Unlocked A");
+//    }
+}

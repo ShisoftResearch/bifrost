@@ -2,7 +2,7 @@ use rand;
 use rand::Rng;
 use rand::distributions::{IndependentSample, Range};
 use std::thread;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use time;
 use std::time::Duration;
 
@@ -224,7 +224,7 @@ impl RaftServer {
             ))
         }
     }
-    pub fn become_candidate(&self) {
+    pub fn become_candidate(&self, meta: &MutexGuard<RaftMeta>) {
 
     }
 }
@@ -241,14 +241,14 @@ pub fn start_server(addr: &String) -> Arc<RaftServer> {
         let server = checker_ref;
         loop {
             {
-                let mut meta = server.meta.lock().unwrap();
+                let mut meta = server.meta.lock().unwrap(); //WARNING: Reentering not supported
                 match meta.membership {
                     Membership::LEADER => {
 
                     },
                     Membership::FOLLOWER => {
                         if get_time() > (meta.timeout + meta.last_checked) { //Timeout, require election
-                            server.become_candidate();
+                            server.become_candidate(&meta);
                         }
                     },
                     Membership::CANDIDATE => {
