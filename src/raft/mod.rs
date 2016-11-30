@@ -170,12 +170,12 @@ macro_rules! state_machine {
     };
 }
 
-const CHECKER_MS: u64 = 10;
+const CHECKER_MS: u64 = 50;
 
-service! {                                                                                            //   sm , fn , data
-    rpc AppendEntries(term: u64, leaderId: u64, prev_log_id: u64, prev_log_term: u64, entries: Option<Vec<(u64, u64, Vec<u8>)>>, leader_commit: u64) -> u64; //Err for not success
-    rpc RequestVote(term: u64, candidate_id: u64, last_log_id: u64, last_log_term: u64) -> (u64, bool); // term, voteGranted
-    rpc InstallSnapshot(term: u64, leader_id: u64, lasr_included_index: u64, last_included_term: u64, data: Vec<u8>, done: bool) -> u64;
+service! {                                                                                            //    sm , fn , data
+    rpc append_entries(term: u64, leaderId: u64, prev_log_id: u64, prev_log_term: u64, entries: Option<Vec<(u64, u64, Vec<u8>)>>, leader_commit: u64) -> u64; //Err for not success
+    rpc request_vote(term: u64, candidate_id: u64, last_log_id: u64, last_log_term: u64) -> (u64, bool); // term, voteGranted
+    rpc install_snapshot(term: u64, leader_id: u64, lasr_included_index: u64, last_included_term: u64, data: Vec<u8>, done: bool) -> u64;
 }
 
 fn gen_rand(lower: u64, higher: u64) -> u64 {
@@ -202,7 +202,10 @@ pub struct RaftMeta {
     voted: bool,
     timeout: u64,
     last_checked: u64,
+    last_updated: u64,
     membership: Membership,
+    leader_id: u64,
+    logs: Vec<(u64, u64, Vec<u8>)>,
 }
 
 pub struct RaftServer {
@@ -219,12 +222,18 @@ impl RaftServer {
                     voted: false,
                     timeout: gen_rand(100, 500), // 10~500 ms for timeout
                     last_checked: get_time(),
+                    last_updated: get_time(),
                     membership: Membership::FOLLOWER,
+                    leader_id: 0,
+                    logs: Vec::new(),
                 }
             ))
         }
     }
     pub fn become_candidate(&self, meta: &MutexGuard<RaftMeta>) {
+
+    }
+    pub fn send_heartbeat(&self, meta: &MutexGuard<RaftMeta>, entries: Option<Vec<(u64, u64, Vec<u8>)>>) {
 
     }
 }
@@ -244,15 +253,14 @@ pub fn start_server(addr: &String) -> Arc<RaftServer> {
                 let mut meta = server.meta.lock().unwrap(); //WARNING: Reentering not supported
                 match meta.membership {
                     Membership::LEADER => {
-
+                        if get_time() > (meta.last_updated + CHECKER_MS) {
+                            server.send_heartbeat(&meta, None);
+                        }
                     },
-                    Membership::FOLLOWER => {
+                    Membership::FOLLOWER | Membership::CANDIDATE => {
                         if get_time() > (meta.timeout + meta.last_checked) { //Timeout, require election
                             server.become_candidate(&meta);
                         }
-                    },
-                    Membership::CANDIDATE => {
-
                     }
                 }
             }
@@ -263,7 +271,7 @@ pub fn start_server(addr: &String) -> Arc<RaftServer> {
 }
 
 impl Server for RaftServer {
-    fn AppendEntries(
+    fn append_entries(
         &self,
         term: u64, leaderId: u64, prev_log_id: u64,
         prev_log_term: u64, entries: Option<Vec<(u64, u64, Vec<u8>)>>,
@@ -272,7 +280,7 @@ impl Server for RaftServer {
         Ok(0)
     }
 
-    fn RequestVote(
+    fn request_vote(
         &self,
         term: u64, candidate_id: u64,
         last_log_id: u64, last_log_term: u64
@@ -280,7 +288,7 @@ impl Server for RaftServer {
         Ok((0, false))
     }
 
-    fn InstallSnapshot(
+    fn install_snapshot(
         &self,
         term: u64, leader_id: u64, lasr_included_index: u64,
         last_included_term: u64, data: Vec<u8>, done: bool

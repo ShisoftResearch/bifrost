@@ -12,6 +12,7 @@ extern crate bincode;
 extern crate serde_derive;
 
 mod rpc;
+mod raft;
 
 mod mutex {
     use std::sync::Mutex;
