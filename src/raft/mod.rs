@@ -169,28 +169,31 @@ macro_rules! state_machine {
     };
 }
 
+const ORDERING: Ordering = Ordering::SeqCst;
+
 service! {                                                                                            //   sm , fn , data
     rpc AppendEntries(term: u64, leaderId: u64, prev_log_id: u64, prev_log_term: u64, entries: Option<Vec<(u64, u64, Vec<u8>)>>, leader_commit: u64) -> u64; //Err for not success
     rpc RequestVote(term: u64, candidate_id: u64, last_log_id: u64, last_log_term: u64) -> (u64, bool); // term, voteGranted
     rpc InstallSnapshot(term: u64, leader_id: u64, lasr_included_index: u64, last_included_term: u64, data: Vec<u8>, done: bool) -> u64;
 }
 
-fn gen_rand(lower: u32, higher: u32) -> u32 {
+fn gen_rand(lower: u64, higher: u64) -> u64 {
     let between = Range::new(lower, higher);
     let mut rng = rand::thread_rng();
     between.ind_sample(&mut rng) + 1
 }
 
-//fn get_time() -> u64 {
-//    let timespec = time::get_time();
-//
-//}
+fn get_time() -> u64 {
+    let timespec = time::get_time();
+    let mills: f64 = timespec.sec as f64 + (timespec.nsec as f64 / 1000.0 / 1000.0 / 1000.0 );
+    mills as u64
+}
 
-struct RaftServer {
+pub struct RaftServer {
     term: u64,
     log: u64,
     voted: bool,
-    timeout: u32,
+    timeout: u64,
     last_term: AtomicU64,
 }
 
@@ -201,9 +204,27 @@ impl RaftServer {
             log: 0,
             voted: false,
             timeout: gen_rand(100, 500), // 10~500 ms for timeout
-            last_term: AtomicU64::new(0) ,
+            last_term: AtomicU64::new(get_time()) ,
         }
     }
+}
+
+pub fn start_server(server: RaftServer, addr: &String) {
+    let server = Arc::new(server);
+    let addr = addr.clone();
+    let svr_ref = server.clone();
+    thread::spawn(move ||{
+        listen(svr_ref, &addr);
+    });
+    let checker_ref = server.clone();
+    thread::spawn(move ||{
+        let server = checker_ref;
+        loop {
+            if get_time() > (server.timeout + server.last_term.load(ORDERING)) {
+
+            }
+        }
+    });
 }
 
 impl Server for RaftServer {

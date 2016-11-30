@@ -133,7 +133,7 @@ macro_rules! service {
                 fn $fn_name(&self, $($arg:$in_),*) -> std::result::Result<$out, $error>;
            )*
         }
-        fn listen(server: Box<Server>, addr: &String) {
+        fn listen(server: Arc<Server>, addr: &String) {
            $crate::rpc::Server::new(addr, Box::new(move |data, conn| {
                     let (mut head, mut body) = data.split_at_mut(8);
                     let func_id = LittleEndian::read_u64(&mut head);
