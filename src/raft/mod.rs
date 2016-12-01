@@ -5,177 +5,26 @@ use std::thread;
 use std::sync::{Mutex, MutexGuard};
 use time;
 use std::time::Duration;
+use std::collections::HashMap;
+use self::state_machine::master::MasterStateMachine;
+
+#[macro_use]
+mod state_machine;
 
 trait RaftMsg {
     fn encode(&self) -> (usize, Vec<u8>);
 }
 
-trait UserStateMachine {
-    fn snapshot(&self) -> Vec<u8>;
-    fn id(&self) -> u64;
-}
-
-
-//TODO: Use higher order macro to merge with rpc service! macro when possible to do this in Rust.
-//Current major problem is inner repeated macro will be recognized as outer macro which breaks expand
-
-#[macro_export]
-macro_rules! state_machine {
-    (
-        $(
-            $(#[$attr:meta])*
-            def $smt:ident $fn_name:ident( $( $arg:ident : $in_:ty ),* ) $(-> $out:ty)* $(| $error:ty)*;
-        )*
-    ) => {
-        state_machine! {{
-            $(
-                $(#[$attr])*
-                def $smt $fn_name( $( $arg : $in_ ),* ) $(-> $out)* $(| $error)*;
-            )*
-        }}
-    };
-    (
-        {
-            $(#[$attr:meta])*
-            def $smt:ident $fn_name:ident( $( $arg:ident : $in_:ty ),* ); // No return, no error
-
-            $( $unexpanded:tt )*
-        }
-        $( $expanded:tt )*
-    ) => {
-        state_machine! {
-            { $( $unexpanded )* }
-
-            $( $expanded )*
-
-            $(#[$attr])*
-            def $smt $fn_name( $( $arg : $in_ ),* ) -> () | ();
-        }
-    };
-    (
-        {
-            $(#[$attr:meta])*
-            def $smt:ident $fn_name:ident( $( $arg:ident : $in_:ty ),* ) -> $out:ty; //return, no error
-
-            $( $unexpanded:tt )*
-        }
-        $( $expanded:tt )*
-    ) => {
-        state_machine! {
-            { $( $unexpanded )* }
-
-            $( $expanded )*
-
-            $(#[$attr])*
-            def $smt $fn_name( $( $arg : $in_ ),* ) -> $out | ();
-        }
-    };
-    (
-        {
-            $(#[$attr:meta])*
-            def $smt:ident $fn_name:ident( $( $arg:ident : $in_:ty ),* ) | $error:ty; //no return, error
-
-            $( $unexpanded:tt )*
-        }
-        $( $expanded:tt )*
-    ) => {
-        state_machine! {
-            { $( $unexpanded )* }
-
-            $( $expanded )*
-
-            $(#[$attr])*
-            def $smt $fn_name( $( $arg : $in_ ),* ) -> () | $error;
-        }
-    };
-    (
-        {
-            $(#[$attr:meta])*
-            def $smt:ident $fn_name:ident( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty; //return, error
-
-            $( $unexpanded:tt )*
-        }
-        $( $expanded:tt )*
-    ) => {
-        state_machine! {
-            { $( $unexpanded )* }
-
-            $( $expanded )*
-
-            $(#[$attr])*
-            def $smt $fn_name( $( $arg : $in_ ),* ) -> $out | $error;
-        }
-    };
-    (
-        {} // all expanded
-        $(
-            $(#[$attr:meta])*
-            def $smt:ident $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty;
-        )*
-    ) => {
-        use std;
-        use byteorder::{ByteOrder, LittleEndian};
-        use bincode::{SizeLimit, serde as bincode};
-
-        mod sm_args {
-            use super::*;
-            $(
-                #[derive(Serialize, Deserialize, Debug)]
-                pub struct $fn_name {
-                    $(pub $arg:$in_),*
-                }
-                impl $crate::raft::RaftMsg for $fn_name {
-                    fn encode(&self) -> (usize, Vec<u8>) {
-                        (
-                            hash_ident!($fn_name),
-                            bincode::serialize(&self, SizeLimit::Infinite).unwrap()
-                        )
-                    }
-                }
-
-            )*
-        }
-        mod sm_returns {
-            $(
-                #[derive(Serialize, Deserialize, Debug)]
-                pub enum $fn_name {
-                    Result($out),
-                    Error($error)
-                }
-            )*
-        }
-        pub trait StateMachine: $crate::raft::UserStateMachine {
-           $(
-                $(#[$attr])*
-                fn $fn_name(&self, $($arg:$in_),*) -> std::result::Result<$out, $error>;
-           )*
-           fn dispatch(&self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {
-                match fn_id as usize {
-                    $(hash_ident!($fn_name) => {
-                        let decoded: sm_args::$fn_name = bincode::deserialize(data).unwrap();
-                        let f_result = self.$fn_name($(decoded.$arg),*);
-                        let s_result = match f_result {
-                            Ok(v) => sm_returns::$fn_name::Result(v),
-                            Err(e) => sm_returns::$fn_name::Error(e)
-                        };
-                        Some(bincode::serialize(&s_result, SizeLimit::Infinite).unwrap())
-                    }),*
-                    _ => {
-                        println!("Undefined function id: {}", fn_id);
-                        None
-                    }
-                }
-           }
-        }
-    };
-}
-
 const CHECKER_MS: u64 = 50;
 
-service! {                                                                                            //    sm , fn , data
-    rpc append_entries(term: u64, leaderId: u64, prev_log_id: u64, prev_log_term: u64, entries: Option<Vec<(u64, u64, Vec<u8>)>>, leader_commit: u64) -> u64; //Err for not success
+//               sm , fn , data
+type LogEntry = (u64, u64, Vec<u8>);
+type LogEntries = Vec<LogEntry>;
+
+service! {
+    rpc append_entries(term: u64, leaderId: u64, prev_log_id: u64, prev_log_term: u64, entries: Option<LogEntries>, leader_commit: u64) -> u64; //Err for not success
     rpc request_vote(term: u64, candidate_id: u64, last_log_id: u64, last_log_term: u64) -> (u64, bool); // term, voteGranted
-    rpc install_snapshot(term: u64, leader_id: u64, lasr_included_index: u64, last_included_term: u64, data: Vec<u8>, done: bool) -> u64;
+    rpc install_snapshot(term: u64, leader_id: u64, last_included_index: u64, last_included_term: u64, data: Vec<u8>, done: bool) -> u64;
 }
 
 fn gen_rand(lower: u64, higher: u64) -> u64 {
@@ -194,6 +43,7 @@ pub enum Membership {
     LEADER,
     FOLLOWER,
     CANDIDATE,
+    OFFLINE,
 }
 
 pub struct RaftMeta {
@@ -205,16 +55,36 @@ pub struct RaftMeta {
     last_updated: u64,
     membership: Membership,
     leader_id: u64,
-    logs: Vec<(u64, u64, Vec<u8>)>,
+    logs: LogEntries,
+    state_machine: MasterStateMachine
+}
+
+#[derive(Clone)]
+pub enum Storage {
+    MEMORY,
+    DISK(String),
+}
+
+impl Storage {
+    pub fn Default() -> Storage {
+        Storage::MEMORY
+    }
+}
+
+#[derive(Clone)]
+pub struct Options {
+    pub storage: Storage,
+    pub address: String,
 }
 
 pub struct RaftServer {
-    meta: Arc<Mutex<RaftMeta>>
+    meta: Arc<Mutex<RaftMeta>>,
+    pub options: Options,
 }
 
 impl RaftServer {
-    pub fn new() -> RaftServer {
-        RaftServer {
+    pub fn new(opts: Options) -> Arc<RaftServer> {
+        let server = Arc::new(RaftServer {
             meta: Arc::new(Mutex::new(
                 RaftMeta {
                     term: 0,
@@ -226,55 +96,55 @@ impl RaftServer {
                     membership: Membership::FOLLOWER,
                     leader_id: 0,
                     logs: Vec::new(),
+                    state_machine: MasterStateMachine{},
                 }
-            ))
-        }
+            )),
+            options: opts.clone(),
+        });
+        let svr_ref = server.clone();
+        thread::spawn(move ||{
+            listen(svr_ref, &opts.address);
+        });
+        let checker_ref = server.clone();
+        thread::spawn(move ||{
+            let server = checker_ref;
+            loop {
+                {
+                    let mut meta = server.meta.lock().unwrap(); //WARNING: Reentering not supported
+                    match meta.membership {
+                        Membership::LEADER => {
+                            if get_time() > (meta.last_updated + CHECKER_MS) {
+                                server.send_heartbeat(&meta, None);
+                            }
+                        },
+                        Membership::FOLLOWER | Membership::CANDIDATE => {
+                            if get_time() > (meta.timeout + meta.last_checked) { //Timeout, require election
+                                server.become_candidate(&meta);
+                            }
+                        },
+                        Membership::OFFLINE => {
+                            break;
+                        }
+                    }
+                }
+                thread::sleep(Duration::from_millis(CHECKER_MS));
+            }
+        });
+        server
     }
     pub fn become_candidate(&self, meta: &MutexGuard<RaftMeta>) {
 
     }
-    pub fn send_heartbeat(&self, meta: &MutexGuard<RaftMeta>, entries: Option<Vec<(u64, u64, Vec<u8>)>>) {
+    pub fn send_heartbeat(&self, meta: &MutexGuard<RaftMeta>, entries: Option<LogEntries>) {
 
     }
-}
-
-pub fn start_server(addr: &String) -> Arc<RaftServer> {
-    let server = Arc::new(RaftServer::new());
-    let addr = addr.clone();
-    let svr_ref = server.clone();
-    thread::spawn(move ||{
-        listen(svr_ref, &addr);
-    });
-    let checker_ref = server.clone();
-    thread::spawn(move ||{
-        let server = checker_ref;
-        loop {
-            {
-                let mut meta = server.meta.lock().unwrap(); //WARNING: Reentering not supported
-                match meta.membership {
-                    Membership::LEADER => {
-                        if get_time() > (meta.last_updated + CHECKER_MS) {
-                            server.send_heartbeat(&meta, None);
-                        }
-                    },
-                    Membership::FOLLOWER | Membership::CANDIDATE => {
-                        if get_time() > (meta.timeout + meta.last_checked) { //Timeout, require election
-                            server.become_candidate(&meta);
-                        }
-                    }
-                }
-            }
-            thread::sleep(Duration::from_millis(CHECKER_MS));
-        }
-    });
-    server
 }
 
 impl Server for RaftServer {
     fn append_entries(
         &self,
         term: u64, leaderId: u64, prev_log_id: u64,
-        prev_log_term: u64, entries: Option<Vec<(u64, u64, Vec<u8>)>>,
+        prev_log_term: u64, entries: Option<LogEntries>,
         leader_commit: u64
     ) -> Result<u64, ()>  {
         Ok(0)
@@ -296,12 +166,3 @@ impl Server for RaftServer {
         Ok(0)
     }
 }
-
-#[cfg(test)]
-mod syntax_test {
-    state_machine! {
-        def qry get (key: u64) -> String | ();
-        def cmd test(a: u32, b: u32) -> bool;
-    }
-}
-

@@ -6,6 +6,7 @@
 
 #[macro_use]
 pub mod rpc;
+#[macro_use]
 pub mod raft;
 
 extern crate mio;
