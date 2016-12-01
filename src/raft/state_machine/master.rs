@@ -1,12 +1,12 @@
 use super::super::*;
 use super::*;
+use std::collections::HashMap;
 
 raft_state_machine! {
     def cmd append(sub_id: u64, entries: Option<LogEntries>) -> u8;
 }
 
 pub struct MasterStateMachine {
-
 }
 
 impl StateMachine for MasterStateMachine {

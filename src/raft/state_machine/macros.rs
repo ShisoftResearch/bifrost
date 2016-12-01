@@ -145,21 +145,21 @@ macro_rules! raft_state_machine {
                 trait_fn!($smt $fn_name( $( $arg : $in_ ),* ) -> $out | $error);
            )*
            fn dispatch(&mut self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {
-                match fn_id as usize {
-                    $(hash_ident!($fn_name) => {
-                        let decoded: sm_args::$fn_name = bincode::deserialize(data).unwrap();
-                        let f_result = self.$fn_name($(decoded.$arg),*);
-                        let s_result = match f_result {
-                            Ok(v) => sm_returns::$fn_name::Result(v),
-                            Err(e) => sm_returns::$fn_name::Error(e)
-                        };
-                        Some(bincode::serialize(&s_result, SizeLimit::Infinite).unwrap())
-                    }),*
-                    _ => {
-                        println!("Undefined function id: {}", fn_id);
-                        None
-                    }
-                }
+               match fn_id as usize {
+                   $(hash_ident!($fn_name) => {
+                       let decoded: sm_args::$fn_name = bincode::deserialize(data).unwrap();
+                       let f_result = self.$fn_name($(decoded.$arg),*);
+                       let s_result = match f_result {
+                           Ok(v) => sm_returns::$fn_name::Result(v),
+                           Err(e) => sm_returns::$fn_name::Error(e)
+                       };
+                       Some(bincode::serialize(&s_result, SizeLimit::Infinite).unwrap())
+                   }),*
+                   _ => {
+                       println!("Undefined function id: {}", fn_id);
+                       None
+                   }
+               }
            }
         }
     };
