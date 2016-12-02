@@ -1,7 +1,9 @@
 use raft::SyncClient;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use super::*;
 use bifrost_plugins::hash_str;
+
+pub const CONFIG_SM_ID: u64 = 1;
 
 pub struct RaftMember {
     rpc: SyncClient,
@@ -14,6 +16,13 @@ pub struct RaftMember {
 
 pub struct Configures {
     members: HashMap<u64, RaftMember>,
+}
+
+pub type MemberConfigSnapshot = HashSet<String>;
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ConfigSnapshot {
+    members: MemberConfigSnapshot
 }
 
 raft_state_machine! {
@@ -36,6 +45,8 @@ impl StateMachineCmds for Configures {
         Ok(())
     }
     fn del_member(&mut self, address: String) -> Result<(),()> {
+        let hash = hash_str(address);
+        self.members.remove(&hash);
         Ok(())
     }
 }
@@ -43,15 +54,39 @@ impl StateMachineCmds for Configures {
 impl StateMachineCtl for Configures {
     fn_dispatch!();
     fn snapshot(&self) -> Option<Vec<u8>> {
-        None
+        let mut snapshot = ConfigSnapshot{
+            members: HashSet::with_capacity(self.members.len())
+        };
+        for (_, member) in self.members.iter() {
+            snapshot.members.insert(member.address.clone());
+        }
+        Some(serialize!(&snapshot))
     }
-    fn id(&self) -> u64 {1}
+    fn recover(&mut self, data: Vec<u8>) {
+        let snapshot:ConfigSnapshot = deserialize!(&data);
+        self.recover_members(&snapshot.members)
+    }
+    fn id(&self) -> u64 {CONFIG_SM_ID}
 }
 
 impl Configures {
     pub fn new() -> Configures {
         Configures {
             members: HashMap::new()
+        }
+    }
+    fn recover_members (&mut self, snapshot: &MemberConfigSnapshot) {
+        let mut curr_members: MemberConfigSnapshot = HashSet::with_capacity(self.members.len());
+        for (_, member) in self.members.iter() {
+            curr_members.insert(member.address.clone());
+        }
+        let to_del = curr_members.difference(snapshot);
+        let to_add = snapshot.difference(&curr_members);
+        for addr in to_del {
+            self.del_member(addr.clone());
+        }
+        for addr in to_add {
+            self.new_member(addr.clone());
         }
     }
 }
