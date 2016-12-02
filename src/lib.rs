@@ -24,3 +24,5 @@ extern crate env_logger;
 
 extern crate rand;
 extern crate time;
+
+extern crate bifrost_plugins;

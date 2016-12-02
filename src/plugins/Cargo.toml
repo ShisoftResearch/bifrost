@@ -5,3 +5,4 @@ authors = ["Hao Shi <shisoftgenius@gmail.com>"]
 
 [lib]
 plugin = true
+name = "bifrost_plugins"

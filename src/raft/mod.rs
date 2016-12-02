@@ -96,7 +96,7 @@ impl RaftServer {
                     membership: Membership::FOLLOWER,
                     leader_id: 0,
                     logs: Vec::new(),
-                    state_machine: MasterStateMachine{},
+                    state_machine: MasterStateMachine::new(),
                 }
             )),
             options: opts.clone(),

@@ -19,6 +19,14 @@ use rustc_plugin::Registry;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
 
+pub fn hash_str (text: String) -> u64 {
+    let mut hasher = DefaultHasher::default();
+    let text_bytes = text.into_bytes();
+    let text_bytes = text_bytes.as_slice();
+    hasher.write(&text_bytes);
+    hasher.finish()
+}
+
 fn hash_ident (cx: &mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacResult + 'static> {
     if args.len() != 1 {
         cx.span_err(
@@ -35,11 +43,8 @@ fn hash_ident (cx: &mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacResult 
         }
     };
     let text = &*text;
-    let mut hasher = DefaultHasher::default();
-    let text_bytes = String::from(text).into_bytes();
-    let text_bytes = text_bytes.as_slice();
-    hasher.write(&text_bytes);
-    MacEager::expr(cx.expr_usize(sp, hasher.finish() as usize))
+    let str = String::from(text);
+    MacEager::expr(cx.expr_usize(sp, hash_str(str) as usize))
 }
 
 #[plugin_registrar]

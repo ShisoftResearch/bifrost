@@ -15,6 +15,13 @@ macro_rules! trait_dispatch {
 }
 
 #[macro_export]
+macro_rules! fn_dispatch {
+    () => {
+        fn fn_dispatch(&mut self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {self.dispatch(fn_id, data)}
+    };
+}
+
+#[macro_export]
 macro_rules! raft_state_machine {
     (
         $(
@@ -131,6 +138,7 @@ macro_rules! raft_state_machine {
             )*
         }
         mod sm_returns {
+            use super::*;
             $(
                 #[derive(Serialize, Deserialize, Debug)]
                 pub enum $fn_name {
@@ -139,7 +147,7 @@ macro_rules! raft_state_machine {
                 }
             )*
         }
-        pub trait StateMachine: $crate::raft::state_machine::StateMachineInterface {
+        pub trait StateMachineCmds: $crate::raft::state_machine::StateMachineCtl {
            $(
                 $(#[$attr])*
                 trait_fn!($smt $fn_name( $( $arg : $in_ ),* ) -> $out | $error);
