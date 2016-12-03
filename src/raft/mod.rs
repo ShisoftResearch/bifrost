@@ -22,7 +22,7 @@ type LogEntry = (u64, u64, Vec<u8>);
 type LogEntries = Vec<LogEntry>;
 
 service! {
-    rpc append_entries(term: u64, leaderId: u64, prev_log_id: u64, prev_log_term: u64, entries: Option<LogEntries>, leader_commit: u64) -> u64; //Err for not success
+    rpc append_entries(term: u64, leaderId: u64, prev_log_id: u64, prev_log_term: u64, entries: Option<LogEntries>, leader_commit: u64) -> (u64, bool);
     rpc request_vote(term: u64, candidate_id: u64, last_log_id: u64, last_log_term: u64) -> (u64, bool); // term, voteGranted
     rpc install_snapshot(term: u64, leader_id: u64, last_included_index: u64, last_included_term: u64, data: Vec<u8>, done: bool) -> u64;
 }
@@ -114,12 +114,12 @@ impl RaftServer {
                     match meta.membership {
                         Membership::LEADER => {
                             if get_time() > (meta.last_updated + CHECKER_MS) {
-                                server.send_heartbeat(&meta, None);
+                                server.send_heartbeat(&mut meta, None);
                             }
                         },
                         Membership::FOLLOWER | Membership::CANDIDATE => {
                             if get_time() > (meta.timeout + meta.last_checked) { //Timeout, require election
-                                server.become_candidate(&meta);
+                                server.become_candidate(&mut meta);
                             }
                         },
                         Membership::OFFLINE => {
@@ -132,11 +132,25 @@ impl RaftServer {
         });
         server
     }
-    pub fn become_candidate(&self, meta: &MutexGuard<RaftMeta>) {
+    fn become_candidate(&self, meta: &mut MutexGuard<RaftMeta>) {
+        meta.membership = Membership::CANDIDATE;
+    }
+    fn become_follower(&self, meta: &mut MutexGuard<RaftMeta>) {
+        meta.membership = Membership::FOLLOWER;
+    }
+    fn send_heartbeat(&self, meta: &mut MutexGuard<RaftMeta>, entries: Option<LogEntries>) {
 
     }
-    pub fn send_heartbeat(&self, meta: &MutexGuard<RaftMeta>, entries: Option<LogEntries>) {
 
+    //check term number, return reject = false if server term is stale
+    fn check_term(&self, meta: &mut MutexGuard<RaftMeta>, remote_term: u64) -> bool {
+        if remote_term > meta.term {
+            (*meta).term = remote_term;
+            self.become_follower(meta)
+        } else if remote_term < meta.term {
+            return false;
+        }
+        return true;
     }
 }
 
@@ -146,9 +160,14 @@ impl Server for RaftServer {
         term: u64, leaderId: u64, prev_log_id: u64,
         prev_log_term: u64, entries: Option<LogEntries>,
         leader_commit: u64
-    ) -> Result<u64, ()>  {
+    ) -> Result<(u64, bool), ()>  {
         let mut meta = self.meta.lock().unwrap();
-        Ok(meta.term)
+        let term_ok = self.check_term(&mut meta, term);
+        if !term_ok {
+            Ok((meta.term, false))
+        } else {
+            Ok((meta.term, true))
+        }
     }
 
     fn request_vote(
@@ -157,8 +176,9 @@ impl Server for RaftServer {
         last_log_id: u64, last_log_term: u64
     ) -> Result<(u64, bool), ()> {
         let mut meta = self.meta.lock().unwrap();
+        let term_ok = self.check_term(&mut meta, term);
         let voted = meta.voted;
-        if !voted {
+        if term_ok && !voted {
 
         }
         Ok((meta.term, !voted))
@@ -170,6 +190,7 @@ impl Server for RaftServer {
         last_included_term: u64, data: Vec<u8>, done: bool
     ) -> Result<u64, ()> {
         let mut meta = self.meta.lock().unwrap();
+        let term_ok = self.check_term(&mut meta, term);
         Ok(meta.term)
     }
 }
