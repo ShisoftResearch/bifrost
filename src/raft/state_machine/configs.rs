@@ -15,7 +15,7 @@ pub struct RaftMember {
 }
 
 pub struct Configures {
-    members: HashMap<u64, RaftMember>,
+    pub members: HashMap<u64, RaftMember>,
 }
 
 pub type MemberConfigSnapshot = HashSet<String>;
@@ -52,7 +52,7 @@ impl StateMachineCmds for Configures {
 }
 
 impl StateMachineCtl for Configures {
-    fn_dispatch!();
+    sm_complete!();
     fn snapshot(&self) -> Option<Vec<u8>> {
         let mut snapshot = ConfigSnapshot{
             members: HashSet::with_capacity(self.members.len())

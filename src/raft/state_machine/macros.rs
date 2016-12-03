@@ -10,10 +10,16 @@ macro_rules! trait_fn {
     };
 }
 
+macro_rules! fn_op_type {
+    (qry) => {$crate::raft::state_machine::OpType::QUERY};
+    (cmd) => {$crate::raft::state_machine::OpType::COMMAND};
+}
+
 #[macro_export]
-macro_rules! fn_dispatch {
+macro_rules! sm_complete {
     () => {
-        fn fn_dispatch(&mut self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {self.dispatch(fn_id, data)}
+        fn fn_dispatch(&mut self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {self.dispatch_(fn_id, data)}
+        fn op_type(&mut self, fn_id: u64) -> Option<$crate::raft::state_machine::OpType> {self.op_type_(fn_id)}
     };
 }
 
@@ -115,7 +121,7 @@ macro_rules! raft_state_machine {
         use byteorder::{ByteOrder, LittleEndian};
         use bincode::{SizeLimit, serde as bincode};
 
-        mod sm_args {
+        mod commands {
             use super::*;
             $(
                 #[derive(Serialize, Deserialize, Debug)]
@@ -126,21 +132,11 @@ macro_rules! raft_state_machine {
                     fn encode(&self) -> (usize, Vec<u8>) {
                         (
                             hash_ident!($fn_name),
-                            bincode::serialize(&self, SizeLimit::Infinite).unwrap()
+                            serialize!(&self)
                         )
                     }
                 }
 
-            )*
-        }
-        mod sm_returns {
-            use super::*;
-            $(
-                #[derive(Serialize, Deserialize, Debug)]
-                pub enum $fn_name {
-                    Result($out),
-                    Error($error)
-                }
             )*
         }
         pub trait StateMachineCmds: $crate::raft::state_machine::StateMachineCtl {
@@ -148,16 +144,23 @@ macro_rules! raft_state_machine {
                 $(#[$attr])*
                 trait_fn!($smt $fn_name( $( $arg : $in_ ),* ) -> $out | $error);
            )*
-           fn dispatch(&mut self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {
+           fn op_type_(&self, fn_id: u64) -> Option<$crate::raft::state_machine::OpType> {
+                match fn_id as usize {
+                   $(hash_ident!($fn_name) => {
+                       Some(fn_op_type!($smt))
+                   }),*
+                   _ => {
+                       println!("Undefined function id: {}", fn_id);
+                       None
+                   }
+                }
+           }
+           fn dispatch_(&mut self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {
                match fn_id as usize {
                    $(hash_ident!($fn_name) => {
-                       let decoded: sm_args::$fn_name = deserialize!(data);
+                       let decoded: commands::$fn_name = deserialize!(data);
                        let f_result = self.$fn_name($(decoded.$arg),*);
-                       let s_result = match f_result {
-                           Ok(v) => sm_returns::$fn_name::Result(v),
-                           Err(e) => sm_returns::$fn_name::Error(e)
-                       };
-                       Some(serialize!(&s_result))
+                       Some(serialize!(&f_result))
                    }),*
                    _ => {
                        println!("Undefined function id: {}", fn_id);

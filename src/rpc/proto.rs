@@ -124,20 +124,6 @@ macro_rules! service {
                 }
             )*
         }
-        mod rpc_returns {
-            #[allow(unused_variables)]
-            #[allow(unused_imports)]
-
-            use super::*;
-            $(
-                #[allow(non_camel_case_types)]
-                #[derive(Serialize, Deserialize, Debug)]
-                pub enum $fn_name {
-                    Result($out),
-                    Error($error)
-                }
-            )*
-        }
         pub trait Server {
            $(
                 $(#[$attr])*
@@ -152,11 +138,7 @@ macro_rules! service {
                         $(hash_ident!($fn_name) => {
                             let decoded: rpc_args::$fn_name = deserialize!(&body);
                             let f_result = server.$fn_name($(decoded.$arg),*);
-                            let s_result = match f_result {
-                                Ok(v) => rpc_returns::$fn_name::Result(v),
-                                Err(e) => rpc_returns::$fn_name::Error(e)
-                            };
-                            let encoded: Vec<u8> = serialize!(&s_result);
+                            let encoded: Vec<u8> = serialize!(&f_result);
                             conn.send_message(encoded).unwrap();
                         }),*
                         _ => {println!("Undefined function id: {}", func_id)}
@@ -199,11 +181,7 @@ macro_rules! service {
                 fn $fn_name(&mut self, $($arg:$in_),*) -> std::result::Result<$out, $error> {
                     let req_bytes = encoders::$fn_name($($arg),*);
                     let res_bytes = self.client.send_message(req_bytes);
-                    let res: rpc_returns::$fn_name = deserialize!(&res_bytes);
-                    match res {
-                        rpc_returns::$fn_name::Result(v) => Ok(v),
-                        rpc_returns::$fn_name::Error(e) => Err(e)
-                    }
+                    deserialize!(&res_bytes)
                 }
            )*
         }

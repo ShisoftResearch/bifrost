@@ -147,7 +147,8 @@ impl Server for RaftServer {
         prev_log_term: u64, entries: Option<LogEntries>,
         leader_commit: u64
     ) -> Result<u64, ()>  {
-        Ok(0)
+        let mut meta = self.meta.lock().unwrap();
+        Ok(meta.term)
     }
 
     fn request_vote(
@@ -155,14 +156,20 @@ impl Server for RaftServer {
         term: u64, candidate_id: u64,
         last_log_id: u64, last_log_term: u64
     ) -> Result<(u64, bool), ()> {
-        Ok((0, false))
+        let mut meta = self.meta.lock().unwrap();
+        let voted = meta.voted;
+        if !voted {
+
+        }
+        Ok((meta.term, !voted))
     }
 
     fn install_snapshot(
         &self,
-        term: u64, leader_id: u64, lasr_included_index: u64,
+        term: u64, leader_id: u64, last_included_index: u64,
         last_included_term: u64, data: Vec<u8>, done: bool
     ) -> Result<u64, ()> {
-        Ok(0)
+        let mut meta = self.meta.lock().unwrap();
+        Ok(meta.term)
     }
 }

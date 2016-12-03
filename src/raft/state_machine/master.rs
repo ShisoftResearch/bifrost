@@ -1,7 +1,7 @@
 use super::super::*;
 use super::*;
 use std::collections::HashMap;
-use self::configs::{Configures, CONFIG_SM_ID};
+use self::configs::{Configures, RaftMember, CONFIG_SM_ID};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum AppendError {
@@ -53,7 +53,7 @@ impl StateMachineCmds for MasterStateMachine {
 }
 
 impl StateMachineCtl for MasterStateMachine {
-    fn_dispatch!();
+    sm_complete!();
     fn snapshot(&self) -> Option<Vec<u8>> {
         let mut sms: SnapshotDataItems = Vec::with_capacity(self.subs.len());
         for (sm_id, smc) in self.subs.iter() {
@@ -94,5 +94,9 @@ impl MasterStateMachine {
         if self.subs.contains_key(&id) {return RegisterResult::EXISTED};
         self.subs.insert(id, smc);
         RegisterResult::OK
+    }
+
+    pub fn members(&self) -> &HashMap<u64, RaftMember> {
+        &self.configs.members
     }
 }
