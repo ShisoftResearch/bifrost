@@ -36,10 +36,9 @@ impl StateMachineCmds for MasterStateMachine {
         let mut rt: AppendResults = Vec::new();
         if let Some(entries) = entries {
             for entry in entries {
-                let (sub_id, fn_id, data) = entry;
                 rt.push(
-                    if let Some(sm) = self.subs.get_mut(&sub_id) {
-                        Ok(sm.as_mut().fn_dispatch(fn_id, &data))
+                    if let Some(sm) = self.subs.get_mut(&entry.sm_id) {
+                        Ok(sm.as_mut().fn_dispatch(entry.fn_id, &entry.data))
                     } else {
                         Err(AppendError::NOT_FOUND)
                     }

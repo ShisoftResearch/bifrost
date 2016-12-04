@@ -5,8 +5,9 @@ use std::thread;
 use std::sync::{Mutex, MutexGuard};
 use time;
 use std::time::Duration;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use self::state_machine::master::MasterStateMachine;
+use std::cmp::min;
 
 #[macro_use]
 mod state_machine;
@@ -17,8 +18,15 @@ trait RaftMsg {
 
 const CHECKER_MS: u64 = 50;
 
-//               sm , fn , data
-type LogEntry = (u64, u64, Vec<u8>);
+#[derive(Serialize, Deserialize, Debug)]
+pub struct LogEntry {
+    id: u64,
+    term: u64,
+    sm_id: u64,
+    fn_id: u64,
+    data: Vec<u8>
+}
+
 type LogEntries = Vec<LogEntry>;
 
 service! {
@@ -48,15 +56,16 @@ pub enum Membership {
 
 pub struct RaftMeta {
     term: u64,
-    log: u64,
     voted: bool,
     timeout: u64,
     last_checked: u64,
     last_updated: u64,
     membership: Membership,
     leader_id: u64,
-    logs: LogEntries,
-    state_machine: MasterStateMachine
+    logs: BTreeMap<u64, LogEntry>,
+    state_machine: MasterStateMachine,
+    commit_index: u64,
+    last_applied: u64,
 }
 
 #[derive(Clone)]
@@ -87,16 +96,17 @@ impl RaftServer {
         let server = Arc::new(RaftServer {
             meta: Arc::new(Mutex::new(
                 RaftMeta {
-                    term: 0,
-                    log: 0,
-                    voted: false,
+                    term: 0, //TODO: read from persistent state
+                    voted: false, //TODO: read from persistent state
                     timeout: gen_rand(100, 500), // 10~500 ms for timeout
                     last_checked: get_time(),
                     last_updated: get_time(),
                     membership: Membership::FOLLOWER,
                     leader_id: 0,
-                    logs: Vec::new(),
+                    logs: BTreeMap::new(), //TODO: read from persistent state
                     state_machine: MasterStateMachine::new(),
+                    commit_index: 0,
+                    last_applied: 0,
                 }
             )),
             options: opts.clone(),
@@ -162,11 +172,39 @@ impl Server for RaftServer {
         leader_commit: u64
     ) -> Result<(u64, bool), ()>  {
         let mut meta = self.meta.lock().unwrap();
-        let term_ok = self.check_term(&mut meta, term);
-        if !term_ok {
-            Ok((meta.term, false))
-        } else {
+        let term_ok = self.check_term(&mut meta, term); // RI, 1
+        if term_ok {
+            { //RI, 2
+                let contains_prev_log = (*meta).logs.contains_key(&prev_log_id);
+                let mut log_mismatch = false;
+                if contains_prev_log {
+                    let entry = (*meta).logs.get(&prev_log_id).unwrap();
+                    log_mismatch = entry.term != prev_log_term;
+                } else {
+                    return Ok((meta.term, false))
+                }
+                if log_mismatch { //RI, 3
+                    let keys: Vec<u64> = (*meta).logs.keys().cloned().collect();
+                    for id in keys {
+                        if id >= prev_log_id {
+                            (*meta).logs.remove(&id);
+                        }
+                    }
+                    return Ok((meta.term, false))
+                }
+            }
+            if let Some(entries) = entries { // entry not empty
+                let entries_len = entries.len();
+                for entry in entries {
+                    meta.logs.entry(entry.id).or_insert(entry);// RI, 4
+                }
+                if leader_commit > meta.commit_index { //RI, 5
+                    meta.commit_index = min(leader_commit, prev_log_id + entries_len as u64);
+                }
+            }
             Ok((meta.term, true))
+        } else {
+            Ok((meta.term, false))
         }
     }
 
@@ -178,10 +216,22 @@ impl Server for RaftServer {
         let mut meta = self.meta.lock().unwrap();
         let term_ok = self.check_term(&mut meta, term);
         let voted = meta.voted;
+        let mut vote_granted = false;
         if term_ok && !voted {
-
+            if !meta.logs.is_empty() {
+                let (last_id, _) = meta.logs.iter().next_back().unwrap();
+                let last_term = meta.logs.get(last_id).unwrap().term;
+                if last_log_id >= *last_id && last_log_term >= last_term {
+                    vote_granted = true;
+                }
+            } else {
+                vote_granted = true;
+            }
         }
-        Ok((meta.term, !voted))
+        if vote_granted {
+            meta.voted = true;
+        }
+        Ok((meta.term, vote_granted))
     }
 
     fn install_snapshot(
