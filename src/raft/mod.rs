@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard};
 use time;
 use std::time::Duration;
 use std::collections::BTreeMap;
-use self::state_machine::master::MasterStateMachine;
+use self::state_machine::master::{MasterStateMachine, StateMachineCmds};
 use std::cmp::min;
 
 #[macro_use]
@@ -18,7 +18,7 @@ trait RaftMsg {
 
 const CHECKER_MS: u64 = 50;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LogEntry {
     id: u64,
     term: u64,
@@ -162,6 +162,23 @@ impl RaftServer {
         }
         return true;
     }
+
+    fn check_commit(&self, meta: &mut MutexGuard<RaftMeta>) { //not need to return result for follower
+        while meta.commit_index > meta.last_applied {
+            (*meta).last_applied += 1;
+            let last_applied = meta.last_applied;
+            let entry = match meta.logs.get(&last_applied) {
+                Some(entry) => {Some((*entry).clone())},
+                _ => None
+            };
+            match entry {
+                Some(entry) => {
+                    (*meta).state_machine.append(&entry);
+                },
+                _ => {}
+            }
+        }
+    }
 }
 
 impl Server for RaftServer {
@@ -174,6 +191,7 @@ impl Server for RaftServer {
         let mut meta = self.meta.lock().unwrap();
         let term_ok = self.check_term(&mut meta, term); // RI, 1
         if term_ok {
+            self.check_commit(&mut meta);
             { //RI, 2
                 let contains_prev_log = (*meta).logs.contains_key(&prev_log_id);
                 let mut log_mismatch = false;
@@ -217,15 +235,18 @@ impl Server for RaftServer {
         let term_ok = self.check_term(&mut meta, term);
         let vote_for = meta.vote_for;
         let mut vote_granted = false;
-        if term_ok && (vote_for.is_none() || vote_for.unwrap() == candidate_id) {
-            if !meta.logs.is_empty() {
-                let (last_id, _) = meta.logs.iter().next_back().unwrap();
-                let last_term = meta.logs.get(last_id).unwrap().term;
-                if last_log_id >= *last_id && last_log_term >= last_term {
+        if term_ok {
+            self.check_commit(&mut meta);
+            if vote_for.is_none() || vote_for.unwrap() == candidate_id {
+                if !meta.logs.is_empty() {
+                    let (last_id, _) = meta.logs.iter().next_back().unwrap();
+                    let last_term = meta.logs.get(last_id).unwrap().term;
+                    if last_log_id >= *last_id && last_log_term >= last_term {
+                        vote_granted = true;
+                    }
+                } else {
                     vote_granted = true;
                 }
-            } else {
-                vote_granted = true;
             }
         }
         if vote_granted {
@@ -241,6 +262,9 @@ impl Server for RaftServer {
     ) -> Result<u64, ()> {
         let mut meta = self.meta.lock().unwrap();
         let term_ok = self.check_term(&mut meta, term);
+        if term_ok {
+            self.check_commit(&mut meta);
+        }
         Ok(meta.term)
     }
 }

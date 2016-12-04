@@ -15,41 +15,20 @@ pub enum RegisterResult {
     RESERVED,
 }
 
-pub type AppendResult = Result<Option<Vec<u8>>, AppendError>;
-pub type AppendResults = Vec<AppendResult>;
+pub type AppendResult = Option<Vec<u8>>;
 pub type SubStateMachine = Box<StateMachineCtl>;
 pub type SnapshotDataItem = (u64, Vec<u8>);
 pub type SnapshotDataItems = Vec<SnapshotDataItem>;
 pub type BoxedConfig = Box<Configures>;
 
-raft_state_machine! {
-    def cmd append(entries: Option<LogEntries>) -> AppendResults;
-}
+raft_state_machine! {}
 
 pub struct MasterStateMachine {
     subs: HashMap<u64, SubStateMachine>,
     configs: Configures
 }
 
-impl StateMachineCmds for MasterStateMachine {
-    fn append(&mut self, entries: Option<LogEntries>) -> Result<AppendResults, ()> {
-        let mut rt: AppendResults = Vec::new();
-        if let Some(entries) = entries {
-            for entry in entries {
-                rt.push(
-                    if let Some(sm) = self.subs.get_mut(&entry.sm_id) {
-                        Ok(sm.as_mut().fn_dispatch(entry.fn_id, &entry.data))
-                    } else {
-                        Err(AppendError::NOT_FOUND)
-                    }
-                );
-            }
-            Ok(rt)
-        } else {
-            Err(())
-        }
-    }
-}
+impl StateMachineCmds for MasterStateMachine {}
 
 impl StateMachineCtl for MasterStateMachine {
     sm_complete!();
@@ -97,5 +76,13 @@ impl MasterStateMachine {
 
     pub fn members(&self) -> &HashMap<u64, RaftMember> {
         &self.configs.members
+    }
+
+    pub fn append(&mut self, entry: &LogEntry) -> Result<AppendResult, AppendError> {
+        if let Some(sm) = self.subs.get_mut(&entry.sm_id) {
+            Ok(sm.as_mut().fn_dispatch(entry.fn_id, &entry.data))
+        } else {
+            Err(AppendError::NOT_FOUND)
+        }
     }
 }
