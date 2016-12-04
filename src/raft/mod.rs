@@ -56,7 +56,7 @@ pub enum Membership {
 
 pub struct RaftMeta {
     term: u64,
-    voted: bool,
+    vote_for: Option<u64>,
     timeout: u64,
     last_checked: u64,
     last_updated: u64,
@@ -97,7 +97,7 @@ impl RaftServer {
             meta: Arc::new(Mutex::new(
                 RaftMeta {
                     term: 0, //TODO: read from persistent state
-                    voted: false, //TODO: read from persistent state
+                    vote_for: None, //TODO: read from persistent state
                     timeout: gen_rand(100, 500), // 10~500 ms for timeout
                     last_checked: get_time(),
                     last_updated: get_time(),
@@ -215,9 +215,9 @@ impl Server for RaftServer {
     ) -> Result<(u64, bool), ()> {
         let mut meta = self.meta.lock().unwrap();
         let term_ok = self.check_term(&mut meta, term);
-        let voted = meta.voted;
+        let vote_for = meta.vote_for;
         let mut vote_granted = false;
-        if term_ok && !voted {
+        if term_ok && (vote_for.is_none() || vote_for.unwrap() == candidate_id) {
             if !meta.logs.is_empty() {
                 let (last_id, _) = meta.logs.iter().next_back().unwrap();
                 let last_term = meta.logs.get(last_id).unwrap().term;
@@ -229,7 +229,7 @@ impl Server for RaftServer {
             }
         }
         if vote_granted {
-            meta.voted = true;
+            meta.vote_for = Some(candidate_id);
         }
         Ok((meta.term, vote_granted))
     }
