@@ -78,7 +78,7 @@ impl MasterStateMachine {
         &self.configs.members
     }
 
-    pub fn append(&mut self, entry: &LogEntry) -> Result<AppendResult, AppendError> {
+    pub fn commit(&mut self, entry: &LogEntry) -> Result<AppendResult, AppendError> {
         if let Some(sm) = self.subs.get_mut(&entry.sm_id) {
             Ok(sm.as_mut().fn_dispatch(entry.fn_id, &entry.data))
         } else {

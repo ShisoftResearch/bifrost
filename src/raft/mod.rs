@@ -5,9 +5,11 @@ use std::thread;
 use std::sync::{Mutex, MutexGuard};
 use time;
 use std::time::Duration;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use self::state_machine::master::{MasterStateMachine, StateMachineCmds};
 use std::cmp::min;
+use std::cell::RefCell;
+use bifrost_plugins::hash_str;
 
 #[macro_use]
 mod state_machine;
@@ -25,6 +27,12 @@ pub struct LogEntry {
     sm_id: u64,
     fn_id: u64,
     data: Vec<u8>
+}
+
+pub struct LeaderMeta {
+    last_updated: u64,
+    next_index: HashMap<u64, u64>,
+    match_index: HashMap<u64, u64>,
 }
 
 type LogEntries = Vec<LogEntry>;
@@ -47,6 +55,10 @@ fn get_time() -> u64 {
     mills as u64
 }
 
+fn gen_timeout() -> u64 {
+    gen_rand(100, 500)
+}
+
 pub enum Membership {
     LEADER,
     FOLLOWER,
@@ -59,11 +71,10 @@ pub struct RaftMeta {
     vote_for: Option<u64>,
     timeout: u64,
     last_checked: u64,
-    last_updated: u64,
+    leader_meta: Option<LeaderMeta>,
     membership: Membership,
-    leader_id: u64,
     logs: BTreeMap<u64, LogEntry>,
-    state_machine: MasterStateMachine,
+    state_machine: RefCell<MasterStateMachine>,
     commit_index: u64,
     last_applied: u64,
 }
@@ -88,6 +99,7 @@ pub struct Options {
 
 pub struct RaftServer {
     meta: Arc<Mutex<RaftMeta>>,
+    pub id: u64,
     pub options: Options,
 }
 
@@ -98,18 +110,18 @@ impl RaftServer {
                 RaftMeta {
                     term: 0, //TODO: read from persistent state
                     vote_for: None, //TODO: read from persistent state
-                    timeout: gen_rand(100, 500), // 10~500 ms for timeout
+                    timeout: gen_timeout(), // 10~500 ms for timeout
                     last_checked: get_time(),
-                    last_updated: get_time(),
+                    leader_meta: None,
                     membership: Membership::FOLLOWER,
-                    leader_id: 0,
                     logs: BTreeMap::new(), //TODO: read from persistent state
-                    state_machine: MasterStateMachine::new(),
+                    state_machine: RefCell::new(MasterStateMachine::new()),
                     commit_index: 0,
                     last_applied: 0,
                 }
             )),
             options: opts.clone(),
+            id: hash_str(opts.address.clone()),
         });
         let svr_ref = server.clone();
         thread::spawn(move ||{
@@ -123,12 +135,16 @@ impl RaftServer {
                     let mut meta = server.meta.lock().unwrap(); //WARNING: Reentering not supported
                     match meta.membership {
                         Membership::LEADER => {
-                            if get_time() > (meta.last_updated + CHECKER_MS) {
+                            let send_heartbeat = if let Some(ref leader_meta) = meta.leader_meta {
+                                get_time() > (leader_meta.last_updated + CHECKER_MS)
+                            } else {false};
+                            if send_heartbeat {
                                 server.send_heartbeat(&mut meta, None);
                             }
                         },
                         Membership::FOLLOWER | Membership::CANDIDATE => {
-                            if get_time() > (meta.timeout + meta.last_checked) { //Timeout, require election
+                            if get_time() > (meta.timeout + meta.last_checked) {
+                                //Timeout, require election
                                 server.become_candidate(&mut meta);
                             }
                         },
@@ -143,10 +159,17 @@ impl RaftServer {
         server
     }
     fn become_candidate(&self, meta: &mut MutexGuard<RaftMeta>) {
+        self.reset_last_checked(meta);
+        meta.term += 1;
+        meta.vote_for = Some(self.id);
         meta.membership = Membership::CANDIDATE;
+
     }
     fn become_follower(&self, meta: &mut MutexGuard<RaftMeta>) {
         meta.membership = Membership::FOLLOWER;
+    }
+    fn become_leader(&self, meta: &mut MutexGuard<RaftMeta>) {
+        meta.membership = Membership::LEADER;
     }
     fn send_heartbeat(&self, meta: &mut MutexGuard<RaftMeta>, entries: Option<LogEntries>) {
 
@@ -155,7 +178,8 @@ impl RaftServer {
     //check term number, return reject = false if server term is stale
     fn check_term(&self, meta: &mut MutexGuard<RaftMeta>, remote_term: u64) -> bool {
         if remote_term > meta.term {
-            (*meta).term = remote_term;
+            meta.term = remote_term;
+            meta.vote_for = None;
             self.become_follower(meta)
         } else if remote_term < meta.term {
             return false;
@@ -167,17 +191,14 @@ impl RaftServer {
         while meta.commit_index > meta.last_applied {
             (*meta).last_applied += 1;
             let last_applied = meta.last_applied;
-            let entry = match meta.logs.get(&last_applied) {
-                Some(entry) => {Some((*entry).clone())},
-                _ => None
+            if let Some(entry) = meta.logs.get(&last_applied) {
+                meta.state_machine.borrow_mut().commit(&entry);
             };
-            match entry {
-                Some(entry) => {
-                    (*meta).state_machine.append(&entry);
-                },
-                _ => {}
-            }
         }
+    }
+    fn reset_last_checked(&self, meta: &mut MutexGuard<RaftMeta>) {
+        meta.last_checked = get_time();
+        meta.timeout = gen_timeout();
     }
 }
 
@@ -190,6 +211,7 @@ impl Server for RaftServer {
     ) -> Result<(u64, bool), ()>  {
         let mut meta = self.meta.lock().unwrap();
         let term_ok = self.check_term(&mut meta, term); // RI, 1
+        self.reset_last_checked(&mut meta);
         if term_ok {
             self.check_commit(&mut meta);
             { //RI, 2
