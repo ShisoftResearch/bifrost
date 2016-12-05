@@ -21,3 +21,5 @@ serde_derive = "0.8"
 bifrost-plugins = { path = "src/plugins" }
 rand = "0.3"
 time = "0.1"
+futures = "0.1"
+tokio-core = "0.1"
