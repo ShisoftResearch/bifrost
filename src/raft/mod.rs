@@ -99,10 +99,10 @@ impl CandidateMeta {
 }
 
 pub enum Membership {
-    LEADER(LeaderMeta),
-    FOLLOWER(FollowerMeta),
-    CANDIDATE(CandidateMeta),
-    OFFLINE,
+    Leader(LeaderMeta),
+    Follower(FollowerMeta),
+    Candidate(CandidateMeta),
+    Offline,
 }
 
 pub struct RaftMeta {
@@ -142,10 +142,10 @@ pub struct RaftServer {
 }
 
 enum CheckerAction {
-    SEND_HEARTBEAT,
-    BECOME_CANDIDATE,
-    EXIT_LOOP,
-    NONE
+    SendHeartbeat,
+    BecomeCandidate,
+    ExitLoop,
+    None
 }
 impl RaftServer {
     pub fn new(opts: Options) -> Arc<RaftServer> {
@@ -156,7 +156,7 @@ impl RaftServer {
                     vote_for: None, //TODO: read from persistent state
                     timeout: gen_timeout(), // 10~500 ms for timeout
                     last_checked: get_time(),
-                    membership: Membership::FOLLOWER(FollowerMeta::new()),
+                    membership: Membership::Follower(FollowerMeta::new()),
                     logs: BTreeMap::new(), //TODO: read from persistent state
                     state_machine: RefCell::new(MasterStateMachine::new()),
                     commit_index: 0,
@@ -177,36 +177,36 @@ impl RaftServer {
                 {
                     let mut meta = server.meta.lock().unwrap(); //WARNING: Reentering not supported
                     let action = match meta.membership {
-                        Membership::LEADER(ref leader_meta) => {
+                        Membership::Leader(ref leader_meta) => {
                             if get_time() > (leader_meta.last_updated + CHECKER_MS) {
-                                CheckerAction::SEND_HEARTBEAT
+                                CheckerAction::SendHeartbeat
                             } else {
-                                CheckerAction::NONE
+                                CheckerAction::None
                             }
                         },
-                        Membership::FOLLOWER(_) | Membership::CANDIDATE(_) => {
+                        Membership::Follower(_) | Membership::Candidate(_) => {
                             if get_time() > (meta.timeout + meta.last_checked) {
                                 //Timeout, require election
-                                CheckerAction::BECOME_CANDIDATE
+                                CheckerAction::BecomeCandidate
                             } else {
-                                CheckerAction::NONE
+                                CheckerAction::None
                             }
                         },
-                        Membership::OFFLINE => {
-                            CheckerAction::EXIT_LOOP
+                        Membership::Offline => {
+                            CheckerAction::ExitLoop
                         }
                     };
                     match action {
-                        CheckerAction::SEND_HEARTBEAT => {
+                        CheckerAction::SendHeartbeat => {
                             server.send_heartbeat(&mut meta, None);
                         },
-                        CheckerAction::BECOME_CANDIDATE => {
+                        CheckerAction::BecomeCandidate => {
                             server.become_candidate(&mut meta);
                         },
-                        CheckerAction::EXIT_LOOP => {
+                        CheckerAction::ExitLoop => {
                             break;
                         },
-                        CheckerAction::NONE => {}
+                        CheckerAction::None => {}
                     }
                 }
                 thread::sleep(Duration::from_millis(CHECKER_MS));
@@ -218,14 +218,14 @@ impl RaftServer {
         self.reset_last_checked(meta);
         meta.term += 1;
         meta.vote_for = Some(self.id);
-        meta.membership = Membership::CANDIDATE(CandidateMeta::new());
+        meta.membership = Membership::Candidate(CandidateMeta::new());
 
     }
     fn become_follower(&self, meta: &mut MutexGuard<RaftMeta>, leader_id: u64) {
-        meta.membership = Membership::FOLLOWER(FollowerMeta::with_leader(leader_id));
+        meta.membership = Membership::Follower(FollowerMeta::with_leader(leader_id));
     }
     fn become_leader(&self, meta: &mut MutexGuard<RaftMeta>) {
-        meta.membership = Membership::LEADER(LeaderMeta::new());
+        meta.membership = Membership::Leader(LeaderMeta::new());
     }
     fn send_heartbeat(&self, meta: &mut MutexGuard<RaftMeta>, entries: Option<LogEntries>) {
 
