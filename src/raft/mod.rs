@@ -29,12 +29,6 @@ pub struct LogEntry {
     data: Vec<u8>
 }
 
-pub struct LeaderMeta {
-    last_updated: u64,
-    next_index: HashMap<u64, u64>,
-    match_index: HashMap<u64, u64>,
-}
-
 type LogEntries = Vec<LogEntry>;
 
 service! {
@@ -59,10 +53,55 @@ fn gen_timeout() -> u64 {
     gen_rand(100, 500)
 }
 
+pub struct LeaderMeta {
+    last_updated: u64,
+    next_index: HashMap<u64, u64>,
+    match_index: HashMap<u64, u64>,
+}
+
+impl LeaderMeta {
+    fn new() -> LeaderMeta {
+        LeaderMeta{
+            last_updated: get_time(),
+            next_index: HashMap::new(),
+            match_index: HashMap::new(),
+        }
+    }
+}
+
+pub struct FollowerMeta {
+    leader_id: u64,
+}
+
+impl FollowerMeta {
+    fn new() -> FollowerMeta {
+        FollowerMeta{
+            leader_id: 0
+        }
+    }
+    fn with_leader(id: u64) -> FollowerMeta {
+        FollowerMeta{
+            leader_id: id
+        }
+    }
+}
+
+pub struct CandidateMeta {
+
+}
+
+impl CandidateMeta {
+    fn  new() -> CandidateMeta {
+        CandidateMeta{
+
+        }
+    }
+}
+
 pub enum Membership {
-    LEADER,
-    FOLLOWER,
-    CANDIDATE,
+    LEADER(LeaderMeta),
+    FOLLOWER(FollowerMeta),
+    CANDIDATE(CandidateMeta),
     OFFLINE,
 }
 
@@ -71,7 +110,6 @@ pub struct RaftMeta {
     vote_for: Option<u64>,
     timeout: u64,
     last_checked: u64,
-    leader_meta: Option<LeaderMeta>,
     membership: Membership,
     logs: BTreeMap<u64, LogEntry>,
     state_machine: RefCell<MasterStateMachine>,
@@ -103,6 +141,12 @@ pub struct RaftServer {
     pub options: Options,
 }
 
+enum CheckerAction {
+    SEND_HEARTBEAT,
+    BECOME_CANDIDATE,
+    EXIT_LOOP,
+    NONE
+}
 impl RaftServer {
     pub fn new(opts: Options) -> Arc<RaftServer> {
         let server = Arc::new(RaftServer {
@@ -112,8 +156,7 @@ impl RaftServer {
                     vote_for: None, //TODO: read from persistent state
                     timeout: gen_timeout(), // 10~500 ms for timeout
                     last_checked: get_time(),
-                    leader_meta: None,
-                    membership: Membership::FOLLOWER,
+                    membership: Membership::FOLLOWER(FollowerMeta::new()),
                     logs: BTreeMap::new(), //TODO: read from persistent state
                     state_machine: RefCell::new(MasterStateMachine::new()),
                     commit_index: 0,
@@ -133,24 +176,37 @@ impl RaftServer {
             loop {
                 {
                     let mut meta = server.meta.lock().unwrap(); //WARNING: Reentering not supported
-                    match meta.membership {
-                        Membership::LEADER => {
-                            let send_heartbeat = if let Some(ref leader_meta) = meta.leader_meta {
-                                get_time() > (leader_meta.last_updated + CHECKER_MS)
-                            } else {false};
-                            if send_heartbeat {
-                                server.send_heartbeat(&mut meta, None);
+                    let action = match meta.membership {
+                        Membership::LEADER(ref leader_meta) => {
+                            if get_time() > (leader_meta.last_updated + CHECKER_MS) {
+                                CheckerAction::SEND_HEARTBEAT
+                            } else {
+                                CheckerAction::NONE
                             }
                         },
-                        Membership::FOLLOWER | Membership::CANDIDATE => {
+                        Membership::FOLLOWER(_) | Membership::CANDIDATE(_) => {
                             if get_time() > (meta.timeout + meta.last_checked) {
                                 //Timeout, require election
-                                server.become_candidate(&mut meta);
+                                CheckerAction::BECOME_CANDIDATE
+                            } else {
+                                CheckerAction::NONE
                             }
                         },
                         Membership::OFFLINE => {
-                            break;
+                            CheckerAction::EXIT_LOOP
                         }
+                    };
+                    match action {
+                        CheckerAction::SEND_HEARTBEAT => {
+                            server.send_heartbeat(&mut meta, None);
+                        },
+                        CheckerAction::BECOME_CANDIDATE => {
+                            server.become_candidate(&mut meta);
+                        },
+                        CheckerAction::EXIT_LOOP => {
+                            break;
+                        },
+                        CheckerAction::NONE => {}
                     }
                 }
                 thread::sleep(Duration::from_millis(CHECKER_MS));
@@ -162,25 +218,25 @@ impl RaftServer {
         self.reset_last_checked(meta);
         meta.term += 1;
         meta.vote_for = Some(self.id);
-        meta.membership = Membership::CANDIDATE;
+        meta.membership = Membership::CANDIDATE(CandidateMeta::new());
 
     }
-    fn become_follower(&self, meta: &mut MutexGuard<RaftMeta>) {
-        meta.membership = Membership::FOLLOWER;
+    fn become_follower(&self, meta: &mut MutexGuard<RaftMeta>, leader_id: u64) {
+        meta.membership = Membership::FOLLOWER(FollowerMeta::with_leader(leader_id));
     }
     fn become_leader(&self, meta: &mut MutexGuard<RaftMeta>) {
-        meta.membership = Membership::LEADER;
+        meta.membership = Membership::LEADER(LeaderMeta::new());
     }
     fn send_heartbeat(&self, meta: &mut MutexGuard<RaftMeta>, entries: Option<LogEntries>) {
 
     }
 
     //check term number, return reject = false if server term is stale
-    fn check_term(&self, meta: &mut MutexGuard<RaftMeta>, remote_term: u64) -> bool {
+    fn check_term(&self, meta: &mut MutexGuard<RaftMeta>, remote_term: u64, leader_id: u64) -> bool {
         if remote_term > meta.term {
             meta.term = remote_term;
             meta.vote_for = None;
-            self.become_follower(meta)
+            self.become_follower(meta, leader_id)
         } else if remote_term < meta.term {
             return false;
         }
@@ -205,12 +261,12 @@ impl RaftServer {
 impl Server for RaftServer {
     fn append_entries(
         &self,
-        term: u64, leaderId: u64, prev_log_id: u64,
+        term: u64, leader_id: u64, prev_log_id: u64,
         prev_log_term: u64, entries: Option<LogEntries>,
         leader_commit: u64
     ) -> Result<(u64, bool), ()>  {
         let mut meta = self.meta.lock().unwrap();
-        let term_ok = self.check_term(&mut meta, term); // RI, 1
+        let term_ok = self.check_term(&mut meta, term, leader_id); // RI, 1
         self.reset_last_checked(&mut meta);
         if term_ok {
             self.check_commit(&mut meta);
@@ -254,10 +310,9 @@ impl Server for RaftServer {
         last_log_id: u64, last_log_term: u64
     ) -> Result<(u64, bool), ()> {
         let mut meta = self.meta.lock().unwrap();
-        let term_ok = self.check_term(&mut meta, term);
         let vote_for = meta.vote_for;
         let mut vote_granted = false;
-        if term_ok {
+        if term >= meta.term {
             self.check_commit(&mut meta);
             if vote_for.is_none() || vote_for.unwrap() == candidate_id {
                 if !meta.logs.is_empty() {
@@ -283,7 +338,7 @@ impl Server for RaftServer {
         last_included_term: u64, data: Vec<u8>, done: bool
     ) -> Result<u64, ()> {
         let mut meta = self.meta.lock().unwrap();
-        let term_ok = self.check_term(&mut meta, term);
+        let term_ok = self.check_term(&mut meta, term, leader_id);
         if term_ok {
             self.check_commit(&mut meta);
         }
