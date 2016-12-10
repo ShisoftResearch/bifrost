@@ -9,6 +9,8 @@ pub mod rpc;
 #[macro_use]
 pub mod raft;
 
+mod utils;
+
 extern crate mio;
 extern crate byteorder;
 extern crate slab;

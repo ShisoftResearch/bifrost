@@ -3,13 +3,12 @@ use rand::Rng;
 use rand::distributions::{IndependentSample, Range};
 use std::thread;
 use std::sync::{Mutex, MutexGuard};
-use time;
-use std::time::Duration;
 use std::collections::{BTreeMap, HashMap};
 use self::state_machine::master::{MasterStateMachine, StateMachineCmds};
 use std::cmp::min;
 use std::cell::RefCell;
 use bifrost_plugins::hash_str;
+use utils::time::get_time;
 
 #[macro_use]
 mod state_machine;
@@ -41,12 +40,6 @@ fn gen_rand(lower: u64, higher: u64) -> u64 {
     let between = Range::new(lower, higher);
     let mut rng = rand::thread_rng();
     between.ind_sample(&mut rng) + 1
-}
-
-fn get_time() -> u64 {
-    let timespec = time::get_time();
-    let mills: f64 = timespec.sec as f64 + (timespec.nsec as f64 / 1000.0 / 1000.0 / 1000.0 );
-    mills as u64
 }
 
 fn gen_timeout() -> u64 {
@@ -87,13 +80,13 @@ impl FollowerMeta {
 }
 
 pub struct CandidateMeta {
-
+    granted: Mutex<u64>,
 }
 
 impl CandidateMeta {
     fn  new() -> CandidateMeta {
         CandidateMeta{
-
+            granted: Mutex::new(0),
         }
     }
 }
@@ -214,18 +207,24 @@ impl RaftServer {
         });
         server
     }
+    fn switch_membership(&self, meta: &mut MutexGuard<RaftMeta>, membership: Membership) {
+        if let Membership::Candidate(ref mut candidiate) = meta.membership {
+
+        }
+        meta.membership = membership;
+    }
     fn become_candidate(&self, meta: &mut MutexGuard<RaftMeta>) {
         self.reset_last_checked(meta);
         meta.term += 1;
         meta.vote_for = Some(self.id);
-        meta.membership = Membership::Candidate(CandidateMeta::new());
+        self.switch_membership(meta, Membership::Candidate(CandidateMeta::new()));
 
     }
     fn become_follower(&self, meta: &mut MutexGuard<RaftMeta>, leader_id: u64) {
-        meta.membership = Membership::Follower(FollowerMeta::with_leader(leader_id));
+        self.switch_membership(meta, Membership::Follower(FollowerMeta::with_leader(leader_id)));
     }
     fn become_leader(&self, meta: &mut MutexGuard<RaftMeta>) {
-        meta.membership = Membership::Leader(LeaderMeta::new());
+        self.switch_membership(meta, Membership::Leader(LeaderMeta::new()));
     }
     fn send_heartbeat(&self, meta: &mut MutexGuard<RaftMeta>, entries: Option<LogEntries>) {
 

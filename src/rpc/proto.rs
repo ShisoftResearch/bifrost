@@ -110,6 +110,7 @@ macro_rules! service {
         use byteorder::{ByteOrder, LittleEndian};
         use bincode::{SizeLimit, serde as bincode};
         use std::sync::Arc;
+use std::time::Duration;
 
         mod rpc_args {
             #[allow(unused_variables)]
@@ -175,13 +176,22 @@ macro_rules! service {
                     client: $crate::rpc::Client::new(addr)
                 }
             }
+            pub fn with_timeout(addr: &String, timeout: Duration) -> SyncClient {
+                SyncClient {
+                    client: $crate::rpc::Client::with_timeout(addr, timeout)
+                }
+            }
            $(
                 #[allow(non_camel_case_types)]
                 $(#[$attr])*
-                fn $fn_name(&mut self, $($arg:$in_),*) -> std::result::Result<$out, $error> {
+                fn $fn_name(&mut self, $($arg:$in_),*) -> Option<std::result::Result<$out, $error>> {
                     let req_bytes = encoders::$fn_name($($arg),*);
                     let res_bytes = self.client.send_message(req_bytes);
-                    deserialize!(&res_bytes)
+                    if let Some(res_bytes) = res_bytes {
+                        Some(deserialize!(&res_bytes))
+                    } else {
+                        None
+                    }
                 }
            )*
         }
