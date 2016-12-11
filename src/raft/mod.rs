@@ -32,12 +32,19 @@ pub struct LogEntry {
     data: Vec<u8>
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum ClientCmdResponse {
+    Success(Vec<u8>),
+    NotLeader(u64)
+}
+
 type LogEntries = Vec<LogEntry>;
 
 service! {
     rpc append_entries(term: u64, leaderId: u64, prev_log_id: u64, prev_log_term: u64, entries: Option<LogEntries>, leader_commit: u64) -> (u64, bool);
     rpc request_vote(term: u64, candidate_id: u64, last_log_id: u64, last_log_term: u64) -> ((u64, u64), bool); // term, voteGranted
     rpc install_snapshot(term: u64, leader_id: u64, last_included_index: u64, last_included_term: u64, data: Vec<u8>, done: bool) -> u64;
+    rpc client_commands(entries: LogEntries) -> ClientCmdResponse;
 }
 
 fn gen_rand(lower: u64, higher: u64) -> u64 {
@@ -83,8 +90,6 @@ pub struct RaftMeta {
     state_machine: RefCell<MasterStateMachine>,
     commit_index: u64,
     last_applied: u64,
-    last_log_id: u64,
-    last_log_term: u64,
     workers: ThreadPool,
     leader_id: u64,
 }
@@ -138,8 +143,6 @@ impl RaftServer {
                     state_machine: RefCell::new(MasterStateMachine::new()),
                     commit_index: 0,
                     last_applied: 0,
-                    last_log_id: 0,
-                    last_log_term: 0,
                     workers: ThreadPool::new(num_cpus::get()),
                     leader_id: 0,
                 }
@@ -166,7 +169,7 @@ impl RaftServer {
                             }
                         },
                         Membership::Follower | Membership::Candidate => {
-                            if get_time() > (meta.timeout + meta.last_checked) {
+                            if get_time() > (meta.timeout + meta.last_checked) && meta.vote_for == None {
                                 //Timeout, require election
                                 CheckerAction::BecomeCandidate
                             } else {
@@ -199,6 +202,15 @@ impl RaftServer {
         self.reset_last_checked(meta);
         meta.membership = membership;
     }
+    fn get_last_log_info(&self, meta: &mut MutexGuard<RaftMeta>) -> (u64, u64) {
+        let last_log = meta.logs.iter().next_back();
+        match last_log {
+            Some((last_log_id, last_log_item)) => {
+                (*last_log_id, last_log_item.term)
+            },
+            None => (0, 0)
+        }
+    }
     fn become_candidate(server: Arc<RaftServer>, meta: &mut MutexGuard<RaftMeta>) {
         server.reset_last_checked(meta);
         meta.term += 1;
@@ -206,8 +218,7 @@ impl RaftServer {
         server.switch_membership(meta, Membership::Candidate);
         let term = meta.term;
         let id = server.id;
-        let last_log_id = meta.last_log_id;
-        let last_log_term = meta.last_log_term;
+        let (last_log_id, last_log_term) = server.get_last_log_info(meta);
         let (tx, rx) = channel();
         let mut members = 0;
         let timeout = meta.timeout;
@@ -383,5 +394,9 @@ impl Server for RaftServer {
             self.check_commit(&mut meta);
         }
         Ok(meta.term)
+    }
+
+    fn client_commands(&self, entries: LogEntries) -> Result<ClientCmdResponse, ()> {
+        Err(())
     }
 }
