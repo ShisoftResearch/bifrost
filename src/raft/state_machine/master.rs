@@ -25,7 +25,7 @@ raft_state_machine! {}
 
 pub struct MasterStateMachine {
     subs: HashMap<u64, SubStateMachine>,
-    configs: Configures
+    pub configs: Configures
 }
 
 impl StateMachineCmds for MasterStateMachine {}

@@ -26,5 +26,10 @@ extern crate env_logger;
 
 extern crate rand;
 extern crate time;
+extern crate threadpool;
+extern crate num_cpus;
+
+#[macro_use]
+extern crate lazy_static;
 
 extern crate bifrost_plugins;

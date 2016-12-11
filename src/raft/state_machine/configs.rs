@@ -2,11 +2,12 @@ use raft::SyncClient;
 use std::collections::{HashMap, HashSet};
 use super::*;
 use bifrost_plugins::hash_str;
+use std::sync::{Arc, Mutex};
 
 pub const CONFIG_SM_ID: u64 = 1;
 
 pub struct RaftMember {
-    rpc: SyncClient,
+    pub rpc: Arc<Mutex<SyncClient>>,
     address: String,
     hash: u64,
     last_term: u64,
@@ -35,7 +36,7 @@ impl StateMachineCmds for Configures {
         let addr = address.clone();
         let hash = hash_str(addr);
         self.members.insert(hash, RaftMember {
-            rpc: SyncClient::new(&address),
+            rpc: Arc::new(Mutex::new(SyncClient::new(&address))),
             address: address,
             hash: hash,
             last_log: 0,
