@@ -8,7 +8,7 @@ pub const CONFIG_SM_ID: u64 = 1;
 
 pub struct RaftMember {
     pub rpc: Arc<Mutex<SyncClient>>,
-    address: String,
+    pub address: String,
     hash: u64,
     last_term: u64,
     last_log: u64,

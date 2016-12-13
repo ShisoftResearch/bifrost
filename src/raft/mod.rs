@@ -4,6 +4,7 @@ use rand::distributions::{IndependentSample, Range};
 use std::thread;
 use std::sync::{Mutex, MutexGuard};
 use std::collections::{BTreeMap, HashMap};
+use self::state_machine::OpType;
 use self::state_machine::master::{MasterStateMachine, StateMachineCmds};
 use std::cmp::min;
 use std::cell::RefCell;
@@ -16,9 +17,10 @@ use std::cmp;
 
 #[macro_use]
 mod state_machine;
+pub mod client;
 
-trait RaftMsg {
-    fn encode(&self) -> (usize, Vec<u8>);
+pub trait RaftMsg {
+    fn encode(&self) -> (usize, OpType, Vec<u8>);
 }
 
 const CHECKER_MS: u64 = 50;
@@ -34,17 +36,36 @@ pub struct LogEntry {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ClientCmdResponse {
-    Success(Vec<u8>),
+    Success{
+        data: Vec<u8>,
+        last_log_term: u64,
+        last_log_id: u64,
+    },
     NotLeader(u64)
 }
-
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum ClientQryResponse {
+    Success{
+        data: Vec<u8>,
+        last_log_term: u64,
+        last_log_id: u64,
+    },
+    LeftBehind
+}
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ClientClusterInfo {
+    members: Vec<(u64, String)>,
+    term: u64,
+}
 type LogEntries = Vec<LogEntry>;
 
 service! {
     rpc append_entries(term: u64, leaderId: u64, prev_log_id: u64, prev_log_term: u64, entries: Option<LogEntries>, leader_commit: u64) -> (u64, bool);
     rpc request_vote(term: u64, candidate_id: u64, last_log_id: u64, last_log_term: u64) -> ((u64, u64), bool); // term, voteGranted
     rpc install_snapshot(term: u64, leader_id: u64, last_included_index: u64, last_included_term: u64, data: Vec<u8>, done: bool) -> u64;
-    rpc client_commands(entries: LogEntries) -> ClientCmdResponse;
+    rpc c_command(entries: LogEntry) -> ClientCmdResponse;
+    rpc c_query(entries: LogEntry, last_log_term: u64, last_log_id: u64) -> ClientQryResponse;
+    rpc c_server_cluster_info() -> ClientClusterInfo;
 }
 
 fn gen_rand(lower: u64, higher: u64) -> u64 {
@@ -250,7 +271,7 @@ impl RaftServer {
                         match res {
                             RequestVoteResponse::TermOut(remote_term, remote_leader_id) => {
                                 server.become_follower(&mut meta, remote_term, remote_leader_id);
-                                return;
+                                break;
                             },
                             RequestVoteResponse::Granted => {
                                 granted += 1;
@@ -396,7 +417,23 @@ impl Server for RaftServer {
         Ok(meta.term)
     }
 
-    fn client_commands(&self, entries: LogEntries) -> Result<ClientCmdResponse, ()> {
+    fn c_command(&self, entries: LogEntry) -> Result<ClientCmdResponse, ()> {
         Err(())
+    }
+    fn c_query(&self, entries: LogEntry, last_log_term: u64, last_log_id: u64) -> Result<ClientQryResponse, ()> {
+        Err(())
+    }
+    fn c_server_cluster_info(&self) -> Result<ClientClusterInfo, ()> {
+        let mut meta = self.meta.lock().unwrap();
+        let sm = meta.state_machine.borrow();
+        let sm_members = sm.members();
+        let mut members = Vec::new();
+        for (id, member) in sm_members.iter(){
+            members.push((*id, member.address.clone()))
+        }
+        Ok(ClientClusterInfo{
+            members: members,
+            term: meta.term,
+        })
     }
 }

@@ -19,7 +19,6 @@ pub type AppendResult = Option<Vec<u8>>;
 pub type SubStateMachine = Box<StateMachineCtl>;
 pub type SnapshotDataItem = (u64, Vec<u8>);
 pub type SnapshotDataItems = Vec<SnapshotDataItem>;
-pub type BoxedConfig = Box<Configures>;
 
 raft_state_machine! {}
 
