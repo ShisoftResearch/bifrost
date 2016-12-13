@@ -1,12 +1,16 @@
 //TODO: Use higher order macro to merge with rpc service! macro when possible to do this in Rust.
 //Current major problem is inner repeated macro will be recognized as outer macro which breaks expand
 
+macro_rules! return_type {
+    ($out: ty, $error: ty) => {std::result::Result<$out, $error>};
+}
+
 macro_rules! trait_fn {
     (qry $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {
-        fn $fn_name(&self, $($arg:$in_),*) -> std::result::Result<$out, $error>;
+        fn $fn_name(&self, $($arg:$in_),*) -> return_type!($out, $error);
     };
     (cmd $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {
-        fn $fn_name(&mut self, $($arg:$in_),*) -> std::result::Result<$out, $error>;
+        fn $fn_name(&mut self, $($arg:$in_),*) -> return_type!($out, $error);
     };
 }
 
@@ -128,13 +132,16 @@ macro_rules! raft_state_machine {
                 pub struct $fn_name {
                     $(pub $arg:$in_),*
                 }
-                impl $crate::raft::RaftMsg for $fn_name {
+                impl $crate::raft::RaftMsg<return_type!($out, $error)> for $fn_name {
                     fn encode(&self) -> (usize, $crate::raft::state_machine::OpType, Vec<u8>) {
                         (
                             hash_ident!($fn_name),
                             fn_op_type!($smt),
                             serialize!(&self)
                         )
+                    }
+                    fn decode_return(&self, data: &Vec<u8>) -> return_type!($out, $error) {
+                        deserialize!(data)
                     }
                 }
 

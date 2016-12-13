@@ -19,8 +19,9 @@ use std::cmp;
 mod state_machine;
 pub mod client;
 
-pub trait RaftMsg {
+pub trait RaftMsg<R> {
     fn encode(&self) -> (usize, OpType, Vec<u8>);
+    fn decode_return(&self, data: &Vec<u8>) -> R;
 }
 
 const CHECKER_MS: u64 = 50;
@@ -64,7 +65,7 @@ service! {
     rpc request_vote(term: u64, candidate_id: u64, last_log_id: u64, last_log_term: u64) -> ((u64, u64), bool); // term, voteGranted
     rpc install_snapshot(term: u64, leader_id: u64, last_included_index: u64, last_included_term: u64, data: Vec<u8>, done: bool) -> u64;
     rpc c_command(entries: LogEntry) -> ClientCmdResponse;
-    rpc c_query(entries: LogEntry, last_log_term: u64, last_log_id: u64) -> ClientQryResponse;
+    rpc c_query(entries: LogEntry) -> ClientQryResponse;
     rpc c_server_cluster_info() -> ClientClusterInfo;
 }
 
@@ -417,10 +418,10 @@ impl Server for RaftServer {
         Ok(meta.term)
     }
 
-    fn c_command(&self, entries: LogEntry) -> Result<ClientCmdResponse, ()> {
+    fn c_command(&self, entry: LogEntry) -> Result<ClientCmdResponse, ()> {
         Err(())
     }
-    fn c_query(&self, entries: LogEntry, last_log_term: u64, last_log_id: u64) -> Result<ClientQryResponse, ()> {
+    fn c_query(&self, entry: LogEntry) -> Result<ClientQryResponse, ()> {
         Err(())
     }
     fn c_server_cluster_info(&self) -> Result<ClientClusterInfo, ()> {
@@ -436,4 +437,19 @@ impl Server for RaftServer {
             term: meta.term,
         })
     }
+}
+
+pub struct RaftStateMachine {
+    pub id: u64,
+    pub name: String,
+}
+
+impl RaftStateMachine {
+    pub fn new(name: String) -> RaftStateMachine {
+        RaftStateMachine {
+            id: hash_str(name.clone()),
+            name: name
+        }
+    }
+
 }
