@@ -100,8 +100,9 @@ impl RaftClient {
         None
     }
 
-    fn query(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {
+    fn query(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>, deepth: usize) -> Option<Vec<u8>> {
         let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
+        let mut num_members = 0;
         let res = {
             let members = self.members.read().unwrap();
             let mut client = {
@@ -110,6 +111,7 @@ impl RaftClient {
                     .nth(pos as usize % clients_count)
                     .unwrap().lock().unwrap()
             };
+            num_members = members.clients.len();
             client.c_query(LogEntry {
                 id: self.last_log_id.load(ORDERING),
                 term: self.last_log_term.load(ORDERING),
@@ -122,7 +124,11 @@ impl RaftClient {
             Some(Ok(res)) => {
                 match res {
                     ClientQryResponse::LeftBehind => {
-                        self.query(sm_id, fn_id, data)
+                        if deepth >= num_members {
+                            None
+                        } else {
+                            self.query(sm_id, fn_id, data, deepth + 1)
+                        }
                     },
                     ClientQryResponse::Success{
                         data: data,
