@@ -1,8 +1,11 @@
-use raft::{SyncClient, ClientClusterInfo, RaftMsg, RaftStateMachine, LogEntry, ClientQryResponse};
+use raft::{
+    SyncClient, ClientClusterInfo, RaftMsg,
+    RaftStateMachine, LogEntry,
+    ClientQryResponse, ClientCmdResponse};
 use raft::state_machine::OpType;
 use std::collections::{HashMap, BTreeMap, HashSet};
 use std::iter::FromIterator;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::cell::RefCell;
 use bifrost_plugins::hash_str;
@@ -106,19 +109,13 @@ impl RaftClient {
         let res = {
             let members = self.members.read().unwrap();
             let mut client = {
-                let clients_count = members.clients.len();
+                let members_count = members.clients.len();
                 members.clients.values()
-                    .nth(pos as usize % clients_count)
+                    .nth(pos as usize % members_count)
                     .unwrap().lock().unwrap()
             };
             num_members = members.clients.len();
-            client.c_query(LogEntry {
-                id: self.last_log_id.load(ORDERING),
-                term: self.last_log_term.load(ORDERING),
-                sm_id: sm_id,
-                fn_id: fn_id,
-                data: data.clone()
-            })
+            client.c_query(self.gen_log_entry(sm_id, fn_id, data))
         };
         match res {
             Some(Ok(res)) => {
@@ -135,8 +132,8 @@ impl RaftClient {
                         last_log_term: last_log_term,
                         last_log_id: last_log_id
                     } => {
-                        swap_when_larger(&self.last_log_id, last_log_id);
-                        swap_when_larger(&self.last_log_term, last_log_term);
+                        swap_when_greater(&self.last_log_id, last_log_id);
+                        swap_when_greater(&self.last_log_term, last_log_term);
                         Some(data)
                     },
                 }
@@ -145,12 +142,61 @@ impl RaftClient {
         }
     }
 
-//    fn command(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>) -> Option<u8> {
-//
-//    }
+    fn command(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {
+        let mut leader = None;
+        let mut searched = 0;
+        let members = self.members.read().unwrap();
+        loop {
+            let leader_id = self.leader_id.load(ORDERING);
+            let num_members = members.clients.len();
+            if searched >= num_members {break;}
+            if members.clients.contains_key(&leader_id) {
+                leader = Some(leader_id);
+                break;
+            } else {
+                let pos = self.qry_meta.pos.load(ORDERING);
+                let index = members.clients.keys()
+                    .nth(pos as usize % num_members)
+                    .unwrap();
+                self.leader_id.compare_and_swap(leader_id, *index, ORDERING);
+            }
+            searched += 1;
+        }
+        match leader {
+            Some(leader_id) => {
+                let mut client = members.clients.get(&leader_id).unwrap().lock().unwrap();
+                match client.c_command(self.gen_log_entry(sm_id, fn_id, data)) {
+                    Some(Ok(ClientCmdResponse::Success{
+                                 data: data, last_log_term: last_log_term,
+                                 last_log_id: last_log_id
+                             })) => {
+                        swap_when_greater(&self.last_log_id, last_log_id);
+                        swap_when_greater(&self.last_log_term, last_log_term);
+                        Some(data)
+                    },
+                    Some(Ok(ClientCmdResponse::NotLeader(leader_id))) => {
+                        self.leader_id.store(leader_id, ORDERING);
+                        self.command(sm_id, fn_id, data)
+                    }
+                    _ => None
+                }
+            },
+            _ => None
+        }
+    }
+
+    fn gen_log_entry(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>) -> LogEntry {
+        LogEntry {
+            id: self.last_log_id.load(ORDERING),
+            term: self.last_log_term.load(ORDERING),
+            sm_id: sm_id,
+            fn_id: fn_id,
+            data: data.clone()
+        }
+    }
 }
 
-fn swap_when_larger(atomic: &AtomicU64, value: u64) {
+fn swap_when_greater(atomic: &AtomicU64, value: u64) {
     let mut orig_num = atomic.load(ORDERING);
     loop {
         if orig_num >= value {
