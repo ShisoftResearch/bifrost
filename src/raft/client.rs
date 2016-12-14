@@ -125,13 +125,28 @@ impl RaftClient {
                         last_log_term: last_log_term,
                         last_log_id: last_log_id
                     } => {
-                        self.qry_meta.last_log_id.store(last_log_id, ORDERING);
-                        self.qry_meta.last_log_term.store(last_log_term, ORDERING);
+                        swap_when_larger(&self.qry_meta.last_log_id, last_log_id);
+                        swap_when_larger(&self.qry_meta.last_log_term, last_log_term);
                         Some(data)
                     },
                 }
             },
             _ => None
+        }
+    }
+}
+
+fn swap_when_larger(atomic: &AtomicU64, value: u64) {
+    let mut orig_num = atomic.load(ORDERING);
+    loop {
+        if orig_num >= value {
+            return;
+        }
+        let actual = atomic.compare_and_swap(orig_num, value, ORDERING);
+        if actual == orig_num {
+            return;
+        } else {
+            orig_num = actual;
         }
     }
 }
