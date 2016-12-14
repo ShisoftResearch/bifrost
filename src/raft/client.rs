@@ -4,14 +4,15 @@ use std::collections::{HashMap, BTreeMap, HashSet};
 use std::iter::FromIterator;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::cell::RefCell;
 use bifrost_plugins::hash_str;
 use rand;
 
 const ORDERING: Ordering = Ordering::Relaxed;
 
 struct QryMeta {
-    last_log_id: u64,
-    last_log_term: u64,
+    last_log_id: AtomicU64,
+    last_log_term: AtomicU64,
     pos: AtomicU64
 }
 
@@ -30,8 +31,8 @@ impl RaftClient {
     pub fn new(servers: Vec<String>) -> Option<RaftClient> {
         let mut client = RaftClient {
             qry_meta: QryMeta {
-                last_log_id: 0,
-                last_log_term: 0,
+                last_log_id: AtomicU64::new(0),
+                last_log_term: AtomicU64::new(0),
                 pos: AtomicU64::new(rand::random::<u64>())
             },
             members: Members {
@@ -53,8 +54,8 @@ impl RaftClient {
             let id = hash_str(server_addr.clone());
             let mut client = self.members.clients.entry(id).or_insert_with(|| {
                 Mutex::new(SyncClient::new(server_addr))
-            }).lock().unwrap();
-            if let Some(Ok(info)) = client.c_server_cluster_info() {
+            });
+            if let Some(Ok(info)) = client.lock().unwrap().c_server_cluster_info() {
                 servers = Some(info);
                 break;
             }
@@ -76,7 +77,7 @@ impl RaftClient {
                     let addr = self.members.id_map.get(id).unwrap();
                     self.members.clients.entry(id.clone()).or_insert_with(|| {
                         Mutex::new(SyncClient::new(addr))
-                    }).lock().unwrap();
+                    });
                 }
                 Ok(())
             },
@@ -84,7 +85,7 @@ impl RaftClient {
         }
     }
 
-    pub fn execute<R>(&mut self, sm: RaftStateMachine, msg: &RaftMsg<R>) -> Option<R> {
+    pub fn execute<R>(&self, sm: RaftStateMachine, msg: &RaftMsg<R>) -> Option<R> {
         let (fn_id, op, req_data) = msg.encode();
         let sm_id = sm.id;
         let response = match op {
@@ -98,17 +99,16 @@ impl RaftClient {
         None
     }
 
-    fn query(&mut self, sm_id: u64, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {
+    fn query(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {
         let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
         let clients_count = self.members.clients.len();
         let res = {
             let mut client = self.members.clients.values()
                 .nth(pos as usize % clients_count)
-                .unwrap()
-                .lock().unwrap();
+                .unwrap().lock().unwrap();
             client.c_query(LogEntry {
-                id: self.qry_meta.last_log_id,
-                term: self.qry_meta.last_log_term,
+                id: self.qry_meta.last_log_id.load(ORDERING),
+                term: self.qry_meta.last_log_term.load(ORDERING),
                 sm_id: sm_id,
                 fn_id: fn_id,
                 data: data.clone()
@@ -125,8 +125,8 @@ impl RaftClient {
                         last_log_term: last_log_term,
                         last_log_id: last_log_id
                     } => {
-                        self.qry_meta.last_log_id = last_log_id;
-                        self.qry_meta.last_log_term = last_log_term;
+                        self.qry_meta.last_log_id.store(last_log_id, ORDERING);
+                        self.qry_meta.last_log_term.store(last_log_term, ORDERING);
                         Some(data)
                     },
                 }
