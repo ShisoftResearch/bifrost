@@ -20,7 +20,7 @@ mod state_machine;
 pub mod client;
 
 pub trait RaftMsg<R> {
-    fn encode(&self) -> (usize, OpType, Vec<u8>);
+    fn encode(&self) -> (u64, OpType, Vec<u8>);
     fn decode_return(&self, data: &Vec<u8>) -> R;
 }
 

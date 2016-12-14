@@ -133,9 +133,9 @@ macro_rules! raft_state_machine {
                     $(pub $arg:$in_),*
                 }
                 impl $crate::raft::RaftMsg<return_type!($out, $error)> for $fn_name {
-                    fn encode(&self) -> (usize, $crate::raft::state_machine::OpType, Vec<u8>) {
+                    fn encode(&self) -> (u64, $crate::raft::state_machine::OpType, Vec<u8>) {
                         (
-                            hash_ident!($fn_name),
+                            hash_ident!($fn_name) as u64,
                             fn_op_type!($smt),
                             serialize!(&self)
                         )

@@ -94,13 +94,18 @@ impl RaftClient {
         let sm_id = sm.id;
         let response = match op {
             OpType::QUERY => {
-
+                self.query(sm_id, fn_id, &req_data, 0)
             },
             OpType::COMMAND => {
-
+                self.command(sm_id, fn_id, &req_data)
             },
         };
-        None
+        match response {
+            Some(data) => {
+                Some(msg.decode_return(&data))
+            },
+            None => None
+        }
     }
 
     fn query(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>, deepth: usize) -> Option<Vec<u8>> {
