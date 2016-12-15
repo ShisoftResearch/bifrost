@@ -56,7 +56,9 @@ pub enum ClientQryResponse {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ClientClusterInfo {
     members: Vec<(u64, String)>,
-    term: u64,
+    last_log_id: u64,
+    last_log_term: u64,
+    leader_id: u64,
 }
 type LogEntries = Vec<LogEntry>;
 
@@ -224,7 +226,7 @@ impl RaftServer {
         self.reset_last_checked(meta);
         meta.membership = membership;
     }
-    fn get_last_log_info(&self, meta: &mut MutexGuard<RaftMeta>) -> (u64, u64) {
+    fn get_last_log_info(&self, meta: &MutexGuard<RaftMeta>) -> (u64, u64) {
         let last_log = meta.logs.iter().next_back();
         match last_log {
             Some((last_log_id, last_log_item)) => {
@@ -432,9 +434,12 @@ impl Server for RaftServer {
         for (id, member) in sm_members.iter(){
             members.push((*id, member.address.clone()))
         }
+        let (last_log_id, last_log_term) = self.get_last_log_info(&meta);
         Ok(ClientClusterInfo{
             members: members,
-            term: meta.term,
+            last_log_id: last_log_id,
+            last_log_term: last_log_term,
+            leader_id: meta.leader_id,
         })
     }
 }

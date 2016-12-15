@@ -5,7 +5,7 @@ use raft::{
 use raft::state_machine::OpType;
 use std::collections::{HashMap, BTreeMap, HashSet};
 use std::iter::FromIterator;
-use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard};
+use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::cell::RefCell;
 use bifrost_plugins::hash_str;
@@ -44,29 +44,35 @@ impl RaftClient {
             last_log_id: AtomicU64::new(0),
             last_log_term: AtomicU64::new(0),
         };
-        match client.update_info(&HashSet::from_iter(servers)) {
+        let init = {
+            let mut members = client.members.write().unwrap();
+            RaftClient::update_info(
+                &mut members,
+                &HashSet::from_iter(servers)
+            )
+        };
+        match init {
             Ok(_) => Some(client),
             Err(_) => None
         }
     }
 
-    fn update_info(&self, addrs: &HashSet<String>) -> Result<(), ()> {
+    fn update_info(members: &mut RwLockWriteGuard<Members>, addrs: &HashSet<String>) -> Result<(), ()> {
         let info: ClientClusterInfo;
-        let mut servers = None;
-        let mut members = self.members.write().unwrap();
+        let mut cluster_info = None;
         for server_addr in addrs {
             let id = hash_str(server_addr.clone());
             let mut client = members.clients.entry(id).or_insert_with(|| {
                 Mutex::new(SyncClient::new(server_addr))
             });
             if let Some(Ok(info)) = client.lock().unwrap().c_server_cluster_info() {
-                servers = Some(info);
+                cluster_info = Some(info);
                 break;
             }
         }
-        match servers {
-            Some(servers) => {
-                let remote_members = servers.members;
+        match cluster_info {
+            Some(info) => {
+                let remote_members = info.members;
                 let mut remote_ids = HashSet::with_capacity(remote_members.len());
                 members.id_map.clear();
                 for (id, addr) in remote_members {
@@ -97,7 +103,7 @@ impl RaftClient {
                 self.query(sm_id, fn_id, &req_data, 0)
             },
             OpType::COMMAND => {
-                self.command(sm_id, fn_id, &req_data)
+                self.command(sm_id, fn_id, &req_data, 0)
             },
         };
         match response {
@@ -108,7 +114,7 @@ impl RaftClient {
         }
     }
 
-    fn query(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>, deepth: usize) -> Option<Vec<u8>> {
+    fn query(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>, depth: usize) -> Option<Vec<u8>> {
         let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
         let mut num_members = 0;
         let res = {
@@ -126,10 +132,10 @@ impl RaftClient {
             Some(Ok(res)) => {
                 match res {
                     ClientQryResponse::LeftBehind => {
-                        if deepth >= num_members {
+                        if depth >= num_members {
                             None
                         } else {
-                            self.query(sm_id, fn_id, data, deepth + 1)
+                            self.query(sm_id, fn_id, data, depth + 1)
                         }
                     },
                     ClientQryResponse::Success{
@@ -147,47 +153,69 @@ impl RaftClient {
         }
     }
 
-    fn command(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {
-        let mut leader = None;
-        let mut searched = 0;
-        let members = self.members.read().unwrap();
-        loop {
-            let leader_id = self.leader_id.load(ORDERING);
+    fn command(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>, depth: usize) -> Option<Vec<u8>> {
+        enum FailureAction {
+            SwitchLeader,
+            UpdateInfo,
+            NotLeader,
+        }
+        let failure = {
+            let members = self.members.read().unwrap();
             let num_members = members.clients.len();
-            if searched >= num_members {break;}
-            if members.clients.contains_key(&leader_id) {
-                leader = Some(leader_id);
-                break;
-            } else {
+            if depth >= num_members {return None};
+            let mut leader = {
+                let leader_id = self.leader_id.load(ORDERING);
+                if members.clients.contains_key(&leader_id) {
+                    Some(leader_id)
+                } else {
+                    None
+                }
+            };
+            match leader {
+                Some(leader_id) => {
+                    let mut client = members.clients.get(&leader_id).unwrap().lock().unwrap();
+                    match client.c_command(self.gen_log_entry(sm_id, fn_id, data)) {
+                        Some(Ok(ClientCmdResponse::Success{
+                                    data: data, last_log_term: last_log_term,
+                                    last_log_id: last_log_id
+                                })) => {
+                            swap_when_greater(&self.last_log_id, last_log_id);
+                            swap_when_greater(&self.last_log_term, last_log_term);
+                            return Some(data);
+                        },
+                        Some(Ok(ClientCmdResponse::NotLeader(leader_id))) => {
+                            self.leader_id.store(leader_id, ORDERING);
+                            FailureAction::NotLeader
+                        }
+                        _ => FailureAction::SwitchLeader // need switch server for leader
+                    }
+                },
+                None => FailureAction::UpdateInfo // need update members
+            }
+        }; //
+        match failure {
+            FailureAction::UpdateInfo => {
+                let mut members = self.members.write().unwrap();
+                let mut members_addrs = HashSet::new();
+                for address in members.id_map.values() {
+                    members_addrs.insert(address.clone());
+
+                }
+                RaftClient::update_info(&mut members, &members_addrs);
+            },
+            FailureAction::SwitchLeader => {
+                let members = self.members.read().unwrap();
+                let num_members = members.clients.len();
                 let pos = self.qry_meta.pos.load(ORDERING);
+                let leader_id = self.leader_id.load(ORDERING);
                 let index = members.clients.keys()
                     .nth(pos as usize % num_members)
                     .unwrap();
                 self.leader_id.compare_and_swap(leader_id, *index, ORDERING);
-            }
-            searched += 1;
-        }
-        match leader {
-            Some(leader_id) => {
-                let mut client = members.clients.get(&leader_id).unwrap().lock().unwrap();
-                match client.c_command(self.gen_log_entry(sm_id, fn_id, data)) {
-                    Some(Ok(ClientCmdResponse::Success{
-                                 data: data, last_log_term: last_log_term,
-                                 last_log_id: last_log_id
-                             })) => {
-                        swap_when_greater(&self.last_log_id, last_log_id);
-                        swap_when_greater(&self.last_log_term, last_log_term);
-                        Some(data)
-                    },
-                    Some(Ok(ClientCmdResponse::NotLeader(leader_id))) => {
-                        self.leader_id.store(leader_id, ORDERING);
-                        self.command(sm_id, fn_id, data)
-                    }
-                    _ => None
-                }
             },
-            _ => None
+            _ => {}
         }
+        self.command(sm_id, fn_id, data, depth + 1)
     }
 
     fn gen_log_entry(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>) -> LogEntry {

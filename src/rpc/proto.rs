@@ -168,17 +168,20 @@ use std::time::Duration;
             )*
         }
         pub struct SyncClient {
-            client: $crate::rpc::Client
+            client: $crate::rpc::Client,
+            pub address: String
         }
         impl SyncClient {
             pub fn new(addr: &String) -> SyncClient {
                 SyncClient {
-                    client: $crate::rpc::Client::new(addr)
+                    client: $crate::rpc::Client::new(addr),
+                    address: addr.clone()
                 }
             }
             pub fn with_timeout(addr: &String, timeout: Duration) -> SyncClient {
                 SyncClient {
-                    client: $crate::rpc::Client::with_timeout(addr, timeout)
+                    client: $crate::rpc::Client::with_timeout(addr, timeout),
+                    address: addr.clone()
                 }
             }
            $(
