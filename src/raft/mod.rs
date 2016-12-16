@@ -2,7 +2,7 @@ use rand;
 use rand::Rng;
 use rand::distributions::{IndependentSample, Range};
 use std::thread;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Mutex};
 use std::collections::{BTreeMap, HashMap};
 use self::state_machine::OpType;
 use self::state_machine::master::{MasterStateMachine, StateMachineCmds};
@@ -111,11 +111,11 @@ pub struct RaftMeta {
     last_checked: u64,
     membership: Membership,
     logs: BTreeMap<u64, LogEntry>,
-    state_machine: RefCell<MasterStateMachine>,
+    state_machine: RwLock<MasterStateMachine>,
     commit_index: u64,
     last_applied: u64,
-    workers: ThreadPool,
     leader_id: u64,
+    workers: Mutex<ThreadPool>,
 }
 
 #[derive(Clone)]
@@ -137,7 +137,7 @@ pub struct Options {
 }
 
 pub struct RaftServer {
-    meta: Arc<Mutex<RaftMeta>>,
+    meta: RwLock<RaftMeta>,
     pub id: u64,
     pub options: Options,
 }
@@ -155,8 +155,8 @@ enum RequestVoteResponse {
 }
 impl RaftServer {
     pub fn new(opts: Options) -> Arc<RaftServer> {
-        let server = Arc::new(RaftServer {
-            meta: Arc::new(Mutex::new(
+        let server_obj = RaftServer {
+            meta: RwLock::new(
                 RaftMeta {
                     term: 0, //TODO: read from persistent state
                     vote_for: None, //TODO: read from persistent state
@@ -164,16 +164,17 @@ impl RaftServer {
                     last_checked: get_time(),
                     membership: Membership::Follower,
                     logs: BTreeMap::new(), //TODO: read from persistent state
-                    state_machine: RefCell::new(MasterStateMachine::new()),
+                    state_machine: RwLock::new(MasterStateMachine::new()),
                     commit_index: 0,
                     last_applied: 0,
-                    workers: ThreadPool::new(num_cpus::get()),
                     leader_id: 0,
+                    workers: Mutex::new(ThreadPool::new(num_cpus::get())),
                 }
-            )),
+            ),
             options: opts.clone(),
             id: hash_str(opts.address.clone()),
-        });
+        };
+        let server = Arc::new(server_obj);
         let svr_ref = server.clone();
         thread::spawn(move ||{
             listen(svr_ref, &opts.address);
@@ -183,7 +184,7 @@ impl RaftServer {
             let server = checker_ref;
             loop {
                 {
-                    let mut meta = server.meta.lock().unwrap(); //WARNING: Reentering not supported
+                    let mut meta = server.meta.write().unwrap(); //WARNING: Reentering not supported
                     let action = match meta.membership {
                         Membership::Leader(ref leader_meta) => {
                             if get_time() > (leader_meta.last_updated + CHECKER_MS) {
@@ -222,35 +223,42 @@ impl RaftServer {
         });
         server
     }
-    fn switch_membership(&self, meta: &mut MutexGuard<RaftMeta>, membership: Membership) {
+    fn switch_membership(&self, meta: &mut RwLockWriteGuard<RaftMeta>, membership: Membership) {
         self.reset_last_checked(meta);
         meta.membership = membership;
     }
-    fn get_last_log_info(&self, meta: &MutexGuard<RaftMeta>) -> (u64, u64) {
-        let last_log = meta.logs.iter().next_back();
-        match last_log {
+    fn get_log_info(&self, log: Option<(&u64, &LogEntry)>) -> (u64, u64) {
+        match log {
             Some((last_log_id, last_log_item)) => {
                 (*last_log_id, last_log_item.term)
             },
             None => (0, 0)
         }
     }
-    fn become_candidate(server: Arc<RaftServer>, meta: &mut MutexGuard<RaftMeta>) {
+    fn get_last_log_info_mut(&self, meta: &RwLockWriteGuard<RaftMeta>) -> (u64, u64) {
+        let last_log = meta.logs.iter().next_back();
+        self.get_log_info(last_log)
+    }
+    fn get_last_log_info(&self, meta: &RwLockReadGuard<RaftMeta>) -> (u64, u64) {
+        let last_log = meta.logs.iter().next_back();
+        self.get_log_info(last_log)
+    }
+    fn become_candidate(server: Arc<RaftServer>, meta: &mut RwLockWriteGuard<RaftMeta>) {
         server.reset_last_checked(meta);
         meta.term += 1;
         meta.vote_for = Some(server.id);
         server.switch_membership(meta, Membership::Candidate);
         let term = meta.term;
         let id = server.id;
-        let (last_log_id, last_log_term) = server.get_last_log_info(meta);
+        let (last_log_id, last_log_term) = server.get_last_log_info_mut(meta);
         let (tx, rx) = channel();
         let mut members = 0;
         let timeout = meta.timeout;
-        for member in meta.state_machine.borrow().configs.members.values() {
+        for member in meta.state_machine.read().unwrap().configs.members.values() {
             let rpc = member.rpc.clone();
             let tx = tx.clone();
             members += 1;
-            meta.workers.execute(move||{
+            meta.workers.lock().unwrap().execute(move||{
                 let mut rpc = rpc.lock().unwrap();
                 if let Some(Ok(((remote_term, remote_leader_id), vote_granted))) = rpc.request_vote(term, id, last_log_id, last_log_term) {
                     if vote_granted {
@@ -263,11 +271,11 @@ impl RaftServer {
                 }
             });
         }
-        meta.workers.execute(move||{
+        meta.workers.lock().unwrap().execute(move ||{
             let mut granted = 0;
             for _ in 0..members {
                 let received = rx.recv_timeout(Duration::from_millis(timeout));
-                let mut meta = server.meta.lock().unwrap();
+                let mut meta = server.meta.write().unwrap();
                 if meta.term != term {break;}
                 match received {
                     Ok(res) => {
@@ -291,20 +299,20 @@ impl RaftServer {
             }
         });
     }
-    fn become_follower(&self, meta: &mut MutexGuard<RaftMeta>, term: u64, leader_id: u64) {
+    fn become_follower(&self, meta: &mut RwLockWriteGuard<RaftMeta>, term: u64, leader_id: u64) {
         meta.term = term;
         meta.leader_id = leader_id;
         self.switch_membership(meta, Membership::Follower);
     }
-    fn become_leader(&self, meta: &mut MutexGuard<RaftMeta>) {
+    fn become_leader(&self, meta: &mut RwLockWriteGuard<RaftMeta>) {
         self.switch_membership(meta, Membership::Leader(LeaderMeta::new()));
     }
-    fn send_heartbeat(&self, meta: &mut MutexGuard<RaftMeta>, entries: Option<LogEntries>) {
+    fn send_heartbeat(&self, meta: &mut RwLockWriteGuard<RaftMeta>, entries: Option<LogEntries>) {
 
     }
 
     //check term number, return reject = false if server term is stale
-    fn check_term(&self, meta: &mut MutexGuard<RaftMeta>, remote_term: u64, leader_id: u64) -> bool {
+    fn check_term(&self, meta: &mut RwLockWriteGuard<RaftMeta>, remote_term: u64, leader_id: u64) -> bool {
         if remote_term > meta.term {
             meta.term = remote_term;
             meta.vote_for = None;
@@ -315,16 +323,16 @@ impl RaftServer {
         return true;
     }
 
-    fn check_commit(&self, meta: &mut MutexGuard<RaftMeta>) { //not need to return result for follower
+    fn check_commit(&self, meta: &mut RwLockWriteGuard<RaftMeta>) { //not need to return result for follower
         while meta.commit_index > meta.last_applied {
             (*meta).last_applied += 1;
             let last_applied = meta.last_applied;
             if let Some(entry) = meta.logs.get(&last_applied) {
-                meta.state_machine.borrow_mut().commit(&entry);
+                meta.state_machine.write().unwrap().commit(&entry);
             };
         }
     }
-    fn reset_last_checked(&self, meta: &mut MutexGuard<RaftMeta>) {
+    fn reset_last_checked(&self, meta: &mut RwLockWriteGuard<RaftMeta>) {
         meta.last_checked = get_time();
         meta.timeout = gen_timeout();
     }
@@ -337,7 +345,7 @@ impl Server for RaftServer {
         prev_log_term: u64, entries: Option<LogEntries>,
         leader_commit: u64
     ) -> Result<(u64, bool), ()>  {
-        let mut meta = self.meta.lock().unwrap();
+        let mut meta = self.meta.write().unwrap();
         let term_ok = self.check_term(&mut meta, term, leader_id); // RI, 1
         self.reset_last_checked(&mut meta);
         if term_ok {
@@ -384,7 +392,7 @@ impl Server for RaftServer {
         term: u64, candidate_id: u64,
         last_log_id: u64, last_log_term: u64
     ) -> Result<((u64, u64), bool), ()> {
-        let mut meta = self.meta.lock().unwrap();
+        let mut meta = self.meta.write().unwrap();
         let vote_for = meta.vote_for;
         let mut vote_granted = false;
         if term >= meta.term {
@@ -412,7 +420,7 @@ impl Server for RaftServer {
         term: u64, leader_id: u64, last_included_index: u64,
         last_included_term: u64, data: Vec<u8>, done: bool
     ) -> Result<u64, ()> {
-        let mut meta = self.meta.lock().unwrap();
+        let mut meta = self.meta.write().unwrap();
         let term_ok = self.check_term(&mut meta, term, leader_id);
         if term_ok {
             self.check_commit(&mut meta);
@@ -424,11 +432,12 @@ impl Server for RaftServer {
         Err(())
     }
     fn c_query(&self, entry: LogEntry) -> Result<ClientQryResponse, ()> {
+        let mut meta = self.meta.read().unwrap();
         Err(())
     }
     fn c_server_cluster_info(&self) -> Result<ClientClusterInfo, ()> {
-        let mut meta = self.meta.lock().unwrap();
-        let sm = meta.state_machine.borrow();
+        let mut meta = self.meta.read().unwrap();
+        let sm = &meta.state_machine.read().unwrap();
         let sm_members = sm.members();
         let mut members = Vec::new();
         for (id, member) in sm_members.iter(){
