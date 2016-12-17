@@ -3,10 +3,11 @@ use super::*;
 use std::collections::HashMap;
 use self::configs::{Configures, RaftMember, CONFIG_SM_ID};
 
-#[derive(Serialize, Deserialize, Debug)]
-pub enum AppendError {
-    NOT_FOUND,
-    NO_ENTRY,
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum ExecError {
+    SmNotFound,
+    FnNotFound,
+    ServerUnreachable
 }
 
 pub enum RegisterResult {
@@ -15,7 +16,8 @@ pub enum RegisterResult {
     RESERVED,
 }
 
-pub type AppendResult = Option<Vec<u8>>;
+pub type ExecOk = Vec<u8>;
+pub type ExecResult = Result<ExecOk, ExecError>;
 pub type SubStateMachine = Box<StateMachineCtl>;
 pub type SnapshotDataItem = (u64, Vec<u8>);
 pub type SnapshotDataItems = Vec<SnapshotDataItem>;
@@ -77,18 +79,24 @@ impl MasterStateMachine {
         &self.configs.members
     }
 
-    pub fn commit_cmd(&mut self, entry: &LogEntry) -> Result<AppendResult, AppendError> {
+    pub fn commit_cmd(&mut self, entry: &LogEntry) -> ExecResult {
         if let Some(sm) = self.subs.get_mut(&entry.sm_id) {
-            Ok(sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data))
+            match sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data) {
+                Some(d) => Ok(d),
+                None => Err(ExecError::FnNotFound)
+            }
         } else {
-            Err(AppendError::NOT_FOUND)
+            Err(ExecError::SmNotFound)
         }
     }
-    pub fn exec_qry(&self, entry: &LogEntry) -> Result<AppendResult, AppendError> {
+    pub fn exec_qry(&self, entry: &LogEntry) -> ExecResult {
     if let Some(sm) = self.subs.get(&entry.sm_id) {
-        Ok(sm.fn_dispatch_qry(entry.fn_id, &entry.data))
+        match sm.fn_dispatch_qry(entry.fn_id, &entry.data) {
+            Some(d) => Ok(d),
+            None => Err(ExecError::FnNotFound)
+        }
     } else {
-        Err(AppendError::NOT_FOUND)
+        Err(ExecError::SmNotFound)
     }
 }
 }

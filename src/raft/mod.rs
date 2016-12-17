@@ -5,7 +5,7 @@ use std::thread;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Mutex};
 use std::collections::{BTreeMap, HashMap};
 use self::state_machine::OpType;
-use self::state_machine::master::{MasterStateMachine, StateMachineCmds};
+use self::state_machine::master::{MasterStateMachine, StateMachineCmds, ExecResult};
 use std::cmp::min;
 use std::cell::RefCell;
 use bifrost_plugins::hash_str;
@@ -38,7 +38,7 @@ pub struct LogEntry {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ClientCmdResponse {
     Success{
-        data: Vec<u8>,
+        data: ExecResult,
         last_log_term: u64,
         last_log_id: u64,
     },
@@ -47,7 +47,7 @@ pub enum ClientCmdResponse {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ClientQryResponse {
     Success{
-        data: Vec<u8>,
+        data: ExecResult,
         last_log_term: u64,
         last_log_id: u64,
     },
@@ -437,7 +437,9 @@ impl Server for RaftServer {
         if entry.term > last_log_term || entry.id > last_log_id {
             return Ok(ClientQryResponse::LeftBehind);
         } else {
-            meta.state_machine.read().unwrap().exec_qry(&entry);
+//            match meta.state_machine.read().unwrap().exec_qry(&entry) {
+//                Ok
+//            }
         }
         Err(())
     }

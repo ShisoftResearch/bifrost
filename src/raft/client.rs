@@ -3,6 +3,7 @@ use raft::{
     RaftStateMachine, LogEntry,
     ClientQryResponse, ClientCmdResponse};
 use raft::state_machine::OpType;
+use raft::state_machine::master::{ExecResult, ExecError};
 use std::collections::{HashMap, BTreeMap, HashSet};
 use std::iter::FromIterator;
 use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -95,7 +96,7 @@ impl RaftClient {
         }
     }
 
-    pub fn execute<R>(&self, sm: RaftStateMachine, msg: &RaftMsg<R>) -> Option<R> {
+    pub fn execute<R>(&self, sm: RaftStateMachine, msg: &RaftMsg<R>) -> Result<R, ExecError> {
         let (fn_id, op, req_data) = msg.encode();
         let sm_id = sm.id;
         let response = match op {
@@ -108,13 +109,16 @@ impl RaftClient {
         };
         match response {
             Some(data) => {
-                Some(msg.decode_return(&data))
+                match data {
+                    Ok(data) => Ok(msg.decode_return(&data)),
+                    Err(e) => Err(e)
+                }
             },
-            None => None
+            None => Err(ExecError::ServerUnreachable)
         }
     }
 
-    fn query(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>, depth: usize) -> Option<Vec<u8>> {
+    fn query(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>, depth: usize) -> Option<ExecResult> {
         let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
         let mut num_members = 0;
         let res = {
@@ -153,7 +157,7 @@ impl RaftClient {
         }
     }
 
-    fn command(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>, depth: usize) -> Option<Vec<u8>> {
+    fn command(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>, depth: usize) -> Option<ExecResult> {
         enum FailureAction {
             SwitchLeader,
             UpdateInfo,
