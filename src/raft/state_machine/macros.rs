@@ -19,10 +19,33 @@ macro_rules! fn_op_type {
     (cmd) => {$crate::raft::state_machine::OpType::COMMAND};
 }
 
+macro_rules! dispatch_fn {
+    ($fn_name:ident $s: ident $d: ident ( $( $arg:ident : $in_:ty ),* )) => {{
+        let decoded: commands::$fn_name = deserialize!($d);
+        let f_result = $s.$fn_name($(decoded.$arg),*);
+        Some(serialize!(&f_result))
+    }};
+}
+
+macro_rules! dispatch_cmd {
+    (qry $fn_name:ident $s: ident $d: ident ( $( $arg:ident : $in_:ty ),* )) => {None};
+    (cmd $fn_name:ident $s: ident $d: ident ( $( $arg:ident : $in_:ty ),* )) => {
+        dispatch_fn!($fn_name $s $d( $( $arg : $in_ ),* ))
+    }
+}
+
+macro_rules! dispatch_qry {
+    (cmd $fn_name:ident $s: ident $d: ident ( $( $arg:ident : $in_:ty ),* )) => {None};
+    (qry $fn_name:ident $s: ident $d: ident ( $( $arg:ident : $in_:ty ),* )) => {
+        dispatch_fn!($fn_name $s $d( $( $arg : $in_ ),* ))
+    }
+}
+
 #[macro_export]
 macro_rules! sm_complete {
     () => {
-        fn fn_dispatch(&mut self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {self.dispatch_(fn_id, data)}
+        fn fn_dispatch_cmd(&mut self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {self.dispatch_cmd_(fn_id, data)}
+        fn fn_dispatch_qry(&self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {self.dispatch_qry_(fn_id, data)}
         fn op_type(&mut self, fn_id: u64) -> Option<$crate::raft::state_machine::OpType> {self.op_type_(fn_id)}
     };
 }
@@ -163,12 +186,21 @@ macro_rules! raft_state_machine {
                    }
                 }
            }
-           fn dispatch_(&mut self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {
+           fn dispatch_cmd_(&mut self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {
                match fn_id as usize {
                    $(hash_ident!($fn_name) => {
-                       let decoded: commands::$fn_name = deserialize!(data);
-                       let f_result = self.$fn_name($(decoded.$arg),*);
-                       Some(serialize!(&f_result))
+                        dispatch_cmd!($smt $fn_name self data( $( $arg : $in_ ),* ))
+                   }),*
+                   _ => {
+                       println!("Undefined function id: {}", fn_id);
+                       None
+                   }
+               }
+           }
+           fn dispatch_qry_(&self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {
+               match fn_id as usize {
+                   $(hash_ident!($fn_name) => {
+                        dispatch_qry!($smt $fn_name self data( $( $arg : $in_ ),* ))
                    }),*
                    _ => {
                        println!("Undefined function id: {}", fn_id);

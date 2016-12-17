@@ -77,11 +77,18 @@ impl MasterStateMachine {
         &self.configs.members
     }
 
-    pub fn commit(&mut self, entry: &LogEntry) -> Result<AppendResult, AppendError> {
+    pub fn commit_cmd(&mut self, entry: &LogEntry) -> Result<AppendResult, AppendError> {
         if let Some(sm) = self.subs.get_mut(&entry.sm_id) {
-            Ok(sm.as_mut().fn_dispatch(entry.fn_id, &entry.data))
+            Ok(sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data))
         } else {
             Err(AppendError::NOT_FOUND)
         }
     }
+    pub fn exec_qry(&self, entry: &LogEntry) -> Result<AppendResult, AppendError> {
+    if let Some(sm) = self.subs.get(&entry.sm_id) {
+        Ok(sm.fn_dispatch_qry(entry.fn_id, &entry.data))
+    } else {
+        Err(AppendError::NOT_FOUND)
+    }
+}
 }

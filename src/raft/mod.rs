@@ -328,7 +328,7 @@ impl RaftServer {
             (*meta).last_applied += 1;
             let last_applied = meta.last_applied;
             if let Some(entry) = meta.logs.get(&last_applied) {
-                meta.state_machine.write().unwrap().commit(&entry);
+                meta.state_machine.write().unwrap().commit_cmd(&entry);
             };
         }
     }
@@ -433,6 +433,12 @@ impl Server for RaftServer {
     }
     fn c_query(&self, entry: LogEntry) -> Result<ClientQryResponse, ()> {
         let mut meta = self.meta.read().unwrap();
+        let (last_log_id, last_log_term) = self.get_last_log_info(&meta);
+        if entry.term > last_log_term || entry.id > last_log_id {
+            return Ok(ClientQryResponse::LeftBehind);
+        } else {
+            meta.state_machine.read().unwrap().exec_qry(&entry);
+        }
         Err(())
     }
     fn c_server_cluster_info(&self) -> Result<ClientClusterInfo, ()> {
