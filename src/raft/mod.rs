@@ -435,13 +435,14 @@ impl Server for RaftServer {
         let mut meta = self.meta.read().unwrap();
         let (last_log_id, last_log_term) = self.get_last_log_info(&meta);
         if entry.term > last_log_term || entry.id > last_log_id {
-            return Ok(ClientQryResponse::LeftBehind);
+            Ok(ClientQryResponse::LeftBehind)
         } else {
-//            match meta.state_machine.read().unwrap().exec_qry(&entry) {
-//                Ok
-//            }
+            Ok(ClientQryResponse::Success{
+                data: meta.state_machine.read().unwrap().exec_qry(&entry),
+                last_log_id: last_log_id,
+                last_log_term: last_log_term,
+            })
         }
-        Err(())
     }
     fn c_server_cluster_info(&self) -> Result<ClientClusterInfo, ()> {
         let mut meta = self.meta.read().unwrap();
