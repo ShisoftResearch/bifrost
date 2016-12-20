@@ -2,7 +2,7 @@ use rand;
 use rand::Rng;
 use rand::distributions::{IndependentSample, Range};
 use std::thread;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Mutex};
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Mutex, MutexGuard};
 use std::collections::{BTreeMap, HashMap};
 use self::state_machine::OpType;
 use self::state_machine::master::{MasterStateMachine, StateMachineCmds, ExecResult};
@@ -42,7 +42,8 @@ pub enum ClientCmdResponse {
         last_log_term: u64,
         last_log_id: u64,
     },
-    NotLeader(u64)
+    NotLeader(u64),
+    NotUpdated,
 }
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ClientQryResponse {
@@ -83,8 +84,8 @@ fn gen_timeout() -> u64 {
 
 pub struct LeaderMeta {
     last_updated: u64,
-    next_index: HashMap<u64, u64>,
-    match_index: HashMap<u64, u64>,
+    next_index: HashMap<u64, Arc<Mutex<u64>>>,
+    match_index: HashMap<u64, Arc<Mutex<u64>>>,
 }
 
 impl LeaderMeta {
@@ -207,7 +208,7 @@ impl RaftServer {
                     };
                     match action {
                         CheckerAction::SendHeartbeat => {
-                            server.send_heartbeat(&mut meta, None);
+                            server.send_followers_heartbeat(&mut meta, None);
                         },
                         CheckerAction::BecomeCandidate => {
                             RaftServer::become_candidate(server.clone(), &mut meta);
@@ -274,7 +275,7 @@ impl RaftServer {
         meta.workers.lock().unwrap().execute(move ||{
             let mut granted = 0;
             for _ in 0..members {
-                let received = rx.recv_timeout(Duration::from_millis(timeout));
+                let received = rx.recv();
                 let mut meta = server.meta.write().unwrap();
                 if meta.term != term {break;}
                 match received {
@@ -305,10 +306,76 @@ impl RaftServer {
         self.switch_membership(meta, Membership::Follower);
     }
     fn become_leader(&self, meta: &mut RwLockWriteGuard<RaftMeta>) {
-        self.switch_membership(meta, Membership::Leader(LeaderMeta::new()));
+        let mut leader_meta = LeaderMeta::new();
+        let (last_log_id, _) = self.get_last_log_info_mut(&meta);
+        for member in meta.state_machine.read().unwrap().configs.members.values() {
+            let id = member.id;
+            leader_meta.match_index.insert(id, Arc::new(Mutex::new(0)));
+            leader_meta.next_index.insert(id, Arc::new(Mutex::new(last_log_id + 1)));
+        }
+        leader_meta.last_updated = get_time();
+        self.switch_membership(meta, Membership::Leader(leader_meta));
     }
-    fn send_heartbeat(&self, meta: &mut RwLockWriteGuard<RaftMeta>, entries: Option<LogEntries>) {
+    fn send_followers_heartbeat(&self, meta: &mut RwLockWriteGuard<RaftMeta>, entry: Option<LogEntry>, ) {
+        let mut log_id = 0;
+        let (last_log_id, last_log_term) = self.get_last_log_info_mut(&meta);
+        if let Some(entry) = entry {
+            log_id = entry.id;
+            meta.logs.insert(entry.id, entry);
+        }
+        let entries = {
+            match meta.logs.get(&log_id) {
+                Some(entry) => Some(vec!(entry.clone())),
+                None => None
+            }
+        };
+        let (tx, rx) = channel();
+        let mut members = 0;
+        let timeout = meta.timeout;
+        let commit_index = meta.commit_index;
+        let term = meta.term;
+        let leader_id = meta.leader_id;
+        {
+            let workers = meta.workers.lock().unwrap();
+            for member in meta.state_machine.read().unwrap().configs.members.values() {
+                let id = member.id;
+                let rpc = member.rpc.clone();
+                let tx = tx.clone();
+                members += 1;
+                let entries = entries.clone();
+                let (next_index, match_index) = {
+                    if let Membership::Leader(ref leader_meta) = meta.membership {(
+                        leader_meta.next_index.get(&id).clone(),
+                        leader_meta.match_index.get(&id).clone()
+                    )} else {
+                        (None, None)
+                    }};
+                let (next_index, match_index) = {(
+                    next_index.unwrap().clone(),
+                    match_index.unwrap().clone(),
+                )};
+                workers.execute(move||{
+                    let mut rpc = rpc.lock().unwrap();
+                    let mut next_index = next_index.lock().unwrap();
+                    let mut match_index = match_index.lock().unwrap();
+//                    let first_append = rpc.append_entries(
+//                        term,
+//                        leader_id,
+//                        last_log_id,
+//                        last_log_term,
+//                        entries,
+//                        commit_index
+//                    );
+                    tx.send(());
+                });
+            }
+        }
+        if let Membership::Leader(ref mut leader_meta) = meta.membership{
+            for _ in 0..members {
 
+            }
+            leader_meta.last_updated = get_time();
+        }
     }
 
     //check term number, return reject = false if server term is stale
@@ -341,8 +408,9 @@ impl RaftServer {
 impl Server for RaftServer {
     fn append_entries(
         &self,
-        term: u64, leader_id: u64, prev_log_id: u64,
-        prev_log_term: u64, entries: Option<LogEntries>,
+        term: u64, leader_id: u64,
+        prev_log_id: u64, prev_log_term: u64,
+        entries: Option<LogEntries>,
         leader_commit: u64
     ) -> Result<(u64, bool), ()>  {
         let mut meta = self.meta.write().unwrap();
@@ -428,8 +496,35 @@ impl Server for RaftServer {
         Ok(meta.term)
     }
 
-    fn c_command(&self, entry: LogEntry) -> Result<ClientCmdResponse, ()> {
-        Err(())
+    fn c_command(&self, mut entry: LogEntry) -> Result<ClientCmdResponse, ()> {
+        let mut meta = self.meta.write().unwrap();
+        let is_leader = match meta.membership {
+            Membership::Leader(_) => {true},
+            _ => {false}
+        };
+        if !is_leader {
+            Ok(ClientCmdResponse::NotLeader(meta.leader_id))
+        } else {
+            let (last_log_id, last_log_term) = self.get_last_log_info_mut(&meta);
+            let new_log_id = last_log_id + 1;
+            let new_log_term = meta.term;
+            entry.term = new_log_term;
+            entry.id = new_log_id;
+
+            self.send_followers_heartbeat(
+                &mut meta,
+                Some(entry)
+            );
+
+            meta.commit_index = new_log_id;
+            Ok(ClientCmdResponse::Success{
+                data: meta.state_machine.write().unwrap().commit_cmd(
+                    meta.logs.get(&new_log_id).unwrap()
+                ),
+                last_log_id: new_log_id,
+                last_log_term: new_log_term,
+            })
+        }
     }
     fn c_query(&self, entry: LogEntry) -> Result<ClientQryResponse, ()> {
         let mut meta = self.meta.read().unwrap();

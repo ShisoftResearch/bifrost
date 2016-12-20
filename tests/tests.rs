@@ -16,6 +16,21 @@ mod raft;
 
 mod mutex {
     use std::sync::Mutex;
+    use std::collections::{HashMap};
+
+    #[test]
+    fn mutable() {
+        let l = Mutex::new(HashMap::new());
+        {
+            let mut m = l.lock().unwrap();
+            m.insert(1, 2);
+        }
+        {
+            let mut m = l.lock().unwrap();
+            assert_eq!(m.get(&1), Some(&2));
+        }
+    }
+
 
 //    #[test]
 //    fn reentering_lock() { //FAIL

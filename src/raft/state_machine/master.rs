@@ -3,7 +3,7 @@ use super::*;
 use std::collections::HashMap;
 use self::configs::{Configures, RaftMember, CONFIG_SM_ID};
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ExecError {
     SmNotFound,
     FnNotFound,

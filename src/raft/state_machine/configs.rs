@@ -9,7 +9,7 @@ pub const CONFIG_SM_ID: u64 = 1;
 pub struct RaftMember {
     pub rpc: Arc<Mutex<SyncClient>>,
     pub address: String,
-    hash: u64,
+    pub id: u64,
     last_term: u64,
     last_log: u64,
     alive: bool,
@@ -34,11 +34,11 @@ raft_state_machine! {
 impl StateMachineCmds for Configures {
     fn new_member(&mut self, address: String) -> Result<(),()> {
         let addr = address.clone();
-        let hash = hash_str(addr);
-        self.members.insert(hash, RaftMember {
+        let id = hash_str(addr);
+        self.members.insert(id, RaftMember {
             rpc: Arc::new(Mutex::new(SyncClient::new(&address))),
             address: address,
-            hash: hash,
+            id: id,
             last_log: 0,
             last_term: 0,
             alive: true,

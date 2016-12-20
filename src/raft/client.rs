@@ -162,6 +162,7 @@ impl RaftClient {
             SwitchLeader,
             UpdateInfo,
             NotLeader,
+            NotUpdated,
         }
         let failure = {
             let members = self.members.read().unwrap();
@@ -190,6 +191,9 @@ impl RaftClient {
                         Some(Ok(ClientCmdResponse::NotLeader(leader_id))) => {
                             self.leader_id.store(leader_id, ORDERING);
                             FailureAction::NotLeader
+                        },
+                        Some(Ok(ClientCmdResponse::NotUpdated)) => {
+                            FailureAction::NotUpdated
                         }
                         _ => FailureAction::SwitchLeader // need switch server for leader
                     }
@@ -216,6 +220,9 @@ impl RaftClient {
                     .nth(pos as usize % num_members)
                     .unwrap();
                 self.leader_id.compare_and_swap(leader_id, *index, ORDERING);
+            },
+            FailureAction::NotUpdated => {
+                return None
             },
             _ => {}
         }
