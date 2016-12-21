@@ -154,6 +154,14 @@ enum RequestVoteResponse {
     TermOut(u64, u64),
     NotGranted,
 }
+
+macro_rules! get_last_log_info {
+    ($s: expr, $meta: expr) => {{
+        let last_log = $meta.logs.iter().next_back();
+        $s.get_log_info_(last_log)
+    }};
+}
+
 impl RaftServer {
     pub fn new(opts: Options) -> Arc<RaftServer> {
         let server_obj = RaftServer {
@@ -228,21 +236,13 @@ impl RaftServer {
         self.reset_last_checked(meta);
         meta.membership = membership;
     }
-    fn get_log_info(&self, log: Option<(&u64, &LogEntry)>) -> (u64, u64) {
+    fn get_log_info_(&self, log: Option<(&u64, &LogEntry)>) -> (u64, u64) {
         match log {
             Some((last_log_id, last_log_item)) => {
                 (*last_log_id, last_log_item.term)
             },
             None => (0, 0)
         }
-    }
-    fn get_last_log_info_mut(&self, meta: &RwLockWriteGuard<RaftMeta>) -> (u64, u64) {
-        let last_log = meta.logs.iter().next_back();
-        self.get_log_info(last_log)
-    }
-    fn get_last_log_info(&self, meta: &RwLockReadGuard<RaftMeta>) -> (u64, u64) {
-        let last_log = meta.logs.iter().next_back();
-        self.get_log_info(last_log)
     }
     fn become_candidate(server: Arc<RaftServer>, meta: &mut RwLockWriteGuard<RaftMeta>) {
         server.reset_last_checked(meta);
@@ -251,7 +251,7 @@ impl RaftServer {
         server.switch_membership(meta, Membership::Candidate);
         let term = meta.term;
         let id = server.id;
-        let (last_log_id, last_log_term) = server.get_last_log_info_mut(meta);
+        let (last_log_id, last_log_term) = get_last_log_info!(server, meta);
         let (tx, rx) = channel();
         let mut members = 0;
         let timeout = meta.timeout;
@@ -307,7 +307,7 @@ impl RaftServer {
     }
     fn become_leader(&self, meta: &mut RwLockWriteGuard<RaftMeta>) {
         let mut leader_meta = LeaderMeta::new();
-        let (last_log_id, _) = self.get_last_log_info_mut(&meta);
+        let (last_log_id, _) = get_last_log_info!(self, &meta);
         for member in meta.state_machine.read().unwrap().configs.members.values() {
             let id = member.id;
             leader_meta.match_index.insert(id, Arc::new(Mutex::new(0)));
@@ -318,7 +318,7 @@ impl RaftServer {
     }
     fn send_followers_heartbeat(&self, meta: &mut RwLockWriteGuard<RaftMeta>, entry: Option<LogEntry>, ) {
         let mut log_id = 0;
-        let (last_log_id, last_log_term) = self.get_last_log_info_mut(&meta);
+        let (last_log_id, last_log_term) = get_last_log_info!(self, &meta);
         if let Some(entry) = entry {
             log_id = entry.id;
             meta.logs.insert(entry.id, entry);
@@ -505,7 +505,7 @@ impl Server for RaftServer {
         if !is_leader {
             Ok(ClientCmdResponse::NotLeader(meta.leader_id))
         } else {
-            let (last_log_id, last_log_term) = self.get_last_log_info_mut(&meta);
+            let (last_log_id, last_log_term) = get_last_log_info!(self, &meta);
             let new_log_id = last_log_id + 1;
             let new_log_term = meta.term;
             entry.term = new_log_term;
@@ -528,7 +528,7 @@ impl Server for RaftServer {
     }
     fn c_query(&self, entry: LogEntry) -> Result<ClientQryResponse, ()> {
         let mut meta = self.meta.read().unwrap();
-        let (last_log_id, last_log_term) = self.get_last_log_info(&meta);
+        let (last_log_id, last_log_term) = get_last_log_info!(self, &meta);
         if entry.term > last_log_term || entry.id > last_log_id {
             Ok(ClientQryResponse::LeftBehind)
         } else {
@@ -547,7 +547,7 @@ impl Server for RaftServer {
         for (id, member) in sm_members.iter(){
             members.push((*id, member.address.clone()))
         }
-        let (last_log_id, last_log_term) = self.get_last_log_info(&meta);
+        let (last_log_id, last_log_term) = get_last_log_info!(self, &meta);
         Ok(ClientClusterInfo{
             members: members,
             last_log_id: last_log_id,
