@@ -82,18 +82,21 @@ fn gen_timeout() -> u64 {
     gen_rand(100, 500)
 }
 
+struct FollowerStatus {
+    next_index: u64,
+    match_index: u64,
+}
+
 pub struct LeaderMeta {
     last_updated: u64,
-    next_index: HashMap<u64, Arc<Mutex<u64>>>,
-    match_index: HashMap<u64, Arc<Mutex<u64>>>,
+    followers: HashMap<u64, Arc<Mutex<FollowerStatus>>>
 }
 
 impl LeaderMeta {
     fn new() -> LeaderMeta {
         LeaderMeta{
             last_updated: get_time(),
-            next_index: HashMap::new(),
-            match_index: HashMap::new(),
+            followers: HashMap::new(),
         }
     }
 }
@@ -111,7 +114,7 @@ pub struct RaftMeta {
     timeout: u64,
     last_checked: u64,
     membership: Membership,
-    logs: RwLock<LogsMap>,
+    logs: Arc<RwLock<LogsMap>>,
     state_machine: RwLock<MasterStateMachine>,
     commit_index: u64,
     last_applied: u64,
@@ -167,7 +170,7 @@ macro_rules! check_commit {
         while $meta.commit_index > $meta.last_applied {
             (*$meta).last_applied += 1;
             let last_applied = $meta.last_applied;
-            let mut logs = $meta.logs.read().unwrap();
+            let logs = $meta.logs.read().unwrap();
             if let Some(entry) = logs.get(&last_applied) {
                 $meta.state_machine.write().unwrap().commit_cmd(&entry);
             };
@@ -185,7 +188,7 @@ impl RaftServer {
                     timeout: gen_timeout(), // 10~500 ms for timeout
                     last_checked: get_time(),
                     membership: Membership::Follower,
-                    logs: RwLock::new(BTreeMap::new()), //TODO: read from persistent state
+                    logs: Arc::new(RwLock::new(BTreeMap::new())), //TODO: read from persistent state
                     state_machine: RwLock::new(MasterStateMachine::new()),
                     commit_index: 0,
                     last_applied: 0,
@@ -338,12 +341,15 @@ impl RaftServer {
         let mut leader_meta = LeaderMeta::new();
         for member in meta.state_machine.read().unwrap().configs.members.values() {
             let id = member.id;
-            leader_meta.match_index.insert(id, Arc::new(Mutex::new(0)));
-            leader_meta.next_index.insert(id, Arc::new(Mutex::new(last_log_id + 1)));
+            leader_meta.followers.insert(id, Arc::new(Mutex::new(FollowerStatus {
+                next_index: last_log_id + 1,
+                match_index: 0
+            })));
         }
         leader_meta.last_updated = get_time();
         self.switch_membership(meta, Membership::Leader(leader_meta));
     }
+
     fn send_followers_heartbeat(
         &self,
         meta: &mut RwLockWriteGuard<RaftMeta>,
@@ -353,8 +359,8 @@ impl RaftServer {
         let mut log_id = 0;
         let entries = {
             match entry {
-                Some(entry) => Some(Arc::new(vec!(entry))),
-                None => None
+                Some(entry) => Arc::new(Some(vec!(entry))),
+                None => Arc::new(None)
             }
         };
         let (tx, rx) = channel();
@@ -363,37 +369,37 @@ impl RaftServer {
         let commit_index = meta.commit_index;
         let term = meta.term;
         let leader_id = meta.leader_id;
+//        let new_log_id = last_log_id + 1;
+//        let new_log_term = meta.term;
         {
             let workers = meta.workers.lock().unwrap();
             for member in meta.state_machine.read().unwrap().configs.members.values() {
                 let id = member.id;
-                let rpc = member.rpc.clone();
                 let tx = tx.clone();
                 members += 1;
+                let logs = meta.logs.clone();
+                let rpc = member.rpc.clone();
                 let entries = entries.clone();
-                let (next_index, match_index) = {
-                    if let Membership::Leader(ref leader_meta) = meta.membership {(
-                        leader_meta.next_index.get(&id).clone(),
-                        leader_meta.match_index.get(&id).clone()
-                    )} else {
-                        (None, None)
-                    }};
-                let (next_index, match_index) = {(
-                    next_index.unwrap().clone(),
-                    match_index.unwrap().clone(),
-                )};
+                let follower = {
+                    if let Membership::Leader(ref leader_meta) = meta.membership {
+                        leader_meta.followers.get(&id)
+                    } else {
+                        None
+                    }}.unwrap().clone();
                 workers.execute(move||{
                     let mut rpc = rpc.lock().unwrap();
-                    let mut next_index = next_index.lock().unwrap();
-                    let mut match_index = match_index.lock().unwrap();
-//                    let first_append = rpc.append_entries(
-//                        term,
-//                        leader_id,
-//                        last_log_id,
-//                        last_log_term,
-//                        entries,
-//                        commit_index
-//                    );
+                    let mut follower = follower.lock().unwrap();
+                    loop {
+
+//                        let first_append = rpc.append_entries(
+//                            term,
+//                            leader_id,
+//                            last_log_id,
+//                            last_log_term,
+//                            entries,
+//                            commit_index
+//                        );
+                    }
                     tx.send(());
                 });
             }
