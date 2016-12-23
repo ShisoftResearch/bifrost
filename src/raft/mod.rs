@@ -377,19 +377,54 @@ impl RaftServer {
                     let mut follower = follower.lock().unwrap();
                     let logs = logs.read().unwrap();
                     loop {
-                        let entries = logs.range(
-                            Included(&follower.next_index), Included(&last_log_id)
+                        let entries: Option<LogEntries> = {
+                            let list: LogEntries = logs.range(
+                                Included(&follower.next_index), Included(&last_log_id)
+                            ).map(|(_, entry)| entry.clone()).collect(); //TODO: avoid clone entry
+                            if list.is_empty() {None} else {Some(list)}
+                        };
+                        let (follower_last_log_id, follower_last_log_term) = {
+                            if logs.is_empty() {
+                                (0, 0) // 0 represents there is no logs in the leader
+                            } else {
+                                let (first_log_id, _) = logs.iter().next().unwrap();
+                                let follower_last_log_id = last_log_id - 1;
+                                // Assumed log ids are sequence of integers
+                                if *first_log_id > follower_last_log_id {
+                                    panic!("TODO: deal with snapshot or other situations may remove old logs")
+                                }
+                                let follower_last_entry = logs.get(&follower_last_log_id);
+                                match follower_last_entry {
+                                    Some(entry) => {
+                                        (entry.id, entry.term)
+                                    },
+                                    None => {
+                                        panic!("Cannot find old logs for follower, first_id: {}, follower_last: {}");
+                                        (0, 0)
+                                    }
+                                }
+                            }
+                        };
+                        let append_result = rpc.append_entries(
+                            term,
+                            leader_id,
+                            follower_last_log_id,
+                            follower_last_log_term,
+                            entries,
+                            commit_index
                         );
-//                        let first_append = rpc.append_entries(
-//                            term,
-//                            leader_id,
-//                            last_log_id,
-//                            last_log_term,
-//                            entries,
-//                            commit_index
-//                        );
+                        match append_result {
+                            Some(Ok((term, ok))) => {
+                                if ok {
+                                    tx.send(());
+                                    break;
+                                } else {
+                                    follower.next_index -= 1;
+                                }
+                            },
+                            _ => {break;} // retry will happened in next heartbeat
+                        }
                     }
-                    tx.send(());
                 });
             }
         }
@@ -436,6 +471,11 @@ impl Server for RaftServer {
             }
             {
                 check_commit!(meta);
+
+                if prev_log_id == 0 {
+                    return Ok((meta.term, true));
+                } //  if leader logs empty, return immediately
+
                 let mut logs = meta.logs.write().unwrap();
                 //RI, 2
                 let contains_prev_log = logs.contains_key(&prev_log_id);
@@ -444,16 +484,16 @@ impl Server for RaftServer {
                     let entry = logs.get(&prev_log_id).unwrap();
                     log_mismatch = entry.term != prev_log_term;
                 } else {
-                    return Ok((meta.term, false))
+                    return Ok((meta.term, false)) // prev log not existed
                 }
                 if log_mismatch { //RI, 3
-                    let keys: Vec<u64> = logs.keys().cloned().collect();
-                    for id in keys {
-                        if id >= prev_log_id {
-                            logs.remove(&id);
-                        }
+                    let ids_to_del: Vec<u64> = logs.range(
+                        Included(&prev_log_id), Unbounded
+                    ).map(|(id, _)| *id).collect();
+                    for id in ids_to_del {
+                        logs.remove(&id);
                     }
-                    return Ok((meta.term, false))
+                    return Ok((meta.term, false)) // log mismatch
                 }
             }
             if let Some(entries) = entries { // entry not empty
@@ -472,7 +512,7 @@ impl Server for RaftServer {
             }
             Ok((meta.term, true))
         } else {
-            Ok((meta.term, false))
+            Ok((meta.term, false)) // term mismatch
         }
     }
 
