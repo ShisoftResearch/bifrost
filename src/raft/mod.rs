@@ -4,6 +4,7 @@ use rand::distributions::{IndependentSample, Range};
 use std::thread;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Mutex, MutexGuard};
 use std::collections::{BTreeMap, HashMap};
+use std::collections::Bound::{Included, Unbounded};
 use self::state_machine::OpType;
 use self::state_machine::master::{MasterStateMachine, StateMachineCmds, ExecResult};
 use std::cmp::{min, max};
@@ -232,14 +233,11 @@ impl RaftServer {
                     };
                     match action {
                         CheckerAction::SendHeartbeat => {
-                            let (last_log_id, last_log_term) = {
+                            let (last_log_id, _) = {
                                 let logs = meta.logs.read().unwrap();
                                 get_last_log_info!(server, logs)
                             };
-                            server.send_followers_heartbeat(
-                                &mut meta, None,
-                                last_log_id, last_log_term
-                            );
+                            server.send_followers_heartbeat(&mut meta, last_log_id);
                         },
                         CheckerAction::BecomeCandidate => {
                             RaftServer::become_candidate(server.clone(), &mut meta);
@@ -351,26 +349,15 @@ impl RaftServer {
     }
 
     fn send_followers_heartbeat(
-        &self,
-        meta: &mut RwLockWriteGuard<RaftMeta>,
-        entry: Option<LogEntry>,
-        last_log_id: u64, last_log_term: u64
+        &self, meta: &mut RwLockWriteGuard<RaftMeta>, last_log_id: u64
     ) {
         let mut log_id = 0;
-        let entries = {
-            match entry {
-                Some(entry) => Arc::new(Some(vec!(entry))),
-                None => Arc::new(None)
-            }
-        };
         let (tx, rx) = channel();
         let mut members = 0;
         let timeout = meta.timeout;
         let commit_index = meta.commit_index;
         let term = meta.term;
         let leader_id = meta.leader_id;
-//        let new_log_id = last_log_id + 1;
-//        let new_log_term = meta.term;
         {
             let workers = meta.workers.lock().unwrap();
             for member in meta.state_machine.read().unwrap().configs.members.values() {
@@ -379,7 +366,6 @@ impl RaftServer {
                 members += 1;
                 let logs = meta.logs.clone();
                 let rpc = member.rpc.clone();
-                let entries = entries.clone();
                 let follower = {
                     if let Membership::Leader(ref leader_meta) = meta.membership {
                         leader_meta.followers.get(&id)
@@ -389,8 +375,11 @@ impl RaftServer {
                 workers.execute(move||{
                     let mut rpc = rpc.lock().unwrap();
                     let mut follower = follower.lock().unwrap();
+                    let logs = logs.read().unwrap();
                     loop {
-
+                        let entries = logs.range(
+                            Included(&follower.next_index), Included(&last_log_id)
+                        );
 //                        let first_append = rpc.append_entries(
 //                            term,
 //                            leader_id,
@@ -557,11 +546,7 @@ impl Server for RaftServer {
                     new_log_id, new_log_term
                 )
             };
-            self.send_followers_heartbeat(
-                &mut meta,
-                Some(entry.clone()),
-                last_log_id, last_log_term
-            );
+            self.send_followers_heartbeat(&mut meta, new_log_id);
             meta.commit_index = new_log_id;
             Ok(ClientCmdResponse::Success{
                 data: meta.state_machine.write().unwrap().commit_cmd(

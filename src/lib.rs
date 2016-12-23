@@ -1,8 +1,11 @@
-#![feature(plugin)]
 #![plugin(bifrost_plugins)]
-#![feature(proc_macro)]
 #![crate_type = "lib"]
+
+#![feature(plugin)]
 #![feature(integer_atomics)]
+#![feature(collections_bound)]
+#![feature(proc_macro)]
+#![feature(btree_range)]
 
 #[macro_use]
 pub mod rpc;
