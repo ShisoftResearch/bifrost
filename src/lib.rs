@@ -7,6 +7,7 @@
 #![feature(proc_macro)]
 #![feature(btree_range)]
 
+pub mod tcp;
 #[macro_use]
 pub mod rpc;
 #[macro_use]
@@ -19,6 +20,8 @@ extern crate byteorder;
 extern crate slab;
 extern crate tokio_core;
 extern crate tokio_proto;
+extern crate tokio_service;
+extern crate futures;
 
 extern crate bincode;
 extern crate serde;
