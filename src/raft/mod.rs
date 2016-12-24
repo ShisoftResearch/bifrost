@@ -195,6 +195,13 @@ fn is_majority (members: u64, granted: u64) -> bool {
 impl RaftServer {
     pub fn new(opts: Options) -> Arc<RaftServer> {
         let server_address = opts.address.clone();
+        let master_state_machine = {
+            let mut sm = MasterStateMachine::new();
+            sm.configs.new_member(
+                opts.address.clone()
+            );
+            sm
+        };
         let server_obj = RaftServer {
             meta: RwLock::new(
                 RaftMeta {
@@ -204,7 +211,7 @@ impl RaftServer {
                     last_checked: get_time(),
                     membership: Membership::Follower,
                     logs: Arc::new(RwLock::new(BTreeMap::new())), //TODO: read from persistent state
-                    state_machine: RwLock::new(MasterStateMachine::new()),
+                    state_machine: RwLock::new(master_state_machine),
                     commit_index: 0,
                     last_applied: 0,
                     leader_id: 0,
@@ -270,13 +277,15 @@ impl RaftServer {
                 let logs = meta.logs.read().unwrap();
                 get_last_log_info!(self, logs)
             };
-            meta.state_machine.write().unwrap().configs.new_member(self.options.address.clone());
             self.become_leader(&mut meta, last_log_id);
         }
         self
     }
     pub fn join(self, addresses: Vec<String>) -> RaftServer {
-        self.bootstrap()
+        {
+            let mut meta = self.meta.write().unwrap();
+        }
+        self
     }
     fn switch_membership(&self, meta: &mut RwLockWriteGuard<RaftMeta>, membership: Membership) {
         self.reset_last_checked(meta);

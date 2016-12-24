@@ -10,8 +10,6 @@ pub struct RaftMember {
     pub rpc: Arc<Mutex<SyncClient>>,
     pub address: String,
     pub id: u64,
-    last_term: u64,
-    last_log: u64,
     alive: bool,
 }
 
@@ -35,12 +33,10 @@ impl StateMachineCmds for Configures {
     fn new_member_(&mut self, address: String) -> Result<(),()> {
         let addr = address.clone();
         let id = hash_str(addr);
-        self.members.insert(id, RaftMember {
+        self.members.entry(id).or_insert_with(|| RaftMember {
             rpc: Arc::new(Mutex::new(SyncClient::new(&address))),
             address: address,
             id: id,
-            last_log: 0,
-            last_term: 0,
             alive: true,
         });
         Ok(())
