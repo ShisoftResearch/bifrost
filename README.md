@@ -7,6 +7,8 @@ The objective of bifrost is to build a solid foundation for distributed systems 
 It is similar to another of my Clojure project [cluster-connecter](https://github.com/shisoft/cluster-connector), but no longer require any third-party software like Zookeeper or etcd. 
 Bifrost will ship with it's own reliable data store based on raft [consensus algorithm](https://raft.github.io/) state machines. Users are also able to build their own reliable data structures by implementing state machine commands.  
 
+**Bifrost is still in very early stage of development and it is not suggested to be used in any kind of projects until it is stabilized** 
+
 ###Progress Check List
 
 - [ ] RPC
