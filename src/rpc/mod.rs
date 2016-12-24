@@ -3,6 +3,8 @@ pub mod connection;
 #[macro_use]
 pub mod proto;
 
+mod tcp;
+
 use std::net::SocketAddr;
 
 use mio::*;

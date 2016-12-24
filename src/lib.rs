@@ -17,6 +17,8 @@ mod utils;
 extern crate mio;
 extern crate byteorder;
 extern crate slab;
+extern crate tokio_core;
+extern crate tokio_proto;
 
 extern crate bincode;
 extern crate serde;

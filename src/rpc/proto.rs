@@ -133,8 +133,8 @@ use std::time::Duration;
         }
         fn listen(server: Arc<Server>, addr: &String) {
            $crate::rpc::Server::new(addr, Box::new(move |data, conn| {
-                    let (mut head, mut body) = data.split_at_mut(8);
-                    let func_id = LittleEndian::read_u64(&mut head);
+                    let func_id = LittleEndian::read_u64(&data);
+                    let body: Vec<_> = data.drain(8..).collect();
                     match func_id as usize {
                         $(hash_ident!($fn_name) => {
                             let decoded: rpc_args::$fn_name = deserialize!(&body);
