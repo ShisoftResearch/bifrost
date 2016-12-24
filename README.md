@@ -1,6 +1,12 @@
 # bifrost
 WIP Raft and RPC impelementation
 
+### Objective
+
+The objective of bifrost is to build a solid foundation for distributed systems in rust.
+It is similar to another of my Clojure project [cluster-connecter](https://github.com/shisoft/cluster-connector), but no longer require any third-party software like Zookeeper or etcd. 
+Bifrost will ship with it's own reliable data store based on raft [consensus algorithm](https://raft.github.io/) state machines. Users are also able to build their own reliable data structures by implementing state machine commands.  
+
 ###Progress Check List
 
 - [ ] RPC
@@ -12,7 +18,7 @@ WIP Raft and RPC impelementation
 - [ ] Raft (data replication)
     - [x] Leader election
     - [x] Log replication
-    - [x] Master/subs state machine
+    - [x] Master/subs state machine framework
     - [ ] Master state machine snapshot
         - [x] Generate
         - [x] Install
@@ -33,11 +39,12 @@ WIP Raft and RPC impelementation
     - [ ] Client
         - [x] Command 
         - [x] Query 
-            - [x] Concurrent
+            - [x] Concurrency
         - [x] Failover
         - [ ] Membership changes 
     - [ ] Raft Group
     - [ ] Tests
+        - [ ] State machine framework
         - [ ] Leader election
         - [ ] Log replication
         - [ ] Snapshot
