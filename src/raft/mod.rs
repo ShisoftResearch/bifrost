@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::collections::Bound::{Included, Unbounded};
 use self::state_machine::OpType;
 use self::state_machine::master::{MasterStateMachine, StateMachineCmds, ExecResult};
+use self::state_machine::configs::Configures;
 use std::cmp::{min, max};
 use std::cell::RefCell;
 use bifrost_plugins::hash_str;
@@ -193,6 +194,7 @@ fn is_majority (members: u64, granted: u64) -> bool {
 
 impl RaftServer {
     pub fn new(opts: Options) -> Arc<RaftServer> {
+        let server_address = opts.address.clone();
         let server_obj = RaftServer {
             meta: RwLock::new(
                 RaftMeta {
@@ -209,13 +211,13 @@ impl RaftServer {
                     workers: Mutex::new(ThreadPool::new(num_cpus::get())),
                 }
             ),
-            options: opts.clone(),
-            id: hash_str(opts.address.clone()),
+            id: hash_str(server_address.clone()),
+            options: opts,
         };
         let server = Arc::new(server_obj);
         let svr_ref = server.clone();
         thread::spawn(move ||{
-            listen(svr_ref, &opts.address);
+            listen(svr_ref, &server_address);
         });
         let checker_ref = server.clone();
         thread::spawn(move ||{
@@ -260,6 +262,21 @@ impl RaftServer {
             }
         });
         server
+    }
+    pub fn bootstrap(self) -> RaftServer  {
+        {
+            let mut meta = self.meta.write().unwrap();
+            let (last_log_id, _) = {
+                let logs = meta.logs.read().unwrap();
+                get_last_log_info!(self, logs)
+            };
+            meta.state_machine.write().unwrap().configs.new_member(self.options.address.clone());
+            self.become_leader(&mut meta, last_log_id);
+        }
+        self
+    }
+    pub fn join(self, addresses: Vec<String>) -> RaftServer {
+        self.bootstrap()
     }
     fn switch_membership(&self, meta: &mut RwLockWriteGuard<RaftMeta>, membership: Membership) {
         self.reset_last_checked(meta);
@@ -330,23 +347,17 @@ impl RaftServer {
             }
         });
     }
-    fn become_follower(
-        &self,
-        meta: &mut RwLockWriteGuard<RaftMeta>,
-        term: u64, leader_id: u64,
-    ) {
+    fn become_follower(&self, meta: &mut RwLockWriteGuard<RaftMeta>, term: u64, leader_id: u64) {
         meta.term = term;
         meta.leader_id = leader_id;
         self.switch_membership(meta, Membership::Follower);
     }
-    fn become_leader(
-        &self,
-        meta: &mut RwLockWriteGuard<RaftMeta>,
-        last_log_id: u64
-    ) {
+    fn become_leader(&self, meta: &mut RwLockWriteGuard<RaftMeta>, last_log_id: u64) {
         let mut leader_meta = LeaderMeta::new();
         for member in meta.state_machine.read().unwrap().configs.members.values() {
             let id = member.id;
+            // the leader itself will not be consider as a follower when sending heartbeat
+            if id == self.id {continue;}
             leader_meta.followers.insert(id, Arc::new(Mutex::new(FollowerStatus {
                 next_index: last_log_id + 1,
                 match_index: 0
@@ -355,7 +366,6 @@ impl RaftServer {
         leader_meta.last_updated = get_time();
         self.switch_membership(meta, Membership::Leader(leader_meta));
     }
-
     fn send_followers_heartbeat(&self, meta: &mut RwLockWriteGuard<RaftMeta>, log_id: Option<u64>) -> bool {
         let (tx, rx) = channel();
         let mut members = 0;
@@ -365,94 +375,97 @@ impl RaftServer {
         let leader_id = meta.leader_id;
         {
             let workers = meta.workers.lock().unwrap();
-            for member in meta.state_machine.read().unwrap().configs.members.values() {
-                members += 1;
-                let id = member.id;
-                let tx = tx.clone();
-                let logs = meta.logs.clone();
-                let rpc = member.rpc.clone();
-                let follower = {
-                    if let Membership::Leader(ref leader_meta) = meta.membership {
-                        leader_meta.followers.get(&id)
-                    } else {
-                        None
-                    }}.unwrap().clone();
-                workers.execute(move||{
-                    let mut rpc = rpc.lock().unwrap();
-                    let mut follower = follower.lock().unwrap();
-                    let mut is_retry = false;
-                    let logs = logs.read().unwrap();
-                    loop {
-                        let entries: Option<LogEntries> = {
-                            let list: LogEntries = logs.range(
-                                Included(&follower.next_index), Unbounded
-                            ).map(|(_, entry)| entry.clone()).collect(); //TODO: avoid clone entry
-                            if list.is_empty() {None} else {Some(list)}
-                        };
-                        if is_retry && entries.is_none() {
-                            break;
+            if let Membership::Leader(ref leader_meta) = meta.membership {
+                for member in meta.state_machine.read().unwrap().configs.members.values() {
+                    let id = member.id;
+                    let tx = tx.clone();
+                    let logs = meta.logs.clone();
+                    let rpc = member.rpc.clone();
+                    let follower = {
+                        if let Some(follower) = leader_meta.followers.get(&id) {
+                            follower.clone()
+                        } else {
+                            continue;
                         }
-                        let last_entries_id = match &entries {
-                            &Some(ref entries) => {
-                                Some(entries.iter().last().unwrap().id)
-                            },
-                            &None => None
-                        };
-                        let (follower_last_log_id, follower_last_log_term) = {
-                            if logs.is_empty() {
-                                (0, 0) // 0 represents there is no logs in the leader
-                            } else {
-                                // detect cleaned logs
-                                let (first_log_id, _) = logs.iter().next().unwrap();
-                                // assumed log ids are sequence of integers
-                                let follower_last_log_id = follower.next_index - 1;
-                                if *first_log_id > follower_last_log_id {
-                                    panic!("TODO: deal with snapshot or other situations may remove old logs")
-                                }
-                                let follower_last_entry = logs.get(&follower_last_log_id);
-                                match follower_last_entry {
-                                    Some(entry) => {
-                                        (entry.id, entry.term)
-                                    },
-                                    None => {
-                                        panic!("Cannot find old logs for follower, first_id: {}, follower_last: {}");
-                                        (0, 0)
-                                    }
-                                }
+                    };
+                    workers.execute(move||{
+                        let mut rpc = rpc.lock().unwrap();
+                        let mut follower = follower.lock().unwrap();
+                        let mut is_retry = false;
+                        let logs = logs.read().unwrap();
+                        loop {
+                            let entries: Option<LogEntries> = {
+                                let list: LogEntries = logs.range(
+                                    Included(&follower.next_index), Unbounded
+                                ).map(|(_, entry)| entry.clone()).collect(); //TODO: avoid clone entry
+                                if list.is_empty() {None} else {Some(list)}
+                            };
+                            if is_retry && entries.is_none() {
+                                break;
                             }
-                        };
-                        let append_result = rpc.append_entries(
-                            term,
-                            leader_id,
-                            follower_last_log_id,
-                            follower_last_log_term,
-                            entries,
-                            commit_index
-                        );
-                        match append_result {
-                            Some(Ok((follower_term, result))) => {
-                                match result {
-                                    AppendEntriesResult::Ok => {
-                                        if let Some(last_entries_id) = last_entries_id {
-                                            follower.next_index = last_entries_id + 1;
-                                            follower.match_index = last_entries_id;
+                            let last_entries_id = match &entries {
+                                &Some(ref entries) => {
+                                    Some(entries.iter().last().unwrap().id)
+                                },
+                                &None => None
+                            };
+                            let (follower_last_log_id, follower_last_log_term) = {
+                                if logs.is_empty() {
+                                    (0, 0) // 0 represents there is no logs in the leader
+                                } else {
+                                    // detect cleaned logs
+                                    let (first_log_id, _) = logs.iter().next().unwrap();
+                                    // assumed log ids are sequence of integers
+                                    let follower_last_log_id = follower.next_index - 1;
+                                    if *first_log_id > follower_last_log_id {
+                                        panic!("TODO: deal with snapshot or other situations may remove old logs")
+                                    }
+                                    let follower_last_entry = logs.get(&follower_last_log_id);
+                                    match follower_last_entry {
+                                        Some(entry) => {
+                                            (entry.id, entry.term)
+                                        },
+                                        None => {
+                                            panic!("Cannot find old logs for follower, first_id: {}, follower_last: {}");
+                                            (0, 0)
                                         }
-                                    },
-                                    AppendEntriesResult::LogMismatch => {
-                                        follower.next_index -= 1;
-                                    },
-                                    AppendEntriesResult::TermOut => {
-                                        info!("term out, new term from follower is {} but this leader is {}", follower_term, term);
-                                        break;
                                     }
                                 }
-                            },
-                            _ => {break;} // retry will happened in next heartbeat
-                        }
-                        is_retry = true;
-                    } // append entries to followers
-                    tx.send(follower.match_index);
-                });
+                            };
+                            let append_result = rpc.append_entries(
+                                term,
+                                leader_id,
+                                follower_last_log_id,
+                                follower_last_log_term,
+                                entries,
+                                commit_index
+                            );
+                            match append_result {
+                                Some(Ok((follower_term, result))) => {
+                                    match result {
+                                        AppendEntriesResult::Ok => {
+                                            if let Some(last_entries_id) = last_entries_id {
+                                                follower.next_index = last_entries_id + 1;
+                                                follower.match_index = last_entries_id;
+                                            }
+                                        },
+                                        AppendEntriesResult::LogMismatch => {
+                                            follower.next_index -= 1;
+                                        },
+                                        AppendEntriesResult::TermOut => {
+                                            info!("term out, new term from follower is {} but this leader is {}", follower_term, term);
+                                            break;
+                                        }
+                                    }
+                                },
+                                _ => {break;} // retry will happened in next heartbeat
+                            }
+                            is_retry = true;
+                        } // append entries to followers
+                        tx.send(follower.match_index);
+                    });
+                    members += 1;
+                }
             }
         }
         match log_id {
@@ -474,7 +487,6 @@ impl RaftServer {
             None => true
         }
     }
-
     //check term number, return reject = false if server term is stale
     fn check_term(&self, meta: &mut RwLockWriteGuard<RaftMeta>, remote_term: u64, leader_id: u64) -> bool {
         if remote_term > meta.term {
@@ -486,7 +498,6 @@ impl RaftServer {
         }
         return true;
     }
-
     fn reset_last_checked(&self, meta: &mut RwLockWriteGuard<RaftMeta>) {
         meta.last_checked = get_time();
         meta.timeout = gen_timeout();

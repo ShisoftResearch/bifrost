@@ -27,12 +27,12 @@ pub struct ConfigSnapshot {
 }
 
 raft_state_machine! {
-    def cmd new_member(address: String);
-    def cmd del_member(address: String);
+    def cmd new_member_(address: String);
+    def cmd del_member_(address: String);
 }
 
 impl StateMachineCmds for Configures {
-    fn new_member(&mut self, address: String) -> Result<(),()> {
+    fn new_member_(&mut self, address: String) -> Result<(),()> {
         let addr = address.clone();
         let id = hash_str(addr);
         self.members.insert(id, RaftMember {
@@ -45,7 +45,7 @@ impl StateMachineCmds for Configures {
         });
         Ok(())
     }
-    fn del_member(&mut self, address: String) -> Result<(),()> {
+    fn del_member_(&mut self, address: String) -> Result<(),()> {
         let hash = hash_str(address);
         self.members.remove(&hash);
         Ok(())
@@ -89,5 +89,11 @@ impl Configures {
         for addr in to_add {
             self.new_member(addr.clone());
         }
+    }
+    pub fn new_member(&mut self, address: String) -> Result<(),()> {
+        self.new_member_(address)
+    }
+    pub fn del_member(&mut self, address: String) -> Result<(),()> {
+        self.del_member_(address)
     }
 }
