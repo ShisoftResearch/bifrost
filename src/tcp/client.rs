@@ -1,0 +1,53 @@
+use futures::{self, Future};
+use std::io;
+use std::net::SocketAddr;
+use tokio_service::Service;
+use tokio_core::io::Io;
+use tokio_core::reactor::Handle;
+use tokio_core::net::TcpStream;
+use tokio_core::reactor::Core;
+use tokio_proto::TcpClient;
+use tokio_proto::multiplex::{ClientProto, ClientService};
+
+use tcp::proto::BytesClientProto;
+
+struct ClientCore {
+    inner: ClientService<TcpStream, BytesClientProto>,
+}
+
+pub struct Client {
+    client: ClientCore,
+    core: Core,
+}
+
+impl Service for ClientCore {
+
+    type Request = Vec<u8>;
+    type Response = Vec<u8>;
+    type Error = io::Error;
+    // Again for simplicity, we are just going to box a future
+    type Future = Box<Future<Item = Self::Response, Error = io::Error>>;
+
+    fn call(&mut self, req: Self::Request) -> Self::Future {
+        self.inner.call(req).boxed()
+    }
+}
+
+impl Client {
+    pub fn connect (address: String) -> Client {
+        let mut core = Core::new().unwrap();
+        let address = address.parse().unwrap();
+        let future = Box::new(TcpClient::new(BytesClientProto)
+                                  .connect(&address, &core.handle())
+                                  .map(|c| ClientCore { inner: c }));
+        let client = core.run(future).unwrap();
+        Client {
+            client: client,
+            core: core,
+        }
+    }
+    pub fn send(&mut self, msg: Vec<u8>) -> io::Result<Vec<u8>> {
+        let resq = self.client.call(msg);
+        self.core.run(resq)
+    }
+}

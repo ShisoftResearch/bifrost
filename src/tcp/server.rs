@@ -6,7 +6,7 @@ use tokio_proto::TcpServer;
 use futures::{future, Future, BoxFuture};
 
 use tcp::framed::BytesCodec;
-use tcp::proto::BytesProto;
+use tcp::proto::BytesServerProto;
 
 pub type ServerCallback = Fn(Vec<u8>) -> Vec<u8> + Send + Sync;
 
@@ -50,6 +50,6 @@ impl Server {
         let new_server = NewServer {
             callback: Arc::new(callback)
         };
-        TcpServer::new(BytesProto, addr).serve(new_server);
+        TcpServer::new(BytesServerProto, addr).serve(new_server);
     }
 }
