@@ -29,3 +29,5 @@ num_cpus = "1.0"
 tokio-core = "0.1"
 tokio-proto = { git = "https://github.com/tokio-rs/tokio-proto" }
 tokio-service = { git = "https://github.com/tokio-rs/tokio-service" }
+tokio-middleware = { git = "https://github.com/tokio-rs/tokio-middleware" }
+tokio-timer = { git = "https://github.com/tokio-rs/tokio-timer" }
