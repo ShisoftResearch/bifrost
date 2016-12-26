@@ -63,10 +63,16 @@ impl RaftClient {
         let mut cluster_info = None;
         for server_addr in addrs {
             let id = hash_str(server_addr.clone());
-            let mut client = members.clients.entry(id).or_insert_with(|| {
-                Mutex::new(SyncClient::new(server_addr))
-            });
-            if let Some(Ok(info)) = client.lock().unwrap().c_server_cluster_info() {
+            if !members.clients.contains_key(&id) {
+                match SyncClient::new(server_addr) {
+                    Ok(remote_client) => {
+                        members.clients.insert(id, Mutex::new(remote_client));
+                    },
+                    Err(_) => {continue;}
+                }
+            }
+            let mut client = members.clients.get(&id).unwrap();
+            if let Ok(Ok(info)) = client.lock().unwrap().c_server_cluster_info() {
                 cluster_info = Some(info);
                 break;
             }
@@ -86,9 +92,11 @@ impl RaftClient {
                 for id in ids_to_remove {members.clients.remove(id);}
                 for id in remote_ids.difference(&connected_ids) {
                     let addr = members.id_map.get(id).unwrap().clone();
-                    members.clients.entry(id.clone()).or_insert_with(|| {
-                        Mutex::new(SyncClient::new(&addr))
-                    });
+                    if !members.clients.contains_key(id) {
+                        if let Ok(client) = SyncClient::new(&addr) {
+                            members.clients.insert(*id, Mutex::new(client));
+                        }
+                    }
                 }
                 Ok(())
             },
@@ -133,7 +141,7 @@ impl RaftClient {
             client.c_query(self.gen_log_entry(sm_id, fn_id, data))
         };
         match res {
-            Some(Ok(res)) => {
+            Ok(Ok(res)) => {
                 match res {
                     ClientQryResponse::LeftBehind => {
                         if depth >= num_members {
@@ -180,7 +188,7 @@ impl RaftClient {
                 Some(leader_id) => {
                     let mut client = members.clients.get(&leader_id).unwrap().lock().unwrap();
                     match client.c_command(self.gen_log_entry(sm_id, fn_id, data)) {
-                        Some(Ok(ClientCmdResponse::Success{
+                        Ok(Ok(ClientCmdResponse::Success{
                                     data: data, last_log_term: last_log_term,
                                     last_log_id: last_log_id
                                 })) => {
@@ -188,11 +196,11 @@ impl RaftClient {
                             swap_when_greater(&self.last_log_term, last_log_term);
                             return Some(data);
                         },
-                        Some(Ok(ClientCmdResponse::NotLeader(leader_id))) => {
+                        Ok(Ok(ClientCmdResponse::NotLeader(leader_id))) => {
                             self.leader_id.store(leader_id, ORDERING);
                             FailureAction::NotLeader
                         },
-                        Some(Ok(ClientCmdResponse::NotUpdated)) => {
+                        Ok(Ok(ClientCmdResponse::NotUpdated)) => {
                             FailureAction::NotUpdated
                         }
                         _ => FailureAction::SwitchLeader // need switch server for leader

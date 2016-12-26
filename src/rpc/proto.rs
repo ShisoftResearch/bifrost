@@ -10,7 +10,6 @@ macro_rules! deserialize {
     ($e:expr) => {bincode::deserialize($e).unwrap()};
 }
 
-
 // this macro expansion design took credits from tarpc by Google Inc.
 #[macro_export]
 macro_rules! service {
@@ -110,7 +109,8 @@ macro_rules! service {
         use byteorder::{ByteOrder, LittleEndian};
         use bincode::{SizeLimit, serde as bincode};
         use std::sync::Arc;
-use std::time::Duration;
+        use std::time::Duration;
+        use std::io;
 
         mod rpc_args {
             #[allow(unused_variables)]
@@ -125,26 +125,27 @@ use std::time::Duration;
                 }
             )*
         }
-        pub trait Server {
+        pub trait Server: Sync + Send {
            $(
                 $(#[$attr])*
                 fn $fn_name(&self, $($arg:$in_),*) -> std::result::Result<$out, $error>;
            )*
         }
         fn listen(server: Arc<Server>, addr: &String) {
-           $crate::rpc::Server::new(addr, Box::new(move |data, conn| {
-                    let (mut head, mut body) = data.split_at_mut(8);
-                    let func_id = LittleEndian::read_u64(&mut head);
+           $crate::tcp::server::Server::new(addr, Box::new(move |data| {
+                    let func_id = LittleEndian::read_u64(&data);
+                    let body: Vec<u8> = data.iter().skip(8).cloned().collect();
                     match func_id as usize {
                         $(hash_ident!($fn_name) => {
                             let decoded: rpc_args::$fn_name = deserialize!(&body);
                             let f_result = server.$fn_name($(decoded.$arg),*);
-                            let encoded: Vec<u8> = serialize!(&f_result);
-                            conn.send_message(encoded).unwrap();
+                            serialize!(&f_result)
                         }),*
-                        _ => {println!("Undefined function id: {}", func_id)}
+                        _ => {
+                            panic!("func_id not found, maybe version mismatch: {}", func_id)
+                        }
                     }
-            })).start();
+            }));
         }
         mod encoders {
             use bincode::{SizeLimit, serde as bincode};
@@ -168,32 +169,32 @@ use std::time::Duration;
             )*
         }
         pub struct SyncClient {
-            client: $crate::rpc::Client,
+            client: $crate::tcp::client::Client,
             pub address: String
         }
         impl SyncClient {
-            pub fn new(addr: &String) -> SyncClient {
-                SyncClient {
-                    client: $crate::rpc::Client::new(addr),
+            pub fn new(addr: &String) -> io::Result<SyncClient> {
+                Ok(SyncClient {
+                    client: $crate::tcp::client::Client::connect(addr)?,
                     address: addr.clone()
-                }
+                })
             }
-            pub fn with_timeout(addr: &String, timeout: Duration) -> SyncClient {
-                SyncClient {
-                    client: $crate::rpc::Client::with_timeout(addr, timeout),
+            pub fn with_timeout(addr: &String, timeout: Duration) -> io::Result<SyncClient> {
+                Ok(SyncClient {
+                    client: $crate::tcp::client::Client::connect_with_timeout(addr, timeout)?,
                     address: addr.clone()
-                }
+                })
             }
            $(
                 #[allow(non_camel_case_types)]
                 $(#[$attr])*
-                fn $fn_name(&mut self, $($arg:$in_),*) -> Option<std::result::Result<$out, $error>> {
+                fn $fn_name(&mut self, $($arg:$in_),*) -> io::Result<std::result::Result<$out, $error>> {
                     let req_bytes = encoders::$fn_name($($arg),*);
-                    let res_bytes = self.client.send_message(req_bytes);
-                    if let Some(res_bytes) = res_bytes {
-                        Some(deserialize!(&res_bytes))
+                    let res_bytes = self.client.send(req_bytes);
+                    if let Ok(res_bytes) = res_bytes {
+                        Ok(deserialize!(res_bytes.as_slice()))
                     } else {
-                        None
+                        Err(res_bytes.err().unwrap())
                     }
                 }
            )*

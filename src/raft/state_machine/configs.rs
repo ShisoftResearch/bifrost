@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use super::*;
 use bifrost_plugins::hash_str;
 use std::sync::{Arc, Mutex};
+use std::io;
 
 pub const CONFIG_SM_ID: u64 = 1;
 
@@ -30,16 +31,24 @@ raft_state_machine! {
 }
 
 impl StateMachineCmds for Configures {
-    fn new_member_(&mut self, address: String) -> Result<(),()> {
+    fn new_member_(&mut self, address: String) -> Result<(), ()> {
         let addr = address.clone();
         let id = hash_str(addr);
-        self.members.entry(id).or_insert_with(|| RaftMember {
-            rpc: Arc::new(Mutex::new(SyncClient::new(&address))),
-            address: address,
-            id: id,
-            alive: true,
-        });
-        Ok(())
+        if !self.members.contains_key(&id) {
+            match SyncClient::new(&address) {
+                Ok(client) => {
+                    self.members.insert(id, RaftMember {
+                        rpc: Arc::new(Mutex::new(client)),
+                        address: address,
+                        id: id,
+                        alive: true,
+                    });
+                    return Ok(());
+                },
+                Err(_) => {}
+            }
+        }
+        Err(())
     }
     fn del_member_(&mut self, address: String) -> Result<(),()> {
         let hash = hash_str(address);
