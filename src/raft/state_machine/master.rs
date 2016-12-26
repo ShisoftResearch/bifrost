@@ -90,13 +90,13 @@ impl MasterStateMachine {
         }
     }
     pub fn exec_qry(&self, entry: &LogEntry) -> ExecResult {
-    if let Some(sm) = self.subs.get(&entry.sm_id) {
-        match sm.fn_dispatch_qry(entry.fn_id, &entry.data) {
-            Some(d) => Ok(d),
-            None => Err(ExecError::FnNotFound)
+        if let Some(sm) = self.subs.get(&entry.sm_id) {
+            match sm.fn_dispatch_qry(entry.fn_id, &entry.data) {
+                Some(d) => Ok(d),
+                None => Err(ExecError::FnNotFound)
+            }
+        } else {
+            Err(ExecError::SmNotFound)
         }
-    } else {
-        Err(ExecError::SmNotFound)
     }
-}
 }

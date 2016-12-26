@@ -193,15 +193,8 @@ fn is_majority (members: u64, granted: u64) -> bool {
 }
 
 impl RaftServer {
-    pub fn new(opts: Options) -> Arc<RaftServer> {
+    pub fn new(opts: Options) -> Option<Arc<RaftServer>> {
         let server_address = opts.address.clone();
-        let master_state_machine = {
-            let mut sm = MasterStateMachine::new();
-            sm.configs.new_member(
-                opts.address.clone()
-            );
-            sm
-        };
         let server_obj = RaftServer {
             meta: RwLock::new(
                 RaftMeta {
@@ -211,7 +204,7 @@ impl RaftServer {
                     last_checked: get_time(),
                     membership: Membership::Follower,
                     logs: Arc::new(RwLock::new(BTreeMap::new())), //TODO: read from persistent state
-                    state_machine: RwLock::new(master_state_machine),
+                    state_machine: RwLock::new(MasterStateMachine::new()),
                     commit_index: 0,
                     last_applied: 0,
                     leader_id: 0,
@@ -223,9 +216,26 @@ impl RaftServer {
         };
         let server = Arc::new(server_obj);
         let svr_ref = server.clone();
+        let server_address2 = server_address.clone();
         thread::spawn(move ||{
-            listen(svr_ref, &server_address);
+            listen(svr_ref, &server_address) ;
         });
+        info!("Waiting for server to be initialized");
+        {
+            let start_time = get_time();
+            let mut meta = server.meta.write().unwrap();
+            let mut sm = meta.state_machine.write().unwrap();
+            let mut inited = false;
+            while get_time() < start_time + 5000 { //waiting for 5 secs
+                if let Ok(_) = sm.configs.new_member(server_address2.clone()) {
+                    inited = true;
+                    break;
+                }
+            }
+            if !inited {
+                return None;
+            }
+        }
         let checker_ref = server.clone();
         thread::spawn(move ||{
             let server = checker_ref;
@@ -268,7 +278,7 @@ impl RaftServer {
                 thread::sleep(Duration::from_millis(CHECKER_MS));
             }
         });
-        server
+        Some(server)
     }
     pub fn bootstrap(self) -> RaftServer  {
         {
