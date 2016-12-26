@@ -39,8 +39,8 @@ impl Service for ClientCore {
 }
 
 impl Client {
-    pub fn connect_with_timeout (address: &String, timeout: Duration) -> Client {
-        let mut core = Core::new().unwrap();
+    pub fn connect_with_timeout (address: &String, timeout: Duration) -> io::Result<Client> {
+        let mut core = Core::new()?;
         let address = address.parse().unwrap();
         let future = Box::new(TcpClient::new(BytesClientProto)
                                   .connect(&address, &core.handle())
@@ -51,13 +51,13 @@ impl Client {
                                       Timer::default(),
                                       timeout
                                   )));
-        let client = core.run(future).unwrap();
-        Client {
+        let client = core.run(future)?;
+        Ok(Client {
             client: client,
             core: Box::new(core),
-        }
+        })
     }
-    pub fn connect (address: &String) -> Client {
+    pub fn connect (address: &String) -> io::Result<Client> {
         Client::connect_with_timeout(address, Duration::from_millis(500))
     }
     pub fn send(&mut self, msg: Vec<u8>) -> io::Result<Vec<u8>> {

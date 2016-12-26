@@ -173,17 +173,17 @@ macro_rules! service {
             pub address: String
         }
         impl SyncClient {
-            pub fn new(addr: &String) -> SyncClient {
-                SyncClient {
-                    client: $crate::tcp::client::Client::connect(addr),
+            pub fn new(addr: &String) -> io::Result<SyncClient> {
+                Ok(SyncClient {
+                    client: $crate::tcp::client::Client::connect(addr)?,
                     address: addr.clone()
-                }
+                })
             }
-            pub fn with_timeout(addr: &String, timeout: Duration) -> SyncClient {
-                SyncClient {
-                    client: $crate::tcp::client::Client::connect_with_timeout(addr, timeout),
+            pub fn with_timeout(addr: &String, timeout: Duration) -> io::Result<SyncClient> {
+                Ok(SyncClient {
+                    client: $crate::tcp::client::Client::connect_with_timeout(addr, timeout)?,
                     address: addr.clone()
-                }
+                })
             }
            $(
                 #[allow(non_camel_case_types)]

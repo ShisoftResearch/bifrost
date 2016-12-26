@@ -36,7 +36,7 @@ mod simple_service {
             });
         }
         thread::sleep(Duration::from_millis(1000));
-        let mut client = SyncClient::new(&addr);
+        let mut client = SyncClient::new(&addr).unwrap();
         let response = client.hello(String::from("Jack"));
         let greeting_str = response.unwrap().unwrap();
         println!("SERVER RESPONDED: {}", greeting_str);
@@ -88,7 +88,7 @@ mod struct_service {
             });
         }
         thread::sleep(Duration::from_millis(1000));
-        let mut client = SyncClient::new(&addr);
+        let mut client = SyncClient::new(&addr).unwrap();
         let response = client.hello(Greeting {
             name: String::from("Jack"),
             time: 12
@@ -139,7 +139,7 @@ mod multi_server {
         thread::sleep(Duration::from_millis(1000));
         for addr in &addrs {
             id += 1;
-            let mut client = SyncClient::new(&addr);
+            let mut client = SyncClient::new(&addr).unwrap();
             let id_res = client.query_server_id().unwrap();
             assert_eq!(id_res.unwrap(), id);
         }
