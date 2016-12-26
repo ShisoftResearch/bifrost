@@ -45,7 +45,7 @@ impl NewService for NewServer {
 }
 
 impl Server {
-    pub fn new(addr: String, callback: Box<ServerCallback>) {
+    pub fn new(addr: &String, callback: Box<ServerCallback>) {
         let addr = addr.parse().unwrap();
         let new_server = NewServer {
             callback: Arc::new(callback)

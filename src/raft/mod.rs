@@ -317,7 +317,7 @@ impl RaftServer {
             members += 1;
             meta.workers.lock().unwrap().execute(move||{
                 let mut rpc = rpc.lock().unwrap();
-                if let Some(Ok(((remote_term, remote_leader_id), vote_granted))) = rpc.request_vote(term, id, last_log_id, last_log_term) {
+                if let Ok(Ok(((remote_term, remote_leader_id), vote_granted))) = rpc.request_vote(term, id, last_log_id, last_log_term) {
                     if vote_granted {
                         tx.send(RequestVoteResponse::Granted);
                     } else if remote_term > term {
@@ -450,7 +450,7 @@ impl RaftServer {
                                 commit_index
                             );
                             match append_result {
-                                Some(Ok((follower_term, result))) => {
+                                Ok(Ok((follower_term, result))) => {
                                     match result {
                                         AppendEntriesResult::Ok => {
                                             if let Some(last_entries_id) = last_entries_id {
@@ -711,5 +711,4 @@ impl RaftStateMachine {
             name: name
         }
     }
-
 }

@@ -22,7 +22,7 @@ struct ClientCore {
 
 pub struct Client {
     client: Timeout<ClientCore>,
-    core: Core,
+    core: Box<Core>,
 }
 
 impl Service for ClientCore {
@@ -39,7 +39,7 @@ impl Service for ClientCore {
 }
 
 impl Client {
-    pub fn connect (address: String, timeout: Duration) -> Client {
+    pub fn connect_with_timeout (address: &String, timeout: Duration) -> Client {
         let mut core = Core::new().unwrap();
         let address = address.parse().unwrap();
         let future = Box::new(TcpClient::new(BytesClientProto)
@@ -54,11 +54,16 @@ impl Client {
         let client = core.run(future).unwrap();
         Client {
             client: client,
-            core: core,
+            core: Box::new(core),
         }
+    }
+    pub fn connect (address: &String) -> Client {
+        Client::connect_with_timeout(address, Duration::from_millis(500))
     }
     pub fn send(&mut self, msg: Vec<u8>) -> io::Result<Vec<u8>> {
         let resq = self.client.call(msg);
         self.core.run(resq)
     }
 }
+
+unsafe impl Send for Client {}
