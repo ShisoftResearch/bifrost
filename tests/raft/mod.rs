@@ -6,6 +6,7 @@ fn startup(){
         storage: Storage::Default(),
         address: String::from("127.0.0.1:2000"),
     });
+    assert!(server.is_some());
 }
 
 #[test]
@@ -14,4 +15,6 @@ fn server_membership(){
         storage: Storage::Default(),
         address: String::from("127.0.0.1:2001"),
     });
+    assert!(server.is_some());
+
 }

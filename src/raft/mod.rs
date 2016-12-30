@@ -280,7 +280,7 @@ impl RaftServer {
         });
         Some(server)
     }
-    pub fn bootstrap(self) -> RaftServer  {
+    pub fn bootstrap(&self) {
         {
             let mut meta = self.meta.write().unwrap();
             let (last_log_id, _) = {
@@ -289,13 +289,11 @@ impl RaftServer {
             };
             self.become_leader(&mut meta, last_log_id);
         }
-        self
     }
-    pub fn join(self, addresses: Vec<String>) -> RaftServer {
+    pub fn join(&self, addresses: Vec<String>) {
         {
             let mut meta = self.meta.write().unwrap();
         }
-        self
     }
     fn switch_membership(&self, meta: &mut RwLockWriteGuard<RaftMeta>, membership: Membership) {
         self.reset_last_checked(meta);

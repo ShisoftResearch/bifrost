@@ -104,9 +104,8 @@ impl RaftClient {
         }
     }
 
-    pub fn execute<R>(&self, sm: RaftStateMachine, msg: &RaftMsg<R>) -> Result<R, ExecError> {
+    pub fn execute<R>(&self, sm_id: u64, msg: &RaftMsg<R>) -> Result<R, ExecError> {
         let (fn_id, op, req_data) = msg.encode();
-        let sm_id = sm.id;
         let response = match op {
             OpType::QUERY => {
                 self.query(sm_id, fn_id, &req_data, 0)

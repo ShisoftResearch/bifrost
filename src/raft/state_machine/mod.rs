@@ -1,3 +1,5 @@
+use std::any::Any;
+
 pub enum Storage {
     MEMORY,
     DISK(String),
@@ -8,7 +10,7 @@ pub enum OpType {
     QUERY
 }
 
-trait StateMachineCtl: Sync + Send {
+trait StateMachineCtl: Sync + Send + Any {
     fn id(&self) -> u64;
     fn snapshot(&self) -> Option<Vec<u8>>;
     fn recover(&mut self, data: Vec<u8>);
