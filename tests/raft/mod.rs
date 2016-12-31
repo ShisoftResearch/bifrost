@@ -11,12 +11,10 @@ fn startup(){
 }
 
 #[test]
-fn server_membership(){
+fn primary_server_membership(){
     let s1_addr = String::from("127.0.0.1:2001");
     let s2_addr = String::from("127.0.0.1:2002");
     let s3_addr = String::from("127.0.0.1:2003");
-    let s4_addr = String::from("127.0.0.1:2004");
-    let s5_addr = String::from("127.0.0.1:2005");
     let server1 = RaftServer::new(Options {
         storage: Storage::Default(),
         address: s1_addr.clone(),
@@ -52,4 +50,7 @@ fn server_membership(){
         s2_addr.clone(),
     ));
     assert!(join_result.is_ok());
+    assert_eq!(server1.num_members(), 3);
+    // will not check in server2 because it is a log replication problem
+    assert_eq!(server3.num_members(), 3);
 }
