@@ -58,6 +58,14 @@ impl StateMachineCtl for MasterStateMachine {
     fn id(&self) -> u64 {0}
 }
 
+fn parse_output(r: Option<Vec<u8>>) -> ExecResult {
+    if let Some(d) = r {
+        Ok(d)
+    } else {
+        Err(ExecError::FnNotFound)
+    }
+}
+
 impl MasterStateMachine {
     pub fn new() -> MasterStateMachine {
         let mut msm = MasterStateMachine {
@@ -80,23 +88,28 @@ impl MasterStateMachine {
     }
 
     pub fn commit_cmd(&mut self, entry: &LogEntry) -> ExecResult {
-        if let Some(sm) = self.subs.get_mut(&entry.sm_id) {
-            match sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data) {
-                Some(d) => Ok(d),
-                None => Err(ExecError::FnNotFound)
+        match entry.sm_id {
+            CONFIG_SM_ID => {
+                parse_output(self.configs.fn_dispatch_cmd(entry.fn_id, &entry.data))
             }
-        } else {
-            Err(ExecError::SmNotFound)
+            _ => if let Some(sm) = self.subs.get_mut(&entry.sm_id) {
+                parse_output(sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data))
+            } else {
+                Err(ExecError::SmNotFound)
+            }
         }
     }
     pub fn exec_qry(&self, entry: &LogEntry) -> ExecResult {
-        if let Some(sm) = self.subs.get(&entry.sm_id) {
-            match sm.fn_dispatch_qry(entry.fn_id, &entry.data) {
-                Some(d) => Ok(d),
-                None => Err(ExecError::FnNotFound)
+        match entry.sm_id {
+            CONFIG_SM_ID => {
+                parse_output(self.configs.fn_dispatch_qry(entry.fn_id, &entry.data))
             }
-        } else {
-            Err(ExecError::SmNotFound)
+            _ => if let Some(sm) = self.subs.get(&entry.sm_id) {
+                parse_output(sm.fn_dispatch_qry(entry.fn_id, &entry.data))
+            } else {
+                Err(ExecError::SmNotFound)
+            }
         }
     }
 }
+
