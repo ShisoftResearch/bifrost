@@ -581,6 +581,7 @@ impl Server for RaftServer {
                 }
                 if leader_commit > meta.commit_index { //RI, 5
                     meta.commit_index = min(leader_commit, last_new_entry);
+                    check_commit!(meta);
                 }
             }
             Ok((meta.term, AppendEntriesResult::Ok))
