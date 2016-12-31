@@ -28,6 +28,7 @@ pub struct ConfigSnapshot {
 raft_state_machine! {
     def cmd new_member_(address: String);
     def cmd del_member_(address: String);
+    def qry member_address() -> Vec<String>;
 }
 
 impl StateMachineCmds for Configures {
@@ -54,6 +55,13 @@ impl StateMachineCmds for Configures {
         let hash = hash_str(address);
         self.members.remove(&hash);
         Ok(())
+    }
+    fn member_address(&self) -> Result<Vec<String>,()> {
+        let mut members = Vec::with_capacity(self.members.len());
+        for (_, member) in self.members.iter() {
+            members.push(member.address.clone());
+        }
+        Ok(members)
     }
 }
 

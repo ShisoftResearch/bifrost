@@ -15,9 +15,13 @@ use utils::time::get_time;
 use threadpool::ThreadPool;
 use num_cpus;
 use std::sync::mpsc::channel;
+use self::client::RaftClient;
+use self::state_machine::configs::{CONFIG_SM_ID, RaftMember};
+use self::state_machine::configs::commands::{new_member_, member_address};
+use self::state_machine::master::ExecError;
 
 #[macro_use]
-mod state_machine;
+pub mod state_machine;
 pub mod client;
 
 pub trait RaftMsg<R> {
@@ -188,6 +192,12 @@ macro_rules! check_commit {
     }};
 }
 
+macro_rules! members_from_meta {
+    ($meta: expr) => {
+        $meta.state_machine.read().unwrap().configs.members
+    };
+}
+
 fn is_majority (members: u64, granted: u64) -> bool {
     granted >= min(members / 2 + 1, members)
 }
@@ -290,10 +300,33 @@ impl RaftServer {
             self.become_leader(&mut meta, last_log_id);
         }
     }
-    pub fn join(&self, addresses: Vec<String>) {
-        {
-            let mut meta = self.meta.write().unwrap();
+    pub fn join(&self, addresses: Vec<String>)
+        -> Result<Result<(), ()>, ExecError> {
+        let mut meta = self.meta.write().unwrap();
+        let client = RaftClient::new(addresses);
+        if let Ok(client) = client {
+            let result = client.execute(
+                CONFIG_SM_ID,
+                &new_member_{address: self.options.address.clone()}
+            );
+            let members = client.execute(
+                CONFIG_SM_ID,
+                &member_address{}
+            );
+            if let Ok(Ok(members)) = members {
+                for member in members {
+                    meta.state_machine.write().unwrap().configs.new_member(member);
+                }
+            }
+            result
+        } else {
+            Err(ExecError::CannotConstructClient)
         }
+    }
+    pub fn num_members(&self) -> usize {
+        let meta = self.meta.read().unwrap();
+        let ref members = members_from_meta!(meta);
+        members.len()
     }
     fn switch_membership(&self, meta: &mut RwLockWriteGuard<RaftMeta>, membership: Membership) {
         self.reset_last_checked(meta);
@@ -319,7 +352,7 @@ impl RaftServer {
         let (tx, rx) = channel();
         let mut members = 0;
         let timeout = meta.timeout;
-        for member in meta.state_machine.read().unwrap().configs.members.values() {
+        for member in members_from_meta!(meta).values() {
             let rpc = member.rpc.clone();
             let tx = tx.clone();
             members += 1;
@@ -371,7 +404,7 @@ impl RaftServer {
     }
     fn become_leader(&self, meta: &mut RwLockWriteGuard<RaftMeta>, last_log_id: u64) {
         let mut leader_meta = LeaderMeta::new();
-        for member in meta.state_machine.read().unwrap().configs.members.values() {
+        for member in members_from_meta!(meta).values() {
             let id = member.id;
             // the leader itself will not be consider as a follower when sending heartbeat
             if id == self.id {continue;}
@@ -381,6 +414,7 @@ impl RaftServer {
             })));
         }
         leader_meta.last_updated = get_time();
+        meta.leader_id = self.id;
         self.switch_membership(meta, Membership::Leader(leader_meta));
     }
     fn send_followers_heartbeat(&self, meta: &mut RwLockWriteGuard<RaftMeta>, log_id: Option<u64>) -> bool {
@@ -393,7 +427,7 @@ impl RaftServer {
         {
             let workers = meta.workers.lock().unwrap();
             if let Membership::Leader(ref leader_meta) = meta.membership {
-                for member in meta.state_machine.read().unwrap().configs.members.values() {
+                for member in members_from_meta!(meta).values() {
                     let id = member.id;
                     let tx = tx.clone();
                     let logs = meta.logs.clone();

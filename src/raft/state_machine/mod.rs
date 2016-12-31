@@ -10,7 +10,7 @@ pub enum OpType {
     QUERY
 }
 
-trait StateMachineCtl: Sync + Send + Any {
+pub trait StateMachineCtl: Sync + Send + Any {
     fn id(&self) -> u64;
     fn snapshot(&self) -> Option<Vec<u8>>;
     fn recover(&mut self, data: Vec<u8>);
@@ -19,7 +19,7 @@ trait StateMachineCtl: Sync + Send + Any {
     fn op_type(&mut self, fn_id: u64) -> Option<OpType>;
 }
 
-trait OpTypes {
+pub trait OpTypes {
     fn op_type(&self, fn_id: u64) -> Option<OpType>;
 }
 

@@ -148,7 +148,7 @@ macro_rules! raft_state_machine {
         use byteorder::{ByteOrder, LittleEndian};
         use bincode::{SizeLimit, serde as bincode};
 
-        mod commands {
+        pub mod commands {
             use super::*;
             $(
                 #[derive(Serialize, Deserialize, Debug)]

@@ -14,6 +14,11 @@ use rand;
 
 const ORDERING: Ordering = Ordering::Relaxed;
 
+pub enum ClientError {
+    LeaderIdValid,
+    ServerUnreachable,
+}
+
 struct QryMeta {
     pos: AtomicU64
 }
@@ -32,7 +37,7 @@ pub struct RaftClient {
 }
 
 impl RaftClient {
-    pub fn new(servers: Vec<String>) -> Option<RaftClient> {
+    pub fn new(servers: Vec<String>) -> Result<RaftClient, ClientError> {
         let mut client = RaftClient {
             qry_meta: QryMeta {
                 pos: AtomicU64::new(rand::random::<u64>())
@@ -47,18 +52,18 @@ impl RaftClient {
         };
         let init = {
             let mut members = client.members.write().unwrap();
-            RaftClient::update_info(
+            client.update_info(
                 &mut members,
                 &HashSet::from_iter(servers)
             )
         };
         match init {
-            Ok(_) => Some(client),
-            Err(_) => None
+            Ok(_) => Ok(client),
+            Err(e) => Err(e)
         }
     }
 
-    fn update_info(members: &mut RwLockWriteGuard<Members>, addrs: &HashSet<String>) -> Result<(), ()> {
+   fn update_info(&self, members: &mut RwLockWriteGuard<Members>, addrs: &HashSet<String>) -> Result<(), ClientError> {
         let info: ClientClusterInfo;
         let mut cluster_info = None;
         for server_addr in addrs {
@@ -73,6 +78,10 @@ impl RaftClient {
             }
             let mut client = members.clients.get(&id).unwrap();
             if let Ok(Ok(info)) = client.lock().unwrap().c_server_cluster_info() {
+                if info.leader_id == 0 {
+                    panic!("server leader id invalid: {}", info.leader_id); //TODO: Remove this line after test
+                    return Err(ClientError::LeaderIdValid)
+                }
                 cluster_info = Some(info);
                 break;
             }
@@ -98,9 +107,10 @@ impl RaftClient {
                         }
                     }
                 }
+                self.leader_id.store(info.leader_id, ORDERING);
                 Ok(())
             },
-            None => Err(()),
+            None => Err(ClientError::ServerUnreachable),
         }
     }
 
@@ -216,7 +226,7 @@ impl RaftClient {
                     members_addrs.insert(address.clone());
 
                 }
-                RaftClient::update_info(&mut members, &members_addrs);
+                self.update_info(&mut members, &members_addrs);
             },
             FailureAction::SwitchLeader => {
                 let members = self.members.read().unwrap();
