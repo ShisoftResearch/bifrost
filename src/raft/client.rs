@@ -135,6 +135,8 @@ impl RaftClient {
         }
     }
 
+    pub fn current_leader_id(&self) -> u64 {self.leader_id.load(ORDERING)}
+
     fn query(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>, depth: usize) -> Option<ExecResult> {
         let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
         let mut num_members = 0;

@@ -14,6 +14,9 @@ fn startup(){
 fn server_membership(){
     let s1_addr = String::from("127.0.0.1:2001");
     let s2_addr = String::from("127.0.0.1:2002");
+    let s3_addr = String::from("127.0.0.1:2003");
+    let s4_addr = String::from("127.0.0.1:2004");
+    let s5_addr = String::from("127.0.0.1:2005");
     let server1 = RaftServer::new(Options {
         storage: Storage::Default(),
         address: s1_addr.clone(),
@@ -38,4 +41,15 @@ fn server_membership(){
     assert!(join_result.is_ok());
     assert_eq!(server1.num_members(), 2);
     assert_eq!(server2.num_members(), 2);
+    let server3 = RaftServer::new(Options {
+        storage: Storage::Default(),
+        address: s3_addr.clone(),
+    });
+    assert!(server3.is_some());
+    let server3 = server3.unwrap();
+    let join_result = server3.join(vec!(
+        s1_addr.clone(),
+        s2_addr.clone(),
+    ));
+    assert!(join_result.is_ok());
 }

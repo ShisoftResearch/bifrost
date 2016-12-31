@@ -318,6 +318,7 @@ impl RaftServer {
                     meta.state_machine.write().unwrap().configs.new_member(member);
                 }
             }
+            meta.leader_id = client.current_leader_id();
             result
         } else {
             Err(ExecError::CannotConstructClient)
