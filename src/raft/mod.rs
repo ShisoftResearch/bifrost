@@ -641,8 +641,6 @@ impl Server for RaftServer {
         } else {
             let
             (
-                entry,
-                last_log_id, last_log_term,
                 new_log_id, new_log_term
 
             ) = {
@@ -654,8 +652,6 @@ impl Server for RaftServer {
                 entry.id = new_log_id;
                 logs.insert(entry.id, entry.clone());
                 (
-                    entry,
-                    last_log_id, last_log_term,
                     new_log_id, new_log_term
                 )
             };
