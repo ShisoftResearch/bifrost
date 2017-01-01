@@ -5,16 +5,17 @@ use std::thread;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Mutex, MutexGuard};
 use std::collections::{BTreeMap, HashMap};
 use std::collections::Bound::{Included, Unbounded};
+use std::cell::RefCell;
+use std::cmp::{min, max};
+use std::borrow::BorrowMut;
+use std::sync::mpsc::channel;
 use self::state_machine::OpType;
 use self::state_machine::master::{MasterStateMachine, StateMachineCmds, ExecResult};
 use self::state_machine::configs::Configures;
-use std::cmp::{min, max};
-use std::cell::RefCell;
 use bifrost_plugins::hash_str;
 use utils::time::get_time;
 use threadpool::ThreadPool;
 use num_cpus;
-use std::sync::mpsc::channel;
 use self::client::RaftClient;
 use self::state_machine::configs::{CONFIG_SM_ID, RaftMember};
 use self::state_machine::configs::commands::{new_member_, member_address};
@@ -116,7 +117,7 @@ impl LeaderMeta {
 }
 
 pub enum Membership {
-    Leader(LeaderMeta),
+    Leader(RwLock<LeaderMeta>),
     Follower,
     Candidate,
     Offline,
@@ -254,6 +255,7 @@ impl RaftServer {
                     let mut meta = server.meta.write().unwrap(); //WARNING: Reentering not supported
                     let action = match meta.membership {
                         Membership::Leader(ref leader_meta) => {
+                            let leader_meta = leader_meta.read().unwrap();
                             if get_time() > (leader_meta.last_updated + CHECKER_MS) {
                                 CheckerAction::SendHeartbeat
                             } else {
@@ -341,6 +343,24 @@ impl RaftServer {
             None => (0, 0)
         }
     }
+    fn reload_leader_meta(
+        &self,
+        member_map: &HashMap<u64, RaftMember>,
+        leader_meta: &mut RwLockWriteGuard<LeaderMeta>,
+        last_log_id: u64
+    ) {
+        for member in member_map.values() {
+            let id = member.id;
+            // the leader itself will not be consider as a follower when sending heartbeat
+            if id == self.id {continue;}
+            leader_meta.followers.entry(id).or_insert_with(|| {
+                Arc::new(Mutex::new(FollowerStatus {
+                    next_index: last_log_id + 1,
+                    match_index: 0
+                }))
+            });
+        }
+    }
     fn become_candidate(server: Arc<RaftServer>, meta: &mut RwLockWriteGuard<RaftMeta>) {
         server.reset_last_checked(meta);
         meta.term += 1;
@@ -403,21 +423,18 @@ impl RaftServer {
         meta.leader_id = leader_id;
         self.switch_membership(meta, Membership::Follower);
     }
+
     fn become_leader(&self, meta: &mut RwLockWriteGuard<RaftMeta>, last_log_id: u64) {
-        let mut leader_meta = LeaderMeta::new();
-        for member in members_from_meta!(meta).values() {
-            let id = member.id;
-            // the leader itself will not be consider as a follower when sending heartbeat
-            if id == self.id {continue;}
-            leader_meta.followers.insert(id, Arc::new(Mutex::new(FollowerStatus {
-                next_index: last_log_id + 1,
-                match_index: 0
-            })));
+        let leader_meta = RwLock::new(LeaderMeta::new());
+        {
+            let mut guard = leader_meta.write().unwrap();
+            self.reload_leader_meta(&members_from_meta!(meta), &mut guard, last_log_id);
+            guard.last_updated = get_time();
         }
-        leader_meta.last_updated = get_time();
         meta.leader_id = self.id;
         self.switch_membership(meta, Membership::Leader(leader_meta));
     }
+
     fn send_followers_heartbeat(&self, meta: &mut RwLockWriteGuard<RaftMeta>, log_id: Option<u64>) -> bool {
         let (tx, rx) = channel();
         let mut members = 0;
@@ -428,6 +445,7 @@ impl RaftServer {
         {
             let workers = meta.workers.lock().unwrap();
             if let Membership::Leader(ref leader_meta) = meta.membership {
+                let leader_meta = leader_meta.read().unwrap();
                 for member in members_from_meta!(meta).values() {
                     let id = member.id;
                     let tx = tx.clone();
@@ -437,6 +455,7 @@ impl RaftServer {
                         if let Some(follower) = leader_meta.followers.get(&id) {
                             follower.clone()
                         } else {
+                            //panic!("not found, {}", leader_meta.followers.len()); //TODO: remove after debug
                             continue;
                         }
                     };
@@ -469,17 +488,21 @@ impl RaftServer {
                                     let (first_log_id, _) = logs.iter().next().unwrap();
                                     // assumed log ids are sequence of integers
                                     let follower_last_log_id = follower.next_index - 1;
-                                    if *first_log_id > follower_last_log_id {
-                                        panic!("TODO: deal with snapshot or other situations may remove old logs")
-                                    }
-                                    let follower_last_entry = logs.get(&follower_last_log_id);
-                                    match follower_last_entry {
-                                        Some(entry) => {
-                                            (entry.id, entry.term)
-                                        },
-                                        None => {
-                                            panic!("Cannot find old logs for follower, first_id: {}, follower_last: {}");
-                                            (0, 0)
+                                    if follower_last_log_id > 0 {
+                                        (0, 0)
+                                    } else {
+                                        if *first_log_id > follower_last_log_id {
+                                            panic!("TODO: deal with snapshot or other situations may remove old logs {}, {}", *first_log_id, follower_last_log_id)
+                                        }
+                                        let follower_last_entry = logs.get(&follower_last_log_id);
+                                        match follower_last_entry {
+                                            Some(entry) => {
+                                                (entry.id, entry.term)
+                                            },
+                                            None => {
+                                                panic!("Cannot find old logs for follower, first_id: {}, follower_last: {}");
+                                                (0, 0)
+                                            }
                                         }
                                     }
                                 }
@@ -522,7 +545,8 @@ impl RaftServer {
         }
         match log_id {
             Some(log_id) => {
-                if let Membership::Leader(ref mut leader_meta) = meta.membership{
+                if let Membership::Leader(ref leader_meta) = meta.membership{
+                    let mut leader_meta = leader_meta.write().unwrap();
                     let mut updated_followers = 0;
                     for _ in 0..members {
                         match rx.recv_timeout(Duration::from_millis(CHECKER_MS * 10)) {
@@ -564,6 +588,8 @@ impl Server for RaftServer {
         entries: Option<LogEntries>,
         leader_commit: u64
     ) -> Result<(u64, AppendEntriesResult), ()>  {
+        //panic!("Append Entries...{}, {}, {}, {}, {}", term, leader_id, prev_log_id, prev_log_term, entries.is_some()); //TODO: remove after debug
+
         let mut meta = self.meta.write().unwrap();
         let term_ok = self.check_term(&mut meta, term, leader_id); // RI, 1
         self.reset_last_checked(&mut meta);
@@ -692,7 +718,7 @@ impl Server for RaftServer {
                 )
             };
             let committed = self.send_followers_heartbeat(&mut meta, Some(new_log_id));
-            if committed {
+            let commit_result = if committed {
                 meta.commit_index = new_log_id;
                 Ok(ClientCmdResponse::Success{
                     data: meta.state_machine.write().unwrap().commit_cmd(
@@ -703,7 +729,20 @@ impl Server for RaftServer {
                 })
             } else {
                 Ok(ClientCmdResponse::NotUpdated)
+            };
+            match entry.sm_id {
+                CONFIG_SM_ID => {
+                    if let Membership::Leader(ref leader_meta) = meta.membership {
+                        let mut leader_meta = leader_meta.write().unwrap();
+                        self.reload_leader_meta(
+                            &members_from_meta!(meta),
+                            &mut leader_meta, new_log_id
+                        );
+                    }
+                }
+                _ => {}
             }
+            commit_result
         }
     }
     fn c_query(&self, entry: LogEntry) -> Result<ClientQryResponse, ()> {
