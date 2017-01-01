@@ -76,31 +76,18 @@ fn log_replication(){
         address: s3_addr.clone(),
     }).unwrap();
     server1.bootstrap();
+
     let join_result = server2.join(vec!(
         s1_addr.clone(),
         s2_addr.clone(),
     ));
     join_result.unwrap();
+
     let join_result = server3.join(vec!(
         s1_addr.clone(),
         s2_addr.clone(),
     ));
     join_result.unwrap();
-    assert_eq!(server1.num_members(), 3);
-    assert_eq!(server3.num_members(), 3);
-    wait(); // wait for membership replication to take effect
-    if server1.num_logs() != server2.num_logs() {
-        panic!(
-            "logs length mismatch {} / {} , last log id: {}, {} - {}",
-            server1.num_logs(),
-            server2.num_logs(),
-            server1.last_log_id().unwrap(),
-            server2.last_log_id().unwrap(),
-            server3.num_logs()
-        );
-    }
-    assert_eq!(server2.num_logs(), server3.num_logs());
-    assert_eq!(server2.num_logs(), 2);
 
     let server4 = RaftServer::new(Options {
         storage: Storage::Default(),
@@ -126,14 +113,19 @@ fn log_replication(){
     join_result.unwrap();
 
     wait(); // wait for membership replication to take effect
-    wait();
-
-    assert_eq!(server1.num_members(), 5);
-    assert_eq!(server5.num_members(), 5);
 
     assert_eq!(server1.num_logs(), server2.num_logs());
     assert_eq!(server2.num_logs(), server3.num_logs());
     assert_eq!(server3.num_logs(), server4.num_logs());
     assert_eq!(server4.num_logs(), server5.num_logs());
-    assert_eq!(server5.num_logs(), 4);
+    assert_eq!(server5.num_logs(), 4); // check all logs replicated
+
+    let mut applied_servers = 0;
+    applied_servers += if server1.num_members() == 5 {1} else {0};
+    applied_servers += if server2.num_members() == 5 {1} else {0};
+    applied_servers += if server3.num_members() == 5 {1} else {0};
+    applied_servers += if server4.num_members() == 5 {1} else {0};
+    applied_servers += if server5.num_members() == 5 {1} else {0};
+
+    assert!(applied_servers >= 3)
 }
