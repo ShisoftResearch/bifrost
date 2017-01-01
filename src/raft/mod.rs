@@ -331,6 +331,11 @@ impl RaftServer {
         let ref members = members_from_meta!(meta);
         members.len()
     }
+    pub fn num_logs(&self) -> usize {
+        let meta = self.meta.read().unwrap();
+        let logs = meta.logs.read().unwrap();
+        logs.len()
+    }
     fn switch_membership(&self, meta: &mut RwLockWriteGuard<RaftMeta>, membership: Membership) {
         self.reset_last_checked(meta);
         meta.membership = membership;

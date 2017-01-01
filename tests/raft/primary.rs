@@ -78,15 +78,17 @@ fn log_replication(){
         s1_addr.clone(),
         s2_addr.clone(),
     ));
-    assert!(join_result.is_ok());
+    join_result.unwrap();
     let join_result = server3.join(vec!(
         s1_addr.clone(),
         s2_addr.clone(),
     ));
-    assert!(join_result.is_ok());
+    join_result.unwrap();
     assert_eq!(server1.num_members(), 3);
     assert_eq!(server3.num_members(), 3);
-    wait(); // wait for membership replication to take effect
+    wait(); // wait for membership replication to take effect for server 2
+    assert_eq!(server1.num_logs(), server2.num_logs());
+    assert_eq!(server2.num_logs(), server3.num_logs());
     assert_eq!(server2.num_members(), 3);
 }
 
