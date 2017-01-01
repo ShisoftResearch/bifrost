@@ -119,13 +119,4 @@ fn log_replication(){
     assert_eq!(server3.num_logs(), server4.num_logs());
     assert_eq!(server4.num_logs(), server5.num_logs());
     assert_eq!(server5.num_logs(), 4); // check all logs replicated
-
-    let mut applied_servers = 0;
-    applied_servers += if server1.num_members() == 5 {1} else {0};
-    applied_servers += if server2.num_members() == 5 {1} else {0};
-    applied_servers += if server3.num_members() == 5 {1} else {0};
-    applied_servers += if server4.num_members() == 5 {1} else {0};
-    applied_servers += if server5.num_members() == 5 {1} else {0};
-
-    assert!(applied_servers >= 3)
 }

@@ -567,15 +567,11 @@ impl RaftServer {
                     let mut leader_meta = leader_meta.write().unwrap();
                     let mut updated_followers = 0;
                     for _ in 0..members {
-                        match rx.recv_timeout(Duration::from_millis(CHECKER_MS * 50)) {
-                            Ok(last_matched_id) => {
-                                if last_matched_id >= log_id {
-                                    updated_followers += 1;
-                                    if is_majority(members, updated_followers) {break;}
-                                }
-                            },
-                            _ => {}
-                        };
+                        let last_matched_id = rx.recv().unwrap();
+                        if last_matched_id >= log_id {
+                            updated_followers += 1;
+                            if is_majority(members, updated_followers) {break;}
+                        }
                     }
                     leader_meta.last_updated = get_time();
                     is_majority(members, updated_followers)
