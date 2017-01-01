@@ -125,19 +125,19 @@ impl RaftClient {
             },
         };
         match response {
-            Some(data) => {
+            Ok(data) => {
                 match data {
                     Ok(data) => Ok(msg.decode_return(&data)),
                     Err(e) => Err(e)
                 }
             },
-            None => Err(ExecError::ServerUnreachable)
+            Err(e) => Err(e)
         }
     }
 
     pub fn current_leader_id(&self) -> u64 {self.leader_id.load(ORDERING)}
 
-    fn query(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>, depth: usize) -> Option<ExecResult> {
+    fn query(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>, depth: usize) -> Result<ExecResult, ExecError> {
         let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
         let mut num_members = 0;
         let res = {
@@ -156,7 +156,7 @@ impl RaftClient {
                 match res {
                     ClientQryResponse::LeftBehind => {
                         if depth >= num_members {
-                            None
+                            Err(ExecError::TooManyRetry)
                         } else {
                             self.query(sm_id, fn_id, data, depth + 1)
                         }
@@ -168,15 +168,15 @@ impl RaftClient {
                     } => {
                         swap_when_greater(&self.last_log_id, last_log_id);
                         swap_when_greater(&self.last_log_term, last_log_term);
-                        Some(data)
+                        Ok(data)
                     },
                 }
             },
-            _ => None
+            _ => Err(ExecError::Unknown)
         }
     }
 
-    fn command(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>, depth: usize) -> Option<ExecResult> {
+    fn command(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>, depth: usize) -> Result<ExecResult, ExecError> {
         enum FailureAction {
             SwitchLeader,
             UpdateInfo,
@@ -186,7 +186,7 @@ impl RaftClient {
         let failure = {
             let members = self.members.read().unwrap();
             let num_members = members.clients.len();
-            if depth >= num_members {return None};
+            if depth >= num_members {return Err(ExecError::TooManyRetry)};
             let mut leader = {
                 let leader_id = self.leader_id.load(ORDERING);
                 if members.clients.contains_key(&leader_id) {
@@ -205,7 +205,7 @@ impl RaftClient {
                                 })) => {
                             swap_when_greater(&self.last_log_id, last_log_id);
                             swap_when_greater(&self.last_log_term, last_log_term);
-                            return Some(data);
+                            return Ok(data);
                         },
                         Ok(Ok(ClientCmdResponse::NotLeader(leader_id))) => {
                             self.leader_id.store(leader_id, ORDERING);
@@ -241,7 +241,7 @@ impl RaftClient {
                 self.leader_id.compare_and_swap(leader_id, *index, ORDERING);
             },
             FailureAction::NotUpdated => {
-                return None
+                return Err(ExecError::NotUpdated)
             },
             _ => {}
         }

@@ -7,8 +7,11 @@ use self::configs::{Configures, RaftMember, CONFIG_SM_ID};
 pub enum ExecError {
     SmNotFound,
     FnNotFound,
-    ServerUnreachable,
+    ServersUnreachable,
     CannotConstructClient,
+    NotUpdated,
+    Unknown,
+    TooManyRetry,
 }
 
 pub enum RegisterResult {

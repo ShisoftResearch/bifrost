@@ -32,7 +32,7 @@ fn server_membership(){
     let server2 = server2.unwrap();
     let join_result = server2.join(vec!(s1_addr.clone()));
     match join_result {
-        Err(ExecError::ServerUnreachable) => panic!("Server unreachable"),
+        Err(ExecError::ServersUnreachable) => panic!("Server unreachable"),
         Err(ExecError::CannotConstructClient) => panic!("Cannot Construct Client"),
         Err(e) => panic!(e),
         Ok(_) => {}
