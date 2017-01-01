@@ -569,8 +569,10 @@ impl RaftServer {
                     for _ in 0..members {
                         match rx.recv_timeout(Duration::from_millis(CHECKER_MS * 50)) {
                             Ok(last_matched_id) => {
-                                updated_followers += if last_matched_id >= log_id {1} else {0};
-                                if is_majority(members, updated_followers) {break;}
+                                if last_matched_id >= log_id {
+                                    updated_followers += 1;
+                                    if is_majority(members, updated_followers) {break;}
+                                }
                             },
                             _ => {}
                         };
