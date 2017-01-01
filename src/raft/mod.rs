@@ -593,8 +593,6 @@ impl Server for RaftServer {
         entries: Option<LogEntries>,
         leader_commit: u64
     ) -> Result<(u64, AppendEntriesResult), ()>  {
-        //panic!("Append Entries...{}, {}, {}, {}, {}", term, leader_id, prev_log_id, prev_log_term, entries.is_some()); //TODO: remove after debug
-
         let mut meta = self.meta.write().unwrap();
         let term_ok = self.check_term(&mut meta, term, leader_id); // RI, 1
         self.reset_last_checked(&mut meta);
@@ -602,17 +600,13 @@ impl Server for RaftServer {
             if let Membership::Candidate = meta.membership {
                 self.become_follower(&mut meta, term, leader_id);
             }
-            {
+            if prev_log_id > 0 {
                 check_commit!(meta);
-
-                if prev_log_id == 0 {
-                    return Ok((meta.term, AppendEntriesResult::Ok));
-                } //  if leader logs empty, return immediately
-
                 let mut logs = meta.logs.write().unwrap();
                 //RI, 2
                 let contains_prev_log = logs.contains_key(&prev_log_id);
                 let mut log_mismatch = false;
+
                 if contains_prev_log {
                     let entry = logs.get(&prev_log_id).unwrap();
                     log_mismatch = entry.term != prev_log_term;
@@ -622,7 +616,8 @@ impl Server for RaftServer {
                         AppendEntriesResult::LogMismatch
                     )) // prev log not existed
                 }
-                if log_mismatch { //RI, 3
+                if log_mismatch {
+                    //RI, 3
                     let ids_to_del: Vec<u64> = logs.range(
                         Included(&prev_log_id), Unbounded
                     ).map(|(id, _)| *id).collect();

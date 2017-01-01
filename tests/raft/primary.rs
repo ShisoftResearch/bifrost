@@ -86,9 +86,8 @@ fn log_replication(){
     join_result.unwrap();
     assert_eq!(server1.num_members(), 3);
     assert_eq!(server3.num_members(), 3);
-    wait(); // wait for membership replication to take effect for server 2
+    wait(); // wait for membership replication to take effect
     assert_eq!(server1.num_logs(), server2.num_logs());
     assert_eq!(server2.num_logs(), server3.num_logs());
     assert_eq!(server2.num_members(), 3);
 }
-
