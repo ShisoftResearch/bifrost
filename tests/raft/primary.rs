@@ -87,7 +87,16 @@ fn log_replication(){
     assert_eq!(server1.num_members(), 3);
     assert_eq!(server3.num_members(), 3);
     wait(); // wait for membership replication to take effect
-    assert_eq!(server1.num_logs(), server2.num_logs());
+    if server1.num_logs() != server2.num_logs() {
+        panic!(
+            "logs length mismatch {} / {} , last log id: {}, {} - {}",
+            server1.num_logs(),
+            server2.num_logs(),
+            server1.last_log_id().unwrap(),
+            server2.last_log_id().unwrap(),
+            server3.num_logs()
+        );
+    }
     assert_eq!(server2.num_logs(), server3.num_logs());
     assert_eq!(server2.num_members(), 3);
 }

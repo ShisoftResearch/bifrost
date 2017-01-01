@@ -336,6 +336,11 @@ impl RaftServer {
         let logs = meta.logs.read().unwrap();
         logs.len()
     }
+    pub fn last_log_id(&self) -> Option<u64> {
+        let meta = self.meta.read().unwrap();
+        let logs = meta.logs.read().unwrap();
+        logs.keys().cloned().last()
+    }
     fn switch_membership(&self, meta: &mut RwLockWriteGuard<RaftMeta>, membership: Membership) {
         self.reset_last_checked(meta);
         meta.membership = membership;
@@ -348,6 +353,21 @@ impl RaftServer {
             None => (0, 0)
         }
     }
+    fn insert_leader_follower_meta(
+        &self,
+        leader_meta: &mut RwLockWriteGuard<LeaderMeta>,
+        last_log_id: u64,
+        member_id: u64
+    ){
+        // the leader itself will not be consider as a follower when sending heartbeat
+        if member_id == self.id {return;}
+        leader_meta.followers.entry(member_id).or_insert_with(|| {
+            Arc::new(Mutex::new(FollowerStatus {
+                next_index: last_log_id + 1,
+                match_index: 0
+            }))
+        });
+    }
     fn reload_leader_meta(
         &self,
         member_map: &HashMap<u64, RaftMember>,
@@ -355,15 +375,7 @@ impl RaftServer {
         last_log_id: u64
     ) {
         for member in member_map.values() {
-            let id = member.id;
-            // the leader itself will not be consider as a follower when sending heartbeat
-            if id == self.id {continue;}
-            leader_meta.followers.entry(id).or_insert_with(|| {
-                Arc::new(Mutex::new(FollowerStatus {
-                    next_index: last_log_id + 1,
-                    match_index: 0
-                }))
-            });
+            self.insert_leader_follower_meta(leader_meta, last_log_id, member.id);
         }
     }
     fn become_candidate(server: Arc<RaftServer>, meta: &mut RwLockWriteGuard<RaftMeta>) {
@@ -453,6 +465,7 @@ impl RaftServer {
                 let leader_meta = leader_meta.read().unwrap();
                 for member in members_from_meta!(meta).values() {
                     let id = member.id;
+                    if id == self.id {continue;}
                     let tx = tx.clone();
                     let logs = meta.logs.clone();
                     let rpc = member.rpc.clone();
@@ -460,7 +473,11 @@ impl RaftServer {
                         if let Some(follower) = leader_meta.followers.get(&id) {
                             follower.clone()
                         } else {
-                            //panic!("not found, {}", leader_meta.followers.len()); //TODO: remove after debug
+                            println!(
+                                "follower not found, {}, {}",
+                                id,
+                                leader_meta.followers.len()
+                            ); //TODO: remove after debug
                             continue;
                         }
                     };
