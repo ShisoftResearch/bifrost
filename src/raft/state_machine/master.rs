@@ -9,7 +9,7 @@ pub enum ExecError {
     FnNotFound,
     ServersUnreachable,
     CannotConstructClient,
-    NotUpdated,
+    NotCommitted,
     Unknown,
     TooManyRetry,
 }

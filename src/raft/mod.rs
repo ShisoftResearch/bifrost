@@ -49,7 +49,7 @@ pub enum ClientCmdResponse {
         last_log_id: u64,
     },
     NotLeader(u64),
-    NotUpdated,
+    NotCommitted,
 }
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ClientQryResponse {
@@ -200,7 +200,7 @@ macro_rules! members_from_meta {
 }
 
 fn is_majority (members: u64, granted: u64) -> bool {
-    granted >= min(members / 2 + 1, members)
+    granted >= members / 2
 }
 
 impl RaftServer {
@@ -567,9 +567,10 @@ impl RaftServer {
                     let mut leader_meta = leader_meta.write().unwrap();
                     let mut updated_followers = 0;
                     for _ in 0..members {
-                        match rx.recv_timeout(Duration::from_millis(CHECKER_MS * 10)) {
+                        match rx.recv_timeout(Duration::from_millis(CHECKER_MS * 50)) {
                             Ok(last_matched_id) => {
-                                updated_followers += if last_matched_id >= log_id {1} else {0}
+                                updated_followers += if last_matched_id >= log_id {1} else {0};
+                                if is_majority(members, updated_followers) {break;}
                             },
                             _ => {}
                         };
@@ -741,7 +742,7 @@ impl Server for RaftServer {
                     last_log_term: new_log_term,
                 })
             } else {
-                Ok(ClientCmdResponse::NotUpdated)
+                Ok(ClientCmdResponse::NotCommitted)
             };
             match entry.sm_id {
                 CONFIG_SM_ID => {

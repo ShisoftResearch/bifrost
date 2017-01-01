@@ -50,7 +50,7 @@ fn server_membership(){
         s1_addr.clone(),
         s2_addr.clone(),
     ));
-    assert!(join_result.is_ok());
+    join_result.unwrap();
     assert_eq!(server1.num_members(), 3);
     // will not check in server2 because it is a log replication problem
     assert_eq!(server3.num_members(), 3);
@@ -136,5 +136,4 @@ fn log_replication(){
     assert_eq!(server3.num_logs(), server4.num_logs());
     assert_eq!(server4.num_logs(), server5.num_logs());
     assert_eq!(server5.num_logs(), 4);
-    //assert_eq!(server2.num_members(), 3); // failed maybe not committed?
 }
