@@ -44,14 +44,16 @@ Bifrost will ship with it's own reliable data store based on [raft consensus alg
         - [x] Query 
             - [x] Concurrency
         - [x] Failover
-        - [ ] Membership changes 
+        - [x] Membership changes 
     - [ ] Raft Group
     - [ ] Tests
         - [ ] State machine framework
-        - [ ] Leader election
-        - [ ] Log replication
+        - [x] Leader selection
+        - [x] Log replication
         - [ ] Snapshot
         - [ ] Membership changes
+            - [x] New member
+            - [ ] Delete member
         - [ ] Safety
         - [ ] Stress and benchmark
         - [ ] Stress + Safety
