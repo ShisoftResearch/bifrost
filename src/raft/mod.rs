@@ -503,28 +503,24 @@ impl RaftServer {
                                 &None => None
                             };
                             let (follower_last_log_id, follower_last_log_term) = {
-                                if logs.is_empty() {
+                                // assumed log ids are sequence of integers
+                                let follower_last_log_id = follower.next_index - 1;
+                                if follower_last_log_id == 0 || logs.is_empty() {
                                     (0, 0) // 0 represents there is no logs in the leader
                                 } else {
                                     // detect cleaned logs
                                     let (first_log_id, _) = logs.iter().next().unwrap();
-                                    // assumed log ids are sequence of integers
-                                    let follower_last_log_id = follower.next_index - 1;
-                                    if follower_last_log_id > 0 {
-                                        (0, 0)
-                                    } else {
-                                        if *first_log_id > follower_last_log_id {
-                                            panic!("TODO: deal with snapshot or other situations may remove old logs {}, {}", *first_log_id, follower_last_log_id)
-                                        }
-                                        let follower_last_entry = logs.get(&follower_last_log_id);
-                                        match follower_last_entry {
-                                            Some(entry) => {
-                                                (entry.id, entry.term)
-                                            },
-                                            None => {
-                                                panic!("Cannot find old logs for follower, first_id: {}, follower_last: {}");
-                                                (0, 0)
-                                            }
+                                    if *first_log_id > follower_last_log_id {
+                                        panic!("TODO: deal with snapshot or other situations may remove old logs {}, {}", *first_log_id, follower_last_log_id)
+                                    }
+                                    let follower_last_entry = logs.get(&follower_last_log_id);
+                                    match follower_last_entry {
+                                        Some(entry) => {
+                                            (entry.id, entry.term)
+                                        },
+                                        None => {
+                                            panic!("Cannot find old logs for follower, first_id: {}, follower_last: {}");
+                                            (0, 0)
                                         }
                                     }
                                 }

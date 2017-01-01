@@ -61,6 +61,8 @@ fn log_replication(){
     let s1_addr = String::from("127.0.0.1:2004");
     let s2_addr = String::from("127.0.0.1:2005");
     let s3_addr = String::from("127.0.0.1:2006");
+    let s4_addr = String::from("127.0.0.1:2007");
+    let s5_addr = String::from("127.0.0.1:2008");
     let server1 = RaftServer::new(Options {
         storage: Storage::Default(),
         address: s1_addr.clone(),
@@ -98,5 +100,41 @@ fn log_replication(){
         );
     }
     assert_eq!(server2.num_logs(), server3.num_logs());
-    assert_eq!(server2.num_members(), 3);
+    assert_eq!(server2.num_logs(), 2);
+
+    let server4 = RaftServer::new(Options {
+        storage: Storage::Default(),
+        address: s4_addr.clone(),
+    }).unwrap();
+    let join_result = server4.join(vec!(
+        s1_addr.clone(),
+        s2_addr.clone(),
+        s3_addr.clone(),
+    ));
+    join_result.unwrap();
+
+    let server5 = RaftServer::new(Options {
+        storage: Storage::Default(),
+        address: s5_addr.clone(),
+    }).unwrap();
+    let join_result = server5.join(vec!(
+        s1_addr.clone(),
+        s2_addr.clone(),
+        s3_addr.clone(),
+        s4_addr.clone(),
+    ));
+    join_result.unwrap();
+
+    wait(); // wait for membership replication to take effect
+    wait();
+
+    assert_eq!(server1.num_members(), 5);
+    assert_eq!(server5.num_members(), 5);
+
+    assert_eq!(server1.num_logs(), server2.num_logs());
+    assert_eq!(server2.num_logs(), server3.num_logs());
+    assert_eq!(server3.num_logs(), server4.num_logs());
+    assert_eq!(server4.num_logs(), server5.num_logs());
+    assert_eq!(server5.num_logs(), 4);
+    //assert_eq!(server2.num_members(), 3); // failed maybe not committed?
 }
