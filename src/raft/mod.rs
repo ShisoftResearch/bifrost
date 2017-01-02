@@ -20,6 +20,7 @@ use self::client::RaftClient;
 use self::state_machine::configs::{CONFIG_SM_ID, RaftMember};
 use self::state_machine::configs::commands::{new_member_, member_address};
 use self::state_machine::master::ExecError;
+use std::fmt;
 
 #[macro_use]
 pub mod state_machine;
@@ -30,7 +31,7 @@ pub trait RaftMsg<R> {
     fn decode_return(&self, data: &Vec<u8>) -> R;
 }
 
-const CHECKER_MS: u64 = 100;
+const CHECKER_MS: u64 = 50;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LogEntry {
@@ -71,7 +72,7 @@ pub struct ClientClusterInfo {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum AppendEntriesResult {
     Ok,
-    TermOut,
+    TermOut(u64),
     LogMismatch
 }
 
@@ -94,7 +95,7 @@ fn gen_rand(lower: u64, higher: u64) -> u64 {
 }
 
 fn gen_timeout() -> u64 {
-    gen_rand(100, 500)
+    gen_rand(800, 1000)
 }
 
 struct FollowerStatus {
@@ -161,12 +162,14 @@ pub struct RaftServer {
     pub options: Options,
 }
 
+#[derive(Debug)]
 enum CheckerAction {
     SendHeartbeat,
     BecomeCandidate,
     ExitLoop,
     None
 }
+
 enum RequestVoteResponse {
     Granted,
     TermOut(u64, u64),
@@ -206,12 +209,13 @@ fn is_majority (members: u64, granted: u64) -> bool {
 impl RaftServer {
     pub fn new(opts: Options) -> Option<Arc<RaftServer>> {
         let server_address = opts.address.clone();
+        let server_id = hash_str(server_address.clone());
         let server_obj = RaftServer {
             meta: RwLock::new(
                 RaftMeta {
                     term: 0, //TODO: read from persistent state
                     vote_for: None, //TODO: read from persistent state
-                    timeout: gen_timeout(), // 10~500 ms for timeout
+                    timeout: gen_timeout() * 5, // it have to be larger than normal for follower bootstrap
                     last_checked: get_time(),
                     membership: Membership::Follower,
                     logs: Arc::new(RwLock::new(BTreeMap::new())), //TODO: read from persistent state
@@ -222,7 +226,7 @@ impl RaftServer {
                     workers: Mutex::new(ThreadPool::new(num_cpus::get())),
                 }
             ),
-            id: hash_str(server_address.clone()),
+            id: server_id,
             options: opts,
         };
         let server = Arc::new(server_obj);
@@ -251,20 +255,20 @@ impl RaftServer {
         thread::spawn(move ||{
             let server = checker_ref;
             loop {
-                {
+                let start_time = get_time();
+                let expected_ends = start_time + CHECKER_MS;
+                let action = {
                     let mut meta = server.meta.write().unwrap(); //WARNING: Reentering not supported
                     let action = match meta.membership {
                         Membership::Leader(ref leader_meta) => {
-                            let leader_meta = leader_meta.read().unwrap();
-                            if get_time() > (leader_meta.last_updated + CHECKER_MS) {
-                                CheckerAction::SendHeartbeat
-                            } else {
-                                CheckerAction::None
-                            }
+                            CheckerAction::SendHeartbeat
                         },
                         Membership::Follower | Membership::Candidate => {
-                            if get_time() > (meta.timeout + meta.last_checked) && meta.vote_for == None {
+                            let current_time = get_time();
+                            let timeout_time = meta.timeout + meta.last_checked;
+                            if  current_time > timeout_time && meta.vote_for == None {
                                 //Timeout, require election
+                                println!("TIMEOUT!!! GOING TO CANDIDATE!!! {}, {} -> {} + {}", server_id, current_time - timeout_time, meta.timeout, meta.last_checked);
                                 CheckerAction::BecomeCandidate
                             } else {
                                 CheckerAction::None
@@ -286,8 +290,18 @@ impl RaftServer {
                         },
                         CheckerAction::None => {}
                     }
+                    action
+                };
+                match action {
+                    CheckerAction::None => {},
+                    _ => {
+                        let end_time = get_time();
+                        if expected_ends > end_time {
+                            thread::sleep(Duration::from_millis(expected_ends - end_time));
+                        }
+                        //println!("Actual check runtime: {}ms, action: {:?}", end_time - start_time, action);
+                    }
                 }
-                thread::sleep(Duration::from_millis(CHECKER_MS));
             }
         });
         Some(server)
@@ -340,6 +354,10 @@ impl RaftServer {
         let meta = self.meta.read().unwrap();
         let logs = meta.logs.read().unwrap();
         logs.keys().cloned().last()
+    }
+    pub fn leader_id(&self) -> u64 {
+        let meta = self.meta.read().unwrap();
+        meta.leader_id
     }
     fn switch_membership(&self, meta: &mut RwLockWriteGuard<RaftMeta>, membership: Membership) {
         self.reset_last_checked(meta);
@@ -487,22 +505,23 @@ impl RaftServer {
                         let mut is_retry = false;
                         let logs = logs.read().unwrap();
                         loop {
-                            let entries: Option<LogEntries> = {
+                            let entries: Option<LogEntries> = { // extract logs to send to follower
                                 let list: LogEntries = logs.range(
                                     Included(&follower.next_index), Unbounded
                                 ).map(|(_, entry)| entry.clone()).collect(); //TODO: avoid clone entry
                                 if list.is_empty() {None} else {Some(list)}
                             };
-                            if is_retry && entries.is_none() {
+                            if is_retry && entries.is_none() { // break when retry and there is no entry
+                                //println!("stop retry when entry is empty, {}", follower.next_index);
                                 break;
                             }
-                            let last_entries_id = match &entries {
+                            let last_entries_id = match &entries { // get last entry id
                                 &Some(ref entries) => {
                                     Some(entries.iter().last().unwrap().id)
                                 },
                                 &None => None
                             };
-                            let (follower_last_log_id, follower_last_log_term) = {
+                            let (follower_last_log_id, follower_last_log_term) = { // extract follower last log info
                                 // assumed log ids are sequence of integers
                                 let follower_last_log_id = follower.next_index - 1;
                                 if follower_last_log_id == 0 || logs.is_empty() {
@@ -537,16 +556,22 @@ impl RaftServer {
                                 Ok(Ok((follower_term, result))) => {
                                     match result {
                                         AppendEntriesResult::Ok => {
+                                            //println!("log updated");
                                             if let Some(last_entries_id) = last_entries_id {
                                                 follower.next_index = last_entries_id + 1;
                                                 follower.match_index = last_entries_id;
                                             }
                                         },
                                         AppendEntriesResult::LogMismatch => {
+                                            //println!("log mismatch, {}", follower.next_index);
                                             follower.next_index -= 1;
                                         },
-                                        AppendEntriesResult::TermOut => {
-                                            info!("term out, new term from follower is {} but this leader is {}", follower_term, term);
+                                        AppendEntriesResult::TermOut(actual_leader_id) => {
+                                            let actual_leader = actual_leader_id.clone();
+//                                            println!(
+//                                                "term out, new term from follower is {} but this leader is {}",
+//                                                follower_term, term
+//                                            );
                                             break;
                                         }
                                     }
@@ -568,6 +593,7 @@ impl RaftServer {
                     let mut updated_followers = 0;
                     for _ in 0..members {
                         let last_matched_id = rx.recv().unwrap();
+                        //println!("{}, {}", last_matched_id, log_id);
                         if last_matched_id >= log_id {
                             updated_followers += 1;
                             if is_majority(members, updated_followers) {break;}
@@ -592,6 +618,7 @@ impl RaftServer {
         return true;
     }
     fn reset_last_checked(&self, meta: &mut RwLockWriteGuard<RaftMeta>) {
+        //println!("elapsed: {}, id: {}, term: {}", get_time() - meta.last_checked, self.id, meta.term);
         meta.last_checked = get_time();
         meta.timeout = gen_timeout();
     }
@@ -606,10 +633,11 @@ impl Server for RaftServer {
         leader_commit: u64
     ) -> Result<(u64, AppendEntriesResult), ()>  {
         let mut meta = self.meta.write().unwrap();
-        let term_ok = self.check_term(&mut meta, term, leader_id); // RI, 1
         self.reset_last_checked(&mut meta);
-        if term_ok {
+        let term_ok = self.check_term(&mut meta, term, leader_id); // RI, 1
+        let result = if term_ok {
             if let Membership::Candidate = meta.membership {
+                println!("SWITCH FROM CANDIDATE BACK TO FOLLOWER {}", self.id);
                 self.become_follower(&mut meta, term, leader_id);
             }
             if prev_log_id > 0 {
@@ -659,8 +687,10 @@ impl Server for RaftServer {
             }
             Ok((meta.term, AppendEntriesResult::Ok))
         } else {
-            Ok((meta.term, AppendEntriesResult::TermOut)) // term mismatch
-        }
+            Ok((meta.term, AppendEntriesResult::TermOut(meta.leader_id))) // term mismatch
+        };
+        self.reset_last_checked(&mut meta);
+        return result;
     }
 
     fn request_vote(

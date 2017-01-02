@@ -119,4 +119,14 @@ fn log_replication(){
     assert_eq!(server3.num_logs(), server4.num_logs());
     assert_eq!(server4.num_logs(), server5.num_logs());
     assert_eq!(server5.num_logs(), 4); // check all logs replicated
+
+    wait();
+    wait();
+    wait();
+
+    assert_eq!(server1.leader_id(), server1.id);
+    assert_eq!(server2.leader_id(), server1.id);
+    assert_eq!(server3.leader_id(), server1.id);
+    assert_eq!(server4.leader_id(), server1.id);
+    assert_eq!(server5.leader_id(), server1.id);
 }
