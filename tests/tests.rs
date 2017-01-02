@@ -3,6 +3,8 @@
 
 #![feature(proc_macro)]
 
+extern crate flame;
+
 #[macro_use]
 extern crate bifrost;
 extern crate byteorder;

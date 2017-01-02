@@ -1,6 +1,8 @@
 use bifrost::raft::*;
 use bifrost::raft::state_machine::master::ExecError;
 use super::wait;
+use flame;
+use std::fs::File;
 
 #[test]
 fn startup(){
@@ -99,7 +101,6 @@ fn log_replication(){
         s3_addr.clone(),
     ));
     join_result.unwrap();
-
     let server5 = RaftServer::new(Options {
         storage: Storage::Default(),
         address: s5_addr.clone(),

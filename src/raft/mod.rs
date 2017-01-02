@@ -31,7 +31,7 @@ pub trait RaftMsg<R> {
     fn decode_return(&self, data: &Vec<u8>) -> R;
 }
 
-const CHECKER_MS: u64 = 50;
+const CHECKER_MS: i64 = 50;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LogEntry {
@@ -88,13 +88,13 @@ service! {
     rpc c_server_cluster_info() -> ClientClusterInfo;
 }
 
-fn gen_rand(lower: u64, higher: u64) -> u64 {
+fn gen_rand(lower: i64, higher: i64) -> i64 {
     let between = Range::new(lower, higher);
     let mut rng = rand::thread_rng();
     between.ind_sample(&mut rng) + 1
 }
 
-fn gen_timeout() -> u64 {
+fn gen_timeout() -> i64 {
     gen_rand(800, 1000)
 }
 
@@ -104,7 +104,7 @@ struct FollowerStatus {
 }
 
 pub struct LeaderMeta {
-    last_updated: u64,
+    last_updated: i64,
     followers: HashMap<u64, Arc<Mutex<FollowerStatus>>>
 }
 
@@ -127,8 +127,8 @@ pub enum Membership {
 pub struct RaftMeta {
     term: u64,
     vote_for: Option<u64>,
-    timeout: u64,
-    last_checked: u64,
+    timeout: i64,
+    last_checked: i64,
     membership: Membership,
     logs: Arc<RwLock<LogsMap>>,
     state_machine: RwLock<MasterStateMachine>,
@@ -215,7 +215,7 @@ impl RaftServer {
                 RaftMeta {
                     term: 0, //TODO: read from persistent state
                     vote_for: None, //TODO: read from persistent state
-                    timeout: gen_timeout() * 5, // it have to be larger than normal for follower bootstrap
+                    timeout: gen_timeout() * 10, // it have to be larger than normal for follower bootstrap
                     last_checked: get_time(),
                     membership: Membership::Follower,
                     logs: Arc::new(RwLock::new(BTreeMap::new())), //TODO: read from persistent state
@@ -266,9 +266,10 @@ impl RaftServer {
                         Membership::Follower | Membership::Candidate => {
                             let current_time = get_time();
                             let timeout_time = meta.timeout + meta.last_checked;
-                            if  current_time > timeout_time && meta.vote_for == None {
+                            let timeout_elapsed = current_time - timeout_time;
+                            if  meta.vote_for == None && timeout_elapsed > 0 { // in my test sometimes timeout_elapsed may go 1 for no reason, require investigate
                                 //Timeout, require election
-                                println!("TIMEOUT!!! GOING TO CANDIDATE!!! {}, {} -> {} + {}", server_id, current_time - timeout_time, meta.timeout, meta.last_checked);
+                                println!("TIMEOUT!!! GOING TO CANDIDATE!!! {}, {}", server_id, timeout_elapsed);
                                 CheckerAction::BecomeCandidate
                             } else {
                                 CheckerAction::None
@@ -296,14 +297,19 @@ impl RaftServer {
                     CheckerAction::None => {},
                     _ => {
                         let end_time = get_time();
-                        if expected_ends > end_time {
-                            thread::sleep(Duration::from_millis(expected_ends - end_time));
+                        let time_to_sleep = expected_ends - end_time - 1;
+                        if time_to_sleep > 0 {
+                            thread::sleep(Duration::from_millis(time_to_sleep as u64));
                         }
                         //println!("Actual check runtime: {}ms, action: {:?}", end_time - start_time, action);
                     }
                 }
             }
         });
+        {
+            let mut meta = server.meta.write().unwrap();
+            meta.last_checked = get_time();
+        }
         Some(server)
     }
     pub fn bootstrap(&self) {
@@ -407,7 +413,6 @@ impl RaftServer {
         let (last_log_id, last_log_term) = get_last_log_info!(server, logs);
         let (tx, rx) = channel();
         let mut members = 0;
-        let timeout = meta.timeout;
         for member in members_from_meta!(meta).values() {
             let rpc = member.rpc.clone();
             let tx = tx.clone();
@@ -473,7 +478,6 @@ impl RaftServer {
     fn send_followers_heartbeat(&self, meta: &mut RwLockWriteGuard<RaftMeta>, log_id: Option<u64>) -> bool {
         let (tx, rx) = channel();
         let mut members = 0;
-        let timeout = meta.timeout;
         let commit_index = meta.commit_index;
         let term = meta.term;
         let leader_id = meta.leader_id;

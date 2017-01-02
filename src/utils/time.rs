@@ -1,10 +1,11 @@
 use time;
 use std::time::Duration;
 
-pub fn get_time() -> u64 {
-    let timespec = time::get_time();
-    let mills: f64 = ((1000*1000*1000) as f64 * timespec.sec as f64 + timespec.nsec as f64)/(1000 * 1000) as f64;
-    mills as u64
+pub fn get_time() -> i64 {
+    //Get current time
+    let current_time = time::get_time();
+    //Calculate milliseconds
+    (current_time.sec as i64 * 1000) + (current_time.nsec as i64 / 1000 / 1000)
 }
 
 pub fn duration_to_ms(duration: Duration) -> u64 {
