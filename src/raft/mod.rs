@@ -30,7 +30,7 @@ pub trait RaftMsg<R> {
     fn decode_return(&self, data: &Vec<u8>) -> R;
 }
 
-const CHECKER_MS: u64 = 50;
+const CHECKER_MS: u64 = 100;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LogEntry {

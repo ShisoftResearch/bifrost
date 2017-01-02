@@ -16,8 +16,7 @@ impl Codec for BytesCodec {
             let len = LittleEndian::read_u64(&buf.as_ref()[8..16]);
             if buf_len as u64 >= 8 * 2 + len {
                 buf.drain_to(16);
-                let mut data = Vec::with_capacity(len as usize);
-                data.extend_from_slice(buf.drain_to(len as usize).as_slice());
+                let data = Vec::from(buf.drain_to(len as usize).as_slice());
                 return Ok(Some((mid, data)))
             }
         }

@@ -58,7 +58,7 @@ impl Client {
         })
     }
     pub fn connect (address: &String) -> io::Result<Client> {
-        Client::connect_with_timeout(address, Duration::from_millis(500))
+        Client::connect_with_timeout(address, Duration::from_secs(1))
     }
     pub fn send(&mut self, msg: Vec<u8>) -> io::Result<Vec<u8>> {
         let resq = self.client.call(msg);
