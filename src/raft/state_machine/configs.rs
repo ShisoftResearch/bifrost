@@ -1,7 +1,7 @@
 use raft::SyncClient;
 use std::collections::{HashMap, HashSet};
 use super::*;
-use bifrost_plugins::hash_str;
+use bifrost_hasher::hash_str;
 use std::sync::{Arc, Mutex};
 use std::io;
 

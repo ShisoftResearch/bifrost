@@ -3,7 +3,7 @@
 extern crate rustc;
 extern crate rustc_plugin;
 extern crate syntax;
-extern crate bifrost;
+extern crate bifrost_hasher;
 
 use syntax::tokenstream::TokenTree;
 use syntax::ext::base::{ExtCtxt, MacResult, DummyResult, MacEager};
@@ -17,7 +17,7 @@ use syntax::parse::parser::{Parser, PathStyle};
 use syntax::ptr::P;
 use syntax::util::small_vector::SmallVector;
 use rustc_plugin::Registry;
-use bifrost::utils::hash::hash_str;
+use bifrost_hasher::hash_str;
 
 fn hash_ident (cx: &mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacResult + 'static> {
     if args.len() != 1 {

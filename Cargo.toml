@@ -18,7 +18,8 @@ mio = "0.6.0"
 slab = "0.3.0"
 serde = "0.8"
 serde_derive = "0.8"
-bifrost-plugins = { path = "src/plugins" }
+bifrost_plugins = { path = "src/plugins" }
+bifrost_hasher = { path = "src/hasher" }
 rand = "0.3"
 time = "0.1"
 futures = "0.1"

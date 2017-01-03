@@ -12,7 +12,7 @@ use std::sync::mpsc::channel;
 use self::state_machine::OpType;
 use self::state_machine::master::{MasterStateMachine, StateMachineCmds, ExecResult};
 use self::state_machine::configs::Configures;
-use bifrost_plugins::hash_str;
+use bifrost_hasher::hash_str;
 use utils::time::get_time;
 use threadpool::ThreadPool;
 use num_cpus;

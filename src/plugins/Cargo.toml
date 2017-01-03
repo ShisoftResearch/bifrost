@@ -1,10 +1,10 @@
 [package]
-name = "bifrost-plugins"
+name = "bifrost_plugins"
 version = "0.1.0"
 authors = ["Hao Shi <shisoftgenius@gmail.com>"]
 
 [lib]
 plugin = true
 
-[dependices]
-bifrost = "*"
+[dependencies]
+bifrost_hasher = { path = "../hasher" }

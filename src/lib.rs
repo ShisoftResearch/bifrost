@@ -43,3 +43,4 @@ extern crate num_cpus;
 extern crate lazy_static;
 
 extern crate bifrost_plugins;
+extern crate bifrost_hasher;

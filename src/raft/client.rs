@@ -9,7 +9,7 @@ use std::iter::FromIterator;
 use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::cell::RefCell;
-use bifrost_plugins::hash_str;
+use bifrost_hasher::hash_str;
 use rand;
 
 const ORDERING: Ordering = Ordering::Relaxed;
