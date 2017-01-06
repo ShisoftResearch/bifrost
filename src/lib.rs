@@ -12,6 +12,7 @@ pub mod tcp;
 pub mod rpc;
 #[macro_use]
 pub mod raft;
+pub mod store;
 
 mod utils;
 
