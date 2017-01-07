@@ -47,7 +47,7 @@ Bifrost will ship with it's own reliable data store based on [raft consensus alg
         - [x] Membership changes 
     - [ ] Raft Group
     - [ ] Tests
-        - [ ] State machine framework
+        - [x] State machine framework
         - [x] Leader selection
         - [x] Log replication
         - [ ] Snapshot
@@ -67,8 +67,8 @@ Bifrost will ship with it's own reliable data store based on [raft consensus alg
     - [ ] Set
     - [ ] Array
     - [ ] Queue
-    - [ ] Value
-    - [ ] Number
+    - [x] Value
+    - [x] Number
     - [ ] Lock
 - [ ] Integration (API)
     - [ ]  gPRC
