@@ -22,6 +22,12 @@ macro_rules! def_store_number {
 
                 def cmd get_and_decr(n: $t) -> $t;
                 def cmd decr_and_get(n: $t) -> $t;
+
+                def cmd get_and_multiply(n: $t) -> $t;
+                def cmd multiply_and_get(n: $t) -> $t;
+
+                def cmd get_and_divide(n: $t) -> $t;
+                def cmd divide_and_get(n: $t) -> $t;
             }
             impl StateMachineCmds for Number {
                 fn set(&mut self, n: $t) -> Result<(),()> {
@@ -60,6 +66,24 @@ macro_rules! def_store_number {
                 }
                 fn decr_and_get(&mut self, n: $t) -> Result<$t, ()> {
                     self.minus_and_get(1)
+                }
+                fn get_and_multiply(&mut self, n: $t) -> Result<$t, ()> {
+                    let on = self.num;
+                    self.num *= n;
+                    Ok(on)
+                }
+                fn multiply_and_get(&mut self, n: $t) -> Result<$t, ()> {
+                    self.num *= n;
+                    Ok(self.num)
+                }
+                fn get_and_divide(&mut self, n: $t) -> Result<$t, ()> {
+                    let on = self.num;
+                    self.num /= n;
+                    Ok(on)
+                }
+                fn divide_and_get(&mut self, n: $t) -> Result<$t, ()> {
+                    self.num /= n;
+                    Ok(self.num)
                 }
             }
             impl StateMachineCtl for Number {
