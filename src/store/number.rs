@@ -8,7 +8,7 @@ macro_rules! def_store_number {
                 pub id: u64
             }
             raft_state_machine! {
-                def cmd set(v: $t);
+                def cmd set(n: $t);
                 def qry get() -> $t;
 
                 def cmd get_and_add(n: $t) -> $t;
