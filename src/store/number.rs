@@ -28,6 +28,9 @@ macro_rules! def_store_number {
 
                 def cmd get_and_divide(n: $t) -> $t;
                 def cmd divide_and_get(n: $t) -> $t;
+
+                def cmd compare_and_swap(original: $t, n: $t) -> $t;
+                def cmd swap(n: $t) -> $t;
             }
             impl StateMachineCmds for Number {
                 fn set(&mut self, n: $t) -> Result<(),()> {
@@ -84,6 +87,18 @@ macro_rules! def_store_number {
                 fn divide_and_get(&mut self, n: $t) -> Result<$t, ()> {
                     self.num /= n;
                     Ok(self.num)
+                }
+                fn compare_and_swap(&mut self, original: $t, n: $t) -> Result<$t, ()> {
+                    let on = self.num;
+                    if on == original {
+                        self.num = n;
+                    }
+                    Ok(on)
+                }
+                fn swap(&mut self, n: $t) -> Result<$t, ()> {
+                    let on = self.num;
+                    self.num = n;
+                    Ok(on)
                 }
             }
             impl StateMachineCtl for Number {

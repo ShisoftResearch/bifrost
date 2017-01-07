@@ -9,7 +9,8 @@ mod u32 {
         get_and_incr, incr_and_get,
         get_and_decr, decr_and_get,
         get_and_multiply, multiply_and_get,
-        get_and_divide, divide_and_get
+        get_and_divide, divide_and_get,
+        compare_and_swap, swap
     };
 
     #[test]
@@ -42,6 +43,12 @@ mod u32 {
         assert_eq!(client.execute(sm_id, &multiply_and_get{n: 2}).unwrap().unwrap(), 8);
         assert_eq!(client.execute(sm_id, &get_and_divide{n: 2}).unwrap().unwrap(), 8);
         assert_eq!(client.execute(sm_id, &divide_and_get{n: 4}).unwrap().unwrap(), 1);
+        assert_eq!(client.execute(sm_id, &swap{n: 5}).unwrap().unwrap(), 1);
+        assert_eq!(client.execute(sm_id, &get{}).unwrap().unwrap(), 5);
+        assert_eq!(client.execute(sm_id, &compare_and_swap{original: 1, n: 10}).unwrap().unwrap(), 5);
+        assert_eq!(client.execute(sm_id, &get{}).unwrap().unwrap(), 5);
+        assert_eq!(client.execute(sm_id, &compare_and_swap{original: 5, n: 11}).unwrap().unwrap(), 5);
+        assert_eq!(client.execute(sm_id, &get{}).unwrap().unwrap(), 11);
     }
 }
 
