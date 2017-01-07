@@ -14,6 +14,7 @@ use rand;
 
 const ORDERING: Ordering = Ordering::Relaxed;
 
+#[derive(Debug)]
 pub enum ClientError {
     LeaderIdValid,
     ServerUnreachable,

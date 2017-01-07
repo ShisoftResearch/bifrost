@@ -5,7 +5,7 @@ macro_rules! def_store_number {
             use bifrost_hasher::hash_str;
             pub struct Number {
                 pub num: $t,
-                id: u64
+                pub id: u64
             }
             raft_state_machine! {
                 def cmd set(v: $t);
@@ -17,11 +17,11 @@ macro_rules! def_store_number {
                 def cmd get_and_minus(n: $t) -> $t;
                 def cmd minus_and_get(n: $t) -> $t;
 
-                def cmd get_and_incr(n: $t) -> $t;
-                def cmd incr_and_get(n: $t) -> $t;
+                def cmd get_and_incr() -> $t;
+                def cmd incr_and_get() -> $t;
 
-                def cmd get_and_decr(n: $t) -> $t;
-                def cmd decr_and_get(n: $t) -> $t;
+                def cmd get_and_decr() -> $t;
+                def cmd decr_and_get() -> $t;
 
                 def cmd get_and_multiply(n: $t) -> $t;
                 def cmd multiply_and_get(n: $t) -> $t;
@@ -55,16 +55,16 @@ macro_rules! def_store_number {
                     self.num -= n;
                     Ok(self.num)
                 }
-                fn get_and_incr(&mut self, n: $t) -> Result<$t, ()> {
+                fn get_and_incr(&mut self) -> Result<$t, ()> {
                     self.get_and_add(1 as $t)
                 }
-                fn incr_and_get(&mut self, n: $t) -> Result<$t, ()> {
+                fn incr_and_get(&mut self) -> Result<$t, ()> {
                     self.add_and_get(1 as $t)
                 }
-                fn get_and_decr(&mut self, n: $t) -> Result<$t, ()> {
+                fn get_and_decr(&mut self) -> Result<$t, ()> {
                     self.get_and_minus(1 as $t)
                 }
-                fn decr_and_get(&mut self, n: $t) -> Result<$t, ()> {
+                fn decr_and_get(&mut self) -> Result<$t, ()> {
                     self.minus_and_get(1 as $t)
                 }
                 fn get_and_multiply(&mut self, n: $t) -> Result<$t, ()> {

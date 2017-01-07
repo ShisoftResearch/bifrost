@@ -19,7 +19,7 @@ use num_cpus;
 use self::client::RaftClient;
 use self::state_machine::configs::{CONFIG_SM_ID, RaftMember};
 use self::state_machine::configs::commands::{new_member_, member_address};
-use self::state_machine::master::ExecError;
+use self::state_machine::master::{ExecError, SubStateMachine};
 use std::fmt;
 
 #[macro_use]
@@ -364,6 +364,11 @@ impl RaftServer {
     pub fn leader_id(&self) -> u64 {
         let meta = self.meta.read().unwrap();
         meta.leader_id
+    }
+    pub fn register_state_machine(&self, state_machine: SubStateMachine) {
+        let meta = self.meta.read().unwrap();
+        let mut master_sm = meta.state_machine.write().unwrap();
+        master_sm.register(state_machine);
     }
     fn switch_membership(&self, meta: &mut RwLockWriteGuard<RaftMeta>, membership: Membership) {
         self.reset_last_checked(meta);

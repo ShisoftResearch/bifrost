@@ -5,7 +5,7 @@ macro_rules! def_store_value {
             use bifrost_hasher::hash_str;
             pub struct Value {
                 pub val: $t,
-                id: u64
+                pub id: u64
             }
             raft_state_machine! {
                 def cmd set(v: $t);
@@ -45,4 +45,4 @@ macro_rules! def_store_value {
     };
 }
 
-def_store_value!(String, String);
+def_store_value!(string, String);
