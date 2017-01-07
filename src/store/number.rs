@@ -56,16 +56,16 @@ macro_rules! def_store_number {
                     Ok(self.num)
                 }
                 fn get_and_incr(&mut self, n: $t) -> Result<$t, ()> {
-                    self.get_and_add(1)
+                    self.get_and_add(1 as $t)
                 }
                 fn incr_and_get(&mut self, n: $t) -> Result<$t, ()> {
-                    self.add_and_get(1)
+                    self.add_and_get(1 as $t)
                 }
                 fn get_and_decr(&mut self, n: $t) -> Result<$t, ()> {
-                    self.get_and_minus(1)
+                    self.get_and_minus(1 as $t)
                 }
                 fn decr_and_get(&mut self, n: $t) -> Result<$t, ()> {
-                    self.minus_and_get(1)
+                    self.minus_and_get(1 as $t)
                 }
                 fn get_and_multiply(&mut self, n: $t) -> Result<$t, ()> {
                     let on = self.num;
@@ -119,3 +119,5 @@ def_store_number!(U8, u8);
 def_store_number!(U16, u16);
 def_store_number!(U32, u32);
 def_store_number!(U64, u64);
+def_store_number!(F64, f64);
+def_store_number!(F32, f32);
