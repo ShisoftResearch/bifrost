@@ -95,7 +95,7 @@ fn gen_rand(lower: i64, higher: i64) -> i64 {
 }
 
 fn gen_timeout() -> i64 {
-    gen_rand(800, 1000)
+    gen_rand(200, 500)
 }
 
 struct FollowerStatus {
@@ -257,7 +257,7 @@ impl RaftServer {
             loop {
                 let start_time = get_time();
                 let expected_ends = start_time + CHECKER_MS;
-                let action = {
+                {
                     let mut meta = server.meta.write().unwrap(); //WARNING: Reentering not supported
                     let action = match meta.membership {
                         Membership::Leader(ref leader_meta) => {
@@ -291,18 +291,11 @@ impl RaftServer {
                         },
                         CheckerAction::None => {}
                     }
-                    action
-                };
-                match action {
-                    CheckerAction::None => {},
-                    _ => {
-                        let end_time = get_time();
-                        let time_to_sleep = expected_ends - end_time - 1;
-                        if time_to_sleep > 0 {
-                            thread::sleep(Duration::from_millis(time_to_sleep as u64));
-                        }
-                        //println!("Actual check runtime: {}ms, action: {:?}", end_time - start_time, action);
-                    }
+                }
+                let end_time = get_time();
+                let time_to_sleep = expected_ends - end_time - 1;
+                if time_to_sleep > 0 {
+                    thread::sleep(Duration::from_millis(time_to_sleep as u64));
                 }
             }
         });
@@ -576,7 +569,7 @@ impl RaftServer {
                                             follower.next_index -= 1;
                                         },
                                         AppendEntriesResult::TermOut(actual_leader_id) => {
-                                            let actual_leader = actual_leader_id.clone();
+//                                            let actual_leader = actual_leader_id.clone();
 //                                            println!(
 //                                                "term out, new term from follower is {} but this leader is {}",
 //                                                follower_term, term
@@ -680,12 +673,21 @@ impl Server for RaftServer {
                 }
             }
             let mut last_new_entry = std::u64::MAX;
-            if let Some(entries) = entries { // entry not empty
+            {
                 let mut logs = meta.logs.write().unwrap();
-                for entry in entries {
-                    let entry_id = entry.id;
-                    logs.entry(entry_id).or_insert(entry);// RI, 4
-                    last_new_entry = max(last_new_entry, entry_id);
+                let mut leader_commit = leader_commit;
+                if let Some(entries) = entries { // entry not empty
+                    for entry in entries {
+                        let entry_id = entry.id;
+                        let sm_id = entry.sm_id;
+                        logs.entry(entry_id).or_insert(entry);// RI, 4
+                        last_new_entry = max(last_new_entry, entry_id);
+                        if sm_id == CONFIG_SM_ID {
+                            leader_commit = max(leader_commit, entry_id);
+                        }
+                    }
+                } else if !logs.is_empty() {
+                    last_new_entry = logs.values().last().unwrap().id;
                 }
             }
             if leader_commit > meta.commit_index { //RI, 5

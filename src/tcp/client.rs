@@ -49,8 +49,7 @@ impl Client {
                                           inner: c,
                                       },
                                       Timer::default(),
-                                      timeout
-                                  )));
+                                      timeout)));
         let client = core.run(future)?;
         Ok(Client {
             client: client,
