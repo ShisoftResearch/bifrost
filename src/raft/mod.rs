@@ -206,6 +206,10 @@ fn is_majority (members: u64, granted: u64) -> bool {
     granted >= members / 2
 }
 
+fn commit_command(meta: &RwLockWriteGuard<RaftMeta>, entry: &LogEntry) -> ExecResult {
+    meta.state_machine.write().unwrap().commit_cmd(&entry)
+}
+
 impl RaftServer {
     pub fn new(opts: Options) -> Option<Arc<RaftServer>> {
         let server_address = opts.address.clone();
@@ -682,9 +686,6 @@ impl Server for RaftServer {
                         let sm_id = entry.sm_id;
                         logs.entry(entry_id).or_insert(entry);// RI, 4
                         last_new_entry = max(last_new_entry, entry_id);
-                        if sm_id == CONFIG_SM_ID {
-                            leader_commit = max(leader_commit, entry_id);
-                        }
                     }
                 } else if !logs.is_empty() {
                     last_new_entry = logs.values().last().unwrap().id;
@@ -768,13 +769,29 @@ impl Server for RaftServer {
                     new_log_id, new_log_term
                 )
             };
-            let committed = self.send_followers_heartbeat(&mut meta, Some(new_log_id));
-            let commit_result = if committed {
-                meta.commit_index = new_log_id;
+            let mut data = None; // Some for committed and None for not committed
+            match entry.sm_id {
+                CONFIG_SM_ID => { // special treats for membership changes
+                    meta.commit_index = new_log_id;
+                    data = Some(commit_command(&meta, &entry));
+                    if let Membership::Leader(ref leader_meta) = meta.membership {
+                        let mut leader_meta = leader_meta.write().unwrap();
+                        self.reload_leader_meta(
+                            &members_from_meta!(meta),
+                            &mut leader_meta, new_log_id
+                        );
+                    }
+                },
+                _ => {
+                    if self.send_followers_heartbeat(&mut meta, Some(new_log_id)) {
+                        meta.commit_index = new_log_id;
+                        data = Some(commit_command(&meta, &entry))
+                    }
+                }
+            }
+            let commit_result = if let Some(data) = data {
                 Ok(ClientCmdResponse::Success{
-                    data: meta.state_machine.write().unwrap().commit_cmd(
-                        &entry
-                    ),
+                    data: data,
                     last_log_id: new_log_id,
                     last_log_term: new_log_term,
                 })
@@ -783,13 +800,7 @@ impl Server for RaftServer {
             };
             match entry.sm_id {
                 CONFIG_SM_ID => {
-                    if let Membership::Leader(ref leader_meta) = meta.membership {
-                        let mut leader_meta = leader_meta.write().unwrap();
-                        self.reload_leader_meta(
-                            &members_from_meta!(meta),
-                            &mut leader_meta, new_log_id
-                        );
-                    }
+
                 }
                 _ => {}
             }
