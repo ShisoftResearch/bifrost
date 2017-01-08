@@ -679,20 +679,18 @@ impl Server for RaftServer {
                     )) // log mismatch
                 }
             }
+            let mut last_new_entry = std::u64::MAX;
             if let Some(entries) = entries { // entry not empty
-                let mut last_new_entry = std::u64::MAX;
-                {
-                    let mut logs = meta.logs.write().unwrap();
-                    for entry in entries {
-                        let entry_id = entry.id;
-                        logs.entry(entry_id).or_insert(entry);// RI, 4
-                        last_new_entry = max(last_new_entry, entry_id);
-                    }
+                let mut logs = meta.logs.write().unwrap();
+                for entry in entries {
+                    let entry_id = entry.id;
+                    logs.entry(entry_id).or_insert(entry);// RI, 4
+                    last_new_entry = max(last_new_entry, entry_id);
                 }
-                if leader_commit > meta.commit_index { //RI, 5
-                    meta.commit_index = min(leader_commit, last_new_entry);
-                    check_commit!(meta);
-                }
+            }
+            if leader_commit > meta.commit_index { //RI, 5
+                meta.commit_index = min(leader_commit, last_new_entry);
+                check_commit!(meta);
             }
             Ok((meta.term, AppendEntriesResult::Ok))
         } else {
