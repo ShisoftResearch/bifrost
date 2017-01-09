@@ -83,8 +83,8 @@ service! {
     rpc append_entries(term: u64, leaderId: u64, prev_log_id: u64, prev_log_term: u64, entries: Option<LogEntries>, leader_commit: u64) -> (u64, AppendEntriesResult);
     rpc request_vote(term: u64, candidate_id: u64, last_log_id: u64, last_log_term: u64) -> ((u64, u64), bool); // term, voteGranted
     rpc install_snapshot(term: u64, leader_id: u64, last_included_index: u64, last_included_term: u64, data: Vec<u8>, done: bool) -> u64;
-    rpc c_command(entries: LogEntry) -> ClientCmdResponse;
-    rpc c_query(entries: LogEntry) -> ClientQryResponse;
+    rpc c_command(entry: LogEntry) -> ClientCmdResponse;
+    rpc c_query(entry: LogEntry) -> ClientQryResponse;
     rpc c_server_cluster_info() -> ClientClusterInfo;
 }
 
@@ -208,6 +208,13 @@ fn is_majority (members: u64, granted: u64) -> bool {
 
 fn commit_command(meta: &RwLockWriteGuard<RaftMeta>, entry: &LogEntry) -> ExecResult {
     meta.state_machine.write().unwrap().commit_cmd(&entry)
+}
+
+fn is_leader(meta: &RwLockWriteGuard<RaftMeta>) -> bool {
+    match meta.membership {
+        Membership::Leader(_) => {true},
+        _ => {false}
+    }
 }
 
 impl RaftServer {
@@ -628,6 +635,47 @@ impl RaftServer {
         meta.last_checked = get_time();
         meta.timeout = gen_timeout();
     }
+    fn append_log(&self, meta: &RwLockWriteGuard<RaftMeta>, entry: &mut LogEntry) -> (u64, u64) {
+        let mut logs = meta.logs.write().unwrap();
+        let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
+        let new_log_id = last_log_id + 1;
+        let new_log_term = meta.term;
+        entry.term = new_log_term;
+        entry.id = new_log_id;
+        logs.insert(entry.id, entry.clone());
+        (new_log_id, new_log_term)
+    }
+    fn try_sync_log_to_followers(
+        &self, meta: &mut RwLockWriteGuard<RaftMeta>,
+        entry: &LogEntry, new_log_id: u64
+    ) -> Option<ExecResult> {
+        if self.send_followers_heartbeat(meta, Some(new_log_id)) {
+            meta.commit_index = new_log_id;
+            Some(commit_command(meta, entry))
+        } else {
+            None
+        }
+    }
+    fn try_sync_config_to_followers(
+        &self, meta: &mut RwLockWriteGuard<RaftMeta>,
+        entry: &LogEntry, new_log_id: u64
+    ) -> ExecResult {
+        // this will force followers to commit the changes
+        meta.commit_index = new_log_id;
+        let data = commit_command(&meta, &entry);
+        //                  <------------------------------------------------
+        let t = get_time();//                                               |
+        self.send_followers_heartbeat(meta, Some(new_log_id));//       |
+        if let Membership::Leader(ref leader_meta) = meta.membership {//  ||| TODO: move this block when snapshot implemented
+            let mut leader_meta = leader_meta.write().unwrap(); //        |||       New member should install newest snapshot
+            self.reload_leader_meta( //                                   |||       and logs to get updated first before leader
+                &members_from_meta!(meta), //                             |||       add it to member list in configuration
+                &mut leader_meta, new_log_id //                           |||
+            ); //                                                         |||
+        } //                                                              |||
+        println!("CONF NB TIME: {}", get_time() - t);
+        data
+    }
 }
 
 impl Server for RaftServer {
@@ -746,55 +794,16 @@ impl Server for RaftServer {
 
     fn c_command(&self, mut entry: LogEntry) -> Result<ClientCmdResponse, ()> {
         let mut meta = self.meta.write().unwrap();
-        let is_leader = match meta.membership {
-            Membership::Leader(_) => {true},
-            _ => {false}
-        };
-        if !is_leader {
+        if !is_leader(&meta) {
             Ok(ClientCmdResponse::NotLeader(meta.leader_id))
         } else {
-            let
-            (
-                new_log_id, new_log_term
-
-            ) = {
-                let mut logs = meta.logs.write().unwrap();
-                let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
-                let new_log_id = last_log_id + 1;
-                let new_log_term = meta.term;
-                entry.term = new_log_term;
-                entry.id = new_log_id;
-                logs.insert(entry.id, entry.clone());
-                (
-                    new_log_id, new_log_term
-                )
-            };
-            let mut data = None; // Some for committed and None for not committed
-            match entry.sm_id {
-                CONFIG_SM_ID => { // special treats for membership changes
-                    // this will force followers to commit the changes
-                    meta.commit_index = new_log_id;
-                    data = Some(commit_command(&meta, &entry));
-//                  <-------------------------------------------------------------------
-                    let t = get_time();//                                               |
-                    self.send_followers_heartbeat(&mut meta, Some(new_log_id));//       |
-                    if let Membership::Leader(ref leader_meta) = meta.membership {//  ||| TODO: move this block when snapshot implemented
-                        let mut leader_meta = leader_meta.write().unwrap(); //        |||       New member should install newest snapshot
-                        self.reload_leader_meta( //                                   |||       and logs to get updated first before leader
-                            &members_from_meta!(meta), //                             |||       add it to member list in configuration
-                            &mut leader_meta, new_log_id //                           |||
-                        ); //                                                         |||
-                    } //                                                              |||
-                    println!("CONF NB TIME: {}", get_time() - t);
-                },
-                _ => {
-                    if self.send_followers_heartbeat(&mut meta, Some(new_log_id)) {
-                        meta.commit_index = new_log_id;
-                        data = Some(commit_command(&meta, &entry))
-                    }
-                }
-            }
-            let commit_result = if let Some(data) = data {
+            let (new_log_id, new_log_term) = self.append_log(&meta, &mut entry);
+            let mut data = match entry.sm_id {
+                // special treats for membership changes
+                CONFIG_SM_ID => Some(self.try_sync_config_to_followers(&mut meta, &entry, new_log_id)),
+                _ => self.try_sync_log_to_followers(&mut meta, &entry, new_log_id)
+            }; // Some for committed and None for not committed
+            if let Some(data) = data {
                 Ok(ClientCmdResponse::Success{
                     data: data,
                     last_log_id: new_log_id,
@@ -802,14 +811,7 @@ impl Server for RaftServer {
                 })
             } else {
                 Ok(ClientCmdResponse::NotCommitted)
-            };
-            match entry.sm_id {
-                CONFIG_SM_ID => {
-
-                }
-                _ => {}
             }
-            commit_result
         }
     }
     fn c_query(&self, entry: LogEntry) -> Result<ClientQryResponse, ()> {
