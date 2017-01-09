@@ -187,7 +187,9 @@ impl RaftClient {
         let failure = {
             let members = self.members.read().unwrap();
             let num_members = members.clients.len();
-            if depth >= num_members {return Err(ExecError::TooManyRetry)};
+            if depth >= num_members {
+                return Err(ExecError::TooManyRetry)
+            };
             let mut leader = {
                 let leader_id = self.leader_id.load(ORDERING);
                 if members.clients.contains_key(&leader_id) {
@@ -214,8 +216,15 @@ impl RaftClient {
                         },
                         Ok(Ok(ClientCmdResponse::NotCommitted)) => {
                             FailureAction::NotCommitted
+                        },
+                        Err(e) => {
+                            println!("CLIENT: E1 - {} - {:?}", leader_id, e);
+                            FailureAction::SwitchLeader // need switch server for leader
                         }
-                        _ => FailureAction::SwitchLeader // need switch server for leader
+                        Ok(Err(e)) => {
+                            println!("CLIENT: E2 - {} - {:?}", leader_id, e);
+                            FailureAction::SwitchLeader // need switch server for leader
+                        }
                     }
                 },
                 None => FailureAction::UpdateInfo // need update members
@@ -230,6 +239,7 @@ impl RaftClient {
 
                 }
                 self.update_info(&mut members, &members_addrs);
+                println!("CLIENT: Updating info");
             },
             FailureAction::SwitchLeader => {
                 let members = self.members.read().unwrap();
@@ -240,6 +250,7 @@ impl RaftClient {
                     .nth(pos as usize % num_members)
                     .unwrap();
                 self.leader_id.compare_and_swap(leader_id, *index, ORDERING);
+                println!("CLIENT: Switch leader");
             },
             FailureAction::NotCommitted => {
                 return Err(ExecError::NotCommitted)

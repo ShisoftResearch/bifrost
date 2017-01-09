@@ -772,15 +772,20 @@ impl Server for RaftServer {
             let mut data = None; // Some for committed and None for not committed
             match entry.sm_id {
                 CONFIG_SM_ID => { // special treats for membership changes
+                    // this will force followers to commit the changes
                     meta.commit_index = new_log_id;
                     data = Some(commit_command(&meta, &entry));
-                    if let Membership::Leader(ref leader_meta) = meta.membership {
-                        let mut leader_meta = leader_meta.write().unwrap();
-                        self.reload_leader_meta(
-                            &members_from_meta!(meta),
-                            &mut leader_meta, new_log_id
-                        );
-                    }
+//                  <-------------------------------------------------------------------
+                    let t = get_time();//                                               |
+                    self.send_followers_heartbeat(&mut meta, Some(new_log_id));//       |
+                    if let Membership::Leader(ref leader_meta) = meta.membership {//  ||| TODO: move this block when snapshot implemented
+                        let mut leader_meta = leader_meta.write().unwrap(); //        |||       New member should install newest snapshot
+                        self.reload_leader_meta( //                                   |||       and logs to get updated first before leader
+                            &members_from_meta!(meta), //                             |||       add it to member list in configuration
+                            &mut leader_meta, new_log_id //                           |||
+                        ); //                                                         |||
+                    } //                                                              |||
+                    println!("CONF NB TIME: {}", get_time() - t);
                 },
                 _ => {
                     if self.send_followers_heartbeat(&mut meta, Some(new_log_id)) {
