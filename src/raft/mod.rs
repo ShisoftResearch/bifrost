@@ -234,7 +234,9 @@ impl RaftServer {
                     commit_index: 0,
                     last_applied: 0,
                     leader_id: 0,
-                    workers: Mutex::new(ThreadPool::new(num_cpus::get())),
+                    workers: Mutex::new(ThreadPool::new(
+                        max(num_cpus::get() * 5, 10)
+                    )),
                 }
             ),
             id: server_id,
@@ -604,12 +606,19 @@ impl RaftServer {
                 if let Membership::Leader(ref leader_meta) = meta.membership{
                     let mut leader_meta = leader_meta.write().unwrap();
                     let mut updated_followers = 0;
+                    let mut timeout = 2000 as i64; // assume client timeout is more than 2s　(5 by default)
+                    let mut check_time = get_time();
                     for _ in 0..members {
-                        let last_matched_id = rx.recv().unwrap();
-                        //println!("{}, {}", last_matched_id, log_id);
-                        if last_matched_id >= log_id {
-                            updated_followers += 1;
-                            if is_majority(members, updated_followers) {break;}
+                        if timeout < 0 {timeout = 0}
+                        if let Ok(last_matched_id) = rx.recv_timeout(Duration::from_millis(timeout as u64)) { // adaptive
+                            //println!("{}, {}", last_matched_id, log_id);
+                            if last_matched_id >= log_id {
+                                updated_followers += 1;
+                                if is_majority(members, updated_followers) {break;}
+                            }
+                            let current_time = get_time();
+                            timeout -= get_time() - current_time;
+                            check_time = current_time;
                         }
                     }
                     leader_meta.last_updated = get_time();
@@ -663,17 +672,15 @@ impl RaftServer {
         // this will force followers to commit the changes
         meta.commit_index = new_log_id;
         let data = commit_command(&meta, &entry);
-        //                  <------------------------------------------------
-        let t = get_time();//                                               |
-        self.send_followers_heartbeat(meta, Some(new_log_id));//       |
-        if let Membership::Leader(ref leader_meta) = meta.membership {//  ||| TODO: move this block when snapshot implemented
-            let mut leader_meta = leader_meta.write().unwrap(); //        |||       New member should install newest snapshot
+        let t = get_time();
+        if let Membership::Leader(ref leader_meta) = meta.membership {//  ||| TODO: New member should install newest snapshot
+            let mut leader_meta = leader_meta.write().unwrap();
             self.reload_leader_meta( //                                   |||       and logs to get updated first before leader
                 &members_from_meta!(meta), //                             |||       add it to member list in configuration
-                &mut leader_meta, new_log_id //                           |||
-            ); //                                                         |||
-        } //                                                              |||
-        println!("CONF NB TIME: {}", get_time() - t);
+                &mut leader_meta, new_log_id
+            );
+        }
+        self.send_followers_heartbeat(meta, Some(new_log_id));
         data
     }
 }
