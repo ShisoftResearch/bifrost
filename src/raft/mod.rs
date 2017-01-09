@@ -443,32 +443,35 @@ impl RaftServer {
         }
         meta.workers.lock().unwrap().execute(move ||{
             let mut granted = 0;
+            let mut timeout = 2000;
+            let mut check_time = get_time();
             for _ in 0..members {
-                let received = rx.recv();
-                let mut meta = server.meta.write().unwrap();
-                if meta.term != term {break;}
-                match received {
-                    Ok(res) => {
-                        match res {
-                            RequestVoteResponse::TermOut(remote_term, remote_leader_id) => {
-                                server.become_follower(&mut meta, remote_term, remote_leader_id);
+                if timeout <= 0 {break;}
+                if let Ok(res)= rx.recv_timeout(Duration::from_millis(timeout as u64)) {
+                    let mut meta = server.meta.write().unwrap();
+                    if meta.term != term {break;}
+                    match res {
+                        RequestVoteResponse::TermOut(remote_term, remote_leader_id) => {
+                            server.become_follower(&mut meta, remote_term, remote_leader_id);
+                            break;
+                        },
+                        RequestVoteResponse::Granted => {
+                            granted += 1;
+                            if is_majority(members, granted) {
+                                server.become_leader(&mut meta, last_log_id);
                                 break;
-                            },
-                            RequestVoteResponse::Granted => {
-                                granted += 1;
-                                if is_majority(members, granted) {
-                                    server.become_leader(&mut meta, last_log_id);
-                                    break;
-                                }
-                            },
-                            _ => {}
-                        }
-                    },
-                    Err(_) => {}
+                            }
+                        },
+                        _ => {}
+                    }
                 }
+                let curr_time = get_time();
+                timeout -= get_time() - curr_time;
+                check_time = curr_time;
             }
         });
     }
+
     fn become_follower(&self, meta: &mut RwLockWriteGuard<RaftMeta>, term: u64, leader_id: u64) {
         meta.term = term;
         meta.leader_id = leader_id;
@@ -609,17 +612,17 @@ impl RaftServer {
                     let mut timeout = 2000 as i64; // assume client timeout is more than 2s　(5 by default)
                     let mut check_time = get_time();
                     for _ in 0..members {
-                        if timeout < 0 {timeout = 0}
+                        if timeout <= 0 {break;}
                         if let Ok(last_matched_id) = rx.recv_timeout(Duration::from_millis(timeout as u64)) { // adaptive
                             //println!("{}, {}", last_matched_id, log_id);
                             if last_matched_id >= log_id {
                                 updated_followers += 1;
                                 if is_majority(members, updated_followers) {break;}
                             }
-                            let current_time = get_time();
-                            timeout -= get_time() - current_time;
-                            check_time = current_time;
                         }
+                        let current_time = get_time();
+                        timeout -= get_time() - current_time;
+                        check_time = current_time;
                     }
                     leader_meta.last_updated = get_time();
                     is_majority(members, updated_followers)
