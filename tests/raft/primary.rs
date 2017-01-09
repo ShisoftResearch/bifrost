@@ -54,8 +54,10 @@ fn server_membership(){
     ));
     join_result.unwrap();
     assert_eq!(server1.num_members(), 3);
-    // will not check in server2 because it is a log replication problem
     assert_eq!(server3.num_members(), 3);
+
+    // check in server2. Although it is a log replication problem but membership changes should take effect immediately
+    assert_eq!(server2.num_members(), 3);
 }
 
 #[test]
@@ -121,8 +123,6 @@ fn log_replication(){
     assert_eq!(server4.num_logs(), server5.num_logs());
     assert_eq!(server5.num_logs(), 4); // check all logs replicated
 
-    wait();
-    wait();
     wait();
 
     assert_eq!(server1.leader_id(), server1.id);
