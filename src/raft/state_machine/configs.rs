@@ -11,7 +11,6 @@ pub struct RaftMember {
     pub rpc: Arc<Mutex<SyncClient>>,
     pub address: String,
     pub id: u64,
-    alive: bool,
 }
 
 pub struct Configures {
@@ -42,7 +41,6 @@ impl StateMachineCmds for Configures {
                         rpc: Arc::new(Mutex::new(client)),
                         address: address,
                         id: id,
-                        alive: true,
                     });
                     return Ok(());
                 },
@@ -108,5 +106,8 @@ impl Configures {
     }
     pub fn del_member(&mut self, address: String) -> Result<(),()> {
         self.del_member_(address)
+    }
+    pub fn member_existed(&self, id: u64) -> bool {
+        self.members.contains_key(&id)
     }
 }

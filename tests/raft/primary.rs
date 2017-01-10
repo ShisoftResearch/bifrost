@@ -58,6 +58,16 @@ fn server_membership(){
 
     // check in server2. Although it is a log replication problem but membership changes should take effect immediately
     assert_eq!(server2.num_members(), 3);
+
+    // test remove member
+    assert!(server2.leave());
+    assert_eq!(server1.num_members(), 2);
+    assert_eq!(server3.num_members(), 2);
+
+    //test remove leader
+    assert_eq!(server1.leader_id(), server1.id);
+    assert!(server1.leave());
+    assert_eq!(server3.num_members(), 1);
 }
 
 #[test]

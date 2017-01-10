@@ -10,16 +10,18 @@ use std::cmp::{min, max};
 use std::borrow::BorrowMut;
 use std::sync::mpsc::channel;
 use self::state_machine::OpType;
-use self::state_machine::master::{MasterStateMachine, StateMachineCmds, ExecResult};
+use self::state_machine::master::{
+    MasterStateMachine, StateMachineCmds, ExecResult,
+    ExecError, SubStateMachine};
 use self::state_machine::configs::Configures;
+use self::state_machine::configs::{CONFIG_SM_ID, RaftMember};
+use self::state_machine::configs::commands::{new_member_, del_member_, member_address};
+use self::client::RaftClient;
 use bifrost_hasher::hash_str;
 use utils::time::get_time;
 use threadpool::ThreadPool;
 use num_cpus;
-use self::client::RaftClient;
-use self::state_machine::configs::{CONFIG_SM_ID, RaftMember};
-use self::state_machine::configs::commands::{new_member_, member_address};
-use self::state_machine::master::{ExecError, SubStateMachine};
+use self::client::ClientError;
 use std::fmt;
 
 #[macro_use]
@@ -86,6 +88,7 @@ service! {
     rpc c_command(entry: LogEntry) -> ClientCmdResponse;
     rpc c_query(entry: LogEntry) -> ClientQryResponse;
     rpc c_server_cluster_info() -> ClientClusterInfo;
+    rpc c_put_offline() -> bool;
 }
 
 fn gen_rand(lower: i64, higher: i64) -> i64 {
@@ -350,6 +353,47 @@ impl RaftServer {
             result
         } else {
             Err(ExecError::CannotConstructClient)
+        }
+    }
+    pub fn leave(&self) -> bool {
+        {
+            let mut meta = self.meta.write().unwrap();
+            if is_leader(&meta) {
+                if !self.send_followers_heartbeat(&mut meta, None) {
+                    return false;
+                }
+            }
+            meta.membership = Membership::Offline;
+        }
+        let addresses = self.cluster_info().members.iter()
+            .map(|&(_, ref address)|{
+                address.clone()
+            }).collect();
+        if let Ok(client) = RaftClient::new(addresses) {
+            client.execute(
+                CONFIG_SM_ID,
+                &del_member_{address: self.options.address.clone()}
+            );
+            true
+        } else {
+            false
+        }
+    }
+    pub fn cluster_info(&self) -> ClientClusterInfo {
+        let meta = self.meta.read().unwrap();
+        let logs = meta.logs.read().unwrap();
+        let sm = &meta.state_machine.read().unwrap();
+        let sm_members = sm.members();
+        let mut members = Vec::new();
+        for (id, member) in sm_members.iter(){
+            members.push((*id, member.address.clone()))
+        }
+        let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
+        ClientClusterInfo{
+            members: members,
+            last_log_id: last_log_id,
+            last_log_term: last_log_term,
+            leader_id: meta.leader_id,
         }
     }
     pub fn num_members(&self) -> usize {
@@ -772,7 +816,9 @@ impl Server for RaftServer {
         if term >= meta.term {
             check_commit!(meta);
             let logs = meta.logs.read().unwrap();
-            if vote_for.is_none() || vote_for.unwrap() == candidate_id {
+            let conf_sm = &meta.state_machine.read().unwrap().configs;
+            if (vote_for.is_none() || vote_for.unwrap() == candidate_id)
+                && conf_sm.member_existed(candidate_id){
                 if !logs.is_empty() {
                     let (last_id, last_term) = get_last_log_info!(self, logs);
                     if last_log_id >= last_id && last_log_term >= last_term {
@@ -839,21 +885,10 @@ impl Server for RaftServer {
         }
     }
     fn c_server_cluster_info(&self) -> Result<ClientClusterInfo, ()> {
-        let mut meta = self.meta.read().unwrap();
-        let logs = meta.logs.read().unwrap();
-        let sm = &meta.state_machine.read().unwrap();
-        let sm_members = sm.members();
-        let mut members = Vec::new();
-        for (id, member) in sm_members.iter(){
-            members.push((*id, member.address.clone()))
-        }
-        let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
-        Ok(ClientClusterInfo{
-            members: members,
-            last_log_id: last_log_id,
-            last_log_term: last_log_term,
-            leader_id: meta.leader_id,
-        })
+        Ok(self.cluster_info())
+    }
+    fn c_put_offline(&self) -> Result<bool, ()> {
+        Ok(self.leave())
     }
 }
 
