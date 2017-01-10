@@ -219,6 +219,13 @@ fn is_leader(meta: &RwLockWriteGuard<RaftMeta>) -> bool {
         _ => {false}
     }
 }
+fn alter_term(meta: &mut RwLockWriteGuard<RaftMeta>, term: u64) {
+    if meta.term != term {
+        meta.term = term;
+        meta.vote_for = None;
+    }
+}
+
 
 impl RaftServer {
     pub fn new(opts: Options) -> Option<Arc<RaftServer>> {
@@ -459,7 +466,8 @@ impl RaftServer {
     }
     fn become_candidate(server: Arc<RaftServer>, meta: &mut RwLockWriteGuard<RaftMeta>) {
         server.reset_last_checked(meta);
-        meta.term += 1;
+        let term = meta.term;
+        alter_term(meta, term + 1);
         meta.vote_for = Some(server.id);
         server.switch_membership(meta, Membership::Candidate);
         let term = meta.term;
@@ -472,18 +480,22 @@ impl RaftServer {
             let rpc = member.rpc.clone();
             let tx = tx.clone();
             members += 1;
-            meta.workers.lock().unwrap().execute(move||{
-                let mut rpc = rpc.lock().unwrap();
-                if let Ok(Ok(((remote_term, remote_leader_id), vote_granted))) = rpc.request_vote(term, id, last_log_id, last_log_term) {
-                    if vote_granted {
-                        tx.send(RequestVoteResponse::Granted);
-                    } else if remote_term > term {
-                        tx.send(RequestVoteResponse::TermOut(remote_term, remote_leader_id));
-                    } else {
-                        tx.send(RequestVoteResponse::NotGranted);
+            if member.id == server.id {
+                tx.send(RequestVoteResponse::Granted);
+            } else {
+                meta.workers.lock().unwrap().execute(move||{
+                    let mut rpc = rpc.lock().unwrap();
+                    if let Ok(Ok(((remote_term, remote_leader_id), vote_granted))) = rpc.request_vote(term, id, last_log_id, last_log_term) {
+                        if vote_granted {
+                            tx.send(RequestVoteResponse::Granted);
+                        } else if remote_term > term {
+                            tx.send(RequestVoteResponse::TermOut(remote_term, remote_leader_id));
+                        } else {
+                            tx.send(RequestVoteResponse::NotGranted);
+                        }
                     }
-                }
-            });
+                });
+            }
         }
         meta.workers.lock().unwrap().execute(move ||{
             let mut granted = 0;
@@ -513,11 +525,12 @@ impl RaftServer {
                 timeout -= get_time() - curr_time;
                 check_time = curr_time;
             }
+            println!("GRANTED: {}/{}", granted, members);
         });
     }
 
     fn become_follower(&self, meta: &mut RwLockWriteGuard<RaftMeta>, term: u64, leader_id: u64) {
-        meta.term = term;
+        alter_term(meta, term);
         meta.leader_id = leader_id;
         self.switch_membership(meta, Membership::Follower);
     }
@@ -678,8 +691,6 @@ impl RaftServer {
     //check term number, return reject = false if server term is stale
     fn check_term(&self, meta: &mut RwLockWriteGuard<RaftMeta>, remote_term: u64, leader_id: u64) -> bool {
         if remote_term > meta.term {
-            meta.term = remote_term;
-            meta.vote_for = None;
             self.become_follower(meta, remote_term, leader_id)
         } else if remote_term < meta.term {
             return false;
@@ -813,25 +824,32 @@ impl Server for RaftServer {
         let mut meta = self.meta.write().unwrap();
         let vote_for = meta.vote_for;
         let mut vote_granted = false;
-        if term >= meta.term {
+        if term > meta.term {
             check_commit!(meta);
             let logs = meta.logs.read().unwrap();
             let conf_sm = &meta.state_machine.read().unwrap().configs;
-            if (vote_for.is_none() || vote_for.unwrap() == candidate_id)
-                && conf_sm.member_existed(candidate_id){
-                if !logs.is_empty() {
-                    let (last_id, last_term) = get_last_log_info!(self, logs);
-                    if last_log_id >= last_id && last_log_term >= last_term {
-                        vote_granted = true;
-                    }
+            let candidate_valid = conf_sm.member_existed(candidate_id);
+            println!("{} VOTE FOR: {}, valid: {}", self.id, candidate_id, candidate_valid);
+            if (vote_for.is_none() || vote_for.unwrap() == candidate_id) && candidate_valid{
+                let (last_id, last_term) = get_last_log_info!(self, logs);
+                if last_log_id >= last_id && last_log_term >= last_term {
+                    vote_granted = true;
                 } else {
-                    vote_granted = false;
+                    println!("{} VOTE FOR: {}, not granted due to log check", self.id, candidate_id);
                 }
+            } else {
+                println!(
+                    "{} VOTE FOR: {}, not granted due to voted for {}",
+                    self.id, candidate_id, vote_for.unwrap()
+                );
             }
+        } else {
+            println!("{} VOTE FOR: {}, not granted due to term out", self.id, candidate_id);
         }
         if vote_granted {
             meta.vote_for = Some(candidate_id);
         }
+        println!("{} VOTE FOR: {}, granted: {}", self.id, candidate_id, vote_granted);
         Ok(((meta.term, meta.leader_id), vote_granted))
     }
 

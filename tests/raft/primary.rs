@@ -67,6 +67,8 @@ fn server_membership(){
     //test remove leader
     assert_eq!(server1.leader_id(), server1.id);
     assert!(server1.leave());
+    wait(); // there will be some unavailability in leader transaction
+    assert_eq!(server3.leader_id(), server3.id);
     assert_eq!(server3.num_members(), 1);
 }
 
