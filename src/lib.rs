@@ -20,10 +20,10 @@ extern crate mio;
 extern crate byteorder;
 
 extern crate tokio_core;
-extern crate tokio_proto;
 extern crate tokio_service;
-extern crate tokio_middleware;
+extern crate tokio_proto;
 extern crate tokio_timer;
+extern crate tokio_middleware;
 extern crate futures;
 
 extern crate bincode;

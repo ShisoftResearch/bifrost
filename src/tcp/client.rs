@@ -33,7 +33,7 @@ impl Service for ClientCore {
     // Again for simplicity, we are just going to box a future
     type Future = Box<Future<Item = Self::Response, Error = io::Error>>;
 
-    fn call(&mut self, req: Self::Request) -> Self::Future {
+    fn call(&self, req: Self::Request) -> Self::Future {
         self.inner.call(req).boxed()
     }
 }
