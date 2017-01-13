@@ -9,13 +9,7 @@ use syntax::tokenstream::TokenTree;
 use syntax::ext::base::{ExtCtxt, MacResult, DummyResult, MacEager};
 use syntax::ext::build::AstBuilder;  // trait for expr_usize
 use syntax::ext::quote::rt::Span;
-use syntax::ast::{self, Ident, TraitRef, Ty, TyKind};
-use syntax::ast::LitKind::Str;
-use syntax::ast::MetaItemKind::NameValue;
-use syntax::parse::{self, token, PResult};
-use syntax::parse::parser::{Parser, PathStyle};
-use syntax::ptr::P;
-use syntax::util::small_vector::SmallVector;
+use syntax::parse::token;
 use rustc_plugin::Registry;
 use bifrost_hasher::hash_str;
 
