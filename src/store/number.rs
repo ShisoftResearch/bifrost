@@ -1,3 +1,4 @@
+#[macro_export]
 macro_rules! def_store_number {
     ($m: ident, $t: ty) => {
         pub mod $m {
