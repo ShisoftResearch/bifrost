@@ -365,15 +365,6 @@ impl RaftServer {
         }
     }
     pub fn leave(&self) -> bool {
-        {
-            let mut meta = self.write_meta();
-            if is_leader(&meta) {
-                if !self.send_followers_heartbeat(&mut meta, None) {
-                    return false;
-                }
-            }
-            meta.membership = Membership::Offline;
-        }
         let addresses = self.cluster_info().members.iter()
             .map(|&(_, ref address)|{
                 address.clone()
@@ -383,10 +374,17 @@ impl RaftServer {
                 CONFIG_SM_ID,
                 &del_member_{address: self.options.address.clone()}
             );
-            true
         } else {
-            false
+            return false
         }
+        let mut meta = self.write_meta();
+        if is_leader(&meta) {
+            if !self.send_followers_heartbeat(&mut meta, None) {
+                return false;
+            }
+        }
+        meta.membership = Membership::Offline;
+        return true;
     }
     pub fn cluster_info(&self) -> ClientClusterInfo {
         let meta = self.meta.read().unwrap();
