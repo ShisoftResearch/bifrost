@@ -1,8 +1,7 @@
 use bifrost::raft::*;
 use bifrost::raft::state_machine::master::ExecError;
-use super::wait;
-use flame;
 use std::fs::File;
+use super::wait;
 
 #[test]
 fn startup(){

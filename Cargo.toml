@@ -28,10 +28,9 @@ threadpool = "1.0"
 num_cpus = "1.0"
 
 tokio-core = "0.1"
-tokio-proto = { git = "https://github.com/tokio-rs/tokio-proto" }
-tokio-service = { git = "https://github.com/tokio-rs/tokio-service" }
+tokio-proto = "0.1"
+tokio-service = "0.1"
+tokio-timer = "0.1"
 tokio-middleware = { git = "https://github.com/tokio-rs/tokio-middleware" }
-tokio-timer = { git = "https://github.com/tokio-rs/tokio-timer" }
 
 [dev-dependencies]
-flame = "^0.1"
