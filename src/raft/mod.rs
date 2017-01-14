@@ -293,7 +293,7 @@ impl RaftServer {
                             let timeout_elapsed = current_time - timeout_time;
                             if  meta.vote_for == None && timeout_elapsed > 0 { // TODO: in my test sometimes timeout_elapsed may go 1 for no reason, require investigation
                                 //Timeout, require election
-                                println!("TIMEOUT!!! GOING TO CANDIDATE!!! {}, {}", server_id, timeout_elapsed);
+                                //println!("TIMEOUT!!! GOING TO CANDIDATE!!! {}, {}", server_id, timeout_elapsed);
                                 CheckerAction::BecomeCandidate
                             } else {
                                 CheckerAction::None
@@ -533,7 +533,7 @@ impl RaftServer {
                 timeout -= get_time() - curr_time;
                 check_time = curr_time;
             }
-            println!("GRANTED: {}/{}", granted, members);
+            //println!("GRANTED: {}/{}", granted, members);
         });
     }
 
