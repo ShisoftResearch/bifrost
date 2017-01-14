@@ -13,6 +13,12 @@ macro_rules! trait_fn {
         fn $fn_name(&mut self, $($arg:$in_),*) -> return_type!($out, $error);
     };
 }
+macro_rules! client_fn {
+    ($fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty $body:block) => {
+        fn $fn_name(&self, $($arg:$in_),*)
+        -> Result<return_type!($out, $error), ExecError> $body
+    };
+}
 
 macro_rules! fn_op_type {
     (qry) => {$crate::raft::state_machine::OpType::QUERY};
@@ -208,6 +214,36 @@ macro_rules! raft_state_machine {
                    }
                }
            }
+        }
+        pub mod client {
+            use std::sync::Arc;
+            use $crate::raft::state_machine::master::ExecError;
+            use $crate::raft::client::RaftClient;
+            use self::commands::*;
+            use super::*;
+
+            pub struct SMClient {
+                client: Arc<RaftClient>,
+                sm_id: u64
+            }
+            impl SMClient {
+               $(
+                  $(#[$attr])*
+                  pub fn $fn_name(&self, $($arg:$in_),*)
+                  -> Result<return_type!($out, $error), ExecError> {
+                      self.client.execute(
+                          self.sm_id,
+                          &$fn_name{$($arg:$arg),*}
+                      )
+                  }
+               )*
+               pub fn new(sm_id: u64, client: &Arc<RaftClient>) -> SMClient {
+                    SMClient {
+                        client: client.clone(),
+                        sm_id: sm_id
+                    }
+               }
+            }
         }
     };
 }

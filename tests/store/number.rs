@@ -12,6 +12,7 @@ mod u32 {
         get_and_divide, divide_and_get,
         compare_and_swap, swap
     };
+    use bifrost::store::number::U32::client::SMClient;
 
     #[test]
     fn test(){
@@ -30,9 +31,10 @@ mod u32 {
         server.bootstrap();
 
         let client = RaftClient::new(vec!(addr)).unwrap();
-        assert_eq!(client.execute(sm_id, &get{}).unwrap().unwrap(), 0);
-        client.execute(sm_id, &set{n: 1}).unwrap().unwrap();
-        assert_eq!(client.execute(sm_id, &get{}).unwrap().unwrap(), 1);
+        let sm_client = SMClient::new(sm_id, &client);
+        assert_eq!(sm_client.get().unwrap().unwrap(), 0);
+        sm_client.set(1).unwrap().unwrap();
+        assert_eq!(sm_client.get().unwrap().unwrap(), 1);
         assert_eq!(client.execute(sm_id, &get_and_add{n: 2}).unwrap().unwrap(), 1);
         assert_eq!(client.execute(sm_id, &add_and_get{n: 3}).unwrap().unwrap(), 6);
         assert_eq!(client.execute(sm_id, &get_and_minus{n: 4}).unwrap().unwrap(), 6);

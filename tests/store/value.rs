@@ -1,7 +1,7 @@
 use bifrost::raft::*;
 use bifrost::raft::client::RaftClient;
 use bifrost::store::value::string;
-use bifrost::store::value::string::commands::{set, get};
+use bifrost::store::value::string::client::SMClient;
 
 #[test]
 fn string(){
@@ -22,13 +22,14 @@ fn string(){
     server.bootstrap();
 
     let client = RaftClient::new(vec!(addr)).unwrap();
+    let sm_client = SMClient::new(sm_id, &client);
     assert_eq!(
-        client.execute(sm_id, &get{}).unwrap().unwrap(),
+        sm_client.get().unwrap().unwrap(),
         original_string.clone()
     );
-    client.execute(sm_id, &set{v: altered_string.clone()}).unwrap().unwrap();
+    sm_client.set(altered_string.clone()).unwrap().unwrap();
     assert_eq!(
-        client.execute(sm_id, &get{}).unwrap().unwrap(),
+        sm_client.get().unwrap().unwrap(),
         altered_string.clone()
     );
 }

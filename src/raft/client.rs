@@ -9,6 +9,7 @@ use std::iter::FromIterator;
 use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::cell::RefCell;
+use std::sync::Arc;
 use bifrost_hasher::hash_str;
 use rand;
 
@@ -38,7 +39,7 @@ pub struct RaftClient {
 }
 
 impl RaftClient {
-    pub fn new(servers: Vec<String>) -> Result<RaftClient, ClientError> {
+    pub fn new(servers: Vec<String>) -> Result<Arc<RaftClient>, ClientError> {
         let mut client = RaftClient {
             qry_meta: QryMeta {
                 pos: AtomicU64::new(rand::random::<u64>())
@@ -59,7 +60,7 @@ impl RaftClient {
             )
         };
         match init {
-            Ok(_) => Ok(client),
+            Ok(_) => Ok(Arc::new(client)),
             Err(e) => Err(e)
         }
     }
