@@ -33,7 +33,7 @@ pub trait RaftMsg<R> {
     fn decode_return(&self, data: &Vec<u8>) -> R;
 }
 
-const CHECKER_MS: i64 = 50;
+const CHECKER_MS: i64 = 10;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LogEntry {
@@ -125,6 +125,7 @@ pub enum Membership {
     Follower,
     Candidate,
     Offline,
+    Undefined,
 }
 
 pub struct RaftMeta {
@@ -236,9 +237,9 @@ impl RaftServer {
                 RaftMeta {
                     term: 0, //TODO: read from persistent state
                     vote_for: None, //TODO: read from persistent state
-                    timeout: gen_timeout() * 10, // it have to be larger than normal for follower bootstrap
+                    timeout: gen_timeout(),
                     last_checked: get_time(),
-                    membership: Membership::Follower,
+                    membership: Membership::Undefined,
                     logs: Arc::new(RwLock::new(BTreeMap::new())), //TODO: read from persistent state
                     state_machine: RwLock::new(MasterStateMachine::new()),
                     commit_index: 0,
@@ -300,7 +301,8 @@ impl RaftServer {
                         },
                         Membership::Offline => {
                             CheckerAction::ExitLoop
-                        }
+                        },
+                        Membership::Undefined => CheckerAction::None
                     };
                     match action {
                         CheckerAction::SendHeartbeat => {
@@ -329,18 +331,16 @@ impl RaftServer {
         Some(server)
     }
     pub fn bootstrap(&self) {
-        {
-            let mut meta = self.meta.write().unwrap();
-            let (last_log_id, _) = {
-                let logs = meta.logs.read().unwrap();
-                get_last_log_info!(self, logs)
-            };
-            self.become_leader(&mut meta, last_log_id);
-        }
+        let mut meta = self.write_meta();
+        let (last_log_id, _) = {
+            let logs = meta.logs.read().unwrap();
+            get_last_log_info!(self, logs)
+        };
+        self.become_leader(&mut meta, last_log_id);
     }
     pub fn join(&self, addresses: Vec<String>)
         -> Result<Result<(), ()>, ExecError> {
-        let mut meta = self.meta.write().unwrap();
+        println!("Trying to join cluster with id {}", self.id);
         let client = RaftClient::new(addresses);
         if let Ok(client) = client {
             let result = client.execute(
@@ -351,12 +351,14 @@ impl RaftServer {
                 CONFIG_SM_ID,
                 &member_address{}
             );
+            let mut meta = self.write_meta();
             if let Ok(Ok(members)) = members {
                 for member in members {
                     meta.state_machine.write().unwrap().configs.new_member(member);
                 }
             }
-            meta.leader_id = client.current_leader_id();
+            self.reset_last_checked(&mut meta);
+            self.become_follower(&mut meta, 0, client.current_leader_id());
             result
         } else {
             Err(ExecError::CannotConstructClient)
@@ -364,7 +366,7 @@ impl RaftServer {
     }
     pub fn leave(&self) -> bool {
         {
-            let mut meta = self.meta.write().unwrap();
+            let mut meta = self.write_meta();
             if is_leader(&meta) {
                 if !self.send_followers_heartbeat(&mut meta, None) {
                     return false;
@@ -464,6 +466,14 @@ impl RaftServer {
             self.insert_leader_follower_meta(leader_meta, last_log_id, member.id);
         }
     }
+    fn write_meta(&self) -> RwLockWriteGuard<RaftMeta> {
+//        let t = get_time();
+        let lock_mon = self.meta.write().unwrap();
+//        let acq_time = get_time() - t;
+//        println!("Meta write locked acquired for {}ms for {}, leader {}", acq_time, self.id, lock_mon.leader_id);
+        lock_mon
+    }
+
     fn become_candidate(server: Arc<RaftServer>, meta: &mut RwLockWriteGuard<RaftMeta>) {
         server.reset_last_checked(meta);
         let term = meta.term;
@@ -751,7 +761,7 @@ impl Server for RaftServer {
         entries: Option<LogEntries>,
         leader_commit: u64
     ) -> Result<(u64, AppendEntriesResult), ()>  {
-        let mut meta = self.meta.write().unwrap();
+        let mut meta = self.write_meta();
         self.reset_last_checked(&mut meta);
         let term_ok = self.check_term(&mut meta, term, leader_id); // RI, 1
         let result = if term_ok {
@@ -821,7 +831,7 @@ impl Server for RaftServer {
         term: u64, candidate_id: u64,
         last_log_id: u64, last_log_term: u64
     ) -> Result<((u64, u64), bool), ()> {
-        let mut meta = self.meta.write().unwrap();
+        let mut meta = self.write_meta();
         let vote_for = meta.vote_for;
         let mut vote_granted = false;
         if term > meta.term {
@@ -858,7 +868,7 @@ impl Server for RaftServer {
         term: u64, leader_id: u64, last_included_index: u64,
         last_included_term: u64, data: Vec<u8>, done: bool
     ) -> Result<u64, ()> {
-        let mut meta = self.meta.write().unwrap();
+        let mut meta = self.write_meta();
         let term_ok = self.check_term(&mut meta, term, leader_id);
         if term_ok {
             check_commit!(meta);
@@ -867,7 +877,7 @@ impl Server for RaftServer {
     }
 
     fn c_command(&self, mut entry: LogEntry) -> Result<ClientCmdResponse, ()> {
-        let mut meta = self.meta.write().unwrap();
+        let mut meta = self.write_meta();
         if !is_leader(&meta) {
             Ok(ClientCmdResponse::NotLeader(meta.leader_id))
         } else {

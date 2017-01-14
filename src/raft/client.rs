@@ -79,12 +79,10 @@ impl RaftClient {
             }
             let mut client = members.clients.get(&id).unwrap();
             if let Ok(Ok(info)) = client.lock().unwrap().c_server_cluster_info() {
-                if info.leader_id == 0 {
-                    panic!("server leader id invalid: {}", info.leader_id); //TODO: Remove this line after test
-                    return Err(ClientError::LeaderIdValid)
+                if info.leader_id != 0 {
+                    cluster_info = Some(info);
+                    break;
                 }
-                cluster_info = Some(info);
-                break;
             }
         }
         match cluster_info {
