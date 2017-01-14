@@ -21,6 +21,7 @@ Bifrost will ship with it's own reliable data store based on [raft consensus alg
     - [x] Leader election
     - [x] Log replication
     - [x] Master/subs state machine framework
+    - [x] State machine client
     - [ ] Master state machine snapshot
         - [x] Generate
         - [x] Install
@@ -36,8 +37,8 @@ Bifrost will ship with it's own reliable data store based on [raft consensus alg
             - [x] Delete Member
             - [x] Snapshot
             - [x] Recover
-        - [ ] Interfaces
-        - [ ] Update procedures
+        - [X] Interfaces
+        - [X] Update procedures
     - [ ] Cluster bootstrap
     - [ ] Client
         - [x] Command 
@@ -53,7 +54,7 @@ Bifrost will ship with it's own reliable data store based on [raft consensus alg
         - [ ] Snapshot
         - [ ] Membership changes
             - [x] New member
-            - [ ] Delete member
+            - [x] Delete member
         - [ ] Safety
         - [ ] Stress and benchmark
         - [ ] Stress + Safety
