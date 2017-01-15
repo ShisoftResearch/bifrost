@@ -17,6 +17,7 @@ Bifrost will ship with it's own reliable data store based on [raft consensus alg
     - [x] Event driven server
     - [x] Sync client
     - [ ] Async client
+    - [ ] Pluggable services
 - [ ] Raft (data replication)
     - [x] Leader election
     - [x] Log replication
