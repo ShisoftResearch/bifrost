@@ -21,7 +21,9 @@ Bifrost will ship with it's own reliable data store based on [raft consensus alg
     - [x] Leader election
     - [x] Log replication
     - [x] Master/subs state machine framework
-    - [x] State machine client
+    - [ ] State machine client
+        - [x] Sync
+        - [ ] PubSub
     - [ ] Master state machine snapshot
         - [x] Generate
         - [x] Install
