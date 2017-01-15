@@ -7,7 +7,7 @@ macro_rules! def_store_hash_map {
             use std::collections::HashMap;
             pub struct Map {
                 map: HashMap<$kt, $vt>,
-                id: u64
+                pub id: u64
             }
             raft_state_machine! {
                 def qry get(k: $kt) -> Option<$vt>;
@@ -82,8 +82,20 @@ macro_rules! def_store_hash_map {
                 }
                 fn id(&self) -> u64 {self.id}
             }
+            impl Map {
+                pub fn new(id: u64) -> Map {
+                    Map {
+                        map: HashMap::new(),
+                        id: id,
+                    }
+                }
+                pub fn new_by_name(name: String) -> Map {
+                    Map::new(hash_str(name))
+                }
+            }
         }
     };
 }
 
 def_store_hash_map!(string_u8vec_hashmap <String, Vec<u8>>);
+def_store_hash_map!(string_string_hashmap <String, String>);
