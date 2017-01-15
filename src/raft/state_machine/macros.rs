@@ -173,7 +173,6 @@ macro_rules! raft_state_machine {
                         deserialize!(data)
                     }
                 }
-
             )*
         }
         pub trait StateMachineCmds: $crate::raft::state_machine::StateMachineCtl {
