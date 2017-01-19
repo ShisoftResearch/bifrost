@@ -10,6 +10,15 @@ macro_rules! deserialize {
     ($e:expr) => {bincode::deserialize($e).unwrap()};
 }
 
+#[macro_export]
+macro_rules! dispatch_rpc_service_functions {
+    () => {
+        fn dispatch(&self, data: Vec<u8>) -> Vec<u8> {
+            self.inner_dispatch(data)
+        }
+    };
+}
+
 // this macro expansion design took credits from tarpc by Google Inc.
 #[macro_export]
 macro_rules! service {
@@ -108,9 +117,9 @@ macro_rules! service {
         use std;
         use byteorder::{ByteOrder, LittleEndian};
         use bincode::{SizeLimit, serde as bincode};
-        use std::sync::Arc;
         use std::time::Duration;
         use std::io;
+        use $crate::rpc::RPCService;
 
         mod rpc_args {
             #[allow(unused_variables)]
@@ -125,27 +134,26 @@ macro_rules! service {
                 }
             )*
         }
-        pub trait Server: Sync + Send {
+        pub trait Service: RPCService {
            $(
                 $(#[$attr])*
                 fn $fn_name(&self, $($arg:$in_),*) -> std::result::Result<$out, $error>;
            )*
-        }
-        fn listen(server: Arc<Server>, addr: &String) {
-           $crate::tcp::server::Server::new(addr, Box::new(move |data| {
-                    let func_id = LittleEndian::read_u64(&data);
-                    let body: Vec<u8> = data.iter().skip(8).cloned().collect();
-                    match func_id as usize {
-                        $(hash_ident!($fn_name) => {
-                            let decoded: rpc_args::$fn_name = deserialize!(&body);
-                            let f_result = server.$fn_name($(decoded.$arg),*);
-                            serialize!(&f_result)
-                        }),*
-                        _ => {
-                            panic!("func_id not found, maybe version mismatch: {}", func_id)
-                        }
-                    }
-            }));
+           fn inner_dispatch(&self, data: Vec<u8>) -> Vec<u8> {
+               let func_id = LittleEndian::read_u64(&data);
+               let body: Vec<u8> = data.iter().skip(8).cloned().collect();
+               match func_id as usize {
+                   $(hash_ident!($fn_name) => {
+                       let decoded: rpc_args::$fn_name = deserialize!(&body);
+                       let f_result = self.$fn_name($(decoded.$arg),*);
+                       serialize!(&f_result)
+                   }),*
+                   _ => {
+                       panic!("func_id not found, maybe version mismatch: {}", func_id)
+                   }
+               }
+           }
+
         }
         mod encoders {
             use bincode::{SizeLimit, serde as bincode};

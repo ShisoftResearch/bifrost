@@ -5,7 +5,7 @@ use super::wait;
 
 #[test]
 fn startup(){
-    let server = RaftServer::new(Options {
+    let server = RaftService::new(Options {
         storage: Storage::Default(),
         address: String::from("127.0.0.1:2000"),
     });
@@ -17,7 +17,7 @@ fn server_membership(){
     let s1_addr = String::from("127.0.0.1:2001");
     let s2_addr = String::from("127.0.0.1:2002");
     let s3_addr = String::from("127.0.0.1:2003");
-    let server1 = RaftServer::new(Options {
+    let server1 = RaftService::new(Options {
         storage: Storage::Default(),
         address: s1_addr.clone(),
     });
@@ -25,7 +25,7 @@ fn server_membership(){
     let server1 = server1.unwrap();
     server1.bootstrap();
     assert_eq!(server1.num_members(), 1);
-    let server2 = RaftServer::new(Options {
+    let server2 = RaftService::new(Options {
         storage: Storage::Default(),
         address: s2_addr.clone(),
     });
@@ -41,7 +41,7 @@ fn server_membership(){
     assert!(join_result.is_ok());
     assert_eq!(server1.num_members(), 2);
     assert_eq!(server2.num_members(), 2);
-    let server3 = RaftServer::new(Options {
+    let server3 = RaftService::new(Options {
         storage: Storage::Default(),
         address: s3_addr.clone(),
     });
@@ -78,15 +78,15 @@ fn log_replication(){
     let s3_addr = String::from("127.0.0.1:2006");
     let s4_addr = String::from("127.0.0.1:2007");
     let s5_addr = String::from("127.0.0.1:2008");
-    let server1 = RaftServer::new(Options {
+    let server1 = RaftService::new(Options {
         storage: Storage::Default(),
         address: s1_addr.clone(),
     }).unwrap();
-    let server2 = RaftServer::new(Options {
+    let server2 = RaftService::new(Options {
         storage: Storage::Default(),
         address: s2_addr.clone(),
     }).unwrap();
-    let server3 = RaftServer::new(Options {
+    let server3 = RaftService::new(Options {
         storage: Storage::Default(),
         address: s3_addr.clone(),
     }).unwrap();
@@ -104,7 +104,7 @@ fn log_replication(){
     ));
     join_result.unwrap();
 
-    let server4 = RaftServer::new(Options {
+    let server4 = RaftService::new(Options {
         storage: Storage::Default(),
         address: s4_addr.clone(),
     }).unwrap();
@@ -114,7 +114,7 @@ fn log_replication(){
         s3_addr.clone(),
     ));
     join_result.unwrap();
-    let server5 = RaftServer::new(Options {
+    let server5 = RaftService::new(Options {
         storage: Storage::Default(),
         address: s5_addr.clone(),
     }).unwrap();

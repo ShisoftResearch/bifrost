@@ -2,7 +2,7 @@ use rand;
 use rand::Rng;
 use rand::distributions::{IndependentSample, Range};
 use std::thread;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Mutex, MutexGuard};
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Mutex, MutexGuard, Arc};
 use std::collections::{BTreeMap, HashMap};
 use std::collections::Bound::{Included, Unbounded};
 use std::cell::RefCell;
@@ -160,7 +160,7 @@ pub struct Options {
     pub address: String,
 }
 
-pub struct RaftServer {
+pub struct RaftService {
     meta: RwLock<RaftMeta>,
     pub id: u64,
     pub options: Options,
@@ -228,11 +228,11 @@ fn alter_term(meta: &mut RwLockWriteGuard<RaftMeta>, term: u64) {
 }
 
 
-impl RaftServer {
-    pub fn new(opts: Options) -> Option<Arc<RaftServer>> {
+impl RaftService {
+    pub fn new(opts: Options) -> Option<Arc<RaftService>> {
         let server_address = opts.address.clone();
         let server_id = hash_str(server_address.clone());
-        let server_obj = RaftServer {
+        let server_obj = RaftService {
             meta: RwLock::new(
                 RaftMeta {
                     term: 0, //TODO: read from persistent state
@@ -253,12 +253,10 @@ impl RaftServer {
             id: server_id,
             options: opts,
         };
-        let server = Arc::new(server_obj);
-        let svr_ref = server.clone();
-        let server_address2 = server_address.clone();
-        thread::spawn(move ||{
-            listen(svr_ref, &server_address) ;
-        });
+        Some(Arc::new(server_obj))
+    }
+    pub fn start(server: &Arc<RaftService>) -> bool {
+        let server_address = server.options.address.clone();
         info!("Waiting for server to be initialized");
         {
             let start_time = get_time();
@@ -266,13 +264,13 @@ impl RaftServer {
             let mut sm = meta.state_machine.write().unwrap();
             let mut inited = false;
             while get_time() < start_time + 5000 { //waiting for 5 secs
-                if let Ok(_) = sm.configs.new_member(server_address2.clone()) {
+                if let Ok(_) = sm.configs.new_member(server_address.clone()) {
                     inited = true;
                     break;
                 }
             }
             if !inited {
-                return None;
+                return false;
             }
         }
         let checker_ref = server.clone();
@@ -309,7 +307,7 @@ impl RaftServer {
                             server.send_followers_heartbeat(&mut meta, None);
                         },
                         CheckerAction::BecomeCandidate => {
-                            RaftServer::become_candidate(server.clone(), &mut meta);
+                            RaftService::become_candidate(server.clone(), &mut meta);
                         },
                         CheckerAction::ExitLoop => {
                             break;
@@ -328,7 +326,7 @@ impl RaftServer {
             let mut meta = server.meta.write().unwrap();
             meta.last_checked = get_time();
         }
-        Some(server)
+        return true;
     }
     pub fn bootstrap(&self) {
         let mut meta = self.write_meta();
@@ -472,7 +470,7 @@ impl RaftServer {
         lock_mon
     }
 
-    fn become_candidate(server: Arc<RaftServer>, meta: &mut RwLockWriteGuard<RaftMeta>) {
+    fn become_candidate(server: Arc<RaftService>, meta: &mut RwLockWriteGuard<RaftMeta>) {
         server.reset_last_checked(meta);
         let term = meta.term;
         alter_term(meta, term + 1);
@@ -751,7 +749,7 @@ impl RaftServer {
     }
 }
 
-impl Server for RaftServer {
+impl Service for RaftService {
     fn append_entries(
         &self,
         term: u64, leader_id: u64,
@@ -916,6 +914,14 @@ impl Server for RaftServer {
     fn c_put_offline(&self) -> Result<bool, ()> {
         Ok(self.leave())
     }
+}
+
+impl RPCService for RaftService {
+    fn id(&self) -> u64 {
+        self.id
+    }
+
+    dispatch_rpc_service_functions!();
 }
 
 pub struct RaftStateMachine {

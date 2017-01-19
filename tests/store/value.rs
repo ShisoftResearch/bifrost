@@ -12,7 +12,7 @@ fn string(){
         String::from("test"),
         original_string.clone()
     );
-    let server = RaftServer::new(Options{
+    let server = RaftService::new(Options{
         storage: Storage::Default(),
         address: addr.clone()
     });

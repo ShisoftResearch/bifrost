@@ -21,7 +21,7 @@ mod u32 {
             String::from("test"),
             0
         );
-        let server = RaftServer::new(Options{
+        let server = RaftService::new(Options{
             storage: Storage::Default(),
             address: addr.clone()
         });
@@ -75,7 +75,7 @@ mod f64 {
             String::from("test"),
             0.0
         );
-        let server = RaftServer::new(Options{
+        let server = RaftService::new(Options{
             storage: Storage::Default(),
             address: addr.clone()
         });

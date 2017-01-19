@@ -246,11 +246,3 @@ macro_rules! raft_state_machine {
         }
     };
 }
-
-#[cfg(test)]
-mod syntax_test {
-    raft_state_machine! {
-        def qry get (key: u64) -> String | ();
-        def cmd test(a: u32, b: u32) -> bool;
-    }
-}

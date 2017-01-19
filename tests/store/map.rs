@@ -10,7 +10,7 @@ use std::iter::FromIterator;
 fn hash_map(){
     let addr = String::from("127.0.0.1:2013");
     let map_sm = string_string_hashmap::Map::new_by_name(String::from("test"));
-    let server = RaftServer::new(Options{
+    let server = RaftService::new(Options{
         storage: Storage::Default(),
         address: addr.clone()
     });
