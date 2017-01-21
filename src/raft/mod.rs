@@ -28,6 +28,8 @@ use std::fmt;
 pub mod state_machine;
 pub mod client;
 
+pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_RAFT_DEFAULT_SERVICE) as u64;
+
 pub trait RaftMsg<R> {
     fn encode(&self) -> (u64, OpType, Vec<u8>);
     fn decode_return(&self, data: &Vec<u8>) -> R;
@@ -158,6 +160,7 @@ impl Storage {
 pub struct Options {
     pub storage: Storage,
     pub address: String,
+    pub service_id: u64,
 }
 
 pub struct RaftService {
@@ -165,6 +168,7 @@ pub struct RaftService {
     pub id: u64,
     pub options: Options,
 }
+dispatch_rpc_service_functions!(RaftService);
 
 #[derive(Debug)]
 enum CheckerAction {
@@ -241,7 +245,7 @@ impl RaftService {
                     last_checked: get_time(),
                     membership: Membership::Undefined,
                     logs: Arc::new(RwLock::new(BTreeMap::new())), //TODO: read from persistent state
-                    state_machine: RwLock::new(MasterStateMachine::new()),
+                    state_machine: RwLock::new(MasterStateMachine::new(opts.service_id)),
                     commit_index: 0,
                     last_applied: 0,
                     leader_id: 0,
@@ -339,7 +343,7 @@ impl RaftService {
     pub fn join(&self, addresses: Vec<String>)
         -> Result<Result<(), ()>, ExecError> {
         println!("Trying to join cluster with id {}", self.id);
-        let client = RaftClient::new(addresses);
+        let client = RaftClient::new(addresses, self.options.service_id);
         if let Ok(client) = client {
             let result = client.execute(
                 CONFIG_SM_ID,
@@ -367,7 +371,7 @@ impl RaftService {
             .map(|&(_, ref address)|{
                 address.clone()
             }).collect();
-        if let Ok(client) = RaftClient::new(addresses) {
+        if let Ok(client) = RaftClient::new(addresses, self.options.service_id) {
             client.execute(
                 CONFIG_SM_ID,
                 &del_member_{address: self.options.address.clone()}
@@ -490,7 +494,6 @@ impl RaftService {
                 tx.send(RequestVoteResponse::Granted);
             } else {
                 meta.workers.lock().unwrap().execute(move||{
-                    let mut rpc = rpc.lock().unwrap();
                     if let Ok(Ok(((remote_term, remote_leader_id), vote_granted))) = rpc.request_vote(term, id, last_log_id, last_log_term) {
                         if vote_granted {
                             tx.send(RequestVoteResponse::Granted);
@@ -581,7 +584,6 @@ impl RaftService {
                         }
                     };
                     workers.execute(move||{
-                        let mut rpc = rpc.lock().unwrap();
                         let mut follower = follower.lock().unwrap();
                         let mut is_retry = false;
                         let logs = logs.read().unwrap();
@@ -914,14 +916,6 @@ impl Service for RaftService {
     fn c_put_offline(&self) -> Result<bool, ()> {
         Ok(self.leave())
     }
-}
-
-impl RPCService for RaftService {
-    fn id(&self) -> u64 {
-        self.id
-    }
-
-    dispatch_rpc_service_functions!();
 }
 
 pub struct RaftStateMachine {

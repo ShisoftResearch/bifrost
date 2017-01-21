@@ -5,9 +5,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::io;
 use std::time::Duration;
+use std::sync::Mutex;
 use bincode::{SizeLimit, serde as bincode};
 use tcp;
 use utils::u8vec::*;
+
+lazy_static! {
+    pub static ref DEFAULT_CLIENT_POOL: ClientPool = ClientPool::new();
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RPCRequestError {
@@ -16,18 +21,22 @@ pub enum RPCRequestError {
     Other,
 }
 
+#[derive(Debug)]
 pub enum RPCError {
     IOError(io::Error),
     RequestError(RPCRequestError),
 }
 
 pub trait RPCService: Sync + Send {
-    fn id(&self) -> u64;
     fn dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, RPCRequestError>;
 }
 
 pub struct Server {
     services: HashMap<u64, Arc<RPCService>>
+}
+
+pub struct ClientPool {
+    clients: Mutex<HashMap<String, Arc<RPCSyncClient>>>
 }
 
 fn encode_res(res: Result<Vec<u8>, RPCRequestError>) -> Vec<u8> {
@@ -64,10 +73,10 @@ fn decode_res(res: io::Result<Vec<u8>>) -> Result<Vec<u8>, RPCError> {
 }
 
 impl Server {
-    pub fn new(services: Vec<Arc<RPCService>>) -> Arc<Server> {
+    pub fn new(services: Vec<(u64, Arc<RPCService>)>) -> Arc<Server> {
         let mut svr_map = HashMap::with_capacity(services.len());
-        for svr in services {
-            svr_map.insert(svr.id(), svr.clone());
+        for (svr_id, svr) in services {
+            svr_map.insert(svr_id, svr.clone());
         }
         Arc::new(Server {
             services: svr_map
@@ -86,8 +95,8 @@ impl Server {
             }
         }));
     }
-    pub fn append_service(&mut self,  service: Arc<RPCService>) {
-        self.services.insert(service.id(), service);
+    pub fn append_service(&mut self, service_id: u64,  service: Arc<RPCService>) {
+        self.services.insert(service_id, service);
     }
     pub fn remove_service(&mut self, service_id: u64) {
         self.services.remove(&service_id);
@@ -95,25 +104,48 @@ impl Server {
 }
 
 pub struct RPCSyncClient {
-    client: tcp::client::Client,
+    client: Mutex<tcp::client::Client>,
     pub address: String
 }
 
 impl RPCSyncClient {
-    pub fn send(&mut self, svr_id: u64, data: Vec<u8>) -> Result<Vec<u8>, RPCError> {
-        decode_res(self.client.send(prepend_u64(svr_id, data)))
+    pub fn send(&self, svr_id: u64, data: Vec<u8>) -> Result<Vec<u8>, RPCError> {
+        decode_res(self.client.lock().unwrap().send(prepend_u64(svr_id, data)))
     }
 
     pub fn new(addr: &String) -> io::Result<Arc<RPCSyncClient>> {
         Ok(Arc::new(RPCSyncClient {
-            client: tcp::client::Client::connect(addr)?,
+            client: Mutex::new(tcp::client::Client::connect(addr)?),
             address: addr.clone()
         }))
     }
     pub fn with_timeout(addr: &String, timeout: Duration) -> io::Result<Arc<RPCSyncClient>> {
         Ok(Arc::new(RPCSyncClient {
-            client: tcp::client::Client::connect_with_timeout(addr, timeout)?,
+            client: Mutex::new(tcp::client::Client::connect_with_timeout(addr, timeout)?),
             address: addr.clone()
         }))
+    }
+}
+
+impl ClientPool {
+    pub fn new() -> ClientPool {
+        ClientPool {
+            clients: Mutex::new(HashMap::new())
+        }
+    }
+
+    pub fn get(&self, addr: &String) -> io::Result<Arc<RPCSyncClient>> {
+        let mut clients = self.clients.lock().unwrap();
+        if clients.contains_key(addr) {
+            Ok(clients.get(addr).unwrap().clone())
+        } else {
+            let client = RPCSyncClient::new(addr);
+            if let Ok(client) = client {
+                clients.insert(addr.clone(), client.clone());
+                Ok(client)
+            } else {
+                Err(client.err().unwrap())
+            }
+        }
     }
 }

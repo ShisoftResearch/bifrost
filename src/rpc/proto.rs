@@ -12,9 +12,11 @@ macro_rules! deserialize {
 
 #[macro_export]
 macro_rules! dispatch_rpc_service_functions {
-    () => {
-        fn dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, RPCRequestError> {
-            self.inner_dispatch(data)
+    ($s:ty) => {
+        impl RPCService for $s {
+            fn dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, RPCRequestError> {
+                self.inner_dispatch(data)
+            }
         }
     };
 }
@@ -176,7 +178,7 @@ macro_rules! service {
            $(
                 #[allow(non_camel_case_types)]
                 $(#[$attr])*
-                fn $fn_name(&mut self, $($arg:$in_),*) -> Result<std::result::Result<$out, $error>, RPCError> {
+                fn $fn_name(&self, $($arg:$in_),*) -> Result<std::result::Result<$out, $error>, RPCError> {
                     let req_bytes = encoders::$fn_name($($arg),*);
                     let res_bytes = self.client.send(self.id, req_bytes);
                     if let Ok(res_bytes) = res_bytes {
@@ -186,6 +188,12 @@ macro_rules! service {
                     }
                 }
            )*
+           pub fn new(service_id: u64, client: Arc<RPCSyncClient>) -> Arc<SyncRPCServiceClient> {
+                Arc::new(SyncRPCServiceClient{
+                    id: service_id,
+                    client: client.clone()
+                })
+           }
         }
     }
 }

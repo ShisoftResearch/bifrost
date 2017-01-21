@@ -1,4 +1,5 @@
-use raft::SyncClient;
+use raft::SyncRPCServiceClient;
+use rpc;
 use std::collections::{HashMap, HashSet};
 use super::*;
 use bifrost_hasher::hash_str;
@@ -8,13 +9,14 @@ use std::io;
 pub const CONFIG_SM_ID: u64 = 1;
 
 pub struct RaftMember {
-    pub rpc: Arc<Mutex<SyncClient>>,
+    pub rpc: Arc<SyncRPCServiceClient>,
     pub address: String,
     pub id: u64,
 }
 
 pub struct Configures {
     pub members: HashMap<u64, RaftMember>,
+    service_id: u64,
 }
 
 pub type MemberConfigSnapshot = HashSet<String>;
@@ -35,10 +37,10 @@ impl StateMachineCmds for Configures {
         let addr = address.clone();
         let id = hash_str(addr);
         if !self.members.contains_key(&id) {
-            match SyncClient::new(&address) {
+            match rpc::DEFAULT_CLIENT_POOL.get(&address) {
                 Ok(client) => {
                     self.members.insert(id, RaftMember {
-                        rpc: Arc::new(Mutex::new(client)),
+                        rpc: SyncRPCServiceClient::new(self.service_id, client),
                         address: address,
                         id: id,
                     });
@@ -82,9 +84,10 @@ impl StateMachineCtl for Configures {
 }
 
 impl Configures {
-    pub fn new() -> Configures {
+    pub fn new(service_id: u64) -> Configures {
         Configures {
-            members: HashMap::new()
+            members: HashMap::new(),
+            service_id: service_id
         }
     }
     fn recover_members (&mut self, snapshot: &MemberConfigSnapshot) {
