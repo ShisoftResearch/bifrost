@@ -13,7 +13,7 @@ macro_rules! deserialize {
 #[macro_export]
 macro_rules! dispatch_rpc_service_functions {
     () => {
-        fn dispatch(&self, data: Vec<u8>) -> Vec<u8> {
+        fn dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, RPCRequestError> {
             self.inner_dispatch(data)
         }
     };
@@ -115,11 +115,11 @@ macro_rules! service {
         )*
     ) => {
         use std;
-        use byteorder::{ByteOrder, LittleEndian};
-        use bincode::{SizeLimit, serde as bincode};
         use std::time::Duration;
+        use bincode::{SizeLimit, serde as bincode};
         use std::io;
-        use $crate::rpc::RPCService;
+        use $crate::rpc::{RPCService, RPCRequestError};
+        use $crate::utils::u8vec::*;
 
         mod rpc_args {
             #[allow(unused_variables)]
@@ -139,40 +139,32 @@ macro_rules! service {
                 $(#[$attr])*
                 fn $fn_name(&self, $($arg:$in_),*) -> std::result::Result<$out, $error>;
            )*
-           fn inner_dispatch(&self, data: Vec<u8>) -> Vec<u8> {
-               let func_id = LittleEndian::read_u64(&data);
-               let body: Vec<u8> = data.iter().skip(8).cloned().collect();
+           fn inner_dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, RPCRequestError> {
+               let (func_id, body) = extract_u64_head(data);
                match func_id as usize {
                    $(hash_ident!($fn_name) => {
                        let decoded: rpc_args::$fn_name = deserialize!(&body);
                        let f_result = self.$fn_name($(decoded.$arg),*);
-                       serialize!(&f_result)
+                       Ok(serialize!(&f_result))
                    }),*
                    _ => {
-                       panic!("func_id not found, maybe version mismatch: {}", func_id)
+                       Err(RPCRequestError::FunctionIdNotFound)
                    }
                }
            }
 
         }
         mod encoders {
-            use bincode::{SizeLimit, serde as bincode};
-            use byteorder::{ByteOrder, LittleEndian};
             use super::*;
             $(
                 pub fn $fn_name($($arg:$in_),*) -> Vec<u8> {
-                    let mut m_id_buf = [0u8; 8];
-                    LittleEndian::write_u64(&mut m_id_buf, hash_ident!($fn_name) as u64);
                     let  obj = super::rpc_args::$fn_name {
                         $(
                             $arg: $arg
                         ),*
                     };
                     let mut data_vec = serialize!(&obj);
-                    let mut r = Vec::with_capacity(data_vec.len() + 8);
-                    r.extend_from_slice(&m_id_buf);
-                    r.append(&mut data_vec);
-                    r
+                    prepend_u64(hash_ident!($fn_name) as u64, data_vec)
                 }
             )*
         }
