@@ -94,24 +94,24 @@ impl Server {
     }
 }
 
-pub struct SyncClient {
+pub struct RPCSyncClient {
     client: tcp::client::Client,
     pub address: String
 }
 
-impl SyncClient {
+impl RPCSyncClient {
     pub fn send(&mut self, svr_id: u64, data: Vec<u8>) -> Result<Vec<u8>, RPCError> {
         decode_res(self.client.send(prepend_u64(svr_id, data)))
     }
 
-    pub fn new(addr: &String) -> io::Result<Arc<SyncClient>> {
-        Ok(Arc::new(SyncClient {
+    pub fn new(addr: &String) -> io::Result<Arc<RPCSyncClient>> {
+        Ok(Arc::new(RPCSyncClient {
             client: tcp::client::Client::connect(addr)?,
             address: addr.clone()
         }))
     }
-    pub fn with_timeout(addr: &String, timeout: Duration) -> io::Result<Arc<SyncClient>> {
-        Ok(Arc::new(SyncClient {
+    pub fn with_timeout(addr: &String, timeout: Duration) -> io::Result<Arc<RPCSyncClient>> {
+        Ok(Arc::new(RPCSyncClient {
             client: tcp::client::Client::connect_with_timeout(addr, timeout)?,
             address: addr.clone()
         }))

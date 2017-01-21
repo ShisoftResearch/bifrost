@@ -118,7 +118,7 @@ macro_rules! service {
         use std::time::Duration;
         use bincode::{SizeLimit, serde as bincode};
         use std::io;
-        use $crate::rpc::{RPCService, RPCRequestError};
+        use $crate::rpc::*;
         use $crate::utils::u8vec::*;
 
         mod rpc_args {
@@ -168,29 +168,17 @@ macro_rules! service {
                 }
             )*
         }
-        pub struct SyncClient {
-            client: $crate::tcp::client::Client,
-            pub address: String
+        pub struct SyncRPCServiceClient {
+            pub id: u64,
+            client: Arc<RPCSyncClient>,
         }
-        impl SyncClient {
-            pub fn new(addr: &String) -> io::Result<SyncClient> {
-                Ok(SyncClient {
-                    client: $crate::tcp::client::Client::connect(addr)?,
-                    address: addr.clone()
-                })
-            }
-            pub fn with_timeout(addr: &String, timeout: Duration) -> io::Result<SyncClient> {
-                Ok(SyncClient {
-                    client: $crate::tcp::client::Client::connect_with_timeout(addr, timeout)?,
-                    address: addr.clone()
-                })
-            }
+        impl SyncRPCServiceClient {
            $(
                 #[allow(non_camel_case_types)]
                 $(#[$attr])*
-                fn $fn_name(&mut self, $($arg:$in_),*) -> io::Result<std::result::Result<$out, $error>> {
+                fn $fn_name(&mut self, $($arg:$in_),*) -> Result<std::result::Result<$out, $error>, RPCError> {
                     let req_bytes = encoders::$fn_name($($arg),*);
-                    let res_bytes = self.client.send(req_bytes);
+                    let res_bytes = self.client.send(self.id, req_bytes);
                     if let Ok(res_bytes) = res_bytes {
                         Ok(deserialize!(res_bytes.as_slice()))
                     } else {
