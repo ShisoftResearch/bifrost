@@ -233,7 +233,7 @@ fn alter_term(meta: &mut RwLockWriteGuard<RaftMeta>, term: u64) {
 
 
 impl RaftService {
-    pub fn new(opts: Options) -> Option<Arc<RaftService>> {
+    pub fn new(opts: Options) -> Arc<RaftService> {
         let server_address = opts.address.clone();
         let server_id = hash_str(server_address.clone());
         let server_obj = RaftService {
@@ -257,7 +257,7 @@ impl RaftService {
             id: server_id,
             options: opts,
         };
-        Some(Arc::new(server_obj))
+        Arc::new(server_obj)
     }
     pub fn start(server: &Arc<RaftService>) -> bool {
         let server_address = server.options.address.clone();
@@ -331,6 +331,14 @@ impl RaftService {
             meta.last_checked = get_time();
         }
         return true;
+    }
+    pub fn new_server(opts: Options) -> (bool, Arc<RaftService>, Arc<Server>) {
+        let address = opts.address.clone();
+        let svr_id = opts.service_id;
+        let service = RaftService::new(opts);
+        let server = Server::new(vec!((svr_id, service.clone())));
+        Server::listen_and_resume(server.clone(), &address);
+        (RaftService::start(&service), service, server)
     }
     pub fn bootstrap(&self) {
         let mut meta = self.write_meta();

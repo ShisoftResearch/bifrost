@@ -6,12 +6,12 @@ use super::wait;
 
 #[test]
 fn startup(){
-    let server = RaftService::new(Options {
+    let (success, _, _) = RaftService::new_server(Options {
         storage: Storage::Default(),
         address: String::from("127.0.0.1:2000"),
         service_id: DEFAULT_SERVICE_ID,
     });
-    assert!(server.is_some());
+    assert!(success);
 }
 
 #[test]
@@ -24,11 +24,9 @@ fn server_membership(){
         address: s1_addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
     });
-    assert!(service1.is_some());
-    let service1 = service1.unwrap();
     let server1 = Server::new(vec!((DEFAULT_SERVICE_ID, service1.clone())));
     Server::listen_and_resume(server1, &s1_addr);
-    RaftService::start(&service1);
+    assert!(RaftService::start(&service1));
     service1.bootstrap();
     assert_eq!(service1.num_members(), 1);
     let service2 = RaftService::new(Options {
@@ -36,11 +34,9 @@ fn server_membership(){
         address: s2_addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
     });
-    assert!(service2.is_some());
-    let service2 = service2.unwrap();
     let server2 = Server::new(vec!((DEFAULT_SERVICE_ID, service2.clone())));
     Server::listen_and_resume(server2, &s2_addr);
-    RaftService::start(&service2);
+    assert!(RaftService::start(&service2));
     let join_result = service2.join(vec!(s1_addr.clone()));
     match join_result {
         Err(ExecError::ServersUnreachable) => panic!("Server unreachable"),
@@ -56,11 +52,9 @@ fn server_membership(){
         address: s3_addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
     });
-    assert!(service3.is_some());
-    let service3 = service3.unwrap();
     let server3 = Server::new(vec!((DEFAULT_SERVICE_ID, service3.clone())));
     Server::listen_and_resume(server3, &s3_addr);
-    RaftService::start(&service3);
+    assert!(RaftService::start(&service3));
     let join_result = service3.join(vec!(
         s1_addr.clone(),
         s2_addr.clone(),
@@ -96,38 +90,38 @@ fn log_replication(){
         storage: Storage::Default(),
         address: s1_addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
-    }).unwrap();
+    });
     let service2 = RaftService::new(Options {
         storage: Storage::Default(),
         address: s2_addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
-    }).unwrap();
+    });
     let service3 = RaftService::new(Options {
         storage: Storage::Default(),
         address: s3_addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
-    }).unwrap();
+    });
     let service4 = RaftService::new(Options {
         storage: Storage::Default(),
         address: s4_addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
-    }).unwrap();
+    });
     let service5 = RaftService::new(Options {
         storage: Storage::Default(),
         address: s5_addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
-    }).unwrap();
+    });
 
 
     let server1 = Server::new(vec!((DEFAULT_SERVICE_ID, service1.clone())));
     Server::listen_and_resume(server1, &s1_addr);
-    RaftService::start(&service1);
+    assert!(RaftService::start(&service1));
     service1.bootstrap();
 
 
     let server2 = Server::new(vec!((DEFAULT_SERVICE_ID, service2.clone())));
     Server::listen_and_resume(server2, &s2_addr);
-    RaftService::start(&service2);
+    assert!(RaftService::start(&service2));
     let join_result = service2.join(vec!(
         s1_addr.clone(),
         s2_addr.clone(),
@@ -136,7 +130,7 @@ fn log_replication(){
 
     let server3 = Server::new(vec!((DEFAULT_SERVICE_ID, service3.clone())));
     Server::listen_and_resume(server3, &s3_addr);
-    RaftService::start(&service3);
+    assert!(RaftService::start(&service3));
     let join_result = service3.join(vec!(
         s1_addr.clone(),
         s2_addr.clone(),
@@ -145,7 +139,7 @@ fn log_replication(){
 
     let server4 = Server::new(vec!((DEFAULT_SERVICE_ID, service4.clone())));
     Server::listen_and_resume(server4, &s4_addr);
-    RaftService::start(&service4);
+    assert!(RaftService::start(&service4));
     let join_result = service4.join(vec!(
         s1_addr.clone(),
         s2_addr.clone(),
@@ -155,7 +149,7 @@ fn log_replication(){
 
     let server5 = Server::new(vec!((DEFAULT_SERVICE_ID, service5.clone())));
     Server::listen_and_resume(server5, &s5_addr);
-    RaftService::start(&service5);
+    assert!(RaftService::start(&service5));
     let join_result = service5.join(vec!(
         s1_addr.clone(),
         s2_addr.clone(),
