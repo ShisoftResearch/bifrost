@@ -171,11 +171,11 @@ macro_rules! service {
                 }
             )*
         }
-        pub struct SyncRPCServiceClient {
+        pub struct SyncServiceClient {
             pub id: u64,
             client: Arc<RPCSyncClient>,
         }
-        impl SyncRPCServiceClient {
+        impl SyncServiceClient {
            $(
                 #[allow(non_camel_case_types)]
                 $(#[$attr])*
@@ -189,8 +189,8 @@ macro_rules! service {
                     }
                 }
            )*
-           pub fn new(service_id: u64, client: Arc<RPCSyncClient>) -> Arc<SyncRPCServiceClient> {
-                Arc::new(SyncRPCServiceClient{
+           pub fn new(service_id: u64, client: Arc<RPCSyncClient>) -> Arc<SyncServiceClient> {
+                Arc::new(SyncServiceClient{
                     id: service_id,
                     client: client.clone()
                 })

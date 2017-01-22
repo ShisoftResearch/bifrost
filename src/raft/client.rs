@@ -1,5 +1,5 @@
 use raft::{
-    SyncRPCServiceClient, ClientClusterInfo, RaftMsg,
+    SyncServiceClient, ClientClusterInfo, RaftMsg,
     RaftStateMachine, LogEntry,
     ClientQryResponse, ClientCmdResponse};
 use raft::state_machine::OpType;
@@ -27,7 +27,7 @@ struct QryMeta {
 }
 
 struct Members {
-    clients: BTreeMap<u64, Arc<SyncRPCServiceClient>>,
+    clients: BTreeMap<u64, Arc<SyncServiceClient>>,
     id_map: HashMap<u64, String>,
 }
 
@@ -76,7 +76,7 @@ impl RaftClient {
             if !members.clients.contains_key(&id) {
                 match rpc::DEFAULT_CLIENT_POOL.get(&server_addr) {
                     Ok(client) => {
-                        members.clients.insert(id, SyncRPCServiceClient::new(self.service_id, client));
+                        members.clients.insert(id, SyncServiceClient::new(self.service_id, client));
                     },
                     Err(_) => {continue;}
                 }
@@ -106,7 +106,7 @@ impl RaftClient {
                     let addr = members.id_map.get(id).unwrap().clone();
                     if !members.clients.contains_key(id) {
                         if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(&addr) {
-                            members.clients.insert(*id, SyncRPCServiceClient::new(self.service_id, client));
+                            members.clients.insert(*id, SyncServiceClient::new(self.service_id, client));
                         }
                     }
                 }

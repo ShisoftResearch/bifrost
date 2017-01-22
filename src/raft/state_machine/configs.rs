@@ -1,4 +1,4 @@
-use raft::SyncRPCServiceClient;
+use raft::SyncServiceClient;
 use rpc;
 use std::collections::{HashMap, HashSet};
 use super::*;
@@ -9,7 +9,7 @@ use std::io;
 pub const CONFIG_SM_ID: u64 = 1;
 
 pub struct RaftMember {
-    pub rpc: Arc<SyncRPCServiceClient>,
+    pub rpc: Arc<SyncServiceClient>,
     pub address: String,
     pub id: u64,
 }
@@ -40,7 +40,7 @@ impl StateMachineCmds for Configures {
             match rpc::DEFAULT_CLIENT_POOL.get(&address) {
                 Ok(client) => {
                     self.members.insert(id, RaftMember {
-                        rpc: SyncRPCServiceClient::new(self.service_id, client),
+                        rpc: SyncServiceClient::new(self.service_id, client),
                         address: address,
                         id: id,
                     });

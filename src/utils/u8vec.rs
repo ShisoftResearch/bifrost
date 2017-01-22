@@ -2,7 +2,7 @@ use byteorder::{ByteOrder, LittleEndian};
 use bincode::{SizeLimit, serde as bincode};
 
 pub fn prepend_u64 (num: u64, vec: Vec<u8>) -> Vec<u8> {
-    let mut s_id_vec = Vec::with_capacity(8);
+    let mut s_id_vec = [0u8; 8].to_vec();
     LittleEndian::write_u64(&mut s_id_vec, num);
     let data_iter = s_id_vec.into_iter().chain(vec.into_iter());
     data_iter.collect()

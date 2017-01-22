@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::io;
 use std::time::Duration;
 use std::sync::Mutex;
+use std::thread;
 use bincode::{SizeLimit, serde as bincode};
 use tcp;
 use utils::u8vec::*;
@@ -94,6 +95,13 @@ impl Server {
                 None => encode_res(Err(RPCRequestError::ServiceIdNotFound) as Result<Vec<u8>, RPCRequestError>)
             }
         }));
+    }
+    pub fn listen_and_resume(server: Arc<Server>, addr: &String) {
+        let server = server.clone();
+        let addr = addr.clone();
+        thread::spawn(move|| {
+            Server::listen(server, &addr);
+        });
     }
     pub fn append_service(&mut self, service_id: u64,  service: Arc<RPCService>) {
         self.services.insert(service_id, service);
