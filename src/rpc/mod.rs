@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::io;
 use std::time::Duration;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::thread;
 use bincode::{SizeLimit, serde as bincode};
 use tcp;
@@ -33,7 +33,7 @@ pub trait RPCService: Sync + Send {
 }
 
 pub struct Server {
-    services: HashMap<u64, Arc<RPCService>>,
+    services: RwLock<HashMap<u64, Arc<RPCService>>>,
 }
 
 pub struct ClientPool {
@@ -80,14 +80,15 @@ impl Server {
             svr_map.insert(svr_id, svr.clone());
         }
         Arc::new(Server {
-            services: svr_map,
+            services: RwLock::new(svr_map),
         })
     }
     pub fn listen(server: Arc<Server>, addr: &String) {
         let server = server.clone();
         tcp::server::Server::new(addr, Box::new(move |data| {
             let (svr_id, data) = extract_u64_head(data);
-            let service = server.services.get(&svr_id);
+            let svr_map = server.services.read().unwrap();
+            let service = svr_map.get(&svr_id);
             match service {
                 Some(service) => {
                     encode_res(service.dispatch(data))
@@ -103,11 +104,11 @@ impl Server {
             Server::listen(server, &addr);
         });
     }
-    pub fn append_service(&mut self, service_id: u64,  service: Arc<RPCService>) {
-        self.services.insert(service_id, service);
+    pub fn append_service(&self, service_id: u64,  service: Arc<RPCService>) {
+        self.services.write().unwrap().insert(service_id, service);
     }
-    pub fn remove_service(&mut self, service_id: u64) {
-        self.services.remove(&service_id);
+    pub fn remove_service(&self, service_id: u64) {
+        self.services.write().unwrap().remove(&service_id);
     }
 }
 
