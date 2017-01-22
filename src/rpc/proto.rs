@@ -10,6 +10,17 @@ macro_rules! deserialize {
     ($e:expr) => {bincode::deserialize($e).unwrap()};
 }
 
+#[macro_export]
+macro_rules! dispatch_rpc_service_functions {
+    ($s:ty) => {
+        impl RPCService for $s {
+            fn dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, RPCRequestError> {
+                self.inner_dispatch(data)
+            }
+        }
+    };
+}
+
 // this macro expansion design took credits from tarpc by Google Inc.
 #[macro_export]
 macro_rules! service {
@@ -106,11 +117,12 @@ macro_rules! service {
         )*
     ) => {
         use std;
-        use byteorder::{ByteOrder, LittleEndian};
+        use std::time::Duration;
         use bincode::{SizeLimit, serde as bincode};
         use std::sync::Arc;
-        use std::time::Duration;
         use std::io;
+        use $crate::rpc::*;
+        use $crate::utils::u8vec::*;
 
         mod rpc_args {
             #[allow(unused_variables)]
@@ -125,72 +137,51 @@ macro_rules! service {
                 }
             )*
         }
-        pub trait Server: Sync + Send {
+        pub trait Service: RPCService {
            $(
                 $(#[$attr])*
                 fn $fn_name(&self, $($arg:$in_),*) -> std::result::Result<$out, $error>;
            )*
-        }
-        fn listen(server: Arc<Server>, addr: &String) {
-           $crate::tcp::server::Server::new(addr, Box::new(move |data| {
-                    let func_id = LittleEndian::read_u64(&data);
-                    let body: Vec<u8> = data.iter().skip(8).cloned().collect();
-                    match func_id as usize {
-                        $(hash_ident!($fn_name) => {
-                            let decoded: rpc_args::$fn_name = deserialize!(&body);
-                            let f_result = server.$fn_name($(decoded.$arg),*);
-                            serialize!(&f_result)
-                        }),*
-                        _ => {
-                            panic!("func_id not found, maybe version mismatch: {}", func_id)
-                        }
-                    }
-            }));
+           fn inner_dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, RPCRequestError> {
+               let (func_id, body) = extract_u64_head(data);
+               match func_id as usize {
+                   $(hash_ident!($fn_name) => {
+                       let decoded: rpc_args::$fn_name = deserialize!(&body);
+                       let f_result = self.$fn_name($(decoded.$arg),*);
+                       Ok(serialize!(&f_result))
+                   }),*
+                   _ => {
+                       Err(RPCRequestError::FunctionIdNotFound)
+                   }
+               }
+           }
+
         }
         mod encoders {
-            use bincode::{SizeLimit, serde as bincode};
-            use byteorder::{ByteOrder, LittleEndian};
             use super::*;
             $(
                 pub fn $fn_name($($arg:$in_),*) -> Vec<u8> {
-                    let mut m_id_buf = [0u8; 8];
-                    LittleEndian::write_u64(&mut m_id_buf, hash_ident!($fn_name) as u64);
                     let  obj = super::rpc_args::$fn_name {
                         $(
                             $arg: $arg
                         ),*
                     };
                     let mut data_vec = serialize!(&obj);
-                    let mut r = Vec::with_capacity(data_vec.len() + 8);
-                    r.extend_from_slice(&m_id_buf);
-                    r.append(&mut data_vec);
-                    r
+                    prepend_u64(hash_ident!($fn_name) as u64, data_vec)
                 }
             )*
         }
-        pub struct SyncClient {
-            client: $crate::tcp::client::Client,
-            pub address: String
+        pub struct SyncServiceClient {
+            pub id: u64,
+            client: Arc<RPCSyncClient>,
         }
-        impl SyncClient {
-            pub fn new(addr: &String) -> io::Result<SyncClient> {
-                Ok(SyncClient {
-                    client: $crate::tcp::client::Client::connect(addr)?,
-                    address: addr.clone()
-                })
-            }
-            pub fn with_timeout(addr: &String, timeout: Duration) -> io::Result<SyncClient> {
-                Ok(SyncClient {
-                    client: $crate::tcp::client::Client::connect_with_timeout(addr, timeout)?,
-                    address: addr.clone()
-                })
-            }
+        impl SyncServiceClient {
            $(
                 #[allow(non_camel_case_types)]
                 $(#[$attr])*
-                fn $fn_name(&mut self, $($arg:$in_),*) -> io::Result<std::result::Result<$out, $error>> {
+                fn $fn_name(&self, $($arg:$in_),*) -> Result<std::result::Result<$out, $error>, RPCError> {
                     let req_bytes = encoders::$fn_name($($arg),*);
-                    let res_bytes = self.client.send(req_bytes);
+                    let res_bytes = self.client.send(self.id, req_bytes);
                     if let Ok(res_bytes) = res_bytes {
                         Ok(deserialize!(res_bytes.as_slice()))
                     } else {
@@ -198,6 +189,12 @@ macro_rules! service {
                     }
                 }
            )*
+           pub fn new(service_id: u64, client: Arc<RPCSyncClient>) -> Arc<SyncServiceClient> {
+                Arc::new(SyncServiceClient{
+                    id: service_id,
+                    client: client.clone()
+                })
+           }
         }
     }
 }

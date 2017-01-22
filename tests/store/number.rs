@@ -13,6 +13,7 @@ mod u32 {
         compare_and_swap, swap
     };
     use bifrost::store::number::U32::client::SMClient;
+    use bifrost::rpc::Server;
 
     #[test]
     fn test(){
@@ -21,16 +22,19 @@ mod u32 {
             String::from("test"),
             0
         );
-        let server = RaftServer::new(Options{
+        let service = RaftService::new(Options{
             storage: Storage::Default(),
-            address: addr.clone()
+            address: addr.clone(),
+            service_id: DEFAULT_SERVICE_ID,
         });
-        let server = server.unwrap();
         let sm_id = num_sm.id;
-        server.register_state_machine(Box::new(num_sm));
-        server.bootstrap();
+        let server = Server::new(vec!((DEFAULT_SERVICE_ID, service.clone())));
+        Server::listen_and_resume(server, &addr);
+        assert!(RaftService::start(&service));
+        service.register_state_machine(Box::new(num_sm));
+        service.bootstrap();
 
-        let client = RaftClient::new(vec!(addr)).unwrap();
+        let client = RaftClient::new(vec!(addr), DEFAULT_SERVICE_ID).unwrap();
         let sm_client = SMClient::new(sm_id, &client);
         assert_eq!(sm_client.get().unwrap().unwrap(), 0);
         sm_client.set(1).unwrap().unwrap();
@@ -67,6 +71,7 @@ mod f64 {
         get_and_multiply, multiply_and_get,
         get_and_divide, divide_and_get
     };
+    use bifrost::rpc::Server;
 
     #[test]
     fn test(){
@@ -75,16 +80,19 @@ mod f64 {
             String::from("test"),
             0.0
         );
-        let server = RaftServer::new(Options{
+        let service = RaftService::new(Options{
             storage: Storage::Default(),
-            address: addr.clone()
+            address: addr.clone(),
+            service_id: DEFAULT_SERVICE_ID,
         });
-        let server = server.unwrap();
         let sm_id = num_sm.id;
-        server.register_state_machine(Box::new(num_sm));
-        server.bootstrap();
+        let server = Server::new(vec!((DEFAULT_SERVICE_ID, service.clone())));
+        Server::listen_and_resume(server, &addr);
+        assert!(RaftService::start(&service));
+        service.register_state_machine(Box::new(num_sm));
+        service.bootstrap();
 
-        let client = RaftClient::new(vec!(addr)).unwrap();
+        let client = RaftClient::new(vec!(addr), DEFAULT_SERVICE_ID).unwrap();
         assert_eq!(client.execute(sm_id, &get{}).unwrap().unwrap(), 0.0);
         client.execute(sm_id, &set{n: 1.0}).unwrap().unwrap();
         assert_eq!(client.execute(sm_id, &get{}).unwrap().unwrap(), 1.0);

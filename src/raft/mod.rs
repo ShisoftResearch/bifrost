@@ -28,6 +28,8 @@ use std::fmt;
 pub mod state_machine;
 pub mod client;
 
+pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_RAFT_DEFAULT_SERVICE) as u64;
+
 pub trait RaftMsg<R> {
     fn encode(&self) -> (u64, OpType, Vec<u8>);
     fn decode_return(&self, data: &Vec<u8>) -> R;
@@ -158,13 +160,15 @@ impl Storage {
 pub struct Options {
     pub storage: Storage,
     pub address: String,
+    pub service_id: u64,
 }
 
-pub struct RaftServer {
+pub struct RaftService {
     meta: RwLock<RaftMeta>,
     pub id: u64,
     pub options: Options,
 }
+dispatch_rpc_service_functions!(RaftService);
 
 #[derive(Debug)]
 enum CheckerAction {
@@ -228,11 +232,11 @@ fn alter_term(meta: &mut RwLockWriteGuard<RaftMeta>, term: u64) {
 }
 
 
-impl RaftServer {
-    pub fn new(opts: Options) -> Option<Arc<RaftServer>> {
+impl RaftService {
+    pub fn new(opts: Options) -> Arc<RaftService> {
         let server_address = opts.address.clone();
         let server_id = hash_str(server_address.clone());
-        let server_obj = RaftServer {
+        let server_obj = RaftService {
             meta: RwLock::new(
                 RaftMeta {
                     term: 0, //TODO: read from persistent state
@@ -241,7 +245,7 @@ impl RaftServer {
                     last_checked: get_time(),
                     membership: Membership::Undefined,
                     logs: Arc::new(RwLock::new(BTreeMap::new())), //TODO: read from persistent state
-                    state_machine: RwLock::new(MasterStateMachine::new()),
+                    state_machine: RwLock::new(MasterStateMachine::new(opts.service_id)),
                     commit_index: 0,
                     last_applied: 0,
                     leader_id: 0,
@@ -253,12 +257,10 @@ impl RaftServer {
             id: server_id,
             options: opts,
         };
-        let server = Arc::new(server_obj);
-        let svr_ref = server.clone();
-        let server_address2 = server_address.clone();
-        thread::spawn(move ||{
-            listen(svr_ref, &server_address) ;
-        });
+        Arc::new(server_obj)
+    }
+    pub fn start(server: &Arc<RaftService>) -> bool {
+        let server_address = server.options.address.clone();
         info!("Waiting for server to be initialized");
         {
             let start_time = get_time();
@@ -266,13 +268,13 @@ impl RaftServer {
             let mut sm = meta.state_machine.write().unwrap();
             let mut inited = false;
             while get_time() < start_time + 5000 { //waiting for 5 secs
-                if let Ok(_) = sm.configs.new_member(server_address2.clone()) {
+                if let Ok(_) = sm.configs.new_member(server_address.clone()) {
                     inited = true;
                     break;
                 }
             }
             if !inited {
-                return None;
+                return false;
             }
         }
         let checker_ref = server.clone();
@@ -309,7 +311,7 @@ impl RaftServer {
                             server.send_followers_heartbeat(&mut meta, None);
                         },
                         CheckerAction::BecomeCandidate => {
-                            RaftServer::become_candidate(server.clone(), &mut meta);
+                            RaftService::become_candidate(server.clone(), &mut meta);
                         },
                         CheckerAction::ExitLoop => {
                             break;
@@ -328,7 +330,15 @@ impl RaftServer {
             let mut meta = server.meta.write().unwrap();
             meta.last_checked = get_time();
         }
-        Some(server)
+        return true;
+    }
+    pub fn new_server(opts: Options) -> (bool, Arc<RaftService>, Arc<Server>) {
+        let address = opts.address.clone();
+        let svr_id = opts.service_id;
+        let service = RaftService::new(opts);
+        let server = Server::new(vec!((svr_id, service.clone())));
+        Server::listen_and_resume(server.clone(), &address);
+        (RaftService::start(&service), service, server)
     }
     pub fn bootstrap(&self) {
         let mut meta = self.write_meta();
@@ -341,7 +351,7 @@ impl RaftServer {
     pub fn join(&self, addresses: Vec<String>)
         -> Result<Result<(), ()>, ExecError> {
         println!("Trying to join cluster with id {}", self.id);
-        let client = RaftClient::new(addresses);
+        let client = RaftClient::new(addresses, self.options.service_id);
         if let Ok(client) = client {
             let result = client.execute(
                 CONFIG_SM_ID,
@@ -369,7 +379,7 @@ impl RaftServer {
             .map(|&(_, ref address)|{
                 address.clone()
             }).collect();
-        if let Ok(client) = RaftClient::new(addresses) {
+        if let Ok(client) = RaftClient::new(addresses, self.options.service_id) {
             client.execute(
                 CONFIG_SM_ID,
                 &del_member_{address: self.options.address.clone()}
@@ -472,7 +482,7 @@ impl RaftServer {
         lock_mon
     }
 
-    fn become_candidate(server: Arc<RaftServer>, meta: &mut RwLockWriteGuard<RaftMeta>) {
+    fn become_candidate(server: Arc<RaftService>, meta: &mut RwLockWriteGuard<RaftMeta>) {
         server.reset_last_checked(meta);
         let term = meta.term;
         alter_term(meta, term + 1);
@@ -492,7 +502,6 @@ impl RaftServer {
                 tx.send(RequestVoteResponse::Granted);
             } else {
                 meta.workers.lock().unwrap().execute(move||{
-                    let mut rpc = rpc.lock().unwrap();
                     if let Ok(Ok(((remote_term, remote_leader_id), vote_granted))) = rpc.request_vote(term, id, last_log_id, last_log_term) {
                         if vote_granted {
                             tx.send(RequestVoteResponse::Granted);
@@ -583,7 +592,6 @@ impl RaftServer {
                         }
                     };
                     workers.execute(move||{
-                        let mut rpc = rpc.lock().unwrap();
                         let mut follower = follower.lock().unwrap();
                         let mut is_retry = false;
                         let logs = logs.read().unwrap();
@@ -751,7 +759,7 @@ impl RaftServer {
     }
 }
 
-impl Server for RaftServer {
+impl Service for RaftService {
     fn append_entries(
         &self,
         term: u64, leader_id: u64,

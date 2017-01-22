@@ -23,7 +23,7 @@ bifrost_hasher = { path = "src/hasher" }
 rand = "0.3"
 time = "0.1"
 futures = "0.1"
-lazy_static = "0.1.*"
+lazy_static = "0.2"
 threadpool = "1.0"
 num_cpus = "1.0"
 

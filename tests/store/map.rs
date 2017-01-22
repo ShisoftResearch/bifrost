@@ -2,6 +2,7 @@ use bifrost::raft::*;
 use bifrost::raft::client::RaftClient;
 use bifrost::store::map::string_string_hashmap;
 use bifrost::store::map::string_string_hashmap::client::SMClient;
+use bifrost::rpc::*;
 
 use std::collections::{HashSet, HashMap};
 use std::iter::FromIterator;
@@ -10,16 +11,19 @@ use std::iter::FromIterator;
 fn hash_map(){
     let addr = String::from("127.0.0.1:2013");
     let map_sm = string_string_hashmap::Map::new_by_name(String::from("test"));
-    let server = RaftServer::new(Options{
+    let service = RaftService::new(Options{
         storage: Storage::Default(),
-        address: addr.clone()
+        address: addr.clone(),
+        service_id: DEFAULT_SERVICE_ID,
     });
-    let server = server.unwrap();
+    let server = Server::new(vec!((DEFAULT_SERVICE_ID, service.clone())));
+    Server::listen_and_resume(server, &addr);
     let sm_id = map_sm.id;
-    server.register_state_machine(Box::new(map_sm));
-    server.bootstrap();
+    assert!(RaftService::start(&service));
+    service.register_state_machine(Box::new(map_sm));
+    service.bootstrap();
 
-    let client = RaftClient::new(vec!(addr)).unwrap();
+    let client = RaftClient::new(vec!(addr), DEFAULT_SERVICE_ID).unwrap();
     let sm_client = SMClient::new(sm_id, &client);
 
     let sk1 = String::from("k1");

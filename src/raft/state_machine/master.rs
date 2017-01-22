@@ -71,10 +71,10 @@ fn parse_output(r: Option<Vec<u8>>) -> ExecResult {
 }
 
 impl MasterStateMachine {
-    pub fn new() -> MasterStateMachine {
+    pub fn new(service_id: u64) -> MasterStateMachine {
         let mut msm = MasterStateMachine {
             subs: HashMap::new(),
-            configs: Configures::new()
+            configs: Configures::new(service_id)
         };
         msm
     }

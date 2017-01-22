@@ -1,5 +1,5 @@
 use raft::{
-    SyncClient, ClientClusterInfo, RaftMsg,
+    SyncServiceClient, ClientClusterInfo, RaftMsg,
     RaftStateMachine, LogEntry,
     ClientQryResponse, ClientCmdResponse};
 use raft::state_machine::OpType;
@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use bifrost_hasher::hash_str;
 use rand;
+use rpc;
 
 const ORDERING: Ordering = Ordering::Relaxed;
 
@@ -26,7 +27,7 @@ struct QryMeta {
 }
 
 struct Members {
-    clients: BTreeMap<u64, Mutex<SyncClient>>,
+    clients: BTreeMap<u64, Arc<SyncServiceClient>>,
     id_map: HashMap<u64, String>,
 }
 
@@ -36,10 +37,11 @@ pub struct RaftClient {
     leader_id: AtomicU64,
     last_log_id: AtomicU64,
     last_log_term: AtomicU64,
+    service_id: u64,
 }
 
 impl RaftClient {
-    pub fn new(servers: Vec<String>) -> Result<Arc<RaftClient>, ClientError> {
+    pub fn new(servers: Vec<String>, service_id: u64) -> Result<Arc<RaftClient>, ClientError> {
         let mut client = RaftClient {
             qry_meta: QryMeta {
                 pos: AtomicU64::new(rand::random::<u64>())
@@ -51,6 +53,7 @@ impl RaftClient {
             leader_id: AtomicU64::new(0),
             last_log_id: AtomicU64::new(0),
             last_log_term: AtomicU64::new(0),
+            service_id: service_id,
         };
         let init = {
             let mut members = client.members.write().unwrap();
@@ -71,15 +74,15 @@ impl RaftClient {
         for server_addr in addrs {
             let id = hash_str(server_addr.clone());
             if !members.clients.contains_key(&id) {
-                match SyncClient::new(server_addr) {
-                    Ok(remote_client) => {
-                        members.clients.insert(id, Mutex::new(remote_client));
+                match rpc::DEFAULT_CLIENT_POOL.get(&server_addr) {
+                    Ok(client) => {
+                        members.clients.insert(id, SyncServiceClient::new(self.service_id, client));
                     },
                     Err(_) => {continue;}
                 }
             }
             let mut client = members.clients.get(&id).unwrap();
-            if let Ok(Ok(info)) = client.lock().unwrap().c_server_cluster_info() {
+            if let Ok(Ok(info)) = client.c_server_cluster_info() {
                 if info.leader_id != 0 {
                     cluster_info = Some(info);
                     break;
@@ -102,8 +105,8 @@ impl RaftClient {
                 for id in remote_ids.difference(&connected_ids) {
                     let addr = members.id_map.get(id).unwrap().clone();
                     if !members.clients.contains_key(id) {
-                        if let Ok(client) = SyncClient::new(&addr) {
-                            members.clients.insert(*id, Mutex::new(client));
+                        if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(&addr) {
+                            members.clients.insert(*id, SyncServiceClient::new(self.service_id, client));
                         }
                     }
                 }
@@ -144,9 +147,7 @@ impl RaftClient {
             let members = self.members.read().unwrap();
             let mut client = {
                 let members_count = members.clients.len();
-                members.clients.values()
-                    .nth(pos as usize % members_count)
-                    .unwrap().lock().unwrap()
+                members.clients.values().nth(pos as usize % members_count).unwrap()
             };
             num_members = members.clients.len();
             client.c_query(self.gen_log_entry(sm_id, fn_id, data))
@@ -199,7 +200,7 @@ impl RaftClient {
             };
             match leader {
                 Some(leader_id) => {
-                    let mut client = members.clients.get(&leader_id).unwrap().lock().unwrap();
+                    let client = members.clients.get(&leader_id).unwrap();
                     match client.c_command(self.gen_log_entry(sm_id, fn_id, data)) {
                         Ok(Ok(ClientCmdResponse::Success{
                                     data: data, last_log_term: last_log_term,

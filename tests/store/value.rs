@@ -2,6 +2,7 @@ use bifrost::raft::*;
 use bifrost::raft::client::RaftClient;
 use bifrost::store::value::string;
 use bifrost::store::value::string::client::SMClient;
+use bifrost::rpc::Server;
 
 #[test]
 fn string(){
@@ -12,16 +13,19 @@ fn string(){
         String::from("test"),
         original_string.clone()
     );
-    let server = RaftServer::new(Options{
+    let service = RaftService::new(Options{
         storage: Storage::Default(),
-        address: addr.clone()
+        address: addr.clone(),
+        service_id: DEFAULT_SERVICE_ID,
     });
-    let server = server.unwrap();
     let sm_id = string_sm.id;
-    server.register_state_machine(Box::new(string_sm));
-    server.bootstrap();
+    let server = Server::new(vec!((DEFAULT_SERVICE_ID, service.clone())));
+    Server::listen_and_resume(server, &addr);
+    assert!(RaftService::start(&service));
+    service.register_state_machine(Box::new(string_sm));
+    service.bootstrap();
 
-    let client = RaftClient::new(vec!(addr)).unwrap();
+    let client = RaftClient::new(vec!(addr), DEFAULT_SERVICE_ID).unwrap();
     let sm_client = SMClient::new(sm_id, &client);
     assert_eq!(
         sm_client.get().unwrap().unwrap(),

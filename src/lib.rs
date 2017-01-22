@@ -14,7 +14,7 @@ pub mod rpc;
 pub mod raft;
 pub mod store;
 
-mod utils;
+pub mod utils;
 
 extern crate mio;
 extern crate byteorder;
