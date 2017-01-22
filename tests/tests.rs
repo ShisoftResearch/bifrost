@@ -13,7 +13,7 @@ extern crate serde_derive;
 
 mod rpc;
 mod raft;
-//mod store;
+mod store;
 
 mod mutex {
     use std::sync::Mutex;

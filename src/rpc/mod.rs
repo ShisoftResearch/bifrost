@@ -33,7 +33,7 @@ pub trait RPCService: Sync + Send {
 }
 
 pub struct Server {
-    services: HashMap<u64, Arc<RPCService>>
+    services: HashMap<u64, Arc<RPCService>>,
 }
 
 pub struct ClientPool {
@@ -80,7 +80,7 @@ impl Server {
             svr_map.insert(svr_id, svr.clone());
         }
         Arc::new(Server {
-            services: svr_map
+            services: svr_map,
         })
     }
     pub fn listen(server: Arc<Server>, addr: &String) {

@@ -16,10 +16,10 @@ fn hash_map(){
         address: addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
     });
-    let service = service.unwrap();
     let server = Server::new(vec!((DEFAULT_SERVICE_ID, service.clone())));
     Server::listen_and_resume(server, &addr);
     let sm_id = map_sm.id;
+    assert!(RaftService::start(&service));
     service.register_state_machine(Box::new(map_sm));
     service.bootstrap();
 

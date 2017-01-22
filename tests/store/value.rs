@@ -13,15 +13,15 @@ fn string(){
         String::from("test"),
         original_string.clone()
     );
-    let server = RaftService::new(Options{
+    let service = RaftService::new(Options{
         storage: Storage::Default(),
         address: addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
     });
-    let service = server.unwrap();
     let sm_id = string_sm.id;
     let server = Server::new(vec!((DEFAULT_SERVICE_ID, service.clone())));
     Server::listen_and_resume(server, &addr);
+    assert!(RaftService::start(&service));
     service.register_state_machine(Box::new(string_sm));
     service.bootstrap();
 
