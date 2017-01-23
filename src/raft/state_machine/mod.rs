@@ -7,7 +7,8 @@ pub enum Storage {
 
 pub enum OpType {
     COMMAND,
-    QUERY
+    QUERY,
+    SUBSCRIBE
 }
 
 pub trait StateMachineCtl: Sync + Send + Any {

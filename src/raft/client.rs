@@ -123,7 +123,7 @@ impl RaftClient {
             OpType::QUERY => {
                 self.query(sm_id, fn_id, &req_data, 0)
             },
-            OpType::COMMAND => {
+            OpType::COMMAND | OpType::SUBSCRIBE => {
                 self.command(sm_id, fn_id, &req_data, 0)
             },
         };
