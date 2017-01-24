@@ -25,6 +25,9 @@ macro_rules! def_store_hash_map {
                 def qry clone() -> HashMap<$kt, $vt>;
 
                 def qry contains_key(k: $kt) -> bool;
+
+                def sub on_insert() -> ($kt, $vt);
+                def sub on_remove() -> ($kt, $vt);
             }
             impl StateMachineCmds for Map {
                 fn get(&self, k: $kt) -> Result<Option<$vt>, ()> {

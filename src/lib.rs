@@ -6,6 +6,7 @@
 #![feature(collections_bound)]
 #![feature(proc_macro)]
 #![feature(btree_range)]
+#![feature(fnbox)]
 
 pub mod tcp;
 #[macro_use]

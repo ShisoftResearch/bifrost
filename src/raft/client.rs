@@ -4,13 +4,15 @@ use raft::{
     ClientQryResponse, ClientCmdResponse};
 use raft::state_machine::OpType;
 use raft::state_machine::master::{ExecResult, ExecError};
+use raft::state_machine::callback::client::SUBSCRIPTIONS;
+use bincode::{SizeLimit, serde as bincode};
 use std::collections::{HashMap, BTreeMap, HashSet};
 use std::iter::FromIterator;
 use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::cell::RefCell;
 use std::sync::Arc;
-use bifrost_hasher::hash_str;
+use bifrost_hasher::{hash_str, hash_bytes};
 use rand;
 use rpc;
 
@@ -136,6 +138,25 @@ impl RaftClient {
             },
             Err(e) => Err(e)
         }
+    }
+
+    pub fn subscribe
+    <M, R, F>
+    (&self, sm_id: u64, msg: M, f: F) -> Result<(), ExecError>
+    where M: RaftMsg<R> + 'static,
+          F: FnOnce(R) + 'static + Send + Sync
+    {
+        let service_id = self.service_id;
+        let (fn_id, _, pattern_data) = msg.encode();
+        let wrapper_fn = move |data: Vec<u8>| {
+            f(msg.decode_return(&data))
+        };
+        let pattern_id = hash_bytes(&pattern_data.as_slice());
+        let key = (service_id, service_id, pattern_id);
+        let mut subs_map = SUBSCRIPTIONS.write().unwrap();
+        let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
+        subs_lst.push(Box::new(wrapper_fn));
+        Ok(())
     }
 
     pub fn current_leader_id(&self) -> u64 {self.leader_id.load(ORDERING)}

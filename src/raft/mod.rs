@@ -30,7 +30,7 @@ pub mod client;
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_RAFT_DEFAULT_SERVICE) as u64;
 
-pub trait RaftMsg<R> {
+pub trait RaftMsg<R>: Send + Sync {
     fn encode(&self) -> (u64, OpType, Vec<u8>);
     fn decode_return(&self, data: &Vec<u8>) -> R;
 }
