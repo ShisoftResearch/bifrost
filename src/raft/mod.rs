@@ -598,7 +598,7 @@ impl RaftService {
                         loop {
                             let entries: Option<LogEntries> = { // extract logs to send to follower
                                 let list: LogEntries = logs.range(
-                                    Included(&follower.next_index), Unbounded
+                                    (Included(&follower.next_index), Unbounded)
                                 ).map(|(_, entry)| entry.clone()).collect(); //TODO: avoid clone entry
                                 if list.is_empty() {None} else {Some(list)}
                             };
@@ -794,7 +794,7 @@ impl Service for RaftService {
                 if log_mismatch {
                     //RI, 3
                     let ids_to_del: Vec<u64> = logs.range(
-                        Included(&prev_log_id), Unbounded
+                        (Included(&prev_log_id), Unbounded)
                     ).map(|(id, _)| *id).collect();
                     for id in ids_to_del {
                         logs.remove(&id);
