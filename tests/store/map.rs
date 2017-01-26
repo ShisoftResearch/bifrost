@@ -100,4 +100,6 @@ fn hash_map(){
     assert!(sm_client.contains_key(sk2.clone()).unwrap().unwrap());
     assert!(sm_client.contains_key(sk3.clone()).unwrap().unwrap());
     assert!(sm_client.contains_key(sk4.clone()).unwrap().unwrap());
+
+    sm_client.on_insert(|res| {});
 }

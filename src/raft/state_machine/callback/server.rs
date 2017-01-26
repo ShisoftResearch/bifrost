@@ -1,0 +1,89 @@
+use std::boxed::FnBox;
+use std::collections::{HashMap, HashSet};
+use std::sync::{RwLock, Arc};
+use std::sync::atomic::{AtomicU64, Ordering};
+use bifrost_hasher::hash_str;
+use rpc;
+use super::*;
+
+pub struct Subscriber {
+    pub session_id: u64,
+    pub client: Arc<SyncServiceClient>
+}
+
+pub struct Subscriptions {
+    next_id: u64,
+    subscribers: HashMap<u64, Subscriber>,
+    suber_subs: HashMap<u64, HashSet<u64>>, //suber_id -> sub_id
+    subscriptions: HashMap<SubKey, HashSet<u64>>, // key -> sub_id
+    sub_suber: HashMap<u64, u64>,
+    sub_to_key: HashMap<u64, SubKey>, //sub_id -> sub_key
+}
+
+impl Subscriptions {
+
+    pub fn new() -> Subscriptions {
+        Subscriptions {
+            next_id: 0,
+            subscribers: HashMap::new(),
+            suber_subs: HashMap::new(),
+            subscriptions: HashMap::new(),
+            sub_suber: HashMap::new(),
+            sub_to_key: HashMap::new(),
+        }
+    }
+
+    pub fn subscribe(&mut self, key: SubKey, address: String, session_id: u64) -> Result<u64, ()> {
+        let sub_service_id = DEFAULT_SERVICE_ID;
+        let suber_id = hash_str(address.clone());
+        let suber_exists = self.subscribers.contains_key(&suber_id);
+        let sub_id = self.next_id;
+        let require_reload_suber = if suber_exists {
+            let session_match = self.subscribers.get(&suber_id).unwrap().session_id == session_id;
+            if !session_match {
+                self.remove_subscriber(suber_id);
+                true
+            } else {false}
+        } else {true};
+        if !self.subscribers.contains_key(&suber_id) {
+            self.subscribers.insert(suber_id, Subscriber {
+                session_id: session_id,
+                client: {
+                    if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(&address) {
+                        SyncServiceClient::new(sub_service_id, client)
+                    } else {
+                        return Err(());
+                    }
+                }
+            });
+        }
+        self.suber_subs.entry(suber_id).or_insert_with(|| HashSet::new()).insert(sub_id);
+        self.subscriptions.entry(key).or_insert_with(|| HashSet::new()).insert(sub_id);
+        self.sub_to_key.insert(sub_id, key);
+        self.sub_suber.insert(sub_id, suber_id);
+
+        self.next_id += 1;
+        Ok(sub_id)
+    }
+
+    pub fn remove_subscriber(&mut self, suber_id: u64) {
+        let suber_subs = if let Some(sub_ids) = self.suber_subs.get(&suber_id) {
+            sub_ids.iter().cloned().collect()
+        } else {Vec::<u64>::new()};
+        for subs_id in suber_subs {
+            self.remove_subscription(subs_id)
+        }
+        self.subscribers.remove(&suber_id);
+        self.suber_subs.remove(&suber_id);
+    }
+
+    pub fn remove_subscription(&mut self, id: u64) {
+        let sub_key = self.sub_to_key.remove(&id);
+        if let Some(sub_key) = sub_key {
+            if let Some(ref mut sub_subers) = self.subscriptions.get_mut(&sub_key) {
+                sub_subers.remove(&id);
+                self.sub_suber.remove(&id);
+            }
+        }
+    }
+}

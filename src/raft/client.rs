@@ -4,7 +4,13 @@ use raft::{
     ClientQryResponse, ClientCmdResponse};
 use raft::state_machine::OpType;
 use raft::state_machine::master::{ExecResult, ExecError};
-use raft::state_machine::callback::client::SUBSCRIPTIONS;
+use raft::state_machine::callback::client::{
+    CLIENT_SUBSCRIPTIONS,
+    is_ready as subs_is_ready};
+use raft::state_machine::callback::{
+    CallbackService,
+    DEFAULT_SERVICE_ID as CALLBACK_DEFAULT_SERVICE_ID, };
+use rpc::Server;
 use bincode::{SizeLimit, serde as bincode};
 use std::collections::{HashMap, BTreeMap, HashSet};
 use std::iter::FromIterator;
@@ -39,7 +45,7 @@ pub struct RaftClient {
     leader_id: AtomicU64,
     last_log_id: AtomicU64,
     last_log_term: AtomicU64,
-    service_id: u64,
+    service_id: u64
 }
 
 impl RaftClient {
@@ -142,21 +148,23 @@ impl RaftClient {
 
     pub fn subscribe
     <M, R, F>
-    (&self, sm_id: u64, msg: M, f: F) -> Result<(), ExecError>
+    (&self, sm_id: u64, msg: M, f: F) -> Result<bool, ExecError>
     where M: RaftMsg<R> + 'static,
           F: FnOnce(R) + 'static + Send + Sync
     {
+        if !subs_is_ready() {return Ok(false)}
         let service_id = self.service_id;
         let (fn_id, _, pattern_data) = msg.encode();
         let wrapper_fn = move |data: Vec<u8>| {
             f(msg.decode_return(&data))
         };
         let pattern_id = hash_bytes(&pattern_data.as_slice());
-        let key = (service_id, service_id, pattern_id);
-        let mut subs_map = SUBSCRIPTIONS.write().unwrap();
+        let key = (service_id, sm_id, fn_id, pattern_id);
+        let mut subs_map = CLIENT_SUBSCRIPTIONS.write().unwrap();
         let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
         subs_lst.push(Box::new(wrapper_fn));
-        Ok(())
+        //let cluster_subs = self.execute(sm_id, &)
+        Ok(true)
     }
 
     pub fn current_leader_id(&self) -> u64 {self.leader_id.load(ORDERING)}
