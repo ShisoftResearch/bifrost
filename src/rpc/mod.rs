@@ -34,6 +34,7 @@ pub trait RPCService: Sync + Send {
 
 pub struct Server {
     services: RwLock<HashMap<u64, Arc<RPCService>>>,
+    pub address: RwLock<Option<String>>,
 }
 
 pub struct ClientPool {
@@ -81,10 +82,15 @@ impl Server {
         }
         Arc::new(Server {
             services: RwLock::new(svr_map),
+            address: RwLock::new(None),
         })
     }
     pub fn listen(server: Arc<Server>, addr: &String) {
         let server = server.clone();
+        {
+            let mut server_address = server.address.write().unwrap();
+            *server_address = Some(addr.clone());
+        }
         tcp::server::Server::new(addr, Box::new(move |data| {
             let (svr_id, data) = extract_u64_head(data);
             let svr_map = server.services.read().unwrap();
@@ -109,6 +115,9 @@ impl Server {
     }
     pub fn remove_service(&self, service_id: u64) {
         self.services.write().unwrap().remove(&service_id);
+    }
+    pub fn address(&self) -> Option<String> {
+        self.address.read().unwrap().clone()
     }
 }
 

@@ -17,7 +17,7 @@ macro_rules! trait_fn {
 macro_rules! client_fn {
     (sub $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {
         pub fn $fn_name<F>(&self, $($arg:$in_),* f: F)
-        -> Result<bool, ExecError>
+        -> Result<Result<u64, SubscriptionError>, ExecError>
         where F: FnOnce(return_type!($out, $error)) + 'static + Send + Sync {
             self.client.subscribe(
                 self.sm_id,
@@ -234,7 +234,7 @@ macro_rules! raft_state_machine {
         pub mod client {
             use std::sync::Arc;
             use $crate::raft::state_machine::master::ExecError;
-            use $crate::raft::client::{RaftClient};
+            use $crate::raft::client::{RaftClient, SubscriptionError};
             use self::commands::*;
             use super::*;
 
