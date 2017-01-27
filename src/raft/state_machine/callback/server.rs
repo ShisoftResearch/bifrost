@@ -122,8 +122,7 @@ impl SMCallback {
                 if let Some(subscriptions) = subscriptions_map.get(&service_id) {
                     if let Some(sub_ids) = subscriptions.subscriptions.get(&key) {
                         for sub_id in sub_ids {
-                            let subscriber_id = subscriptions.sub_suber.get(&sub_id);
-                            if let Some(subscriber_id) = subscriber_id {
+                            if let Some(subscriber_id) = subscriptions.sub_suber.get(&sub_id) {
                                 if let Some(subscriber) = subscriptions.subscribers.get(&subscriber_id) {
                                     subscriber.client.notify(
                                         key, serialize!(&data)
