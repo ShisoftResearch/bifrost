@@ -10,7 +10,7 @@ use std::iter::FromIterator;
 #[test]
 fn hash_map(){
     let addr = String::from("127.0.0.1:2013");
-    let map_sm = string_string_hashmap::Map::new_by_name(String::from("test"));
+    let mut map_sm = string_string_hashmap::Map::new_by_name(String::from("test"));
     let service = RaftService::new(Options{
         storage: Storage::Default(),
         address: addr.clone(),
@@ -19,6 +19,7 @@ fn hash_map(){
     let server = Server::new(vec!((DEFAULT_SERVICE_ID, service.clone())));
     Server::listen_and_resume(server, &addr);
     let sm_id = map_sm.id;
+    map_sm.init_callback(&service);
     assert!(RaftService::start(&service));
     service.register_state_machine(Box::new(map_sm));
     service.bootstrap();
@@ -35,6 +36,10 @@ fn hash_map(){
     let sv2 = String::from("v2");
     let sv3 = String::from("v3");
     let sv4 = String::from("v4");
+
+    sm_client.on_inserted(|res| {
+
+    });
 
     assert!(sm_client.is_empty().unwrap().unwrap());
     sm_client.insert(sk1.clone(), sv1.clone()).unwrap().unwrap();
@@ -100,6 +105,4 @@ fn hash_map(){
     assert!(sm_client.contains_key(sk2.clone()).unwrap().unwrap());
     assert!(sm_client.contains_key(sk3.clone()).unwrap().unwrap());
     assert!(sm_client.contains_key(sk4.clone()).unwrap().unwrap());
-
-    sm_client.on_insert(|res| {});
 }

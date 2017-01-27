@@ -30,8 +30,8 @@ macro_rules! def_store_hash_map {
 
                 def qry contains_key(k: $kt) -> bool;
 
-                def sub on_insert() -> ($kt, $vt);
-                def sub on_remove() -> ($kt, $vt);
+                def sub on_inserted() -> ($kt, $vt);
+                def sub on_removed() -> ($kt, $vt);
             }
             impl StateMachineCmds for Map {
                 fn get(&self, k: $kt) -> Result<Option<$vt>, ()> {
@@ -44,7 +44,7 @@ macro_rules! def_store_hash_map {
                 fn insert(&mut self, k: $kt, v: $vt) -> Result<Option<$vt>, ()> {
                     let res = self.map.insert(k.clone(), v.clone());
                     if let Some(ref callback) = self.callback {
-                        callback.notify(&commands::on_insert{}, Ok((k, v)));
+                        callback.notify(&commands::on_inserted{}, Ok((k, v)));
                     }
                     Ok(res)
                 }
@@ -58,7 +58,7 @@ macro_rules! def_store_hash_map {
                     let res = self.map.remove(&k);
                     if let Some(ref callback) = self.callback {
                         if let Some(ref v) = res {
-                            callback.notify(&commands::on_remove{}, Ok((k, v.clone())));
+                            callback.notify(&commands::on_removed{}, Ok((k, v.clone())));
                         }
                     }
                     Ok(res)
@@ -113,8 +113,8 @@ macro_rules! def_store_hash_map {
                 pub fn new_by_name(name: String) -> Map {
                     Map::new(hash_str(name))
                 }
-                pub fn init_callback(&mut self, raft_service: Arc<RaftService>) {
-                    self.callback = Some(SMCallback::new(self.id(), raft_service));
+                pub fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
+                    self.callback = Some(SMCallback::new(self.id(), raft_service.clone()));
                 }
             }
         }

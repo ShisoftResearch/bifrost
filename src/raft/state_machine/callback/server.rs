@@ -117,7 +117,6 @@ impl SMCallback {
                 let service_id = self.raft_service.id;
                 let sm_id = self.sm_id;
                 let key = (service_id, sm_id, fn_id, pattern_id);
-                let raft_meta = self.raft_service.read_meta();
                 let subscriptions_map = SUBSCRIPTIONS.read().unwrap();
                 if let Some(subscriptions) = subscriptions_map.get(&service_id) {
                     if let Some(sub_ids) = subscriptions.subscriptions.get(&key) {
