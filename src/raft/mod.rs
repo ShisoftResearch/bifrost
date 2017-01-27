@@ -481,7 +481,9 @@ impl RaftService {
 //        println!("Meta write locked acquired for {}ms for {}, leader {}", acq_time, self.id, lock_mon.leader_id);
         lock_mon
     }
-
+    pub fn read_meta(&self) -> RwLockReadGuard<RaftMeta> {
+        self.meta.read().unwrap()
+    }
     fn become_candidate(server: Arc<RaftService>, meta: &mut RwLockWriteGuard<RaftMeta>) {
         server.reset_last_checked(meta);
         let term = meta.term;

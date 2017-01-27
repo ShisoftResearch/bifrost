@@ -2,9 +2,17 @@ use std::boxed::FnBox;
 use std::collections::{HashMap, HashSet};
 use std::sync::{RwLock, Arc};
 use std::sync::atomic::{AtomicU64, Ordering};
-use bifrost_hasher::hash_str;
+use bifrost_hasher::{hash_str, hash_bytes};
+use raft::RaftService;
 use rpc;
+use serde;
+use super::super::{StateMachineCtl, OpType};
+use super::super::super::RaftMsg;
 use super::*;
+
+lazy_static! {
+    pub static ref SUBSCRIPTIONS: RwLock<HashMap<u64, Subscriptions>> = RwLock::new(HashMap::new());
+}
 
 pub struct Subscriber {
     pub session_id: u64,
@@ -85,5 +93,50 @@ impl Subscriptions {
                 self.sub_suber.remove(&id);
             }
         }
+    }
+}
+
+pub struct SMCallback {
+    pub raft_service: Arc<RaftService>,
+    pub sm_id: u64,
+}
+
+impl SMCallback {
+    pub fn new(state_machine_id: u64, raft_service: Arc<RaftService>) -> SMCallback {
+        SMCallback {
+            raft_service: raft_service,
+            sm_id: state_machine_id,
+        }
+    }
+    pub fn notify<R>(&self, func: &RaftMsg<R>, data: R) -> bool
+    where R: serde::Serialize {
+        let (fn_id, op_type, pattern_data) = func.encode();
+        match op_type {
+            OpType::SUBSCRIBE => {
+                let pattern_id = hash_bytes(&pattern_data.as_slice());
+                let service_id = self.raft_service.id;
+                let sm_id = self.sm_id;
+                let key = (service_id, sm_id, fn_id, pattern_id);
+                let raft_meta = self.raft_service.read_meta();
+                let subscriptions_map = SUBSCRIPTIONS.read().unwrap();
+                if let Some(subscriptions) = subscriptions_map.get(&service_id) {
+                    if let Some(sub_ids) = subscriptions.subscriptions.get(&key) {
+                        for sub_id in sub_ids {
+                            let subscriber_id = subscriptions.sub_suber.get(&sub_id);
+                            if let Some(subscriber_id) = subscriber_id {
+                                if let Some(subscriber) = subscriptions.subscribers.get(&subscriber_id) {
+                                    subscriber.client.notify(
+                                        key, serialize!(&data)
+                                    );
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            _ => {}
+        }
+        return false;
     }
 }

@@ -2,7 +2,7 @@ use raft::SyncServiceClient;
 use rpc;
 use super::*;
 use super::callback::SubKey;
-use super::callback::server::Subscriptions;
+use super::callback::server::{Subscriptions, SUBSCRIPTIONS};
 use bifrost_hasher::hash_str;
 use std::sync::{Arc, Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
@@ -18,7 +18,6 @@ pub struct RaftMember {
 
 pub struct Configures {
     pub members: HashMap<u64, RaftMember>,
-    pub subscriptions: Subscriptions,
     service_id: u64,
 }
 
@@ -27,6 +26,7 @@ pub type MemberConfigSnapshot = HashSet<String>;
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ConfigSnapshot {
     members: MemberConfigSnapshot,
+    //TODO: snapshot for subscriptions
 }
 
 raft_state_machine! {
@@ -69,7 +69,12 @@ impl StateMachineCmds for Configures {
         Ok(members)
     }
     fn subscribe(&mut self, key: SubKey, address: String, session_id: u64) -> Result<u64, ()> {
-        self.subscriptions.subscribe(key, address, session_id)
+        let mut subscriptions_map = SUBSCRIPTIONS.write().unwrap();
+        if let Some(ref mut subscriptions) = subscriptions_map.get_mut(&self.service_id) {
+            subscriptions.subscribe(key, address, session_id)
+        } else {
+            Err(())
+        }
     }
 }
 
@@ -93,9 +98,10 @@ impl StateMachineCtl for Configures {
 
 impl Configures {
     pub fn new(service_id: u64) -> Configures {
+        let mut subscription_map = SUBSCRIPTIONS.write().unwrap();
+        subscription_map.insert(service_id, Subscriptions::new());
         Configures {
             members: HashMap::new(),
-            subscriptions: Subscriptions::new(),
             service_id: service_id
         }
     }
