@@ -114,19 +114,21 @@ impl SMCallback {
         match op_type {
             OpType::SUBSCRIBE => {
                 let pattern_id = hash_bytes(&pattern_data.as_slice());
-                let service_id = self.raft_service.id;
+                let raft_sid = self.raft_service.options.service_id;
                 let sm_id = self.sm_id;
-                let key = (service_id, sm_id, fn_id, pattern_id);
+                let key = (raft_sid, sm_id, fn_id, pattern_id);
                 let subscriptions_map = SUBSCRIPTIONS.read().unwrap();
-                if let Some(subscriptions) = subscriptions_map.get(&service_id) {
+                if let Some(subscriptions) = subscriptions_map.get(&raft_sid) {
                     if let Some(sub_ids) = subscriptions.subscriptions.get(&key) {
                         for sub_id in sub_ids {
                             if let Some(subscriber_id) = subscriptions.sub_suber.get(&sub_id) {
                                 if let Some(subscriber) = subscriptions.subscribers.get(&subscriber_id) {
-                                    subscriber.client.notify(
+//                                    if let Ok(_) = subscriber.client.notify(
+//                                        key, serialize!(&data)
+//                                    ) {return true;} else {panic!("callback failed");}
+                                    panic!("NOTIFY: {:?}", subscriber.client.notify(
                                         key, serialize!(&data)
-                                    );
-                                    return true;
+                                    ))
                                 }
                             }
                         }

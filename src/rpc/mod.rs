@@ -85,12 +85,13 @@ impl Server {
             address: RwLock::new(None),
         })
     }
+    fn reset_address(&self, addr: &String) {
+        let mut server_address = self.address.write().unwrap();
+        *server_address = Some(addr.clone());
+    }
     pub fn listen(server: Arc<Server>, addr: &String) {
+        server.reset_address(addr);
         let server = server.clone();
-        {
-            let mut server_address = server.address.write().unwrap();
-            *server_address = Some(addr.clone());
-        }
         tcp::server::Server::new(addr, Box::new(move |data| {
             let (svr_id, data) = extract_u64_head(data);
             let svr_map = server.services.read().unwrap();
@@ -104,8 +105,9 @@ impl Server {
         }));
     }
     pub fn listen_and_resume(server: Arc<Server>, addr: &String) {
-        let server = server.clone();
+        server.reset_address(&addr);
         let addr = addr.clone();
+        let server = server.clone();
         thread::spawn(move|| {
             Server::listen(server, &addr);
         });
