@@ -41,12 +41,27 @@ fn hash_map(){
     let sv3 = String::from("v3");
     let sv4 = String::from("v4");
 
-    println!("SUBSCRIPTION: {:?}", sm_client.on_inserted(|res| {
-        if let Ok((key, value)) = res {
-            println!("GOT CALLBACK {:?} -> {:?}", key, value)
-        }
-    }));
+    let mut inserted_stash = HashMap::new();
+    inserted_stash.insert(sk1.clone(), sv1.clone());
+    inserted_stash.insert(sk2.clone(), sv2.clone());
+    inserted_stash.insert(sk3.clone(), sv3.clone());
+    inserted_stash.insert(sk4.clone(), sv4.clone());
 
+    let mut removed_stash = HashMap::new();
+    removed_stash.insert(sk2.clone(), sv2.clone());
+
+    sm_client.on_inserted(move |res| {
+        if let Ok((key, value)) = res {
+            println!("GOT INSERT CALLBACK {:?} -> {:?}", key, value);
+            assert_eq!(inserted_stash.get(&key).unwrap(), &value);
+        }
+    });
+    sm_client.on_removed(move |res| {
+        if let Ok((key, value)) = res {
+            println!("GOT REMOVED CALLBACK {:?} -> {:?}", key, value);
+            assert_eq!(removed_stash.get(&key).unwrap(), &value);
+        }
+    });
     assert!(sm_client.is_empty().unwrap().unwrap());
     sm_client.insert(sk1.clone(), sv1.clone()).unwrap().unwrap();
     sm_client.insert(sk2.clone(), sv2.clone()).unwrap().unwrap();
