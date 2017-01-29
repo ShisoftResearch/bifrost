@@ -8,6 +8,8 @@ use bifrost::rpc::*;
 use std::collections::{HashSet, HashMap};
 use std::iter::FromIterator;
 
+use raft::wait;
+
 #[test]
 fn hash_map(){
     let addr = String::from("127.0.0.1:2013");
@@ -107,4 +109,6 @@ fn hash_map(){
     assert!(sm_client.contains_key(sk2.clone()).unwrap().unwrap());
     assert!(sm_client.contains_key(sk3.clone()).unwrap().unwrap());
     assert!(sm_client.contains_key(sk4.clone()).unwrap().unwrap());
+
+    wait();
 }

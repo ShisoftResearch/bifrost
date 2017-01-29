@@ -19,8 +19,8 @@ pub fn init_subscription(server: Arc<Server>) {
         let service = Arc::new(CallbackService);
         let mut address_ref = SERVER_ADDRESS.write().unwrap();
         server.append_service(DEFAULT_SERVICE_ID, service.clone());
-        *service_ref = Some(service);
-        *address_ref = Some(server.address().unwrap());
+        *service_ref = Some(service.clone());
+        *address_ref = Some(server.clone().address().unwrap());
     }
 }
 

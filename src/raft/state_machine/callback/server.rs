@@ -2,6 +2,8 @@ use std::boxed::FnBox;
 use std::collections::{HashMap, HashSet};
 use std::sync::{RwLock, Arc};
 use std::sync::atomic::{AtomicU64, Ordering};
+use futures::Future;
+use futures_cpupool::CpuPool;
 use bifrost_hasher::{hash_str, hash_bytes};
 use raft::RaftService;
 use rpc;
@@ -10,8 +12,10 @@ use super::super::{StateMachineCtl, OpType};
 use super::super::super::RaftMsg;
 use super::*;
 
+
 lazy_static! {
     pub static ref SUBSCRIPTIONS: RwLock<HashMap<u64, Subscriptions>> = RwLock::new(HashMap::new());
+    pub static ref THREAD_POOL:CpuPool = CpuPool::new_num_cpus();
 }
 
 pub struct Subscriber {
@@ -108,8 +112,8 @@ impl SMCallback {
             sm_id: state_machine_id,
         }
     }
-    pub fn notify<R>(&self, func: &RaftMsg<R>, data: R) -> bool
-    where R: serde::Serialize {
+    pub fn notify<R>(&self, func: &RaftMsg<R>, data: R)
+    where R: serde::Serialize + Clone + Send + Sync {
         let (fn_id, op_type, pattern_data) = func.encode();
         match op_type {
             OpType::SUBSCRIBE => {
@@ -120,15 +124,20 @@ impl SMCallback {
                 let subscriptions_map = SUBSCRIPTIONS.read().unwrap();
                 if let Some(subscriptions) = subscriptions_map.get(&raft_sid) {
                     if let Some(sub_ids) = subscriptions.subscriptions.get(&key) {
+                        let data = serialize!(&data);
                         for sub_id in sub_ids {
                             if let Some(subscriber_id) = subscriptions.sub_suber.get(&sub_id) {
                                 if let Some(subscriber) = subscriptions.subscribers.get(&subscriber_id) {
-//                                    if let Ok(_) = subscriber.client.notify(
-//                                        key, serialize!(&data)
-//                                    ) {return true;} else {panic!("callback failed");}
-                                    panic!("NOTIFY: {:?}", subscriber.client.notify(
-                                        key, serialize!(&data)
-                                    ))
+                                    let data = data.clone();
+                                    let client = subscriber.client.clone();
+                                    println!("=============");
+                                    THREAD_POOL.spawn_fn(move || -> Result<(), ()>{
+                                        println!("------------");
+                                        println!("NOTIFY: {:?}", client.notify(
+                                            key, data
+                                        ));
+                                        Ok(())
+                                    });
                                 }
                             }
                         }
@@ -137,6 +146,5 @@ impl SMCallback {
             },
             _ => {}
         }
-        return false;
     }
 }

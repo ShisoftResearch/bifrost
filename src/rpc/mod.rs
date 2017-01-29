@@ -9,6 +9,7 @@ use std::sync::{Mutex, RwLock};
 use std::thread;
 use bincode::{SizeLimit, serde as bincode};
 use tcp;
+use utils::time;
 use utils::u8vec::*;
 
 lazy_static! {
@@ -94,14 +95,17 @@ impl Server {
         let server = server.clone();
         tcp::server::Server::new(addr, Box::new(move |data| {
             let (svr_id, data) = extract_u64_head(data);
+            let t = time::get_time();
             let svr_map = server.services.read().unwrap();
             let service = svr_map.get(&svr_id);
-            match service {
+            let res = match service {
                 Some(service) => {
                     encode_res(service.dispatch(data))
                 },
                 None => encode_res(Err(RPCRequestError::ServiceIdNotFound) as Result<Vec<u8>, RPCRequestError>)
-            }
+            };
+            //println!("SVR RPC: {} - {}ms", svr_id, time::get_time() - t);
+            res
         }));
     }
     pub fn listen_and_resume(server: Arc<Server>, addr: &String) {

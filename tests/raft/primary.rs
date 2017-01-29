@@ -63,6 +63,8 @@ fn server_membership(){
     assert_eq!(service1.num_members(), 3);
     assert_eq!(service3.num_members(), 3);
 
+    wait();
+
     // check in service2. Although it is a log replication problem but membership changes should take effect immediately
     assert_eq!(service2.num_members(), 3);
 
