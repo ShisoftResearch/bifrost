@@ -1,9 +1,9 @@
 use std::boxed::FnBox;
 use std::collections::{HashMap, HashSet};
-use std::sync::{RwLock, Arc};
+use std::sync::{RwLock, Mutex, Arc};
 use std::sync::atomic::{AtomicU64, Ordering};
-use futures::Future;
-use futures_cpupool::CpuPool;
+use threadpool::ThreadPool;
+use num_cpus;
 use bifrost_hasher::{hash_str, hash_bytes};
 use raft::RaftService;
 use rpc;
@@ -15,7 +15,9 @@ use super::*;
 
 lazy_static! {
     pub static ref SUBSCRIPTIONS: RwLock<HashMap<u64, Subscriptions>> = RwLock::new(HashMap::new());
-    pub static ref THREAD_POOL:CpuPool = CpuPool::new_num_cpus();
+    pub static ref THREAD_POOL: Mutex<ThreadPool> = Mutex::new(ThreadPool::new(
+                        num_cpus::get()
+                    ));
 }
 
 pub struct Subscriber {
@@ -130,13 +132,8 @@ impl SMCallback {
                                 if let Some(subscriber) = subscriptions.subscribers.get(&subscriber_id) {
                                     let data = data.clone();
                                     let client = subscriber.client.clone();
-                                    println!("=============");
-                                    THREAD_POOL.spawn_fn(move || -> Result<(), ()>{
-                                        println!("------------");
-                                        println!("NOTIFY: {:?}", client.notify(
-                                            key, data
-                                        ));
-                                        Ok(())
+                                    THREAD_POOL.lock().unwrap().execute(move || {
+                                        client.notify(key, data);
                                     });
                                 }
                             }
