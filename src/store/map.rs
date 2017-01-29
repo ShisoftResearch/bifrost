@@ -2,11 +2,15 @@
 macro_rules! def_store_hash_map {
     ($m: ident <$kt: ty, $vt: ty>) => {
         pub mod $m {
-            use raft::state_machine::StateMachineCtl;
+            use $crate::raft::state_machine::StateMachineCtl;
+            use $crate::raft::state_machine::callback::server::SMCallback;
+            use $crate::raft::RaftService;
             use bifrost_hasher::hash_str;
             use std::collections::HashMap;
+            use std::sync::{Arc};
             pub struct Map {
                 map: HashMap<$kt, $vt>,
+                callback: Option<SMCallback>,
                 pub id: u64
             }
             raft_state_machine! {
@@ -25,6 +29,9 @@ macro_rules! def_store_hash_map {
                 def qry clone() -> HashMap<$kt, $vt>;
 
                 def qry contains_key(k: $kt) -> bool;
+
+                def sub on_inserted() -> ($kt, $vt);
+                def sub on_removed() -> ($kt, $vt);
             }
             impl StateMachineCmds for Map {
                 fn get(&self, k: $kt) -> Result<Option<$vt>, ()> {
@@ -35,13 +42,26 @@ macro_rules! def_store_hash_map {
                     )
                 }
                 fn insert(&mut self, k: $kt, v: $vt) -> Result<Option<$vt>, ()> {
-                    Ok(self.map.insert(k, v))
+                    let res = self.map.insert(k.clone(), v.clone());
+                    if let Some(ref callback) = self.callback {
+                        callback.notify(&commands::on_inserted{}, Ok((k, v)));
+                    }
+                    Ok(res)
                 }
                 fn insert_if_absent(&mut self, k: $kt, v: $vt) -> Result<$vt, ()> {
-                    Ok(self.map.entry(k).or_insert(v).clone())
+                    if let Some(v) = self.map.get(&k) {
+                        return Ok(v.clone())
+                    }
+                    self.insert(k, v.clone()); Ok(v)
                 }
                 fn remove(&mut self, k: $kt) -> Result<Option<$vt>, ()> {
-                    Ok(self.map.remove(&k))
+                    let res = self.map.remove(&k);
+                    if let Some(ref callback) = self.callback {
+                        if let Some(ref v) = res {
+                            callback.notify(&commands::on_removed{}, Ok((k, v.clone())));
+                        }
+                    }
+                    Ok(res)
                 }
                 fn is_empty(&self) -> Result<bool, ()> {
                     Ok(self.map.is_empty())
@@ -86,11 +106,15 @@ macro_rules! def_store_hash_map {
                 pub fn new(id: u64) -> Map {
                     Map {
                         map: HashMap::new(),
+                        callback: None,
                         id: id,
                     }
                 }
                 pub fn new_by_name(name: String) -> Map {
                     Map::new(hash_str(name))
+                }
+                pub fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
+                    self.callback = Some(SMCallback::new(self.id(), raft_service.clone()));
                 }
             }
         }

@@ -173,7 +173,7 @@ macro_rules! service {
         }
         pub struct SyncServiceClient {
             pub id: u64,
-            client: Arc<RPCSyncClient>,
+            pub client: Arc<RPCSyncClient>,
         }
         impl SyncServiceClient {
            $(

@@ -6,6 +6,7 @@
 #![feature(collections_bound)]
 #![feature(proc_macro)]
 #![feature(btree_range)]
+#![feature(fnbox)]
 
 pub mod tcp;
 #[macro_use]
@@ -25,6 +26,7 @@ extern crate tokio_proto;
 extern crate tokio_timer;
 extern crate tokio_middleware;
 extern crate futures;
+extern crate futures_cpupool;
 
 extern crate bincode;
 extern crate serde;

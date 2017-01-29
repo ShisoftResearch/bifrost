@@ -9,6 +9,7 @@ use std::sync::{Mutex, RwLock};
 use std::thread;
 use bincode::{SizeLimit, serde as bincode};
 use tcp;
+use utils::time;
 use utils::u8vec::*;
 
 lazy_static! {
@@ -34,6 +35,7 @@ pub trait RPCService: Sync + Send {
 
 pub struct Server {
     services: RwLock<HashMap<u64, Arc<RPCService>>>,
+    pub address: RwLock<Option<String>>,
 }
 
 pub struct ClientPool {
@@ -81,25 +83,35 @@ impl Server {
         }
         Arc::new(Server {
             services: RwLock::new(svr_map),
+            address: RwLock::new(None),
         })
     }
+    fn reset_address(&self, addr: &String) {
+        let mut server_address = self.address.write().unwrap();
+        *server_address = Some(addr.clone());
+    }
     pub fn listen(server: Arc<Server>, addr: &String) {
+        server.reset_address(addr);
         let server = server.clone();
         tcp::server::Server::new(addr, Box::new(move |data| {
             let (svr_id, data) = extract_u64_head(data);
+            let t = time::get_time();
             let svr_map = server.services.read().unwrap();
             let service = svr_map.get(&svr_id);
-            match service {
+            let res = match service {
                 Some(service) => {
                     encode_res(service.dispatch(data))
                 },
                 None => encode_res(Err(RPCRequestError::ServiceIdNotFound) as Result<Vec<u8>, RPCRequestError>)
-            }
+            };
+            //println!("SVR RPC: {} - {}ms", svr_id, time::get_time() - t);
+            res
         }));
     }
     pub fn listen_and_resume(server: Arc<Server>, addr: &String) {
-        let server = server.clone();
+        server.reset_address(&addr);
         let addr = addr.clone();
+        let server = server.clone();
         thread::spawn(move|| {
             Server::listen(server, &addr);
         });
@@ -109,6 +121,9 @@ impl Server {
     }
     pub fn remove_service(&self, service_id: u64) {
         self.services.write().unwrap().remove(&service_id);
+    }
+    pub fn address(&self) -> Option<String> {
+        self.address.read().unwrap().clone()
     }
 }
 

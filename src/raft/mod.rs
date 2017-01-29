@@ -30,7 +30,7 @@ pub mod client;
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_RAFT_DEFAULT_SERVICE) as u64;
 
-pub trait RaftMsg<R> {
+pub trait RaftMsg<R>: Send + Sync {
     fn encode(&self) -> (u64, OpType, Vec<u8>);
     fn decode_return(&self, data: &Vec<u8>) -> R;
 }
@@ -481,7 +481,9 @@ impl RaftService {
 //        println!("Meta write locked acquired for {}ms for {}, leader {}", acq_time, self.id, lock_mon.leader_id);
         lock_mon
     }
-
+    pub fn read_meta(&self) -> RwLockReadGuard<RaftMeta> {
+        self.meta.read().unwrap()
+    }
     fn become_candidate(server: Arc<RaftService>, meta: &mut RwLockWriteGuard<RaftMeta>) {
         server.reset_last_checked(meta);
         let term = meta.term;
@@ -598,7 +600,7 @@ impl RaftService {
                         loop {
                             let entries: Option<LogEntries> = { // extract logs to send to follower
                                 let list: LogEntries = logs.range(
-                                    Included(&follower.next_index), Unbounded
+                                    (Included(&follower.next_index), Unbounded)
                                 ).map(|(_, entry)| entry.clone()).collect(); //TODO: avoid clone entry
                                 if list.is_empty() {None} else {Some(list)}
                             };
@@ -794,7 +796,7 @@ impl Service for RaftService {
                 if log_mismatch {
                     //RI, 3
                     let ids_to_del: Vec<u64> = logs.range(
-                        Included(&prev_log_id), Unbounded
+                        (Included(&prev_log_id), Unbounded)
                     ).map(|(id, _)| *id).collect();
                     for id in ids_to_del {
                         logs.remove(&id);

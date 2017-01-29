@@ -4,13 +4,25 @@ use raft::{
     ClientQryResponse, ClientCmdResponse};
 use raft::state_machine::OpType;
 use raft::state_machine::master::{ExecResult, ExecError};
+use raft::state_machine::callback::client::{
+    CLIENT_SUBSCRIPTIONS,
+    is_ready as subs_is_ready,
+    server_address as subs_server_address,
+    session_id as subs_session_id};
+use raft::state_machine::callback::{
+    CallbackService,
+    DEFAULT_SERVICE_ID as CALLBACK_DEFAULT_SERVICE_ID, };
+use raft::state_machine::configs::CONFIG_SM_ID;
+use raft::state_machine::configs::commands::{subscribe as conf_subscribe};
+use rpc::Server;
+use bincode::{SizeLimit, serde as bincode};
 use std::collections::{HashMap, BTreeMap, HashSet};
 use std::iter::FromIterator;
 use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::cell::RefCell;
 use std::sync::Arc;
-use bifrost_hasher::hash_str;
+use bifrost_hasher::{hash_str, hash_bytes};
 use rand;
 use rpc;
 
@@ -20,6 +32,12 @@ const ORDERING: Ordering = Ordering::Relaxed;
 pub enum ClientError {
     LeaderIdValid,
     ServerUnreachable,
+}
+
+#[derive(Debug)]
+pub enum SubscriptionError {
+    RemoteError,
+    SubServerNotReady,
 }
 
 struct QryMeta {
@@ -37,7 +55,7 @@ pub struct RaftClient {
     leader_id: AtomicU64,
     last_log_id: AtomicU64,
     last_log_term: AtomicU64,
-    service_id: u64,
+    service_id: u64
 }
 
 impl RaftClient {
@@ -123,7 +141,7 @@ impl RaftClient {
             OpType::QUERY => {
                 self.query(sm_id, fn_id, &req_data, 0)
             },
-            OpType::COMMAND => {
+            OpType::COMMAND | OpType::SUBSCRIBE => {
                 self.command(sm_id, fn_id, &req_data, 0)
             },
         };
@@ -133,6 +151,40 @@ impl RaftClient {
                     Ok(data) => Ok(msg.decode_return(&data)),
                     Err(e) => Err(e)
                 }
+            },
+            Err(e) => Err(e)
+        }
+    }
+
+    pub fn subscribe
+    <M, R, F>
+    (&self, sm_id: u64, msg: M, f: F) -> Result<Result<u64, SubscriptionError>, ExecError>
+    where M: RaftMsg<R> + 'static,
+          F: Fn(R) + 'static + Send + Sync
+    {
+        if !subs_is_ready() {return Ok(Err(SubscriptionError::SubServerNotReady))}
+        let service_id = self.service_id;
+        let (fn_id, _, pattern_data) = msg.encode();
+        let wrapper_fn = move |data: Vec<u8>| {
+            f(msg.decode_return(&data))
+        };
+        let pattern_id = hash_bytes(&pattern_data.as_slice());
+        let key = (service_id, sm_id, fn_id, pattern_id);
+        let mut subs_map = CLIENT_SUBSCRIPTIONS.write().unwrap();
+        let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
+        subs_lst.push(Box::new(wrapper_fn));
+        let cluster_subs = self.execute(
+            CONFIG_SM_ID,
+            &conf_subscribe {
+                key: key,
+                address: subs_server_address(),
+                session_id: subs_session_id()
+            }
+        );
+        match cluster_subs {
+            Ok(sub_result) => match sub_result {
+                Ok(sub_id) => Ok(Ok(sub_id)),
+                Err(_) => Ok(Err(SubscriptionError::RemoteError))
             },
             Err(e) => Err(e)
         }

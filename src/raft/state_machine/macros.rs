@@ -12,17 +12,35 @@ macro_rules! trait_fn {
     (cmd $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {
         fn $fn_name(&mut self, $($arg:$in_),*) -> return_type!($out, $error);
     };
+    (sub $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {}
 }
 macro_rules! client_fn {
-    ($fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty $body:block) => {
-        fn $fn_name(&self, $($arg:$in_),*)
-        -> Result<return_type!($out, $error), ExecError> $body
+    (sub $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {
+        pub fn $fn_name<F>(&self, $($arg:$in_),* f: F)
+        -> Result<Result<u64, SubscriptionError>, ExecError>
+        where F: Fn(return_type!($out, $error)) + 'static + Send + Sync {
+            self.client.subscribe(
+                self.sm_id,
+                $fn_name{$($arg:$arg),*},
+                f
+            )
+        }
+    };
+    ($others:ident $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {
+        pub fn $fn_name(&self, $($arg:$in_),*)
+        -> Result<return_type!($out, $error), ExecError> {
+            self.client.execute(
+                self.sm_id,
+                &$fn_name{$($arg:$arg),*}
+            )
+        }
     };
 }
 
 macro_rules! fn_op_type {
     (qry) => {$crate::raft::state_machine::OpType::QUERY};
     (cmd) => {$crate::raft::state_machine::OpType::COMMAND};
+    (sub) => {$crate::raft::state_machine::OpType::SUBSCRIBE};
 }
 
 macro_rules! dispatch_fn {
@@ -34,17 +52,17 @@ macro_rules! dispatch_fn {
 }
 
 macro_rules! dispatch_cmd {
-    (qry $fn_name:ident $s: ident $d: ident ( $( $arg:ident : $in_:ty ),* )) => {None};
     (cmd $fn_name:ident $s: ident $d: ident ( $( $arg:ident : $in_:ty ),* )) => {
         dispatch_fn!($fn_name $s $d( $( $arg : $in_ ),* ))
-    }
+    };
+    ($others:ident $fn_name:ident $s: ident $d: ident ( $( $arg:ident : $in_:ty ),* )) => {None};
 }
 
 macro_rules! dispatch_qry {
-    (cmd $fn_name:ident $s: ident $d: ident ( $( $arg:ident : $in_:ty ),* )) => {None};
     (qry $fn_name:ident $s: ident $d: ident ( $( $arg:ident : $in_:ty ),* )) => {
         dispatch_fn!($fn_name $s $d( $( $arg : $in_ ),* ))
-    }
+    };
+    ($others:ident $fn_name:ident $s: ident $d: ident ( $( $arg:ident : $in_:ty ),* )) => {None};
 }
 
 #[macro_export]
@@ -153,7 +171,6 @@ macro_rules! raft_state_machine {
         use std;
         use bincode::{SizeLimit, serde as bincode};
 
-
         pub mod commands {
             use super::*;
             $(
@@ -217,7 +234,7 @@ macro_rules! raft_state_machine {
         pub mod client {
             use std::sync::Arc;
             use $crate::raft::state_machine::master::ExecError;
-            use $crate::raft::client::RaftClient;
+            use $crate::raft::client::{RaftClient, SubscriptionError};
             use self::commands::*;
             use super::*;
 
@@ -228,13 +245,7 @@ macro_rules! raft_state_machine {
             impl SMClient {
                $(
                   $(#[$attr])*
-                  pub fn $fn_name(&self, $($arg:$in_),*)
-                  -> Result<return_type!($out, $error), ExecError> {
-                      self.client.execute(
-                          self.sm_id,
-                          &$fn_name{$($arg:$arg),*}
-                      )
-                  }
+                  client_fn!($smt $fn_name( $( $arg : $in_ ),* ) -> $out | $error);
                )*
                pub fn new(sm_id: u64, client: &Arc<RaftClient>) -> SMClient {
                     SMClient {

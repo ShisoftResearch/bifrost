@@ -1,9 +1,11 @@
 use raft::SyncServiceClient;
 use rpc;
-use std::collections::{HashMap, HashSet};
 use super::*;
+use super::callback::SubKey;
+use super::callback::server::{Subscriptions, SUBSCRIPTIONS};
 use bifrost_hasher::hash_str;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
+use std::collections::{HashMap, HashSet};
 use std::io;
 
 pub const CONFIG_SM_ID: u64 = 1;
@@ -23,13 +25,16 @@ pub type MemberConfigSnapshot = HashSet<String>;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ConfigSnapshot {
-    members: MemberConfigSnapshot
+    members: MemberConfigSnapshot,
+    //TODO: snapshot for subscriptions
 }
 
 raft_state_machine! {
     def cmd new_member_(address: String);
     def cmd del_member_(address: String);
     def qry member_address() -> Vec<String>;
+
+    def cmd subscribe(key: SubKey, address: String, session_id: u64) -> u64;
 }
 
 impl StateMachineCmds for Configures {
@@ -63,13 +68,21 @@ impl StateMachineCmds for Configures {
         }
         Ok(members)
     }
+    fn subscribe(&mut self, key: SubKey, address: String, session_id: u64) -> Result<u64, ()> {
+        let mut subscriptions_map = SUBSCRIPTIONS.write().unwrap();
+        if let Some(ref mut subscriptions) = subscriptions_map.get_mut(&self.service_id) {
+            subscriptions.subscribe(key, address, session_id)
+        } else {
+            Err(())
+        }
+    }
 }
 
 impl StateMachineCtl for Configures {
     sm_complete!();
     fn snapshot(&self) -> Option<Vec<u8>> {
         let mut snapshot = ConfigSnapshot{
-            members: HashSet::with_capacity(self.members.len())
+            members: HashSet::with_capacity(self.members.len()),
         };
         for (_, member) in self.members.iter() {
             snapshot.members.insert(member.address.clone());
@@ -85,6 +98,8 @@ impl StateMachineCtl for Configures {
 
 impl Configures {
     pub fn new(service_id: u64) -> Configures {
+        let mut subscription_map = SUBSCRIPTIONS.write().unwrap();
+        subscription_map.insert(service_id, Subscriptions::new());
         Configures {
             members: HashMap::new(),
             service_id: service_id

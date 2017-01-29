@@ -1,10 +1,14 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
 
-pub fn hash_str (text: String) -> u64 { // the same as the one in utils hash
+pub fn hash_bytes(bytes: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::default();
+    hasher.write(bytes);
+    hasher.finish()
+}
+
+pub fn hash_str (text: String) -> u64 { // the same as the one in utils hash
     let text_bytes = text.into_bytes();
     let text_bytes = text_bytes.as_slice();
-    hasher.write(&text_bytes);
-    hasher.finish()
+    hash_bytes(&text_bytes)
 }
