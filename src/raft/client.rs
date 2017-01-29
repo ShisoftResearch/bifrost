@@ -160,7 +160,7 @@ impl RaftClient {
     <M, R, F>
     (&self, sm_id: u64, msg: M, f: F) -> Result<Result<u64, SubscriptionError>, ExecError>
     where M: RaftMsg<R> + 'static,
-          F: FnOnce(R) + 'static + Send + Sync
+          F: Fn(R) + 'static + Send + Sync
     {
         if !subs_is_ready() {return Ok(Err(SubscriptionError::SubServerNotReady))}
         let service_id = self.service_id;

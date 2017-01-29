@@ -6,7 +6,7 @@ use rpc::Server;
 use utils::time::get_time;
 
 lazy_static! {
-    pub static ref CLIENT_SUBSCRIPTIONS: RwLock<HashMap<SubKey, Vec<Box<FnBox(Vec<u8>) + Send + Sync>>>> = RwLock::new(HashMap::new());
+    pub static ref CLIENT_SUBSCRIPTIONS: RwLock<HashMap<SubKey, Vec<Box<Fn(Vec<u8>) + Send + Sync>>>> = RwLock::new(HashMap::new());
     pub static ref SUBSCRIPTIONS_SERVICE: RwLock<Option<Arc<CallbackService>>> = RwLock::new(None);
     pub static ref SERVER_ADDRESS: RwLock<Option<String>> = RwLock::new(None);
     pub static ref SESSION_ID: Option<u64> = Some(get_time() as u64);

@@ -42,7 +42,9 @@ fn hash_map(){
     let sv4 = String::from("v4");
 
     println!("SUBSCRIPTION: {:?}", sm_client.on_inserted(|res| {
-
+        if let Ok((key, value)) = res {
+            println!("GOT CALLBACK {:?} -> {:?}", key, value)
+        }
     }));
 
     assert!(sm_client.is_empty().unwrap().unwrap());
