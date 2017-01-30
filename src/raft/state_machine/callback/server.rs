@@ -55,6 +55,7 @@ impl Subscriptions {
         let require_reload_suber = if suber_exists {
             let session_match = self.subscribers.get(&suber_id).unwrap().session_id == session_id;
             if !session_match {
+                println!("SESSION ID NOT MATCH!!!");
                 self.remove_subscriber(suber_id);
                 true
             } else {false}
@@ -116,6 +117,7 @@ impl SMCallback {
     }
     pub fn notify<R>(&self, func: &RaftMsg<R>, data: R)
     where R: serde::Serialize + Clone + Send + Sync {
+        println!("===============");
         let (fn_id, op_type, pattern_data) = func.encode();
         match op_type {
             OpType::SUBSCRIBE => {
@@ -124,24 +126,29 @@ impl SMCallback {
                 let sm_id = self.sm_id;
                 let key = (raft_sid, sm_id, fn_id, pattern_id);
                 let subscriptions_map = SUBSCRIPTIONS.read().unwrap();
-                if let Some(subscriptions) = subscriptions_map.get(&raft_sid) {
-                    if let Some(sub_ids) = subscriptions.subscriptions.get(&key) {
+                if let Some(svr_subs) = subscriptions_map.get(&raft_sid) {
+                    if let Some(sub_ids) = svr_subs.subscriptions.get(&key) {
                         let data = serialize!(&data);
                         for sub_id in sub_ids {
-                            if let Some(subscriber_id) = subscriptions.sub_suber.get(&sub_id) {
-                                if let Some(subscriber) = subscriptions.subscribers.get(&subscriber_id) {
+                            if let Some(subscriber_id) = svr_subs.sub_suber.get(&sub_id) {
+                                if let Some(subscriber) = svr_subs.subscribers.get(&subscriber_id) {
                                     let data = data.clone();
                                     let client = subscriber.client.clone();
+                                    println!("--------");
                                     THREAD_POOL.lock().unwrap().execute(move || {
                                         client.notify(key, data);
                                     });
                                 }
-                            }
+                            } else {println!("||||||||||||||||");}
                         }
+                    } else {
+                        let keys: Vec<SubKey> = svr_subs.subscriptions.keys().cloned().collect();
+                        println!(">>>>>>>>>>>>>> {:?} -> {:?}", keys, key);
                     }
-                }
+                } else {println!("<<<<<<<<<<<<<<<");}
             },
             _ => {}
+
         }
     }
 }
