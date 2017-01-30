@@ -15,9 +15,7 @@ use super::*;
 
 lazy_static! {
     pub static ref SUBSCRIPTIONS: RwLock<HashMap<u64, Subscriptions>> = RwLock::new(HashMap::new());
-    pub static ref THREAD_POOL: Mutex<ThreadPool> = Mutex::new(ThreadPool::new(
-                        num_cpus::get()
-                    ));
+    pub static ref THREAD_POOL: Mutex<ThreadPool> = Mutex::new(ThreadPool::new(num_cpus::get()));
 }
 
 pub struct Subscriber {
@@ -55,7 +53,6 @@ impl Subscriptions {
         let require_reload_suber = if suber_exists {
             let session_match = self.subscribers.get(&suber_id).unwrap().session_id == session_id;
             if !session_match {
-                println!("SESSION ID NOT MATCH!!!");
                 self.remove_subscriber(suber_id);
                 true
             } else {false}
@@ -139,10 +136,20 @@ impl SMCallback {
                                 }
                             }
                         }
+                    } else {
+                        //TODO: Check missing subscriptions
+//                        let keys: Vec<SubKey> = svr_subs.subscriptions.keys().cloned().collect();
+//                        if !keys.is_empty() {
+//                            println!(">>>>>>>>>>>>>> {:?} -> {:?}", keys, key);
+//                        } else {
+//                            println!(">>>>>>>>>>>>>> EMPTY -> {:?}", key);
+//                        }
                     }
                 }
             },
-            _ => {}
+            _ => {
+                panic!("Cannot notify on {:?}")
+            }
         }
     }
 }
