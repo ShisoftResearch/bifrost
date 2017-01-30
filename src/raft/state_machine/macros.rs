@@ -16,7 +16,7 @@ macro_rules! trait_fn {
 }
 macro_rules! client_fn {
     (sub $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {
-        pub fn $fn_name<F>(&self, $($arg:$in_),* f: F)
+        pub fn $fn_name<F>(&self, f: F, $($arg:$in_),* )
         -> Result<Result<u64, SubscriptionError>, ExecError>
         where F: Fn(return_type!($out, $error)) + 'static + Send + Sync {
             self.client.subscribe(

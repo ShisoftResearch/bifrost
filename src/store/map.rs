@@ -31,7 +31,9 @@ macro_rules! def_store_hash_map {
                 def qry contains_key(k: $kt) -> bool;
 
                 def sub on_inserted() -> ($kt, $vt);
+                def sub on_key_inserted(k: $kt) -> $vt;
                 def sub on_removed() -> ($kt, $vt);
+                def sub on_key_removed(k: $kt) -> $vt;
             }
             impl StateMachineCmds for Map {
                 fn get(&self, k: $kt) -> Result<Option<$vt>, ()> {
@@ -44,7 +46,8 @@ macro_rules! def_store_hash_map {
                 fn insert(&mut self, k: $kt, v: $vt) -> Result<Option<$vt>, ()> {
                     let res = self.map.insert(k.clone(), v.clone());
                     if let Some(ref callback) = self.callback {
-                        callback.notify(&commands::on_inserted{}, Ok((k, v)));
+                        callback.notify(&commands::on_inserted{}, Ok((k.clone(), v.clone())));
+                        callback.notify(&commands::on_key_inserted{k: k}, Ok(v));
                     }
                     Ok(res)
                 }
@@ -58,7 +61,8 @@ macro_rules! def_store_hash_map {
                     let res = self.map.remove(&k);
                     if let Some(ref callback) = self.callback {
                         if let Some(ref v) = res {
-                            callback.notify(&commands::on_removed{}, Ok((k, v.clone())));
+                            callback.notify(&commands::on_removed{}, Ok((k.clone(), v.clone())));
+                            callback.notify(&commands::on_key_removed{k: k}, Ok(v.clone()));
                         }
                     }
                     Ok(res)

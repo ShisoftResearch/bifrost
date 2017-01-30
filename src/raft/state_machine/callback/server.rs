@@ -143,7 +143,6 @@ impl SMCallback {
                 }
             },
             _ => {}
-
         }
     }
 }

@@ -62,6 +62,18 @@ fn hash_map(){
             assert_eq!(removed_stash.get(&key).unwrap(), &value);
         }
     });
+    sm_client.on_key_inserted(|res| {
+        if let Ok(value) = res {
+            println!("GOT K1 CALLBACK {:?}", value);
+            assert_eq!(&String::from("v1"), &value);
+        }
+    }, sk1.clone());
+    sm_client.on_key_removed(|res| {
+        if let Ok(value) = res {
+            println!("GOT K2 CALLBACK {:?}", value);
+            assert_eq!(&String::from("v2"), &value);
+        }
+    }, sk2.clone());
     assert!(sm_client.is_empty().unwrap().unwrap());
     sm_client.insert(sk1.clone(), sv1.clone()).unwrap().unwrap();
     sm_client.insert(sk2.clone(), sv2.clone()).unwrap().unwrap();
