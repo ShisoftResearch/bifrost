@@ -4,16 +4,25 @@ macro_rules! def_store_value {
         pub mod $m {
             use raft::state_machine::StateMachineCtl;
             use bifrost_hasher::hash_str;
+            use $crate::raft::state_machine::callback::server::SMCallback;
+            use $crate::raft::RaftService;
+            use std::sync::{Arc};
             pub struct Value {
                 pub val: $t,
-                pub id: u64
+                pub id: u64,
+                callback: Option<SMCallback>,
             }
             raft_state_machine! {
                 def cmd set(v: $t);
                 def qry get() -> $t;
+                def sub on_changed() -> ($t, $t);
             }
             impl StateMachineCmds for Value {
                 fn set(&mut self, v: $t) -> Result<(),()> {
+                    if let Some(ref callback) = self.callback {
+                        let old = self.val.clone();
+                        callback.notify(&commands::on_changed{}, Ok((old, v.clone())));
+                    }
                     self.val = v;
                     Ok(())
                 }
@@ -36,10 +45,14 @@ macro_rules! def_store_value {
                     Value {
                         val: val,
                         id: id,
+                        callback: None,
                     }
                 }
                 pub fn new_by_name(name: String, val: $t) -> Value {
                     Value::new(hash_str(name), val)
+                }
+                pub fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
+                    self.callback = Some(SMCallback::new(self.id(), raft_service.clone()));
                 }
             }
         }
