@@ -117,7 +117,6 @@ impl SMCallback {
     }
     pub fn notify<R>(&self, func: &RaftMsg<R>, data: R)
     where R: serde::Serialize + Clone + Send + Sync {
-        println!("===============");
         let (fn_id, op_type, pattern_data) = func.encode();
         match op_type {
             OpType::SUBSCRIBE => {
@@ -134,18 +133,14 @@ impl SMCallback {
                                 if let Some(subscriber) = svr_subs.subscribers.get(&subscriber_id) {
                                     let data = data.clone();
                                     let client = subscriber.client.clone();
-                                    println!("--------");
                                     THREAD_POOL.lock().unwrap().execute(move || {
                                         client.notify(key, data);
                                     });
                                 }
-                            } else {println!("||||||||||||||||");}
+                            }
                         }
-                    } else {
-                        let keys: Vec<SubKey> = svr_subs.subscriptions.keys().cloned().collect();
-                        println!(">>>>>>>>>>>>>> {:?} -> {:?}", keys, key);
                     }
-                } else {println!("<<<<<<<<<<<<<<<");}
+                }
             },
             _ => {}
 
