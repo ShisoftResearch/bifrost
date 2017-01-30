@@ -4,9 +4,13 @@ macro_rules! def_store_number {
         pub mod $m {
             use raft::state_machine::StateMachineCtl;
             use bifrost_hasher::hash_str;
+            use $crate::raft::state_machine::callback::server::SMCallback;
+            use $crate::raft::RaftService;
+            use std::sync::{Arc};
             pub struct Number {
                 pub num: $t,
-                pub id: u64
+                pub id: u64,
+                callback: Option<SMCallback>,
             }
             raft_state_machine! {
                 def cmd set(n: $t);
@@ -32,10 +36,16 @@ macro_rules! def_store_number {
 
                 def cmd compare_and_swap(original: $t, n: $t) -> $t;
                 def cmd swap(n: $t) -> $t;
+
+                def sub on_changed() -> ($t, $t);
             }
             impl StateMachineCmds for Number {
                 fn set(&mut self, n: $t) -> Result<(),()> {
+                    let on = self.num;
                     self.num = n;
+                    if let Some(ref callback) = self.callback {
+                        callback.notify(&commands::on_changed{}, Ok((on, n)));
+                    }
                     Ok(())
                 }
                 fn get(&self) -> Result<$t, ()> {
@@ -43,20 +53,22 @@ macro_rules! def_store_number {
                 }
                 fn get_and_add(&mut self, n: $t) -> Result<$t, ()> {
                     let on = self.num;
-                    self.num += n;
+                    self.set(on + n);
                     Ok(on)
                 }
                 fn add_and_get(&mut self, n: $t) -> Result<$t, ()> {
-                    self.num += n;
+                    let on = self.num;
+                    self.set(on + n);
                     Ok(self.num)
                 }
                 fn get_and_minus(&mut self, n: $t) -> Result<$t, ()> {
                     let on = self.num;
-                    self.num -= n;
+                    self.set(on - n);
                     Ok(on)
                 }
                 fn minus_and_get(&mut self, n: $t) -> Result<$t, ()> {
-                    self.num -= n;
+                    let on = self.num;
+                    self.set(on - n);
                     Ok(self.num)
                 }
                 fn get_and_incr(&mut self) -> Result<$t, ()> {
@@ -73,32 +85,34 @@ macro_rules! def_store_number {
                 }
                 fn get_and_multiply(&mut self, n: $t) -> Result<$t, ()> {
                     let on = self.num;
-                    self.num *= n;
+                    self.set(on * n);
                     Ok(on)
                 }
                 fn multiply_and_get(&mut self, n: $t) -> Result<$t, ()> {
-                    self.num *= n;
+                    let on = self.num;
+                    self.set(on * n);
                     Ok(self.num)
                 }
                 fn get_and_divide(&mut self, n: $t) -> Result<$t, ()> {
                     let on = self.num;
-                    self.num /= n;
+                    self.set(on / n);
                     Ok(on)
                 }
                 fn divide_and_get(&mut self, n: $t) -> Result<$t, ()> {
-                    self.num /= n;
+                    let on = self.num;
+                    self.set(on / n);
                     Ok(self.num)
                 }
                 fn compare_and_swap(&mut self, original: $t, n: $t) -> Result<$t, ()> {
                     let on = self.num;
                     if on == original {
-                        self.num = n;
+                        self.set(n);
                     }
                     Ok(on)
                 }
                 fn swap(&mut self, n: $t) -> Result<$t, ()> {
                     let on = self.num;
-                    self.num = n;
+                    self.set(n);
                     Ok(on)
                 }
             }
@@ -117,10 +131,14 @@ macro_rules! def_store_number {
                     Number {
                         num: val,
                         id: id,
+                        callback: None,
                     }
                 }
                 pub fn new_by_name(name: String, num: $t) -> Number {
                     Number::new(hash_str(name), num)
+                }
+                pub fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
+                    self.callback = Some(SMCallback::new(self.id(), raft_service.clone()));
                 }
             }
         }

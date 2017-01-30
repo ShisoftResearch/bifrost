@@ -14,11 +14,12 @@ mod u32 {
     };
     use bifrost::store::number::U32::client::SMClient;
     use bifrost::rpc::Server;
+    use bifrost::raft::state_machine::callback::client::init_subscription;
 
     #[test]
     fn test(){
         let addr = String::from("127.0.0.1:2011");
-        let num_sm = U32::Number::new_by_name(
+        let mut num_sm = U32::Number::new_by_name(
             String::from("test"),
             0
         );
@@ -29,13 +30,22 @@ mod u32 {
         });
         let sm_id = num_sm.id;
         let server = Server::new(vec!((DEFAULT_SERVICE_ID, service.clone())));
-        Server::listen_and_resume(server, &addr);
+        Server::listen_and_resume(server.clone(), &addr);
+        init_subscription(server.clone());
+        num_sm.init_callback(&service);
         assert!(RaftService::start(&service));
         service.register_state_machine(Box::new(num_sm));
         service.bootstrap();
 
         let client = RaftClient::new(vec!(addr), DEFAULT_SERVICE_ID).unwrap();
         let sm_client = SMClient::new(sm_id, &client);
+
+        sm_client.on_changed(|res| {
+           if let Ok((old, new)) = res {
+               println!("GOT NUM CHANGED: {} -> {}", old, new);
+           }
+        });
+
         assert_eq!(sm_client.get().unwrap().unwrap(), 0);
         sm_client.set(1).unwrap().unwrap();
         assert_eq!(sm_client.get().unwrap().unwrap(), 1);
