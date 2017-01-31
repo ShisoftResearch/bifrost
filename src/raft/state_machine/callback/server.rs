@@ -1,6 +1,7 @@
 use std::boxed::FnBox;
 use std::collections::{HashMap, HashSet};
-use std::sync::{RwLock, Mutex, Arc};
+use std::sync::Arc;
+use parking_lot::{RwLock, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use threadpool::ThreadPool;
 use num_cpus;
@@ -122,7 +123,7 @@ impl SMCallback {
                 let raft_sid = self.raft_service.options.service_id;
                 let sm_id = self.sm_id;
                 let key = (raft_sid, sm_id, fn_id, pattern_id);
-                let subscriptions_map = SUBSCRIPTIONS.read().unwrap();
+                let subscriptions_map = SUBSCRIPTIONS.read();
                 if let Some(svr_subs) = subscriptions_map.get(&raft_sid) {
                     if let Some(sub_ids) = svr_subs.subscriptions.get(&key) {
                         let data = serialize!(&data);
@@ -131,7 +132,7 @@ impl SMCallback {
                                 if let Some(subscriber) = svr_subs.subscribers.get(&subscriber_id) {
                                     let data = data.clone();
                                     let client = subscriber.client.clone();
-                                    THREAD_POOL.lock().unwrap().execute(move || {
+                                    THREAD_POOL.lock().execute(move || {
                                         client.notify(key, data);
                                     });
                                 }

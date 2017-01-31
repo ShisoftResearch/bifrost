@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::io;
 use std::time::Duration;
-use std::sync::{Mutex, RwLock};
+use parking_lot::{Mutex, RwLock};
 use std::thread;
 use bincode::{SizeLimit, serde as bincode};
 use tcp;
@@ -87,7 +87,7 @@ impl Server {
         })
     }
     fn reset_address(&self, addr: &String) {
-        let mut server_address = self.address.write().unwrap();
+        let mut server_address = self.address.write();
         *server_address = Some(addr.clone());
     }
     pub fn listen(server: Arc<Server>, addr: &String) {
@@ -96,7 +96,7 @@ impl Server {
         tcp::server::Server::new(addr, Box::new(move |data| {
             let (svr_id, data) = extract_u64_head(data);
             let t = time::get_time();
-            let svr_map = server.services.read().unwrap();
+            let svr_map = server.services.read();
             let service = svr_map.get(&svr_id);
             let res = match service {
                 Some(service) => {
@@ -117,13 +117,13 @@ impl Server {
         });
     }
     pub fn append_service(&self, service_id: u64,  service: Arc<RPCService>) {
-        self.services.write().unwrap().insert(service_id, service);
+        self.services.write().insert(service_id, service);
     }
     pub fn remove_service(&self, service_id: u64) {
-        self.services.write().unwrap().remove(&service_id);
+        self.services.write().remove(&service_id);
     }
     pub fn address(&self) -> Option<String> {
-        self.address.read().unwrap().clone()
+        self.address.read().clone()
     }
 }
 
@@ -134,7 +134,7 @@ pub struct RPCSyncClient {
 
 impl RPCSyncClient {
     pub fn send(&self, svr_id: u64, data: Vec<u8>) -> Result<Vec<u8>, RPCError> {
-        decode_res(self.client.lock().unwrap().send(prepend_u64(svr_id, data)))
+        decode_res(self.client.lock().send(prepend_u64(svr_id, data)))
     }
 
     pub fn new(addr: &String) -> io::Result<Arc<RPCSyncClient>> {
@@ -159,7 +159,7 @@ impl ClientPool {
     }
 
     pub fn get(&self, addr: &String) -> io::Result<Arc<RPCSyncClient>> {
-        let mut clients = self.clients.lock().unwrap();
+        let mut clients = self.clients.lock();
         if clients.contains_key(addr) {
             Ok(clients.get(addr).unwrap().clone())
         } else {
