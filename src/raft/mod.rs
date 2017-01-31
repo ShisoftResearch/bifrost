@@ -432,6 +432,13 @@ impl RaftService {
         let meta = self.meta.read().unwrap();
         meta.leader_id
     }
+    pub fn is_leader(&self) -> bool {
+        let meta = self.meta.read().unwrap();
+        match meta.membership {
+            Membership::Leader(_) => {true},
+            _ => {false}
+        }
+    }
     pub fn register_state_machine(&self, state_machine: SubStateMachine) {
         let meta = self.meta.read().unwrap();
         let mut master_sm = meta.state_machine.write().unwrap();

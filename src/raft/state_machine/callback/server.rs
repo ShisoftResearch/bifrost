@@ -114,6 +114,7 @@ impl SMCallback {
     }
     pub fn notify<R>(&self, func: &RaftMsg<R>, data: R)
     where R: serde::Serialize + Clone + Send + Sync {
+        //if !self.raft_service.is_leader() {return;}
         let (fn_id, op_type, pattern_data) = func.encode();
         match op_type {
             OpType::SUBSCRIBE => {
