@@ -894,23 +894,22 @@ impl Service for RaftService {
     fn c_command(&self, mut entry: LogEntry) -> Result<ClientCmdResponse, ()> {
         let mut meta = self.write_meta();
         if !is_leader(&meta) {
-            Ok(ClientCmdResponse::NotLeader(meta.leader_id))
+            return Ok(ClientCmdResponse::NotLeader(meta.leader_id));
+        }
+        let (new_log_id, new_log_term) = self.append_log(&meta, &mut entry);
+        let mut data = match entry.sm_id {
+            // special treats for membership changes
+            CONFIG_SM_ID => Some(self.try_sync_config_to_followers(&mut meta, &entry, new_log_id)),
+            _ => self.try_sync_log_to_followers(&mut meta, &entry, new_log_id)
+        }; // Some for committed and None for not committed
+        if let Some(data) = data {
+            Ok(ClientCmdResponse::Success{
+                data: data,
+                last_log_id: new_log_id,
+                last_log_term: new_log_term,
+            })
         } else {
-            let (new_log_id, new_log_term) = self.append_log(&meta, &mut entry);
-            let mut data = match entry.sm_id {
-                // special treats for membership changes
-                CONFIG_SM_ID => Some(self.try_sync_config_to_followers(&mut meta, &entry, new_log_id)),
-                _ => self.try_sync_log_to_followers(&mut meta, &entry, new_log_id)
-            }; // Some for committed and None for not committed
-            if let Some(data) = data {
-                Ok(ClientCmdResponse::Success{
-                    data: data,
-                    last_log_id: new_log_id,
-                    last_log_term: new_log_term,
-                })
-            } else {
-                Ok(ClientCmdResponse::NotCommitted)
-            }
+            Ok(ClientCmdResponse::NotCommitted)
         }
     }
     fn c_query(&self, entry: LogEntry) -> Result<ClientQryResponse, ()> {

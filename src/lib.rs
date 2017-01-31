@@ -28,6 +28,7 @@ extern crate tokio_middleware;
 extern crate futures;
 extern crate futures_cpupool;
 extern crate parking_lot;
+extern crate thread_id;
 
 extern crate bincode;
 extern crate serde;

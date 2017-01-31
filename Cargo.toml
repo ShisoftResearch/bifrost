@@ -28,6 +28,7 @@ lazy_static = "0.2"
 threadpool = "1.0"
 num_cpus = "1.0"
 parking_lot = {version = "0.3", features = ["nightly"]}
+thread-id = "3.0.0"
 
 tokio-core = "0.1"
 tokio-proto = "0.1"
