@@ -2,7 +2,7 @@ use rand;
 use rand::Rng;
 use rand::distributions::{IndependentSample, Range};
 use std::thread;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Mutex, MutexGuard};
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard, Mutex, MutexGuard};
 use std::collections::{BTreeMap, HashMap};
 use std::collections::Bound::{Included, Unbounded};
 use std::cell::RefCell;
@@ -196,9 +196,9 @@ macro_rules! check_commit {
         while $meta.commit_index > $meta.last_applied {
             (*$meta).last_applied += 1;
             let last_applied = $meta.last_applied;
-            let logs = $meta.logs.read().unwrap();
+            let logs = $meta.logs.read();
             if let Some(entry) = logs.get(&last_applied) {
-                $meta.state_machine.write().unwrap().commit_cmd(&entry);
+                $meta.state_machine.write().commit_cmd(&entry);
             };
         }
     }};
@@ -206,7 +206,7 @@ macro_rules! check_commit {
 
 macro_rules! members_from_meta {
     ($meta: expr) => {
-        $meta.state_machine.read().unwrap().configs.members
+        $meta.state_machine.read().configs.members
     };
 }
 
@@ -215,7 +215,7 @@ fn is_majority (members: u64, granted: u64) -> bool {
 }
 
 fn commit_command(meta: &RwLockWriteGuard<RaftMeta>, entry: &LogEntry) -> ExecResult {
-    meta.state_machine.write().unwrap().commit_cmd(&entry)
+    meta.state_machine.write().commit_cmd(&entry)
 }
 
 fn is_leader(meta: &RwLockWriteGuard<RaftMeta>) -> bool {
@@ -264,8 +264,8 @@ impl RaftService {
         info!("Waiting for server to be initialized");
         {
             let start_time = get_time();
-            let mut meta = server.meta.write().unwrap();
-            let mut sm = meta.state_machine.write().unwrap();
+            let mut meta = server.meta.write();
+            let mut sm = meta.state_machine.write();
             let mut inited = false;
             while get_time() < start_time + 5000 { //waiting for 5 secs
                 if let Ok(_) = sm.configs.new_member(server_address.clone()) {
@@ -284,7 +284,7 @@ impl RaftService {
                 let start_time = get_time();
                 let expected_ends = start_time + CHECKER_MS;
                 {
-                    let mut meta = server.meta.write().unwrap(); //WARNING: Reentering not supported
+                    let mut meta = server.meta.write(); //WARNING: Reentering not supported
                     let action = match meta.membership {
                         Membership::Leader(ref leader_meta) => {
                             CheckerAction::SendHeartbeat
@@ -327,7 +327,7 @@ impl RaftService {
             }
         });
         {
-            let mut meta = server.meta.write().unwrap();
+            let mut meta = server.meta.write();
             meta.last_checked = get_time();
         }
         return true;
@@ -343,7 +343,7 @@ impl RaftService {
     pub fn bootstrap(&self) {
         let mut meta = self.write_meta();
         let (last_log_id, _) = {
-            let logs = meta.logs.read().unwrap();
+            let logs = meta.logs.read();
             get_last_log_info!(self, logs)
         };
         self.become_leader(&mut meta, last_log_id);
@@ -364,7 +364,7 @@ impl RaftService {
             let mut meta = self.write_meta();
             if let Ok(Ok(members)) = members {
                 for member in members {
-                    meta.state_machine.write().unwrap().configs.new_member(member);
+                    meta.state_machine.write().configs.new_member(member);
                 }
             }
             self.reset_last_checked(&mut meta);
@@ -397,9 +397,9 @@ impl RaftService {
         return true;
     }
     pub fn cluster_info(&self) -> ClientClusterInfo {
-        let meta = self.meta.read().unwrap();
-        let logs = meta.logs.read().unwrap();
-        let sm = &meta.state_machine.read().unwrap();
+        let meta = self.meta.read();
+        let logs = meta.logs.read();
+        let sm = &meta.state_machine.read();
         let sm_members = sm.members();
         let mut members = Vec::new();
         for (id, member) in sm_members.iter(){
@@ -414,34 +414,34 @@ impl RaftService {
         }
     }
     pub fn num_members(&self) -> usize {
-        let meta = self.meta.read().unwrap();
+        let meta = self.meta.read();
         let ref members = members_from_meta!(meta);
         members.len()
     }
     pub fn num_logs(&self) -> usize {
-        let meta = self.meta.read().unwrap();
-        let logs = meta.logs.read().unwrap();
+        let meta = self.meta.read();
+        let logs = meta.logs.read();
         logs.len()
     }
     pub fn last_log_id(&self) -> Option<u64> {
-        let meta = self.meta.read().unwrap();
-        let logs = meta.logs.read().unwrap();
+        let meta = self.meta.read();
+        let logs = meta.logs.read();
         logs.keys().cloned().last()
     }
     pub fn leader_id(&self) -> u64 {
-        let meta = self.meta.read().unwrap();
+        let meta = self.meta.read();
         meta.leader_id
     }
     pub fn is_leader(&self) -> bool {
-        let meta = self.meta.read().unwrap();
+        let meta = self.meta.read();
         match meta.membership {
             Membership::Leader(_) => {true},
             _ => {false}
         }
     }
     pub fn register_state_machine(&self, state_machine: SubStateMachine) {
-        let meta = self.meta.read().unwrap();
-        let mut master_sm = meta.state_machine.write().unwrap();
+        let meta = self.meta.read();
+        let mut master_sm = meta.state_machine.write();
         master_sm.register(state_machine);
     }
     fn switch_membership(&self, meta: &mut RwLockWriteGuard<RaftMeta>, membership: Membership) {
@@ -483,13 +483,13 @@ impl RaftService {
     }
     fn write_meta(&self) -> RwLockWriteGuard<RaftMeta> {
 //        let t = get_time();
-        let lock_mon = self.meta.write().unwrap();
+        let lock_mon = self.meta.write();
 //        let acq_time = get_time() - t;
 //        println!("Meta write locked acquired for {}ms for {}, leader {}", acq_time, self.id, lock_mon.leader_id);
         lock_mon
     }
     pub fn read_meta(&self) -> RwLockReadGuard<RaftMeta> {
-        self.meta.read().unwrap()
+        self.meta.read()
     }
     fn become_candidate(server: Arc<RaftService>, meta: &mut RwLockWriteGuard<RaftMeta>) {
         server.reset_last_checked(meta);
@@ -499,7 +499,7 @@ impl RaftService {
         server.switch_membership(meta, Membership::Candidate);
         let term = meta.term;
         let id = server.id;
-        let logs = meta.logs.read().unwrap();
+        let logs = meta.logs.read();
         let (last_log_id, last_log_term) = get_last_log_info!(server, logs);
         let (tx, rx) = channel();
         let mut members = 0;
@@ -510,7 +510,7 @@ impl RaftService {
             if member.id == server.id {
                 tx.send(RequestVoteResponse::Granted);
             } else {
-                meta.workers.lock().unwrap().execute(move||{
+                meta.workers.lock().execute(move||{
                     if let Ok(Ok(((remote_term, remote_leader_id), vote_granted))) = rpc.request_vote(term, id, last_log_id, last_log_term) {
                         if vote_granted {
                             tx.send(RequestVoteResponse::Granted);
@@ -523,14 +523,14 @@ impl RaftService {
                 });
             }
         }
-        meta.workers.lock().unwrap().execute(move ||{
+        meta.workers.lock().execute(move ||{
             let mut granted = 0;
             let mut timeout = 2000;
             let mut check_time = get_time();
             for _ in 0..members {
                 if timeout <= 0 {break;}
                 if let Ok(res)= rx.recv_timeout(Duration::from_millis(timeout as u64)) {
-                    let mut meta = server.meta.write().unwrap();
+                    let mut meta = server.meta.write();
                     if meta.term != term {break;}
                     match res {
                         RequestVoteResponse::TermOut(remote_term, remote_leader_id) => {
@@ -564,7 +564,7 @@ impl RaftService {
     fn become_leader(&self, meta: &mut RwLockWriteGuard<RaftMeta>, last_log_id: u64) {
         let leader_meta = RwLock::new(LeaderMeta::new());
         {
-            let mut guard = leader_meta.write().unwrap();
+            let mut guard = leader_meta.write();
             self.reload_leader_meta(&members_from_meta!(meta), &mut guard, last_log_id);
             guard.last_updated = get_time();
         }
@@ -579,9 +579,9 @@ impl RaftService {
         let term = meta.term;
         let leader_id = meta.leader_id;
         {
-            let workers = meta.workers.lock().unwrap();
+            let workers = meta.workers.lock();
             if let Membership::Leader(ref leader_meta) = meta.membership {
-                let leader_meta = leader_meta.read().unwrap();
+                let leader_meta = leader_meta.read();
                 for member in members_from_meta!(meta).values() {
                     let id = member.id;
                     if id == self.id {continue;}
@@ -601,9 +601,9 @@ impl RaftService {
                         }
                     };
                     workers.execute(move||{
-                        let mut follower = follower.lock().unwrap();
+                        let mut follower = follower.lock();
                         let mut is_retry = false;
-                        let logs = logs.read().unwrap();
+                        let logs = logs.read();
                         loop {
                             let entries: Option<LogEntries> = { // extract logs to send to follower
                                 let list: LogEntries = logs.range(
@@ -689,7 +689,7 @@ impl RaftService {
         match log_id {
             Some(log_id) => {
                 if let Membership::Leader(ref leader_meta) = meta.membership{
-                    let mut leader_meta = leader_meta.write().unwrap();
+                    let mut leader_meta = leader_meta.write();
                     let mut updated_followers = 0;
                     let mut timeout = 2000 as i64; // assume client timeout is more than 2s　(5 by default)
                     let mut check_time = get_time();
@@ -728,7 +728,7 @@ impl RaftService {
         meta.timeout = gen_timeout();
     }
     fn append_log(&self, meta: &RwLockWriteGuard<RaftMeta>, entry: &mut LogEntry) -> (u64, u64) {
-        let mut logs = meta.logs.write().unwrap();
+        let mut logs = meta.logs.write();
         let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
         let new_log_id = last_log_id + 1;
         let new_log_term = meta.term;
@@ -757,7 +757,7 @@ impl RaftService {
         let data = commit_command(&meta, &entry);
         let t = get_time();
         if let Membership::Leader(ref leader_meta) = meta.membership {//  ||| TODO: New member should install newest snapshot
-            let mut leader_meta = leader_meta.write().unwrap();
+            let mut leader_meta = leader_meta.write();
             self.reload_leader_meta( //                                   |||       and logs to get updated first before leader
                 &members_from_meta!(meta), //                             |||       add it to member list in configuration
                 &mut leader_meta, new_log_id
@@ -786,7 +786,7 @@ impl Service for RaftService {
             }
             if prev_log_id > 0 {
                 check_commit!(meta);
-                let mut logs = meta.logs.write().unwrap();
+                let mut logs = meta.logs.write();
                 //RI, 2
                 let contains_prev_log = logs.contains_key(&prev_log_id);
                 let mut log_mismatch = false;
@@ -816,7 +816,7 @@ impl Service for RaftService {
             }
             let mut last_new_entry = std::u64::MAX;
             {
-                let mut logs = meta.logs.write().unwrap();
+                let mut logs = meta.logs.write();
                 let mut leader_commit = leader_commit;
                 if let Some(entries) = entries { // entry not empty
                     for entry in entries {
@@ -851,8 +851,8 @@ impl Service for RaftService {
         let mut vote_granted = false;
         if term > meta.term {
             check_commit!(meta);
-            let logs = meta.logs.read().unwrap();
-            let conf_sm = &meta.state_machine.read().unwrap().configs;
+            let logs = meta.logs.read();
+            let conf_sm = &meta.state_machine.read().configs;
             let candidate_valid = conf_sm.member_existed(candidate_id);
             println!("{} VOTE FOR: {}, valid: {}", self.id, candidate_id, candidate_valid);
             if (vote_for.is_none() || vote_for.unwrap() == candidate_id) && candidate_valid{
@@ -914,14 +914,14 @@ impl Service for RaftService {
         }
     }
     fn c_query(&self, entry: LogEntry) -> Result<ClientQryResponse, ()> {
-        let mut meta = self.meta.read().unwrap();
-        let logs = meta.logs.read().unwrap();
+        let mut meta = self.meta.read();
+        let logs = meta.logs.read();
         let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
         if entry.term > last_log_term || entry.id > last_log_id {
             Ok(ClientQryResponse::LeftBehind)
         } else {
             Ok(ClientQryResponse::Success{
-                data: meta.state_machine.read().unwrap().exec_qry(&entry),
+                data: meta.state_machine.read().exec_qry(&entry),
                 last_log_id: last_log_id,
                 last_log_term: last_log_term,
             })

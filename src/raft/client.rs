@@ -18,7 +18,7 @@ use rpc::Server;
 use bincode::{SizeLimit, serde as bincode};
 use std::collections::{HashMap, BTreeMap, HashSet};
 use std::iter::FromIterator;
-use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -74,7 +74,7 @@ impl RaftClient {
             service_id: service_id,
         };
         let init = {
-            let mut members = client.members.write().unwrap();
+            let mut members = client.members.write();
             client.update_info(
                 &mut members,
                 &HashSet::from_iter(servers)
@@ -170,7 +170,7 @@ impl RaftClient {
         };
         let pattern_id = hash_bytes(&pattern_data.as_slice());
         let key = (service_id, sm_id, fn_id, pattern_id);
-        let mut subs_map = CLIENT_SUBSCRIPTIONS.write().unwrap();
+        let mut subs_map = CLIENT_SUBSCRIPTIONS.write();
         let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
         subs_lst.push(Box::new(wrapper_fn));
         let cluster_subs = self.execute(
@@ -196,7 +196,7 @@ impl RaftClient {
         let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
         let mut num_members = 0;
         let res = {
-            let members = self.members.read().unwrap();
+            let members = self.members.read();
             let mut client = {
                 let members_count = members.clients.len();
                 members.clients.values().nth(pos as usize % members_count).unwrap()
@@ -237,7 +237,7 @@ impl RaftClient {
             NotCommitted,
         }
         let failure = {
-            let members = self.members.read().unwrap();
+            let members = self.members.read();
             let num_members = members.clients.len();
             if depth >= num_members {
                 return Err(ExecError::TooManyRetry)
@@ -284,7 +284,7 @@ impl RaftClient {
         }; //
         match failure {
             FailureAction::UpdateInfo => {
-                let mut members = self.members.write().unwrap();
+                let mut members = self.members.write();
                 let mut members_addrs = HashSet::new();
                 for address in members.id_map.values() {
                     members_addrs.insert(address.clone());
@@ -294,7 +294,7 @@ impl RaftClient {
                 println!("CLIENT: Updating info");
             },
             FailureAction::SwitchLeader => {
-                let members = self.members.read().unwrap();
+                let members = self.members.read();
                 let num_members = members.clients.len();
                 let pos = self.qry_meta.pos.load(ORDERING);
                 let leader_id = self.leader_id.load(ORDERING);

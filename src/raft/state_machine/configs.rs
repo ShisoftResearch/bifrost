@@ -4,7 +4,8 @@ use super::*;
 use super::callback::SubKey;
 use super::callback::server::{Subscriptions, SUBSCRIPTIONS};
 use bifrost_hasher::hash_str;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
+use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
 use std::io;
 
@@ -69,7 +70,7 @@ impl StateMachineCmds for Configures {
         Ok(members)
     }
     fn subscribe(&mut self, key: SubKey, address: String, session_id: u64) -> Result<u64, ()> {
-        let mut subscriptions_map = SUBSCRIPTIONS.write().unwrap();
+        let mut subscriptions_map = SUBSCRIPTIONS.write();
         if let Some(ref mut subscriptions) = subscriptions_map.get_mut(&self.service_id) {
             subscriptions.subscribe(key, address, session_id)
         } else {
@@ -98,7 +99,7 @@ impl StateMachineCtl for Configures {
 
 impl Configures {
     pub fn new(service_id: u64) -> Configures {
-        let mut subscription_map = SUBSCRIPTIONS.write().unwrap();
+        let mut subscription_map = SUBSCRIPTIONS.write();
         subscription_map.insert(service_id, Subscriptions::new());
         Configures {
             members: HashMap::new(),
