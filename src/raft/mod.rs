@@ -30,6 +30,10 @@ pub mod client;
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_RAFT_DEFAULT_SERVICE) as u64;
 
+def_bindings! {
+    bind val IS_LEADER: bool = false;
+}
+
 pub trait RaftMsg<R>: Send + Sync {
     fn encode(&self) -> (u64, OpType, Vec<u8>);
     fn decode_return(&self, data: &Vec<u8>) -> R;
@@ -191,23 +195,21 @@ macro_rules! get_last_log_info {
     }};
 }
 
-macro_rules! check_commit {
-    ($meta: expr) => {{
-        while $meta.commit_index > $meta.last_applied {
-            (*$meta).last_applied += 1;
-            let last_applied = $meta.last_applied;
-            let logs = $meta.logs.read();
-            if let Some(entry) = logs.get(&last_applied) {
-                $meta.state_machine.write().commit_cmd(&entry);
-            };
-        }
-    }};
-}
-
 macro_rules! members_from_meta {
     ($meta: expr) => {
         $meta.state_machine.read().configs.members
     };
+}
+
+fn check_commit(meta: &mut RwLockWriteGuard<RaftMeta>) {
+    while meta.commit_index > meta.last_applied {
+        meta.last_applied += 1;
+        let last_applied = meta.last_applied;
+        let logs = meta.logs.read();
+        if let Some(entry) = logs.get(&last_applied) {
+            commit_command(meta, &entry);
+        };
+    }
 }
 
 fn is_majority (members: u64, granted: u64) -> bool {
@@ -215,7 +217,9 @@ fn is_majority (members: u64, granted: u64) -> bool {
 }
 
 fn commit_command(meta: &RwLockWriteGuard<RaftMeta>, entry: &LogEntry) -> ExecResult {
-    meta.state_machine.write().commit_cmd(&entry)
+    with_bindings!(IS_LEADER: is_leader(meta) => {
+        meta.state_machine.write().commit_cmd(&entry)
+    })
 }
 
 fn is_leader(meta: &RwLockWriteGuard<RaftMeta>) -> bool {
@@ -785,7 +789,7 @@ impl Service for RaftService {
                 self.become_follower(&mut meta, term, leader_id);
             }
             if prev_log_id > 0 {
-                check_commit!(meta);
+                check_commit(&mut meta);
                 let mut logs = meta.logs.write();
                 //RI, 2
                 let contains_prev_log = logs.contains_key(&prev_log_id);
@@ -831,7 +835,7 @@ impl Service for RaftService {
             }
             if leader_commit > meta.commit_index { //RI, 5
                 meta.commit_index = min(leader_commit, last_new_entry);
-                check_commit!(meta);
+                check_commit(&mut meta);
             }
             Ok((meta.term, AppendEntriesResult::Ok))
         } else {
@@ -850,7 +854,7 @@ impl Service for RaftService {
         let vote_for = meta.vote_for;
         let mut vote_granted = false;
         if term > meta.term {
-            check_commit!(meta);
+            check_commit(&mut meta);
             let logs = meta.logs.read();
             let conf_sm = &meta.state_machine.read().configs;
             let candidate_valid = conf_sm.member_existed(candidate_id);
@@ -886,7 +890,7 @@ impl Service for RaftService {
         let mut meta = self.write_meta();
         let term_ok = self.check_term(&mut meta, term, leader_id);
         if term_ok {
-            check_commit!(meta);
+            check_commit(&mut meta);
         }
         Ok(meta.term)
     }

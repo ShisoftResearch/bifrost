@@ -24,7 +24,7 @@ Bifrost will ship with it's own reliable data store based on [raft consensus alg
     - [x] Master/subs state machine framework
     - [ ] State machine client
         - [x] Sync
-        - [ ] PubSub
+        - [x] PubSub
     - [ ] Master state machine snapshot
         - [x] Generate
         - [x] Install
@@ -75,5 +75,7 @@ Bifrost will ship with it's own reliable data store based on [raft consensus alg
     - [x] Number
     - [ ] Lock
 - [ ] Integration (API)
-    - [ ]  gPRC
+    - [ ] gPRC
+- [ ] Utility
+    - [x] [Global bindings](https://clojuredocs.org/clojure.core/binding)
     

@@ -8,14 +8,15 @@
 #![feature(btree_range)]
 #![feature(fnbox)]
 
+
+#[macro_use]
+pub mod utils;
 pub mod tcp;
 #[macro_use]
 pub mod rpc;
 #[macro_use]
 pub mod raft;
 pub mod store;
-
-pub mod utils;
 
 extern crate mio;
 extern crate byteorder;

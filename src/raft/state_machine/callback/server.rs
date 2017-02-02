@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use threadpool::ThreadPool;
 use num_cpus;
 use bifrost_hasher::{hash_str, hash_bytes};
-use raft::RaftService;
+use raft::{RaftService, IS_LEADER};
 use rpc;
 use serde;
 use super::super::{StateMachineCtl, OpType};
@@ -115,7 +115,7 @@ impl SMCallback {
     }
     pub fn notify<R>(&self, func: &RaftMsg<R>, data: R)
     where R: serde::Serialize + Clone + Send + Sync {
-        //if !self.raft_service.is_leader() {return;}
+        if !IS_LEADER.get() {return;}
         let (fn_id, op_type, pattern_data) = func.encode();
         match op_type {
             OpType::SUBSCRIBE => {
