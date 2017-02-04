@@ -2,16 +2,9 @@ pub mod client;
 pub mod server;
 
 #[derive(Serialize, Deserialize, Debug)]
-pub enum Status {
-    Online,
-    Offline,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
 pub struct Member {
     pub id: u64,
     pub address: String,
-    pub status: Status,
     pub groups: Vec<u64>,
 }
 
@@ -19,8 +12,10 @@ mod raft {
     use super::*;
     raft_state_machine! {
         def cmd hb_online_changed(online: Vec<u64>, offline: Vec<u64>);
-        def cmd join(group: u64, address: String);
-        def cmd leave(group: u64, address: String);
+        def cmd join(address: String) -> u64;
+        def cmd leave(id: u64);
+        def cmd join_group(group: u64, id: u64);
+        def cmd leave_group(group: u64, id: u64);
         def qry members(group: u64) -> Vec<Member>;
         def qry leader(group: u64) -> Member;
         def qry group_members (group: u64) -> Vec<Member>;

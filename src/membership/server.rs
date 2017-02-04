@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::{thread, time as std_time};
+use bifrost_hasher::hash_str;
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_MEMBERSHIP_SERVICE) as u64;
 
@@ -21,7 +22,6 @@ struct HBStatus {
 
 pub struct HeartbeatService {
     status: Mutex<HashMap<u64, HBStatus>>,
-    member_addresses: Mutex<HashMap<String, u64>>,
     raft_service: Arc<RaftService>,
     closed: AtomicBool,
     was_leader: AtomicBool,
@@ -77,6 +77,7 @@ pub struct MemberGroup {
 pub struct Membership {
     heartbeat: Arc<HeartbeatService>,
     groups: HashMap<u64, MemberGroup>,
+    members: HashMap<u64, Member>
 }
 impl Drop for Membership {
     fn drop(&mut self) {
@@ -88,7 +89,6 @@ impl Membership {
     pub fn new(raft_service: Arc<RaftService>) {
         let service = Arc::new(HeartbeatService {
             status: Mutex::new(HashMap::new()),
-            member_addresses: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
             raft_service: raft_service.clone(),
             was_leader: AtomicBool::new(false),
@@ -131,21 +131,69 @@ impl Membership {
         });
         raft_service.register_state_machine(Box::new(Membership {
             heartbeat: service,
-            groups: HashMap::new()
+            groups: HashMap::new(),
+            members: HashMap::new(),
         }))
     }
 }
 
 impl StateMachineCmds for Membership {
     fn hb_online_changed(&mut self, online: Vec<u64>, offline: Vec<u64>) -> Result<(), ()> {
+        let mut stat_map = self.heartbeat.status.lock();
+        for id in online {
+            if let Some(ref mut stat) = stat_map.get_mut(&id) {
+                stat.alive = true;
+            }
+        }
+        for id in offline {
+            if let Some(ref mut stat) = stat_map.get_mut(&id) {
+                stat.alive = false;
+            }
+        }
+        Ok(())
+    }
+    fn join(&mut self, address: String) -> Result<u64, ()> {
+        let id = hash_str(address.clone());
+        let mut stat_map = self.heartbeat.status.lock();
+        self.members.entry(id).or_insert_with(|| {
+            let current_time = time::get_time();
+            let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
+                alive: true,
+                last_updated: current_time
+            });
+            stat.alive = true;
+            stat.last_updated = current_time;
+            Member {
+                id: id,
+                address: address.clone(),
+                groups: Vec::new(),
+            }
+        });
+        Ok(id)
+    }
+    fn leave(&mut self, id: u64) -> Result<(), ()> {
+        let mut stat_map = self.heartbeat.status.lock();
+        let mut groups:Vec<u64> = Vec::new();
+        if let Some(member) = self.members.get(&id) {
+            for group in &member.groups {
+                groups.push(group.clone());
+            }
+        }
+        for group_id in groups {
+            if let Some(ref mut group) = self.groups.get_mut(&group_id) {
+                group.members.remove(&id);
+            }
+        }
+        stat_map.remove(&id);
+        self.members.remove(&id);
         Err(())
     }
-    fn join(&mut self, group: u64, address: String) -> Result<(), ()> {
+    fn join_group(&mut self, group: u64, id: u64) -> Result<(), ()> {
         Err(())
     }
-    fn leave(&mut self, group: u64, address: String) -> Result<(), ()> {
-        Err(())
-    }
+    fn leave_group(&mut self, group: u64, id: u64) -> Result<(), ()> {
+    Err(())
+}
     fn members(&self, group: u64) -> Result<Vec<Member>, ()> {
         Err(())
     }
