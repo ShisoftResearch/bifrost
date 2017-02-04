@@ -25,7 +25,7 @@ mod raft {
         def qry members(group: u64) -> Vec<Member>;
         def qry leader(group: u64) -> Member;
         def qry group_members (group: u64) -> Vec<Member>;
-        def qry all_members (group: u64) -> Vec<Member>;
+        def qry all_members () -> Vec<Member>;
         def sub on_group_member_offline(group: u64) -> Member;
         def sub on_any_member_offline() -> Member;
         def sub on_group_member_online(group: u64) -> Member;

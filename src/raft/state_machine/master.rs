@@ -115,5 +115,8 @@ impl MasterStateMachine {
             }
         }
     }
+    pub fn clear_subs(&mut self) {
+        self.subs.clear()
+    }
 }
 

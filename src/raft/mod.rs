@@ -398,6 +398,8 @@ impl RaftService {
             }
         }
         meta.membership = Membership::Offline;
+        let mut sm = meta.state_machine.write();
+        sm.clear_subs();
         return true;
     }
     pub fn cluster_info(&self) -> ClientClusterInfo {
