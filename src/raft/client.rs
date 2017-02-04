@@ -22,11 +22,13 @@ use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::cell::RefCell;
 use std::sync::Arc;
+use std::cmp::max;
 use bifrost_hasher::{hash_str, hash_bytes};
 use rand;
 use rpc;
 
 const ORDERING: Ordering = Ordering::Relaxed;
+pub type Client = Arc<SyncServiceClient>;
 
 #[derive(Debug)]
 pub enum ClientError {
@@ -45,7 +47,7 @@ struct QryMeta {
 }
 
 struct Members {
-    clients: BTreeMap<u64, Arc<SyncServiceClient>>,
+    clients: BTreeMap<u64, Client>,
     id_map: HashMap<u64, String>,
 }
 
@@ -190,8 +192,6 @@ impl RaftClient {
         }
     }
 
-    pub fn current_leader_id(&self) -> u64 {self.leader_id.load(ORDERING)}
-
     fn query(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>, depth: usize) -> Result<ExecResult, ExecError> {
         let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
         let mut num_members = 0;
@@ -232,32 +232,26 @@ impl RaftClient {
     fn command(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>, depth: usize) -> Result<ExecResult, ExecError> {
         enum FailureAction {
             SwitchLeader,
+            NotCommitted,
             UpdateInfo,
             NotLeader,
-            NotCommitted,
+            Retry,
         }
         let failure = {
-            let members = self.members.read();
-            let num_members = members.clients.len();
-            if depth >= num_members {
-                return Err(ExecError::TooManyRetry)
-            };
-            let mut leader = {
-                let leader_id = self.leader_id.load(ORDERING);
-                if members.clients.contains_key(&leader_id) {
-                    Some(leader_id)
-                } else {
-                    None
-                }
-            };
-            match leader {
-                Some(leader_id) => {
-                    let client = members.clients.get(&leader_id).unwrap();
+            if depth > 0 {
+                let members = self.members.read();
+                let num_members = members.clients.len();
+                if depth >= max(num_members, 5) {
+                    return Err(ExecError::TooManyRetry)
+                };
+            }
+            match self.current_leader_client() {
+                Some((leader_id, client)) => {
                     match client.c_command(self.gen_log_entry(sm_id, fn_id, data)) {
-                        Ok(Ok(ClientCmdResponse::Success{
-                                    data: data, last_log_term: last_log_term,
-                                    last_log_id: last_log_id
-                                })) => {
+                        Ok(Ok(ClientCmdResponse::Success {
+                                  data: data, last_log_term: last_log_term,
+                                  last_log_id: last_log_id
+                              })) => {
                             swap_when_greater(&self.last_log_id, last_log_id);
                             swap_when_greater(&self.last_log_term, last_log_term);
                             return Ok(data);
@@ -283,16 +277,6 @@ impl RaftClient {
             }
         }; //
         match failure {
-            FailureAction::UpdateInfo => {
-                let mut members = self.members.write();
-                let mut members_addrs = HashSet::new();
-                for address in members.id_map.values() {
-                    members_addrs.insert(address.clone());
-
-                }
-                self.update_info(&mut members, &members_addrs);
-                println!("CLIENT: Updating info");
-            },
             FailureAction::SwitchLeader => {
                 let members = self.members.read();
                 let num_members = members.clients.len();
@@ -303,9 +287,6 @@ impl RaftClient {
                     .unwrap();
                 self.leader_id.compare_and_swap(leader_id, *index, ORDERING);
                 println!("CLIENT: Switch leader");
-            },
-            FailureAction::NotCommitted => {
-                return Err(ExecError::NotCommitted)
             },
             _ => {}
         }
@@ -319,6 +300,45 @@ impl RaftClient {
             sm_id: sm_id,
             fn_id: fn_id,
             data: data.clone()
+        }
+    }
+    pub fn leader_id(&self) -> u64 {self.leader_id.load(ORDERING)}
+    pub fn leader_client(&self) -> Option<(u64, Client)> {
+        let members = self.members.read();
+        let leader_id = self.leader_id();
+        if let Some(client) = members.clients.get(&leader_id) {
+            Some((leader_id,  client.clone()))
+        } else {
+            None
+        }
+    }
+    pub fn current_leader_client(&self) -> Option<(u64, Client)> {
+        {
+            let leader_client = self.leader_client();
+            if leader_client.is_some() {
+                return leader_client
+            }
+        }
+        {
+            let mut members = self.members.write();
+            let mut members_addrs = HashSet::new();
+            for address in members.id_map.values() {
+                members_addrs.insert(address.clone());
+
+            }
+            self.update_info(&mut members, &members_addrs);
+            let leader_id = self.leader_id.load(ORDERING);
+            if let Some(client) = members.clients.get(&leader_id) {
+                Some((leader_id,  client.clone()))
+            } else {
+                None
+            }
+        }
+    }
+    pub fn current_leader_rpc_client(&self) -> Option<Arc<rpc::RPCSyncClient>> {
+        match self.current_leader_client() {
+            Some((_, client)) => Some(client.client.clone()),
+            None => None
         }
     }
 }

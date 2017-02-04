@@ -17,6 +17,7 @@ pub mod rpc;
 #[macro_use]
 pub mod raft;
 pub mod store;
+pub mod membership;
 
 extern crate mio;
 extern crate byteorder;

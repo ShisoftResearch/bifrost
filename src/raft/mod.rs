@@ -372,7 +372,7 @@ impl RaftService {
                 }
             }
             self.reset_last_checked(&mut meta);
-            self.become_follower(&mut meta, 0, client.current_leader_id());
+            self.become_follower(&mut meta, 0, client.leader_id());
             result
         } else {
             Err(ExecError::CannotConstructClient)

@@ -13,8 +13,8 @@ macro_rules! deserialize {
 #[macro_export]
 macro_rules! dispatch_rpc_service_functions {
     ($s:ty) => {
-        impl RPCService for $s {
-            fn dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, RPCRequestError> {
+        impl $crate::rpc::RPCService for $s {
+            fn dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, $crate::rpc::RPCRequestError> {
                 self.inner_dispatch(data)
             }
         }
