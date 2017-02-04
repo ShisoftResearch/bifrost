@@ -172,28 +172,38 @@ impl StateMachineCmds for Membership {
         Ok(id)
     }
     fn leave(&mut self, id: u64) -> Result<(), ()> {
-        let mut stat_map = self.heartbeat.status.lock();
         let mut groups:Vec<u64> = Vec::new();
+        {
+            let mut stat_map = self.heartbeat.status.lock();
+            stat_map.remove(&id);
+        }
         if let Some(member) = self.members.get(&id) {
             for group in &member.groups {
                 groups.push(group.clone());
             }
         }
         for group_id in groups {
-            if let Some(ref mut group) = self.groups.get_mut(&group_id) {
-                group.members.remove(&id);
-            }
+            self.leave_group(group_id, id);
         }
-        stat_map.remove(&id);
         self.members.remove(&id);
-        Err(())
+        Ok(())
     }
     fn join_group(&mut self, group: u64, id: u64) -> Result<(), ()> {
-        Err(())
+        if let Some(ref mut group) = self.groups.get_mut(&group) {
+            group.members.insert(id);
+            Ok(())
+        } else {
+            Err(())
+        }
     }
     fn leave_group(&mut self, group: u64, id: u64) -> Result<(), ()> {
-    Err(())
-}
+        if let Some(ref mut group) = self.groups.get_mut(&group) {
+            group.members.remove(&id);
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
     fn members(&self, group: u64) -> Result<Vec<Member>, ()> {
         Err(())
     }
