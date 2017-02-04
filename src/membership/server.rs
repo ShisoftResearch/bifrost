@@ -24,6 +24,7 @@ pub struct HeartbeatService {
     member_addresses: Mutex<HashMap<String, u64>>,
     raft_service: Arc<RaftService>,
     closed: AtomicBool,
+    was_leader: AtomicBool,
 }
 
 impl Service for HeartbeatService {
@@ -55,6 +56,15 @@ impl HeartbeatService {
             data: data
         });
     }
+    fn transfer_leadership(&self) { //update timestamp for every alive server
+        let mut stat_map = self.status.lock();
+        let current_time = time::get_time();
+        for stat in stat_map.values_mut() {
+            if stat.alive {
+                stat.last_updated = current_time;
+            }
+        }
+    }
 }
 dispatch_rpc_service_functions!(HeartbeatService);
 
@@ -81,11 +91,16 @@ impl Membership {
             member_addresses: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
             raft_service: raft_service.clone(),
+            was_leader: AtomicBool::new(false),
         });
         let service_clone = service.clone();
         thread::spawn(move || {
             while !service_clone.closed.load(Ordering::Relaxed) {
-                if service_clone.raft_service.is_leader() {
+                let is_leader = service_clone.raft_service.is_leader();
+                let was_leader = service_clone.was_leader.load(Ordering::Relaxed);
+                if !was_leader && is_leader {service_clone.transfer_leadership()}
+                if was_leader != is_leader {service_clone.was_leader.store(is_leader, Ordering::Relaxed);}
+                if is_leader {
                     let current_time = time::get_time();
                     let mut outdated_members: Vec<u64> = Vec::new();
                     let mut backedin_members: Vec<u64> = Vec::new();
