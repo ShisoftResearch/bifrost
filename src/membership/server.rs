@@ -2,7 +2,7 @@ use utils::time;
 use super::heartbeat_rpc::*;
 use super::raft::*;
 use super::*;
-use raft::RaftService;
+use raft::{RaftService, LogEntry, RaftMsg, Service as raft_svr_trait};
 use raft::state_machine::StateMachineCtl;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
@@ -17,7 +17,6 @@ static MAX_TIMEOUT: i64 = 5000; //5 secs for 500ms heartbeat
 struct HBStatus {
     alive: bool,
     last_updated: i64,
-    last_checked: i64,
 }
 
 pub struct HeartbeatService {
@@ -29,11 +28,33 @@ pub struct HeartbeatService {
 
 impl Service for HeartbeatService {
     fn ping(&self, id: u64) -> Result<(), ()> {
+        let mut stat_map = self.status.lock();
+        let current_time = time::get_time();
+        let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
+            alive: false,
+            last_updated: current_time,
+            //orthodoxy info will trigger the watcher thread to update
+        });
+        stat.last_updated = current_time;
+        // only update the timestamp, let the watcher thread to decide
         Ok(())
     }
 }
 impl HeartbeatService {
-
+    fn update_raft(&self, online: Vec<u64>, offline: Vec<u64>) {
+        let log = commands::hb_online_changed {
+            online: online,
+            offline: offline
+        };
+        let (fn_id, _, data) = log.encode();
+        self.raft_service.c_command(LogEntry {
+            id: 0,
+            term: 0,
+            sm_id: DEFAULT_SERVICE_ID,
+            fn_id: fn_id,
+            data: data
+        });
+    }
 }
 dispatch_rpc_service_functions!(HeartbeatService);
 
@@ -54,7 +75,7 @@ impl Drop for Membership {
 }
 
 impl Membership {
-    fn new(raft_service: Arc<RaftService>) {
+    pub fn new(raft_service: Arc<RaftService>) {
         let service = Arc::new(HeartbeatService {
             status: Mutex::new(HashMap::new()),
             member_addresses: Mutex::new(HashMap::new()),
@@ -66,26 +87,29 @@ impl Membership {
             while !service_clone.closed.load(Ordering::Relaxed) {
                 if service_clone.raft_service.is_leader() {
                     let current_time = time::get_time();
-                    let mut status_map = service_clone.status.lock();
                     let mut outdated_members: Vec<u64> = Vec::new();
                     let mut backedin_members: Vec<u64> = Vec::new();
-                    let mut members_to_update: HashMap<u64, bool> = HashMap::new();
-                    for (id, status) in status_map.iter() {
-                        let alive = (current_time - status.last_updated) < MAX_TIMEOUT;
-                        if status.alive && !alive {
-                            outdated_members.push(id.clone());
-                            members_to_update.insert(id.clone(), alive);
+                    {
+                        let mut status_map = service_clone.status.lock();
+                        let mut members_to_update: HashMap<u64, bool> = HashMap::new();
+                        for (id, status) in status_map.iter() {
+                            let alive = (current_time - status.last_updated) < MAX_TIMEOUT;
+                            if status.alive && !alive {
+                                outdated_members.push(id.clone());
+                                members_to_update.insert(id.clone(), alive);
+                            }
+                            if !status.alive && alive {
+                                backedin_members.push(id.clone());
+                                members_to_update.insert(id.clone(), alive);
+                            }
                         }
-                        if !status.alive && alive {
-                            backedin_members.push(id.clone());
-                            members_to_update.insert(id.clone(), alive);
+                        for (id, alive) in members_to_update.iter() {
+                            let mut status = status_map.get_mut(&id).unwrap();
+                            status.alive = alive.clone();
                         }
+
                     }
-                    for (id, alive) in members_to_update.iter() {
-                        let mut status = status_map.get_mut(&id).unwrap();
-                        status.alive = alive.clone();
-                    }
-                    // TODO: Update members in raft_service
+                    service_clone.update_raft(backedin_members, outdated_members);
                 }
                 thread::sleep(std_time::Duration::from_secs(1));
             }
@@ -98,10 +122,7 @@ impl Membership {
 }
 
 impl StateMachineCmds for Membership {
-    fn offline(&mut self, ids: Vec<u64>) -> Result<(), ()> {
-        Err(())
-    }
-    fn online(&mut self, ids: Vec<u64>) -> Result<(), ()> {
+    fn hb_online_changed(&mut self, online: Vec<u64>, offline: Vec<u64>) -> Result<(), ()> {
         Err(())
     }
     fn join(&mut self, group: u64, address: String) -> Result<(), ()> {

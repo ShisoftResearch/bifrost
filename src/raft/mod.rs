@@ -43,11 +43,11 @@ const CHECKER_MS: i64 = 10;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LogEntry {
-    id: u64,
-    term: u64,
-    sm_id: u64,
-    fn_id: u64,
-    data: Vec<u8>
+    pub id: u64,
+    pub term: u64,
+    pub sm_id: u64,
+    pub fn_id: u64,
+    pub data: Vec<u8>
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

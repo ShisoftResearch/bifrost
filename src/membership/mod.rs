@@ -18,8 +18,7 @@ pub struct Member {
 mod raft {
     use super::*;
     raft_state_machine! {
-        def cmd offline(ids: Vec<u64>);
-        def cmd online(ids: Vec<u64>);
+        def cmd hb_online_changed(online: Vec<u64>, offline: Vec<u64>);
         def cmd join(group: u64, address: String);
         def cmd leave(group: u64, address: String);
         def qry members(group: u64) -> Vec<Member>;
