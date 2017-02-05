@@ -4,24 +4,25 @@ use super::raft::*;
 use super::*;
 use raft::{RaftService, LogEntry, RaftMsg, Service as raft_svr_trait};
 use raft::state_machine::StateMachineCtl;
-use parking_lot::Mutex;
-use std::collections::{HashMap, HashSet};
+use parking_lot::{RwLock};
+use std::collections::{HashMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::{thread, time as std_time};
 use bifrost_hasher::hash_str;
+use membership::client::{Group as ClientGroup, Member as ClientMember};
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_MEMBERSHIP_SERVICE) as u64;
 
 static MAX_TIMEOUT: i64 = 5000; //5 secs for 500ms heartbeat
 
 struct HBStatus {
-    alive: bool,
+    online: bool,
     last_updated: i64,
 }
 
 pub struct HeartbeatService {
-    status: Mutex<HashMap<u64, HBStatus>>,
+    status: RwLock<HashMap<u64, HBStatus>>,
     raft_service: Arc<RaftService>,
     closed: AtomicBool,
     was_leader: AtomicBool,
@@ -29,10 +30,10 @@ pub struct HeartbeatService {
 
 impl Service for HeartbeatService {
     fn ping(&self, id: u64) -> Result<(), ()> {
-        let mut stat_map = self.status.lock();
+        let mut stat_map = self.status.write();
         let current_time = time::get_time();
         let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
-            alive: false,
+            online: false,
             last_updated: current_time,
             //orthodoxy info will trigger the watcher thread to update
         });
@@ -57,10 +58,10 @@ impl HeartbeatService {
         });
     }
     fn transfer_leadership(&self) { //update timestamp for every alive server
-        let mut stat_map = self.status.lock();
+        let mut stat_map = self.status.write();
         let current_time = time::get_time();
         for stat in stat_map.values_mut() {
-            if stat.alive {
+            if stat.online {
                 stat.last_updated = current_time;
             }
         }
@@ -71,7 +72,7 @@ dispatch_rpc_service_functions!(HeartbeatService);
 pub struct MemberGroup {
     name: String,
     id: u64,
-    members: HashSet<u64>
+    members: BTreeSet<u64>
 }
 
 pub struct Membership {
@@ -88,7 +89,7 @@ impl Drop for Membership {
 impl Membership {
     pub fn new(raft_service: Arc<RaftService>) {
         let service = Arc::new(HeartbeatService {
-            status: Mutex::new(HashMap::new()),
+            status: RwLock::new(HashMap::new()),
             closed: AtomicBool::new(false),
             raft_service: raft_service.clone(),
             was_leader: AtomicBool::new(false),
@@ -105,22 +106,22 @@ impl Membership {
                     let mut outdated_members: Vec<u64> = Vec::new();
                     let mut backedin_members: Vec<u64> = Vec::new();
                     {
-                        let mut status_map = service_clone.status.lock();
+                        let mut status_map = service_clone.status.write();
                         let mut members_to_update: HashMap<u64, bool> = HashMap::new();
                         for (id, status) in status_map.iter() {
                             let alive = (current_time - status.last_updated) < MAX_TIMEOUT;
-                            if status.alive && !alive {
+                            if status.online && !alive {
                                 outdated_members.push(id.clone());
                                 members_to_update.insert(id.clone(), alive);
                             }
-                            if !status.alive && alive {
+                            if !status.online && alive {
                                 backedin_members.push(id.clone());
                                 members_to_update.insert(id.clone(), alive);
                             }
                         }
                         for (id, alive) in members_to_update.iter() {
                             let mut status = status_map.get_mut(&id).unwrap();
-                            status.alive = alive.clone();
+                            status.online = alive.clone();
                         }
 
                     }
@@ -135,33 +136,42 @@ impl Membership {
             members: HashMap::new(),
         }))
     }
+    fn compose_client_member(&self, id: u64) -> ClientMember {
+        let member = self.members.get(&id).unwrap();
+        let stat_map = self.heartbeat.status.read();
+        ClientMember {
+            id: id,
+            address: member.address.clone(),
+            online: stat_map.get(&id).unwrap().online
+        }
+    }
 }
 
 impl StateMachineCmds for Membership {
     fn hb_online_changed(&mut self, online: Vec<u64>, offline: Vec<u64>) -> Result<(), ()> {
-        let mut stat_map = self.heartbeat.status.lock();
+        let mut stat_map = self.heartbeat.status.write();
         for id in online {
             if let Some(ref mut stat) = stat_map.get_mut(&id) {
-                stat.alive = true;
+                stat.online = true;
             }
         }
         for id in offline {
             if let Some(ref mut stat) = stat_map.get_mut(&id) {
-                stat.alive = false;
+                stat.online = false;
             }
         }
         Ok(())
     }
     fn join(&mut self, address: String) -> Result<u64, ()> {
         let id = hash_str(address.clone());
-        let mut stat_map = self.heartbeat.status.lock();
+        let mut stat_map = self.heartbeat.status.write();
         self.members.entry(id).or_insert_with(|| {
             let current_time = time::get_time();
             let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
-                alive: true,
+                online: true,
                 last_updated: current_time
             });
-            stat.alive = true;
+            stat.online = true;
             stat.last_updated = current_time;
             Member {
                 id: id,
@@ -174,7 +184,7 @@ impl StateMachineCmds for Membership {
     fn leave(&mut self, id: u64) -> Result<(), ()> {
         let mut groups:Vec<u64> = Vec::new();
         {
-            let mut stat_map = self.heartbeat.status.lock();
+            let mut stat_map = self.heartbeat.status.write();
             stat_map.remove(&id);
         }
         if let Some(member) = self.members.get(&id) {
@@ -204,17 +214,33 @@ impl StateMachineCmds for Membership {
             Err(())
         }
     }
-    fn members(&self, group: u64) -> Result<Vec<Member>, ()> {
-        Err(())
+    fn group_leader(&self, group: u64) -> Result<Option<ClientMember>, ()> {
+        if let Some(group) = self.groups.get(&group) {
+            let first_member = group.members.iter().next();
+            if let Some(first_member) = first_member {
+                Ok(Some(self.compose_client_member(first_member.clone())))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Err(())
+        }
     }
-    fn leader(&self, group: u64) -> Result<Member, ()> {
-        Err(())
+    fn group_members(&self, group: u64, online_only: bool) -> Result<Vec<ClientMember>, ()> {
+        if let Some(group) = self.groups.get(&group) {
+            Ok(group.members.iter()
+                .map(|id| self.compose_client_member(id.clone()))
+                .filter(|member| !online_only || member.online)
+                .collect())
+        } else {
+            Err(())
+        }
     }
-    fn group_members(&self, group: u64) -> Result<Vec<Member>, ()> {
-        Err(())
-    }
-    fn all_members(&self) -> Result<Vec<Member>, ()> {
-        Err(())
+    fn all_members(&self, online_only: bool) -> Result<Vec<ClientMember>, ()> {
+        Ok(self.members.iter()
+            .map(|(id, _)| self.compose_client_member(id.clone()))
+            .filter(|member| !online_only || member.online)
+            .collect())
     }
 }
 impl StateMachineCtl for Membership {

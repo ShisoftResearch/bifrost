@@ -1,6 +1,8 @@
 pub mod client;
 pub mod server;
 
+use membership::client::{Group as ClientGroup, Member as ClientMember};
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Member {
     pub id: u64,
@@ -16,19 +18,18 @@ mod raft {
         def cmd leave(id: u64);
         def cmd join_group(group: u64, id: u64);
         def cmd leave_group(group: u64, id: u64);
-        def qry members(group: u64) -> Vec<Member>;
-        def qry leader(group: u64) -> Member;
-        def qry group_members (group: u64) -> Vec<Member>;
-        def qry all_members () -> Vec<Member>;
-        def sub on_group_member_offline(group: u64) -> Member;
+        def qry group_leader(group: u64) -> Option<ClientMember>;
+        def qry group_members (group: u64, online_only: bool) -> Vec<ClientMember>;
+        def qry all_members (online_only: bool) -> Vec<ClientMember>;
+        def sub on_group_member_offline(group: u64) -> ClientMember;
         def sub on_any_member_offline() -> Member;
-        def sub on_group_member_online(group: u64) -> Member;
+        def sub on_group_member_online(group: u64) -> ClientMember;
         def sub on_any_member_online() -> Member;
-        def sub on_group_member_joined(group: u64) -> Member;
+        def sub on_group_member_joined(group: u64) -> ClientMember;
         def sub on_any_member_joined() -> Member;
-        def sub on_group_member_left(group: u64) -> Member;
+        def sub on_group_member_left(group: u64) -> ClientMember;
         def sub on_any_member_left() -> Member;
-        def sub on_group_leader_changed(group: u64) -> (Member, Member);
+        def sub on_group_leader_changed(group: u64) -> (ClientMember, ClientMember);
     }
 }
 
