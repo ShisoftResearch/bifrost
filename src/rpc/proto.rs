@@ -179,7 +179,7 @@ macro_rules! service {
            $(
                 #[allow(non_camel_case_types)]
                 $(#[$attr])*
-                fn $fn_name(&self, $($arg:$in_),*) -> Result<std::result::Result<$out, $error>, RPCError> {
+                pub fn $fn_name(&self, $($arg:$in_),*) -> Result<std::result::Result<$out, $error>, RPCError> {
                     let req_bytes = encoders::$fn_name($($arg),*);
                     let res_bytes = self.client.send(self.id, req_bytes);
                     if let Ok(res_bytes) = res_bytes {

@@ -1,7 +1,10 @@
 pub mod client;
 pub mod server;
+pub mod member;
 
 use membership::client::{Group as ClientGroup, Member as ClientMember};
+
+pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_MEMBERSHIP_SERVICE) as u64;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Member {

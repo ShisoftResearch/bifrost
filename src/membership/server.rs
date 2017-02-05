@@ -12,7 +12,6 @@ use std::{thread, time as std_time};
 use bifrost_hasher::hash_str;
 use membership::client::{Group as ClientGroup, Member as ClientMember};
 
-pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_MEMBERSHIP_SERVICE) as u64;
 
 static MAX_TIMEOUT: i64 = 5000; //5 secs for 500ms heartbeat
 
