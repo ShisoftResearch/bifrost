@@ -5,7 +5,7 @@ use super::*;
 use raft::{RaftService, LogEntry, RaftMsg, Service as raft_svr_trait};
 use raft::state_machine::StateMachineCtl;
 use parking_lot::{RwLock};
-use std::collections::{HashMap, BTreeSet};
+use std::collections::{HashMap, HashSet, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::{thread, time as std_time};
@@ -67,6 +67,12 @@ impl HeartbeatService {
     }
 }
 dispatch_rpc_service_functions!(HeartbeatService);
+
+pub struct Member {
+    pub id: u64,
+    pub address: String,
+    pub groups: HashSet<u64>,
+}
 
 pub struct MemberGroup {
     name: String,
@@ -175,7 +181,7 @@ impl StateMachineCmds for Membership {
             Member {
                 id: id,
                 address: address.clone(),
-                groups: Vec::new(),
+                groups: HashSet::new(),
             }
         });
         Ok(id)
@@ -211,6 +217,40 @@ impl StateMachineCmds for Membership {
             Ok(())
         } else {
             Err(())
+        }
+    }
+    fn new_group(&mut self, name: String) -> Result<u64, u64> {
+        let id = hash_str(name.clone());
+        let mut inserted = false;
+        self.groups.entry(id).or_insert_with(|| {
+            inserted = true;
+            MemberGroup {
+                name: name,
+                id: id,
+                members: BTreeSet::new(),
+            }
+        });
+        if inserted {
+            Ok(id)
+        } else {
+            Err(id)
+        }
+    }
+    fn del_group(&mut self, id: u64) -> Result<(), ()> {
+        let mut members: Option<BTreeSet<u64>> = None;
+        if let Some(group) = self.groups.get(&id) {
+            members = Some(group.members.clone());
+        }
+        if let Some(members) = members {
+            for member_id in members {
+                if let Some(ref mut member) = self.members.get_mut(&member_id) {
+                    member.groups.remove(&id);
+                }
+            }
+            self.groups.remove(&id);
+            return Ok(())
+        } else {
+            return Err(());
         }
     }
     fn group_leader(&self, group: u64) -> Result<Option<ClientMember>, ()> {
