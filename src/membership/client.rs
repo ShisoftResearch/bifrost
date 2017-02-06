@@ -1,6 +1,9 @@
 use std::sync::Arc;
+use raft::client::RaftClient;
+use raft::state_machine::master::ExecError;
 use bifrost_hasher::hash_str;
 use super::raft::client::SMClient;
+use super::DEFAULT_SERVICE_ID;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Member {
@@ -22,18 +25,43 @@ pub struct MemberClient {
 }
 
 impl MemberClient {
-    pub fn join_group(&self, group: String) -> Option<Result<(), ()>> {
-        if let Ok(r) = self.sm_client.join_group(hash_str(group), self.id) {
-            Some(r)
-        } else {
-            None
+    pub fn join_group(&self, group: String) -> Result<Result<(), ()>, ExecError> {
+        self.sm_client.join_group(hash_str(group), self.id)
+    }
+    pub fn leave_group(&self, group: String) -> Result<Result<(), ()>, ExecError> {
+        self.sm_client.leave_group(hash_str(group), self.id)
+    }
+}
+
+pub struct Client {
+    pub sm_client: Arc<SMClient>
+}
+
+impl Client {
+    pub fn new(raft_client: &Arc<RaftClient>) -> Client {
+        Client {
+            sm_client: Arc::new(SMClient::new(DEFAULT_SERVICE_ID, &raft_client))
         }
     }
-    pub fn leave_group(&self, group: String) -> Option<Result<(), ()>> {
-        if let Ok(r) = self.sm_client.leave_group(hash_str(group), self.id) {
-            Some(r)
-        } else {
-            None
+    pub fn new_from_sm(sm_client: &Arc<SMClient>) -> Client {
+        Client {
+            sm_client: sm_client.clone()
         }
     }
+    pub fn new_group(&self, name: String) -> Result<Result<u64, u64>, ExecError> {
+        self.sm_client.new_group(name)
+    }
+    pub fn del_group(&self, name: String) -> Result<Result<(), ()>, ExecError> {
+        self.sm_client.del_group(hash_str(name))
+    }
+    pub fn group_leader(&self, group: String) -> Result<Result<Option<Member>, ()>, ExecError> {
+        self.sm_client.group_leader(hash_str(group))
+    }
+    pub fn group_members(&self, group: String, online_only: bool) -> Result<Result<Vec<Member>, ()>, ExecError> {
+        self.sm_client.group_members(hash_str(group), online_only)
+    }
+    pub fn all_members(&self, online_only: bool) -> Result<Result<Vec<Member>, ()>, ExecError> {
+        self.sm_client.all_members(online_only)
+    }
+    // TODO: Subscription functions
 }

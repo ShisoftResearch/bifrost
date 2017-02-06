@@ -1,8 +1,9 @@
 use raft::client::RaftClient;
+use raft::state_machine::master::ExecError;
 use super::DEFAULT_SERVICE_ID;
 use super::heartbeat_rpc::*;
 use super::raft::client::SMClient;
-use super::client::MemberClient;
+use super::client::{MemberClient, Client as ObserverClient};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{thread, time};
@@ -55,11 +56,14 @@ impl MemberService {
         self.sm_client.leave(self.id);
         self.close();
     }
-    pub fn join_group(&self, group: String) -> Option<Result<(), ()>> {
+    pub fn join_group(&self, group: String) -> Result<Result<(), ()>, ExecError> {
         self.member_client.join_group(group)
     }
-    pub fn leave_group(&self, group: String) -> Option<Result<(), ()>> {
+    pub fn leave_group(&self, group: String) -> Result<Result<(), ()>, ExecError> {
         self.member_client.leave_group(group)
+    }
+    pub fn client(&self) -> ObserverClient {
+        ObserverClient::new_from_sm(&self.sm_client)
     }
 }
 
