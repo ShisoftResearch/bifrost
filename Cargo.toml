@@ -11,7 +11,7 @@ name = "tests"
 
 [dependencies]
 bincode = "0.6"
-byteorder = "0.3"
+byteorder = "1"
 env_logger = "0.3.1"
 log = "0.3.1"
 mio = "0.6.0"
