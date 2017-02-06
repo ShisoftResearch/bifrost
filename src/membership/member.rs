@@ -1,6 +1,7 @@
 use raft::client::RaftClient;
 use super::DEFAULT_SERVICE_ID;
 use super::heartbeat_rpc::*;
+use super::raft::client::SMClient;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{thread, time};
@@ -9,6 +10,7 @@ use bifrost_hasher::hash_str;
 static PING_INTERVAL: u64 = 500; //5 secs for 500ms heartbeat
 
 pub struct MemberService {
+    pub sm_client: Arc<SMClient>,
     raft_client: Arc<RaftClient>,
     address: String,
     closed: AtomicBool,
@@ -17,12 +19,15 @@ pub struct MemberService {
 
 impl MemberService {
     pub fn new(server_address: String, raft_client: &Arc<RaftClient>) -> Arc<MemberService> {
+        let sm_client = Arc::new(SMClient::new(DEFAULT_SERVICE_ID, &raft_client));
         let service = Arc::new(MemberService {
+            sm_client: sm_client.clone(),
             raft_client:  raft_client.clone(),
             address: server_address.clone(),
             closed: AtomicBool::new(false),
-            id: hash_str(server_address),
+            id: hash_str(server_address.clone()),
         });
+        sm_client.join(server_address);
         let service_clone = service.clone();
         thread::spawn(move || {
             while !service_clone.closed.load(Ordering::Relaxed) {
@@ -38,6 +43,10 @@ impl MemberService {
     }
     pub fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
+    }
+    pub fn leave(&self) {
+        self.sm_client.leave(self.id);
+        self.close();
     }
 }
 
