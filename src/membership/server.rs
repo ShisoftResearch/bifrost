@@ -204,21 +204,25 @@ impl StateMachineCmds for Membership {
         self.members.remove(&id);
         Ok(())
     }
-    fn join_group(&mut self, group: u64, id: u64) -> Result<(), ()> {
-        if let Some(ref mut group) = self.groups.get_mut(&group) {
-            group.members.insert(id);
-            Ok(())
-        } else {
-            Err(())
+    fn join_group(&mut self, group_id: u64, id: u64) -> Result<(), ()> {
+        if let Some(ref mut group) = self.groups.get_mut(&group_id) {
+            if let Some(ref mut member) = self.members.get_mut(&id) {
+                group.members.insert(id);
+                member.groups.insert(group_id);
+                return Ok(())
+            }
         }
+        Err(())
     }
-    fn leave_group(&mut self, group: u64, id: u64) -> Result<(), ()> {
-        if let Some(ref mut group) = self.groups.get_mut(&group) {
-            group.members.remove(&id);
-            Ok(())
-        } else {
-            Err(())
+    fn leave_group(&mut self, group_id: u64, id: u64) -> Result<(), ()> {
+        if let Some(ref mut group) = self.groups.get_mut(&group_id) {
+            if let Some(ref mut member) = self.members.get_mut(&id) {
+                group.members.remove(&id);
+                member.groups.remove(&group_id);
+                return Ok(())
+            }
         }
+        Err(())
     }
     fn new_group(&mut self, name: String) -> Result<u64, u64> {
         let id = hash_str(&name);
