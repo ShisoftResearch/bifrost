@@ -7,8 +7,7 @@ pub fn hash_bytes(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
-pub fn hash_str (text: String) -> u64 { // the same as the one in utils hash
-    let text_bytes = text.into_bytes();
-    let text_bytes = text_bytes.as_slice();
-    hash_bytes(&text_bytes)
+pub fn hash_str (text: &String) -> u64 { // the same as the one in utils hash
+    let text_bytes = text.as_bytes();
+    hash_bytes(text_bytes)
 }

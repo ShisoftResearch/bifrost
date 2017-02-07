@@ -113,7 +113,7 @@ macro_rules! def_store_hash_map {
                         id: id,
                     }
                 }
-                pub fn new_by_name(name: String) -> Map {
+                pub fn new_by_name(name: &String) -> Map {
                     Map::new(hash_str(name))
                 }
                 pub fn init_callback(&mut self, raft_service: &Arc<RaftService>) {

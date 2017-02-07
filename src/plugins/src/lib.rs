@@ -30,7 +30,7 @@ fn hash_ident (cx: &mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacResult 
     };
     let text = &*text;
     let str = String::from(text);
-    MacEager::expr(cx.expr_usize(sp, hash_str(str) as usize))
+    MacEager::expr(cx.expr_usize(sp, hash_str(&str) as usize))
 }
 
 #[plugin_registrar]

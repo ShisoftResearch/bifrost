@@ -239,7 +239,7 @@ fn alter_term(meta: &mut RwLockWriteGuard<RaftMeta>, term: u64) {
 impl RaftService {
     pub fn new(opts: Options) -> Arc<RaftService> {
         let server_address = opts.address.clone();
-        let server_id = hash_str(server_address.clone());
+        let server_id = hash_str(&server_address);
         let server_obj = RaftService {
             meta: RwLock::new(
                 RaftMeta {
@@ -946,10 +946,10 @@ pub struct RaftStateMachine {
 }
 
 impl RaftStateMachine {
-    pub fn new(name: String) -> RaftStateMachine {
+    pub fn new(name: &String) -> RaftStateMachine {
         RaftStateMachine {
-            id: hash_str(name.clone()),
-            name: name
+            id: hash_str(name),
+            name: name.clone()
         }
     }
 }

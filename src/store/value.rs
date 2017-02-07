@@ -48,7 +48,7 @@ macro_rules! def_store_value {
                         callback: None,
                     }
                 }
-                pub fn new_by_name(name: String, val: $t) -> Value {
+                pub fn new_by_name(name: &String, val: $t) -> Value {
                     Value::new(hash_str(name), val)
                 }
                 pub fn init_callback(&mut self, raft_service: &Arc<RaftService>) {

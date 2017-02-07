@@ -13,7 +13,7 @@ use raft::wait;
 #[test]
 fn hash_map(){
     let addr = String::from("127.0.0.1:2013");
-    let mut map_sm = string_string_hashmap::Map::new_by_name(String::from("test"));
+    let mut map_sm = string_string_hashmap::Map::new_by_name(&String::from("test"));
     let service = RaftService::new(Options{
         storage: Storage::Default(),
         address: addr.clone(),

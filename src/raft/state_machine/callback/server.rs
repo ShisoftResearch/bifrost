@@ -46,9 +46,9 @@ impl Subscriptions {
         }
     }
 
-    pub fn subscribe(&mut self, key: SubKey, address: String, session_id: u64) -> Result<u64, ()> {
+    pub fn subscribe(&mut self, key: SubKey, address: &String, session_id: u64) -> Result<u64, ()> {
         let sub_service_id = DEFAULT_SERVICE_ID;
-        let suber_id = hash_str(address.clone());
+        let suber_id = hash_str(address);
         let suber_exists = self.subscribers.contains_key(&suber_id);
         let sub_id = self.next_id;
         let require_reload_suber = if suber_exists {
@@ -62,7 +62,7 @@ impl Subscriptions {
             self.subscribers.insert(suber_id, Subscriber {
                 session_id: session_id,
                 client: {
-                    if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(&address) {
+                    if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(address) {
                         SyncServiceClient::new(sub_service_id, client)
                     } else {
                         return Err(());

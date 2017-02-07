@@ -21,8 +21,8 @@ pub struct MemberService {
 }
 
 impl MemberService {
-    pub fn new(server_address: String, raft_client: &Arc<RaftClient>) -> Arc<MemberService> {
-        let server_id = hash_str(server_address.clone());
+    pub fn new(server_address: &String, raft_client: &Arc<RaftClient>) -> Arc<MemberService> {
+        let server_id = hash_str(server_address);
         let sm_client = Arc::new(SMClient::new(DEFAULT_SERVICE_ID, &raft_client));
         let service = Arc::new(MemberService {
             sm_client: sm_client.clone(),
@@ -35,7 +35,7 @@ impl MemberService {
             closed: AtomicBool::new(false),
             id: server_id,
         });
-        sm_client.join(server_address);
+        sm_client.join(server_address.clone());
         let service_clone = service.clone();
         thread::spawn(move || {
             while !service_clone.closed.load(Ordering::Relaxed) {
@@ -56,10 +56,10 @@ impl MemberService {
         self.close();
         self.sm_client.leave(self.id);
     }
-    pub fn join_group(&self, group: String) -> Result<Result<(), ()>, ExecError> {
+    pub fn join_group(&self, group: &String) -> Result<Result<(), ()>, ExecError> {
         self.member_client.join_group(group)
     }
-    pub fn leave_group(&self, group: String) -> Result<Result<(), ()>, ExecError> {
+    pub fn leave_group(&self, group: &String) -> Result<Result<(), ()>, ExecError> {
         self.member_client.leave_group(group)
     }
     pub fn client(&self) -> ObserverClient {

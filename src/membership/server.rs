@@ -13,7 +13,6 @@ use std::{thread, time as std_time};
 use bifrost_hasher::hash_str;
 use membership::client::{Group as ClientGroup, Member as ClientMember};
 
-
 static MAX_TIMEOUT: i64 = 1000; //5 secs for 500ms heartbeat
 
 struct HBStatus {
@@ -170,7 +169,7 @@ impl StateMachineCmds for Membership {
         Ok(())
     }
     fn join(&mut self, address: String) -> Result<u64, ()> {
-        let id = hash_str(address.clone());
+        let id = hash_str(&address);
         let mut stat_map = self.heartbeat.status.write();
         self.members.entry(id).or_insert_with(|| {
             let current_time = time::get_time();
@@ -222,7 +221,7 @@ impl StateMachineCmds for Membership {
         }
     }
     fn new_group(&mut self, name: String) -> Result<u64, u64> {
-        let id = hash_str(name.clone());
+        let id = hash_str(&name);
         let mut inserted = false;
         self.groups.entry(id).or_insert_with(|| {
             inserted = true;

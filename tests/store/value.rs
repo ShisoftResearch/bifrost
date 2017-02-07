@@ -11,7 +11,7 @@ fn string(){
     let original_string = String::from("The stored text");
     let altered_string = String::from("The altered text");
     let mut string_sm = string::Value::new_by_name(
-        String::from("test"),
+        &String::from("test"),
         original_string.clone()
     );
     let service = RaftService::new(Options{

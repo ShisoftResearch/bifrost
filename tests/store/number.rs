@@ -20,7 +20,7 @@ mod u32 {
     fn test(){
         let addr = String::from("127.0.0.1:2011");
         let mut num_sm = U32::Number::new_by_name(
-            String::from("test"),
+            &String::from("test"),
             0
         );
         let service = RaftService::new(Options{
@@ -87,7 +87,7 @@ mod f64 {
     fn test(){
         let addr = String::from("127.0.0.1:2012");
         let num_sm = F64::Number::new_by_name(
-            String::from("test"),
+            &String::from("test"),
             0.0
         );
         let service = RaftService::new(Options{

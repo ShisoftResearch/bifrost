@@ -25,10 +25,10 @@ pub struct MemberClient {
 }
 
 impl MemberClient {
-    pub fn join_group(&self, group: String) -> Result<Result<(), ()>, ExecError> {
+    pub fn join_group(&self, group: &String) -> Result<Result<(), ()>, ExecError> {
         self.sm_client.join_group(hash_str(group), self.id)
     }
-    pub fn leave_group(&self, group: String) -> Result<Result<(), ()>, ExecError> {
+    pub fn leave_group(&self, group: &String) -> Result<Result<(), ()>, ExecError> {
         self.sm_client.leave_group(hash_str(group), self.id)
     }
 }
@@ -48,22 +48,22 @@ impl Client {
             sm_client: sm_client.clone()
         }
     }
-    pub fn new_group(&self, name: String) -> Result<Result<u64, u64>, ExecError> {
-        self.sm_client.new_group(name)
+    pub fn new_group(&self, name: &String) -> Result<Result<u64, u64>, ExecError> {
+        self.sm_client.new_group(name.clone())
     }
-    pub fn del_group(&self, name: String) -> Result<Result<(), ()>, ExecError> {
+    pub fn del_group(&self, name: &String) -> Result<Result<(), ()>, ExecError> {
         self.sm_client.del_group(hash_str(name))
     }
-    pub fn group_leader(&self, group: String) -> Result<Result<Option<Member>, ()>, ExecError> {
+    pub fn group_leader(&self, group: &String) -> Result<Result<Option<Member>, ()>, ExecError> {
         self.sm_client.group_leader(hash_str(group))
     }
-    pub fn group_members(&self, group: String, online_only: bool) -> Result<Result<Vec<Member>, ()>, ExecError> {
+    pub fn group_members(&self, group: &String, online_only: bool) -> Result<Result<Vec<Member>, ()>, ExecError> {
         self.sm_client.group_members(hash_str(group), online_only)
     }
     pub fn all_members(&self, online_only: bool) -> Result<Result<Vec<Member>, ()>, ExecError> {
         self.sm_client.all_members(online_only)
     }
-    pub fn on_group_member_offline<F>(&self, f: F, group: String)
+    pub fn on_group_member_offline<F>(&self, f: F, group: &String)
         -> Result<Result<u64, SubscriptionError>, ExecError>
         where F: Fn(Result<Member, ()>)  + 'static + Send + Sync {
         self.sm_client.on_group_member_offline(f, hash_str(group))
@@ -73,7 +73,7 @@ impl Client {
         where F: Fn(Result<Member, ()>)  + 'static + Send + Sync {
         self.sm_client.on_any_member_offline(f)
     }
-    pub fn on_group_member_online<F>(&self, f: F, group: String)
+    pub fn on_group_member_online<F>(&self, f: F, group: &String)
         -> Result<Result<u64, SubscriptionError>, ExecError>
         where F: Fn(Result<Member, ()>)  + 'static + Send + Sync {
         self.sm_client.on_group_member_online(f, hash_str(group))
@@ -83,7 +83,7 @@ impl Client {
         where F: Fn(Result<Member, ()>)  + 'static + Send + Sync {
         self.sm_client.on_any_member_online(f)
     }
-    pub fn on_group_member_joined<F>(&self, f: F, group: String)
+    pub fn on_group_member_joined<F>(&self, f: F, group: &String)
         -> Result<Result<u64, SubscriptionError>, ExecError>
         where F: Fn(Result<Member, ()>)  + 'static + Send + Sync {
         self.sm_client.on_group_member_joined(f, hash_str(group))
@@ -93,7 +93,7 @@ impl Client {
         where F: Fn(Result<Member, ()>)  + 'static + Send + Sync {
         self.sm_client.on_any_member_joined(f)
     }
-    pub fn on_group_member_left<F>(&self, f: F, group: String)
+    pub fn on_group_member_left<F>(&self, f: F, group: &String)
         -> Result<Result<u64, SubscriptionError>, ExecError>
         where F: Fn(Result<Member, ()>)  + 'static + Send + Sync {
         self.sm_client.on_group_member_left(f, hash_str(group))
@@ -103,7 +103,7 @@ impl Client {
         where F: Fn(Result<Member, ()>)  + 'static + Send + Sync {
         self.sm_client.on_any_member_left(f)
     }
-    pub fn on_group_leader_changed<F>(&self, f: F, group: String)
+    pub fn on_group_leader_changed<F>(&self, f: F, group: &String)
         -> Result<Result<u64, SubscriptionError>, ExecError>
         where F: Fn(Result<(Member, Member), ()>)  + 'static + Send + Sync {
         self.sm_client.on_group_leader_changed(f, hash_str(group))

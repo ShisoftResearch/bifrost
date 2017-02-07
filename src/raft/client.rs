@@ -92,7 +92,7 @@ impl RaftClient {
         let info: ClientClusterInfo;
         let mut cluster_info = None;
         for server_addr in addrs {
-            let id = hash_str(server_addr.clone());
+            let id = hash_str(&server_addr);
             if !members.clients.contains_key(&id) {
                 match rpc::DEFAULT_CLIENT_POOL.get(&server_addr) {
                     Ok(client) => {
