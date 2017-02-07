@@ -65,9 +65,9 @@ Bifrost will ship with it's own reliable data store based on [raft consensus alg
     - [ ] DHT
 - [ ] Reliable data store
     - [ ] Raft interface
-    - [ ] Client group membership
-    - [ ] Client group leader election
-    - [ ] Map
+    - [x] Client group membership
+    - [x] Client group leader election
+    - [x] Map
     - [ ] Set
     - [ ] Array
     - [ ] Queue
