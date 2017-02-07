@@ -199,7 +199,11 @@ impl RaftClient {
             let members = self.members.read();
             let mut client = {
                 let members_count = members.clients.len();
-                members.clients.values().nth(pos as usize % members_count).unwrap()
+                if members_count < 1 {
+                    return Err(ExecError::ServersUnreachable)
+                } else {
+                    members.clients.values().nth(pos as usize % members_count).unwrap()
+                }
             };
             num_members = members.clients.len();
             client.c_query(self.gen_log_entry(sm_id, fn_id, data))

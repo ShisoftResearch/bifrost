@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::{thread, time};
 use bifrost_hasher::hash_str;
 
-static PING_INTERVAL: u64 = 500; //5 secs for 500ms heartbeat
+static PING_INTERVAL: u64 = 100;
 
 pub struct MemberService {
     member_client: MemberClient,
@@ -53,8 +53,8 @@ impl MemberService {
         self.closed.store(true, Ordering::Relaxed);
     }
     pub fn leave(&self) {
-        self.sm_client.leave(self.id);
         self.close();
+        self.sm_client.leave(self.id);
     }
     pub fn join_group(&self, group: String) -> Result<Result<(), ()>, ExecError> {
         self.member_client.join_group(group)
@@ -64,6 +64,12 @@ impl MemberService {
     }
     pub fn client(&self) -> ObserverClient {
         ObserverClient::new_from_sm(&self.sm_client)
+    }
+}
+
+impl Drop for MemberService {
+    fn drop(&mut self) {
+        self.leave();
     }
 }
 

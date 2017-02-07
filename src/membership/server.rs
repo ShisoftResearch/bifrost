@@ -4,6 +4,7 @@ use super::raft::*;
 use super::*;
 use raft::{RaftService, LogEntry, RaftMsg, Service as raft_svr_trait};
 use raft::state_machine::StateMachineCtl;
+use rpc::Server;
 use parking_lot::{RwLock};
 use std::collections::{HashMap, HashSet, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,7 +14,7 @@ use bifrost_hasher::hash_str;
 use membership::client::{Group as ClientGroup, Member as ClientMember};
 
 
-static MAX_TIMEOUT: i64 = 5000; //5 secs for 500ms heartbeat
+static MAX_TIMEOUT: i64 = 1000; //5 secs for 500ms heartbeat
 
 struct HBStatus {
     online: bool,
@@ -68,13 +69,13 @@ impl HeartbeatService {
 }
 dispatch_rpc_service_functions!(HeartbeatService);
 
-pub struct Member {
+struct Member {
     pub id: u64,
     pub address: String,
     pub groups: HashSet<u64>,
 }
 
-pub struct MemberGroup {
+struct MemberGroup {
     name: String,
     id: u64,
     members: BTreeSet<u64>
@@ -92,7 +93,7 @@ impl Drop for Membership {
 }
 
 impl Membership {
-    pub fn new(raft_service: Arc<RaftService>) {
+    pub fn new(server: &Arc<Server>, raft_service: &Arc<RaftService>) {
         let service = Arc::new(HeartbeatService {
             status: RwLock::new(HashMap::new()),
             closed: AtomicBool::new(false),
@@ -136,10 +137,11 @@ impl Membership {
             }
         });
         raft_service.register_state_machine(Box::new(Membership {
-            heartbeat: service,
+            heartbeat: service.clone(),
             groups: HashMap::new(),
             members: HashMap::new(),
-        }))
+        }));
+        server.append_service(DEFAULT_SERVICE_ID, service);
     }
     fn compose_client_member(&self, id: u64) -> ClientMember {
         let member = self.members.get(&id).unwrap();
