@@ -140,7 +140,7 @@ impl Membership {
             groups: HashMap::new(),
             members: HashMap::new(),
         }));
-        server.append_service(DEFAULT_SERVICE_ID, service);
+        server.register_service(DEFAULT_SERVICE_ID, service);
     }
     fn compose_client_member(&self, id: u64) -> ClientMember {
         let member = self.members.get(&id).unwrap();

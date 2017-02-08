@@ -116,7 +116,7 @@ impl Server {
             Server::listen(server, &addr);
         });
     }
-    pub fn append_service(&self, service_id: u64,  service: Arc<RPCService>) {
+    pub fn register_service(&self, service_id: u64,  service: Arc<RPCService>) {
         self.services.write().insert(service_id, service);
     }
     pub fn remove_service(&self, service_id: u64) {

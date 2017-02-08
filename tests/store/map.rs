@@ -14,22 +14,22 @@ use raft::wait;
 fn hash_map(){
     let addr = String::from("127.0.0.1:2013");
     let mut map_sm = string_string_hashmap::Map::new_by_name(&String::from("test"));
-    let service = RaftService::new(Options{
+    let raft_service = RaftService::new(Options{
         storage: Storage::Default(),
         address: addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
     });
-    let server = Server::new(vec!((DEFAULT_SERVICE_ID, service.clone())));
+    let server = Server::new(vec!((DEFAULT_SERVICE_ID, raft_service.clone())));
     Server::listen_and_resume(server.clone(), &addr);
     init_subscription(server.clone());
     let sm_id = map_sm.id;
-    map_sm.init_callback(&service);
-    assert!(RaftService::start(&service));
-    service.register_state_machine(Box::new(map_sm));
-    service.bootstrap();
+    map_sm.init_callback(&raft_service);
+    assert!(RaftService::start(&raft_service));
+    raft_service.register_state_machine(Box::new(map_sm));
+    raft_service.bootstrap();
 
-    let client = RaftClient::new(vec!(addr), DEFAULT_SERVICE_ID).unwrap();
-    let sm_client = SMClient::new(sm_id, &client);
+    let raft_client = RaftClient::new(vec!(addr), DEFAULT_SERVICE_ID).unwrap();
+    let sm_client = SMClient::new(sm_id, &raft_client);
 
     let sk1 = String::from("k1");
     let sk2 = String::from("k2");

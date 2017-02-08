@@ -14,7 +14,7 @@ fn primary() {
     let raft_service = RaftService::new(Options {
         storage: Storage::Default(),
         address: addr.clone(),
-        service_id: DEFAULT_SERVICE_ID,
+        service_id: 0,
     });
     let server = Server::new(vec!((0, raft_service.clone())));
     let heartbeat_service = Membership::new(&server, &raft_service);
