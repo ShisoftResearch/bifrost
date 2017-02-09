@@ -114,7 +114,7 @@ impl SMCallback {
         }
     }
     pub fn notify<R>(&self, func: &RaftMsg<R>, data: R)
-    where R: serde::Serialize + Clone + Send + Sync {
+    where R: serde::Serialize + Send + Sync {
         if !IS_LEADER.get() {return;}
         let (fn_id, op_type, pattern_data) = func.encode();
         match op_type {
@@ -156,10 +156,10 @@ impl SMCallback {
     }
 }
 
-pub fn notify<R, F>(callback: Option<SMCallback>, func: &RaftMsg<R>, data: F)
+pub fn notify<R, F>(callback: &Option<SMCallback>, func: &RaftMsg<R>, data: F)
     where F: Fn() -> R,
-          R: serde::Serialize + Clone + Send + Sync {
-    if let Some(ref callback) = callback {
+          R: serde::Serialize + Send + Sync {
+    if let Some(ref callback) = *callback {
         callback.notify(func, data());
     }
 }

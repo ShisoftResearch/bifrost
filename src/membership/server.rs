@@ -4,7 +4,7 @@ use super::raft::*;
 use super::*;
 use raft::{RaftService, LogEntry, RaftMsg, Service as raft_svr_trait};
 use raft::state_machine::StateMachineCtl;
-use raft::state_machine::callback::server::SMCallback;
+use raft::state_machine::callback::server::{SMCallback, notify as cb_notify};
 use rpc::Server;
 use parking_lot::{RwLock};
 use std::collections::{HashMap, HashSet, BTreeSet};
@@ -157,26 +157,108 @@ impl Membership {
     pub fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
         self.callback = Some(SMCallback::new(self.id(), raft_service.clone()));
     }
+    fn notify_for_member_online(&self, id: u64) {
+        let client_member = self.compose_client_member(id);
+        cb_notify(
+            &self.callback,
+            &commands::on_any_member_online{},
+            || Ok(client_member.clone())
+        );
+        if let Some(ref member) = self.members.get(&id) {
+            for group in &member.groups {
+                cb_notify(
+                    &self.callback,
+                    &commands::on_group_member_online{group: group.clone()},
+                    || Ok(client_member.clone())
+                );
+            }
+        }
+    }
+    fn notify_for_member_offline(&self, id: u64) {
+        let client_member = self.compose_client_member(id);
+        cb_notify(
+            &self.callback,
+            &commands::on_any_member_offline{},
+            || Ok(client_member.clone())
+        );
+        if let Some(ref member) = self.members.get(&id) {
+            for group in &member.groups {
+                cb_notify(
+                    &self.callback,
+                    &commands::on_group_member_offline{group: group.clone()},
+                    || Ok(client_member.clone())
+                );
+            }
+        }
+    }
+    fn notify_for_member_left(&self, id: u64) {
+        let client_member = self.compose_client_member(id);
+        cb_notify(
+            &self.callback,
+            &commands::on_any_member_left{},
+            || Ok(client_member.clone())
+        );
+        if let Some(ref member) = self.members.get(&id) {
+            for group in &member.groups {
+                self.notify_for_group_member_left(group.clone(), &client_member)
+            }
+        }
+    }
+    fn notify_for_group_member_left(&self, group: u64, member: &ClientMember) {
+        cb_notify(
+            &self.callback,
+            &commands::on_group_member_left{group: group},
+            || Ok(member.clone())
+        );
+    }
+    fn leave_group_(&mut self, group_id: u64, id: u64, need_notify: bool) -> Result<(), ()> {
+        let mut success = false;
+        let mut client_member: Option<ClientMember> = None;
+        if let Some(ref mut group) = self.groups.get_mut(&group_id) {
+            if let Some(ref mut member) = self.members.get_mut(&id) {
+                group.members.remove(&id);
+                member.groups.remove(&group_id);
+                success = true;
+            }
+        }
+        if success {
+            if need_notify {
+                self.notify_for_group_member_left(group_id, &self.compose_client_member(id));
+            }
+            return Ok(());
+        } else {
+            return Err(());
+        }
+    }
 }
 
 impl StateMachineCmds for Membership {
     fn hb_online_changed(&mut self, online: Vec<u64>, offline: Vec<u64>) -> Result<(), ()> {
-        let mut stat_map = self.heartbeat.status.write();
-        for id in online {
-            if let Some(ref mut stat) = stat_map.get_mut(&id) {
-                stat.online = true;
+        {
+            let mut stat_map = self.heartbeat.status.write();
+            for id in &online {
+                if let Some(ref mut stat) = stat_map.get_mut(&id) {
+                    stat.online = true;
+                }
+            }
+            for id in &offline {
+                if let Some(ref mut stat) = stat_map.get_mut(&id) {
+                    stat.online = false;
+                }
             }
         }
+        for id in online {
+            self.notify_for_member_online(id);
+        }
         for id in offline {
-            if let Some(ref mut stat) = stat_map.get_mut(&id) {
-                stat.online = false;
-            }
+            self.notify_for_member_offline(id);
         }
         Ok(())
     }
     fn join(&mut self, address: String) -> Result<u64, ()> {
         let id = hash_str(&address);
         let mut stat_map = self.heartbeat.status.write();
+        let mut joined = false;
         self.members.entry(id).or_insert_with(|| {
             let current_time = time::get_time();
             let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
@@ -185,50 +267,65 @@ impl StateMachineCmds for Membership {
             });
             stat.online = true;
             stat.last_updated = current_time;
+            joined = true;
             Member {
                 id: id,
                 address: address.clone(),
                 groups: HashSet::new(),
             }
         });
-        Ok(id)
+        if joined {
+            cb_notify(
+                &self.callback,
+                &commands::on_any_member_joined{},
+                || Ok(self.compose_client_member(id))
+            );
+            Ok(id)
+        } else {
+            Err(())
+        }
     }
     fn leave(&mut self, id: u64) -> Result<(), ()> {
+        if !self.members.contains_key(&id) {return Err(())};
         let mut groups:Vec<u64> = Vec::new();
-        {
-            let mut stat_map = self.heartbeat.status.write();
-            stat_map.remove(&id);
-        }
         if let Some(member) = self.members.get(&id) {
             for group in &member.groups {
                 groups.push(group.clone());
             }
         }
+        self.notify_for_member_left(id);
         for group_id in groups {
-            self.leave_group(group_id, id);
+            self.leave_group_(group_id, id, false);
+        }
+        {
+            let mut stat_map = self.heartbeat.status.write();
+            stat_map.remove(&id);
         }
         self.members.remove(&id);
         Ok(())
     }
     fn join_group(&mut self, group_id: u64, id: u64) -> Result<(), ()> {
+        let mut success = false;
         if let Some(ref mut group) = self.groups.get_mut(&group_id) {
             if let Some(ref mut member) = self.members.get_mut(&id) {
                 group.members.insert(id);
                 member.groups.insert(group_id);
-                return Ok(())
+                success = true;
             }
         }
-        Err(())
+        if success {
+            cb_notify(
+                &self.callback,
+                &commands::on_group_member_joined{group: group_id},
+                || Ok(self.compose_client_member(id))
+            );
+            return Ok(());
+        } else {
+            return Err(());
+        }
     }
     fn leave_group(&mut self, group_id: u64, id: u64) -> Result<(), ()> {
-        if let Some(ref mut group) = self.groups.get_mut(&group_id) {
-            if let Some(ref mut member) = self.members.get_mut(&id) {
-                group.members.remove(&id);
-                member.groups.remove(&group_id);
-                return Ok(())
-            }
-        }
-        Err(())
+        self.leave_group_(group_id, id, true)
     }
     fn new_group(&mut self, name: String) -> Result<u64, u64> {
         let id = hash_str(&name);

@@ -38,18 +38,18 @@ fn primary() {
     let group_2 = String::from("test_group_2");
     let group_3 = String::from("test_group_3");
 
-    member1_svr.client().new_group(&group_1);
-    member1_svr.client().new_group(&group_2);
-    member1_svr.client().new_group(&group_3);
+    member1_svr.client().new_group(&group_1).unwrap().unwrap();
+    member1_svr.client().new_group(&group_2).unwrap().unwrap();
+    member1_svr.client().new_group(&group_3).unwrap().unwrap();
 
-    member1_svr.join_group(&group_1);
-    member2_svr.join_group(&group_1);
-    member3_svr.join_group(&group_1);
+    member1_svr.join_group(&group_1).unwrap().unwrap();
+    member2_svr.join_group(&group_1).unwrap().unwrap();
+    member3_svr.join_group(&group_1).unwrap().unwrap();
 
-    member1_svr.join_group(&group_2);
-    member2_svr.join_group(&group_2);
+    member1_svr.join_group(&group_2).unwrap().unwrap();
+    member2_svr.join_group(&group_2).unwrap().unwrap();
 
-    member1_svr.join_group(&group_3);
+    member1_svr.join_group(&group_3).unwrap().unwrap();
 
     assert_eq!(member1_svr.client().all_members(false).unwrap().unwrap().len(), 3);
     assert_eq!(member1_svr.client().all_members(true).unwrap().unwrap().len(), 3);
@@ -78,7 +78,7 @@ fn primary() {
     assert_eq!(member1_svr.client().group_members(&group_3, false).unwrap().unwrap().len(), 1);
     assert_eq!(member1_svr.client().group_members(&group_3, true).unwrap().unwrap().len(), 0);
 
-    member2_svr.leave();// leave will report to the raft servers to remove it from the list
+    member2_svr.leave().unwrap().unwrap();// leave will report to the raft servers to remove it from the list
     assert_eq!(member1_svr.client().all_members(false).unwrap().unwrap().len(), 2);
     assert_eq!(member1_svr.client().all_members(true).unwrap().unwrap().len(), 1);
 

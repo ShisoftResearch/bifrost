@@ -52,9 +52,9 @@ impl MemberService {
     pub fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
     }
-    pub fn leave(&self) {
+    pub fn leave(&self) -> Result<Result<(), ()>, ExecError>{
         self.close();
-        self.sm_client.leave(self.id);
+        self.sm_client.leave(self.id)
     }
     pub fn join_group(&self, group: &String) -> Result<Result<(), ()>, ExecError> {
         self.member_client.join_group(group)

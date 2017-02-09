@@ -5,14 +5,16 @@ use bifrost_hasher::hash_str;
 use super::raft::client::SMClient;
 use super::DEFAULT_SERVICE_ID;
 
-#[derive(Serialize, Deserialize, Debug)]
+use membership::server::Membership;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Member {
     pub id: u64,
     pub address: String,
     pub online: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Group {
     pub id: u64,
     pub name: String,
