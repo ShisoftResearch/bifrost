@@ -117,7 +117,7 @@ macro_rules! def_store_number {
                 }
             }
             impl StateMachineCtl for Number {
-                sm_complete!();
+                raft_sm_complete!();
                 fn snapshot(&self) -> Option<Vec<u8>> {
                     Some(serialize!(&self.num))
                 }

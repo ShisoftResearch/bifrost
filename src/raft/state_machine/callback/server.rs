@@ -140,12 +140,12 @@ impl SMCallback {
                         }
                     } else {
                         //TODO: Check missing subscriptions
-//                        let keys: Vec<SubKey> = svr_subs.subscriptions.keys().cloned().collect();
-//                        if !keys.is_empty() {
-//                            println!(">>>>>>>>>>>>>> {:?} -> {:?}", keys, key);
-//                        } else {
-//                            println!(">>>>>>>>>>>>>> EMPTY -> {:?}", key);
-//                        }
+                        let keys: Vec<SubKey> = svr_subs.subscriptions.keys().cloned().collect();
+                        if !keys.is_empty() {
+                            println!(">>>>>>>>>>>>>> {:?} -> {:?}", keys, key);
+                        } else {
+                            println!(">>>>>>>>>>>>>> EMPTY -> {:?}", key);
+                        }
                     }
                 }
             },

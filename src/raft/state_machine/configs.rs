@@ -80,7 +80,7 @@ impl StateMachineCmds for Configures {
 }
 
 impl StateMachineCtl for Configures {
-    sm_complete!();
+    raft_sm_complete!();
     fn snapshot(&self) -> Option<Vec<u8>> {
         let mut snapshot = ConfigSnapshot{
             members: HashSet::with_capacity(self.members.len()),

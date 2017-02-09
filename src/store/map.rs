@@ -96,7 +96,7 @@ macro_rules! def_store_hash_map {
                 }
             }
             impl StateMachineCtl for Map {
-                sm_complete!();
+                raft_sm_complete!();
                 fn snapshot(&self) -> Option<Vec<u8>> {
                     Some(serialize!(&self.map))
                 }

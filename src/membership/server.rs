@@ -288,7 +288,7 @@ impl StateMachineCmds for Membership {
     }
 }
 impl StateMachineCtl for Membership {
-    sm_complete!();
+    raft_sm_complete!();
     fn snapshot(&self) -> Option<Vec<u8>> {
         //Some(serialize!(&self.map))
         None // TODO: Backup members

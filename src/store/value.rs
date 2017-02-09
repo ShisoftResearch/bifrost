@@ -31,7 +31,7 @@ macro_rules! def_store_value {
                 }
             }
             impl StateMachineCtl for Value {
-                sm_complete!();
+                raft_sm_complete!();
                 fn snapshot(&self) -> Option<Vec<u8>> {
                     Some(serialize!(&self.val))
                 }

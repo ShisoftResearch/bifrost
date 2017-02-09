@@ -36,7 +36,7 @@ pub struct MasterStateMachine {
 impl StateMachineCmds for MasterStateMachine {}
 
 impl StateMachineCtl for MasterStateMachine {
-    sm_complete!();
+    raft_sm_complete!();
     fn snapshot(&self) -> Option<Vec<u8>> {
         let mut sms: SnapshotDataItems = Vec::with_capacity(self.subs.len());
         for (sm_id, smc) in self.subs.iter() {

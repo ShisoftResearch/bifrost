@@ -165,13 +165,13 @@ impl RaftClient {
           F: Fn(R) + 'static + Send + Sync
     {
         if !subs_is_ready() {return Ok(Err(SubscriptionError::SubServerNotReady))}
-        let service_id = self.service_id;
+        let raft_sid = self.service_id;
         let (fn_id, _, pattern_data) = msg.encode();
         let wrapper_fn = move |data: Vec<u8>| {
             f(msg.decode_return(&data))
         };
         let pattern_id = hash_bytes(&pattern_data.as_slice());
-        let key = (service_id, sm_id, fn_id, pattern_id);
+        let key = (raft_sid, sm_id, fn_id, pattern_id);
         let mut subs_map = CLIENT_SUBSCRIPTIONS.write();
         let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
         subs_lst.push(Box::new(wrapper_fn));
