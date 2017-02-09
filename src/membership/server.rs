@@ -4,6 +4,7 @@ use super::raft::*;
 use super::*;
 use raft::{RaftService, LogEntry, RaftMsg, Service as raft_svr_trait};
 use raft::state_machine::StateMachineCtl;
+use raft::state_machine::callback::server::SMCallback;
 use rpc::Server;
 use parking_lot::{RwLock};
 use std::collections::{HashMap, HashSet, BTreeSet};
@@ -83,7 +84,8 @@ struct MemberGroup {
 pub struct Membership {
     heartbeat: Arc<HeartbeatService>,
     groups: HashMap<u64, MemberGroup>,
-    members: HashMap<u64, Member>
+    members: HashMap<u64, Member>,
+    callback: Option<SMCallback>,
 }
 impl Drop for Membership {
     fn drop(&mut self) {
@@ -139,6 +141,7 @@ impl Membership {
             heartbeat: service.clone(),
             groups: HashMap::new(),
             members: HashMap::new(),
+            callback: None,
         }));
         server.register_service(DEFAULT_SERVICE_ID, service);
     }
@@ -150,6 +153,9 @@ impl Membership {
             address: member.address.clone(),
             online: stat_map.get(&id).unwrap().online
         }
+    }
+    pub fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
+        self.callback = Some(SMCallback::new(self.id(), raft_service.clone()));
     }
 }
 

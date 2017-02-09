@@ -155,3 +155,11 @@ impl SMCallback {
         }
     }
 }
+
+pub fn notify<R, F>(callback: Option<SMCallback>, func: &RaftMsg<R>, data: F)
+    where F: Fn() -> R,
+          R: serde::Serialize + Clone + Send + Sync {
+    if let Some(ref callback) = callback {
+        callback.notify(func, data());
+    }
+}
