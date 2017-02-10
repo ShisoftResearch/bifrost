@@ -455,11 +455,14 @@ impl StateMachineCmds for Membership {
             return Err(());
         }
     }
-    fn group_leader(&self, group: u64) -> Result<Option<ClientMember>, ()> {
-        match self.group_first_online_member_id(group) {
-            Ok(Some(id)) => Ok(Some(self.compose_client_member(id))),
-            Err(_) => Err(()),
-            _ => Ok(None)
+    fn group_leader(&self, group_id: u64) -> Result<Option<ClientMember>, ()> {
+        if let Some(group) = self.groups.get(&group_id) {
+            Ok(match group.leader {
+                Some(id) => Some(self.compose_client_member(id)),
+                None => None
+            })
+        } else {
+            Err(())
         }
     }
     fn group_members(&self, group: u64, online_only: bool) -> Result<Vec<ClientMember>, ()> {
