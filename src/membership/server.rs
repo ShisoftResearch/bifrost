@@ -78,7 +78,8 @@ struct Member {
 struct MemberGroup {
     name: String,
     id: u64,
-    members: BTreeSet<u64>
+    members: BTreeSet<u64>,
+    leader: Option<u64>
 }
 
 pub struct Membership {
@@ -225,12 +226,20 @@ impl Membership {
             if need_notify {
                 self.notify_for_group_member_left(group_id, &self.compose_client_member(id));
             }
+            self.group_leader_candidate_unavailable(group_id, id);
             return Ok(());
         } else {
             return Err(());
         }
     }
-    fn group_leader_id(&self, group: u64) -> Result<Option<u64>, ()> {
+    fn member_groups(&self, member: u64) -> Option<HashSet<u64>> {
+        if let Some(member) = self.members.get(&member) {
+            Some(member.groups.clone())
+        } else {
+            None
+        }
+    }
+    fn group_first_online_member_id(&self, group: u64) -> Result<Option<u64>, ()> {
         if let Some(group) = self.groups.get(&group) {
             let stat_map = self.heartbeat.status.read();
             for member in group.members.iter() {
@@ -243,6 +252,69 @@ impl Membership {
             Ok(None)
         } else {
             Err(())
+        }
+    }
+    fn change_leader(&mut self, group_id: u64, new: Option<u64>) -> Result<(), ()> {
+        let mut old: Option<u64> = None;
+        let mut changed = false;
+        if let Some(mut group) = self.groups.get_mut(&group_id) {
+            old =  group.leader;
+            if old != new {
+                group.leader = new;
+                changed = true;
+            }
+        }
+        if changed {
+            let convert = |id_opt| if let Some(id_opt) = id_opt {
+                Some(self.compose_client_member(id_opt))
+            } else {None};
+            cb_notify(
+                &self.callback,
+                &commands::on_group_leader_changed {group: group_id},
+                || Ok(( convert(old), convert(new)))
+            );
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+    fn group_leader_candidate_available(&mut self, group_id: u64, member: u64) {
+        // if the group does not have a leader, assign the member
+        let mut leader_changed = false;
+        if let Some(group) = self.groups.get_mut(&group_id) {
+            if group.leader == None {
+                leader_changed = true;
+            }
+        }
+        if leader_changed {
+            self.change_leader(group_id, Some(member));
+        }
+    }
+    fn group_leader_candidate_unavailable(&mut self, group_id: u64, member: u64) {
+        // if the group have a leader that is the same as the member, reelect
+        let mut reelected = false;
+        if let Some(group) = self.groups.get_mut(&group_id) {
+            if group.leader == Some(member) {
+                reelected = true;
+            }
+        }
+        if reelected {
+            let online_id = self.group_first_online_member_id(group_id).unwrap();
+            self.change_leader(group_id, online_id);
+        }
+    }
+    fn leader_candidate_available(&mut self, member: u64) {
+        if let Some(groups) = self.member_groups(member) {
+            for group in groups {
+                self.group_leader_candidate_available(group, member)
+            }
+        }
+    }
+    fn leader_candidate_unavailable(&mut self, member: u64) {
+        if let Some(groups) = self.member_groups(member) {
+            for group in groups {
+                self.group_leader_candidate_unavailable(group, member)
+            }
         }
     }
 }
@@ -264,9 +336,11 @@ impl StateMachineCmds for Membership {
         }
         for id in online {
             self.notify_for_member_online(id);
+            self.leader_candidate_available(id);
         }
         for id in offline {
             self.notify_for_member_offline(id);
+            self.leader_candidate_unavailable(id);
         }
         Ok(())
     }
@@ -312,6 +386,9 @@ impl StateMachineCmds for Membership {
         for group_id in groups {
             self.leave_group_(group_id, id, false);
         }
+        // in this part we will not do leader_candidate_unavailable
+        // because it have already been triggered by leave_group_
+        // in the loop above
         {
             let mut stat_map = self.heartbeat.status.write();
             stat_map.remove(&id);
@@ -334,6 +411,7 @@ impl StateMachineCmds for Membership {
                 &commands::on_group_member_joined{group: group_id},
                 || Ok(self.compose_client_member(id))
             );
+            self.group_leader_candidate_available(group_id, id);
             return Ok(());
         } else {
             return Err(());
@@ -351,6 +429,7 @@ impl StateMachineCmds for Membership {
                 name: name,
                 id: id,
                 members: BTreeSet::new(),
+                leader: None
             }
         });
         if inserted {
@@ -377,7 +456,7 @@ impl StateMachineCmds for Membership {
         }
     }
     fn group_leader(&self, group: u64) -> Result<Option<ClientMember>, ()> {
-        match self.group_leader_id(group) {
+        match self.group_first_online_member_id(group) {
             Ok(Some(id)) => Ok(Some(self.compose_client_member(id))),
             Err(_) => Err(()),
             _ => Ok(None)

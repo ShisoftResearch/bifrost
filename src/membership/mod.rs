@@ -28,7 +28,7 @@ mod raft {
         def sub on_any_member_joined() -> ClientMember; //
         def sub on_group_member_left(group: u64) -> ClientMember; //
         def sub on_any_member_left() -> ClientMember; //
-        def sub on_group_leader_changed(group: u64) -> (ClientMember, ClientMember);
+        def sub on_group_leader_changed(group: u64) -> (Option<ClientMember>, Option<ClientMember>);
     }
 }
 

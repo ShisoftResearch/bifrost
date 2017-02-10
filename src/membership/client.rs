@@ -107,7 +107,7 @@ impl Client {
     }
     pub fn on_group_leader_changed<F>(&self, f: F, group: &String)
         -> Result<Result<u64, SubscriptionError>, ExecError>
-        where F: Fn(Result<(Member, Member), ()>)  + 'static + Send + Sync {
+        where F: Fn(Result<(Option<Member>, Option<Member>), ()>)  + 'static + Send + Sync {
         self.sm_client.on_group_leader_changed(f, hash_str(group))
     }
 }
