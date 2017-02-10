@@ -118,17 +118,17 @@ impl Membership {
                         for (id, status) in status_map.iter() {
                             let alive = (current_time - status.last_updated) < MAX_TIMEOUT;
                             if status.online && !alive {
-                                outdated_members.push(id.clone());
-                                members_to_update.insert(id.clone(), alive);
+                                outdated_members.push(*id);
+                                members_to_update.insert(*id, alive);
                             }
                             if !status.online && alive {
-                                backedin_members.push(id.clone());
-                                members_to_update.insert(id.clone(), alive);
+                                backedin_members.push(*id);
+                                members_to_update.insert(*id, alive);
                             }
                         }
                         for (id, alive) in members_to_update.iter() {
                             let mut status = status_map.get_mut(&id).unwrap();
-                            status.online = alive.clone();
+                            status.online = *alive;
                         }
 
                     }
@@ -168,7 +168,7 @@ impl Membership {
             for group in &member.groups {
                 cb_notify(
                     &self.callback,
-                    &commands::on_group_member_online{group: group.clone()},
+                    &commands::on_group_member_online{group: *group},
                     || Ok(client_member.clone())
                 );
             }
@@ -185,7 +185,7 @@ impl Membership {
             for group in &member.groups {
                 cb_notify(
                     &self.callback,
-                    &commands::on_group_member_offline{group: group.clone()},
+                    &commands::on_group_member_offline{group: *group},
                     || Ok(client_member.clone())
                 );
             }
@@ -200,7 +200,7 @@ impl Membership {
         );
         if let Some(ref member) = self.members.get(&id) {
             for group in &member.groups {
-                self.notify_for_group_member_left(group.clone(), &client_member)
+                self.notify_for_group_member_left(*group, &client_member)
             }
         }
     }
@@ -228,6 +228,21 @@ impl Membership {
             return Ok(());
         } else {
             return Err(());
+        }
+    }
+    fn group_leader_id(&self, group: u64) -> Result<Option<u64>, ()> {
+        if let Some(group) = self.groups.get(&group) {
+            let stat_map = self.heartbeat.status.read();
+            for member in group.members.iter() {
+                if let Some(member_stat) = stat_map.get(&member) {
+                    if member_stat.online {
+                        return Ok(Some(*member))
+                    }
+                }
+            }
+            Ok(None)
+        } else {
+            Err(())
         }
     }
 }
@@ -290,7 +305,7 @@ impl StateMachineCmds for Membership {
         let mut groups:Vec<u64> = Vec::new();
         if let Some(member) = self.members.get(&id) {
             for group in &member.groups {
-                groups.push(group.clone());
+                groups.push(*group);
             }
         }
         self.notify_for_member_left(id);
@@ -362,21 +377,16 @@ impl StateMachineCmds for Membership {
         }
     }
     fn group_leader(&self, group: u64) -> Result<Option<ClientMember>, ()> {
-        if let Some(group) = self.groups.get(&group) {
-            let first_member = group.members.iter().next();
-            if let Some(first_member) = first_member {
-                Ok(Some(self.compose_client_member(first_member.clone())))
-            } else {
-                Ok(None)
-            }
-        } else {
-            Err(())
+        match self.group_leader_id(group) {
+            Ok(Some(id)) => Ok(Some(self.compose_client_member(id))),
+            Err(_) => Err(()),
+            _ => Ok(None)
         }
     }
     fn group_members(&self, group: u64, online_only: bool) -> Result<Vec<ClientMember>, ()> {
         if let Some(group) = self.groups.get(&group) {
             Ok(group.members.iter()
-                .map(|id| self.compose_client_member(id.clone()))
+                .map(|id| self.compose_client_member(*id))
                 .filter(|member| !online_only || member.online)
                 .collect())
         } else {
@@ -385,7 +395,7 @@ impl StateMachineCmds for Membership {
     }
     fn all_members(&self, online_only: bool) -> Result<Vec<ClientMember>, ()> {
         Ok(self.members.iter()
-            .map(|(id, _)| self.compose_client_member(id.clone()))
+            .map(|(id, _)| self.compose_client_member(*id))
             .filter(|member| !online_only || member.online)
             .collect())
     }
