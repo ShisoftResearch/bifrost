@@ -14,7 +14,7 @@ mod u32 {
     };
     use bifrost::store::number::U32::client::SMClient;
     use bifrost::rpc::Server;
-    use bifrost::raft::state_machine::callback::client::init_subscription;
+    use bifrost::raft::state_machine::callback::client::SubscriptionService;
 
     #[test]
     fn test(){
@@ -31,7 +31,6 @@ mod u32 {
         let sm_id = num_sm.id;
         let server = Server::new(vec!((DEFAULT_SERVICE_ID, service.clone())));
         Server::listen_and_resume(&server, &addr);
-        init_subscription(&server);
         num_sm.init_callback(&service);
         assert!(RaftService::start(&service));
         service.register_state_machine(Box::new(num_sm));
@@ -39,6 +38,8 @@ mod u32 {
 
         let client = RaftClient::new(vec!(addr), DEFAULT_SERVICE_ID).unwrap();
         let sm_client = SMClient::new(sm_id, &client);
+        let subs_service = SubscriptionService::initialize(&server);
+        client.set_subscription(&subs_service);
 
         sm_client.on_changed(|res| {
            if let Ok((old, new)) = res {

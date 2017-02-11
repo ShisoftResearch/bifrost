@@ -6,31 +6,38 @@ use super::*;
 use rpc::Server;
 use utils::time::get_time;
 
-lazy_static! {
-    pub static ref CLIENT_SUBSCRIPTIONS: RwLock<HashMap<SubKey, Vec<Box<Fn(Vec<u8>) + Send + Sync>>>> = RwLock::new(HashMap::new());
-    pub static ref SUBSCRIPTIONS_SERVICE: RwLock<Option<Arc<CallbackService>>> = RwLock::new(None);
-    pub static ref SERVER_ADDRESS: RwLock<Option<String>> = RwLock::new(None);
-    pub static ref SESSION_ID: Option<u64> = Some(get_time() as u64);
+pub struct SubscriptionService {
+    pub subs: RwLock<HashMap<SubKey, Vec<Box<Fn(Vec<u8>) + Send + Sync>>>>,
+    server_address: String,
+    session_id: u64
 }
 
-pub fn init_subscription(server: &Arc<Server>) {
-    let mut service_ref = SUBSCRIPTIONS_SERVICE.write();
-    let empty_ref = service_ref.is_none();
-    if empty_ref {
-        let service = Arc::new(CallbackService);
-        let mut address_ref = SERVER_ADDRESS.write();
-        server.register_service(DEFAULT_SERVICE_ID, service.clone());
-        *service_ref = Some(service.clone());
-        *address_ref = Some(server.clone().address().clone().unwrap());
+impl Service for SubscriptionService {
+    fn notify(&self, key: SubKey, data: Vec<u8>) -> Result<(), ()> {
+        let (raft_sid, sm_id, fn_id, pattern_id) = key;
+        let subs = self.subs.read();
+        if let Some(sub_fns) = subs.get(&key) {
+            for fun in sub_fns {
+                fun(data.clone());
+            }
+        }
+        Ok(())
     }
 }
+dispatch_rpc_service_functions!(SubscriptionService);
 
-pub fn is_ready() -> bool {
-    SUBSCRIPTIONS_SERVICE.read().is_some()
+impl SubscriptionService {
+    pub fn initialize(server: &Arc<Server>) -> Arc<SubscriptionService> {
+        let service = Arc::new(SubscriptionService {
+            subs: RwLock::new(HashMap::new()),
+            server_address: server.address().clone().unwrap(),
+            session_id: get_time() as u64
+        });
+        server.register_service(DEFAULT_SERVICE_ID, service.clone());
+        return service;
+    }
+    pub fn server_address(&self) -> String {
+        self.server_address.clone()
+    }
+    pub fn session_id(&self) -> u64 {self.session_id}
 }
-
-pub fn server_address() -> String {
-    SERVER_ADDRESS.read().clone().unwrap()
-}
-
-pub fn session_id() -> u64 {SESSION_ID.unwrap()}

@@ -4,7 +4,7 @@ use bifrost::membership::server::Membership;
 use bifrost::membership::member::MemberService;
 use bifrost::membership::client::Client;
 use bifrost::raft::client::RaftClient;
-use bifrost::raft::state_machine::callback::client::init_subscription;
+use bifrost::raft::state_machine::callback::client::SubscriptionService;
 
 use std::mem::forget;
 
@@ -20,7 +20,6 @@ fn primary() {
     });
     let server = Server::new(vec!((0, raft_service.clone())));
     let heartbeat_service = Membership::new(&server, &raft_service);
-    init_subscription(&server);
     Server::listen_and_resume(&server, &addr);
     RaftService::start(&raft_service);
     raft_service.bootstrap();
@@ -31,6 +30,9 @@ fn primary() {
 
     let wild_raft_client = RaftClient::new(vec!(addr.clone()), 0).unwrap();
     let client = Client::new(&wild_raft_client);
+
+    let subs_service = SubscriptionService::initialize(&server);
+    wild_raft_client.set_subscription(&subs_service);
 
     client.new_group(&group_1).unwrap().unwrap();
     client.new_group(&group_2).unwrap().unwrap();

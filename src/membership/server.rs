@@ -144,7 +144,7 @@ impl Membership {
             members: HashMap::new(),
             callback: None,
         }));
-        server.register_service(DEFAULT_SERVICE_ID, service);
+        server.register_service(DEFAULT_SERVICE_ID, service.clone());
     }
     fn compose_client_member(&self, id: u64) -> ClientMember {
         let member = self.members.get(&id).unwrap();

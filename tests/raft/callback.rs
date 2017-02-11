@@ -2,7 +2,7 @@ use bifrost::raft::*;
 use bifrost::raft::client::RaftClient;
 use bifrost::raft::state_machine::master::ExecError;
 use bifrost::raft::state_machine::callback::server::SMCallback;
-use bifrost::raft::state_machine::callback::client::init_subscription;
+use bifrost::raft::state_machine::callback::client::SubscriptionService;
 use bifrost::raft::state_machine::StateMachineCtl;
 use bifrost::rpc::Server;
 
@@ -53,13 +53,13 @@ fn dummy() {
     };
     let sm_id = dummy_sm.id();
     Server::listen_and_resume(&server, &addr);
-    init_subscription(&server);
     RaftService::start(&raft_service);
     raft_service.register_state_machine(Box::new(dummy_sm));
     raft_service.bootstrap();
 
     wait();
 
+    let sub_service = SubscriptionService::initialize(&server);
     let raft_client = RaftClient::new(vec!(addr), DEFAULT_SERVICE_ID).unwrap();
     let sm_client = Arc::new(client::SMClient::new(sm_id, &raft_client));
     let loops = 10;
@@ -68,6 +68,7 @@ fn dummy() {
     let sumer = Arc::new(AtomicUsize::new(0));
     let sumer_clone = sumer.clone();
     let mut expected_sum = 0;
+    raft_client.set_subscription(&sub_service);
     sm_client.on_trigged(move |res| {
         counter_clone.fetch_add(1, Ordering::Relaxed);
         sumer_clone.fetch_add(res.unwrap() as usize, Ordering::Relaxed);

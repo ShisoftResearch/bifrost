@@ -3,7 +3,7 @@ use bifrost::raft::client::RaftClient;
 use bifrost::store::value::string;
 use bifrost::store::value::string::client::SMClient;
 use bifrost::rpc::Server;
-use bifrost::raft::state_machine::callback::client::init_subscription;
+use bifrost::raft::state_machine::callback::client::SubscriptionService;
 
 #[test]
 fn string(){
@@ -23,15 +23,16 @@ fn string(){
     let server = Server::new(vec!((DEFAULT_SERVICE_ID, service.clone())));
     string_sm.init_callback(&service);
     Server::listen_and_resume(&server, &addr);
-    init_subscription(&server);
     assert!(RaftService::start(&service));
     service.register_state_machine(Box::new(string_sm));
     service.bootstrap();
 
     let client = RaftClient::new(vec!(addr), DEFAULT_SERVICE_ID).unwrap();
+    let sub_service = SubscriptionService::initialize(&server);
     let sm_client = SMClient::new(sm_id, &client);
     let unchanged_str = original_string.clone();
     let changed_str = altered_string.clone();
+    client.set_subscription(&sub_service);
 //    sm_client.on_changed(move |res| {
 //        if let Ok((old, new)) = res {
 //            println!("GOT VAL CALLBACK {:?} -> {:?}", old, new);

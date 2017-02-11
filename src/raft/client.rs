@@ -4,13 +4,8 @@ use raft::{
     ClientQryResponse, ClientCmdResponse};
 use raft::state_machine::OpType;
 use raft::state_machine::master::{ExecResult, ExecError};
-use raft::state_machine::callback::client::{
-    CLIENT_SUBSCRIPTIONS,
-    is_ready as subs_is_ready,
-    server_address as subs_server_address,
-    session_id as subs_session_id};
+use raft::state_machine::callback::client::SubscriptionService;
 use raft::state_machine::callback::{
-    CallbackService,
     DEFAULT_SERVICE_ID as CALLBACK_DEFAULT_SERVICE_ID, };
 use raft::state_machine::configs::CONFIG_SM_ID;
 use raft::state_machine::configs::commands::{subscribe as conf_subscribe};
@@ -39,7 +34,7 @@ pub enum ClientError {
 #[derive(Debug)]
 pub enum SubscriptionError {
     RemoteError,
-    SubServerNotReady,
+    SubServiceNotSet,
 }
 
 struct QryMeta {
@@ -54,6 +49,7 @@ struct Members {
 pub struct RaftClient {
     qry_meta: QryMeta,
     members: RwLock<Members>,
+    callback: RwLock<Option<Arc<SubscriptionService>>>,
     leader_id: AtomicU64,
     last_log_id: AtomicU64,
     last_log_term: AtomicU64,
@@ -74,6 +70,7 @@ impl RaftClient {
             last_log_id: AtomicU64::new(0),
             last_log_term: AtomicU64::new(0),
             service_id: service_id,
+            callback: RwLock::new(None)
         };
         let init = {
             let mut members = client.members.write();
@@ -86,6 +83,11 @@ impl RaftClient {
             Ok(_) => Ok(Arc::new(client)),
             Err(e) => Err(e)
         }
+    }
+
+    pub fn set_subscription(&self, sub_service: &Arc<SubscriptionService>) {
+        let mut callback = self.callback.write();
+        *callback = Some(sub_service.clone());
     }
 
    fn update_info(&self, members: &mut RwLockWriteGuard<Members>, addrs: &HashSet<String>) -> Result<(), ClientError> {
@@ -164,7 +166,9 @@ impl RaftClient {
     where M: RaftMsg<R> + 'static,
           F: Fn(R) + 'static + Send + Sync
     {
-        if !subs_is_ready() {return Ok(Err(SubscriptionError::SubServerNotReady))}
+        let callback = self.callback.read();
+        if callback.is_none() {return Ok(Err(SubscriptionError::SubServiceNotSet))}
+        let callback = callback.clone().unwrap();
         let raft_sid = self.service_id;
         let (fn_id, _, pattern_data) = msg.encode();
         let wrapper_fn = move |data: Vec<u8>| {
@@ -172,15 +176,15 @@ impl RaftClient {
         };
         let pattern_id = hash_bytes(&pattern_data.as_slice());
         let key = (raft_sid, sm_id, fn_id, pattern_id);
-        let mut subs_map = CLIENT_SUBSCRIPTIONS.write();
+        let mut subs_map = callback.subs.write();
         let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
         subs_lst.push(Box::new(wrapper_fn));
         let cluster_subs = self.execute(
             CONFIG_SM_ID,
             &conf_subscribe {
                 key: key,
-                address: subs_server_address(),
-                session_id: subs_session_id()
+                address: callback.server_address(),
+                session_id: callback.session_id()
             }
         );
         match cluster_subs {

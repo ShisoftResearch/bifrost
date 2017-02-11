@@ -1,5 +1,5 @@
 use bifrost::raft::*;
-use bifrost::raft::state_machine::callback::client::init_subscription;
+use bifrost::raft::state_machine::callback::client::SubscriptionService;
 use bifrost::raft::client::RaftClient;
 use bifrost::store::map::string_string_hashmap;
 use bifrost::store::map::string_string_hashmap::client::SMClient;
@@ -21,7 +21,6 @@ fn hash_map(){
     });
     let server = Server::new(vec!((DEFAULT_SERVICE_ID, raft_service.clone())));
     Server::listen_and_resume(&server, &addr);
-    init_subscription(&server);
     let sm_id = map_sm.id;
     map_sm.init_callback(&raft_service);
     assert!(RaftService::start(&raft_service));
@@ -30,6 +29,8 @@ fn hash_map(){
 
     let raft_client = RaftClient::new(vec!(addr), DEFAULT_SERVICE_ID).unwrap();
     let sm_client = SMClient::new(sm_id, &raft_client);
+    let subs_service = SubscriptionService::initialize(&server);
+    raft_client.set_subscription(&subs_service);
 
     let sk1 = String::from("k1");
     let sk2 = String::from("k2");
