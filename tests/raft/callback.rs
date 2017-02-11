@@ -52,8 +52,8 @@ fn dummy() {
         callback: SMCallback::new(10, raft_service.clone())
     };
     let sm_id = dummy_sm.id();
-    Server::listen_and_resume(server.clone(), &addr);
-    init_subscription(server);
+    Server::listen_and_resume(&server, &addr);
+    init_subscription(&server);
     RaftService::start(&raft_service);
     raft_service.register_state_machine(Box::new(dummy_sm));
     raft_service.bootstrap();

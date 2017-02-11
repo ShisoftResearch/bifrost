@@ -25,7 +25,7 @@ fn server_membership(){
         service_id: DEFAULT_SERVICE_ID,
     });
     let server1 = Server::new(vec!((DEFAULT_SERVICE_ID, service1.clone())));
-    Server::listen_and_resume(server1, &s1_addr);
+    Server::listen_and_resume(&server1, &s1_addr);
     assert!(RaftService::start(&service1));
     service1.bootstrap();
     assert_eq!(service1.num_members(), 1);
@@ -35,7 +35,7 @@ fn server_membership(){
         service_id: DEFAULT_SERVICE_ID,
     });
     let server2 = Server::new(vec!((DEFAULT_SERVICE_ID, service2.clone())));
-    Server::listen_and_resume(server2, &s2_addr);
+    Server::listen_and_resume(&server2, &s2_addr);
     assert!(RaftService::start(&service2));
     let join_result = service2.join(vec!(s1_addr.clone()));
     match join_result {
@@ -53,7 +53,7 @@ fn server_membership(){
         service_id: DEFAULT_SERVICE_ID,
     });
     let server3 = Server::new(vec!((DEFAULT_SERVICE_ID, service3.clone())));
-    Server::listen_and_resume(server3, &s3_addr);
+    Server::listen_and_resume(&server3, &s3_addr);
     assert!(RaftService::start(&service3));
     let join_result = service3.join(vec!(
         s1_addr.clone(),
@@ -116,13 +116,13 @@ fn log_replication(){
 
 
     let server1 = Server::new(vec!((DEFAULT_SERVICE_ID, service1.clone())));
-    Server::listen_and_resume(server1, &s1_addr);
+    Server::listen_and_resume(&server1, &s1_addr);
     assert!(RaftService::start(&service1));
     service1.bootstrap();
 
 
     let server2 = Server::new(vec!((DEFAULT_SERVICE_ID, service2.clone())));
-    Server::listen_and_resume(server2, &s2_addr);
+    Server::listen_and_resume(&server2, &s2_addr);
     assert!(RaftService::start(&service2));
     let join_result = service2.join(vec!(
         s1_addr.clone(),
@@ -131,7 +131,7 @@ fn log_replication(){
     join_result.unwrap();
 
     let server3 = Server::new(vec!((DEFAULT_SERVICE_ID, service3.clone())));
-    Server::listen_and_resume(server3, &s3_addr);
+    Server::listen_and_resume(&server3, &s3_addr);
     assert!(RaftService::start(&service3));
     let join_result = service3.join(vec!(
         s1_addr.clone(),
@@ -140,7 +140,7 @@ fn log_replication(){
     join_result.unwrap();
 
     let server4 = Server::new(vec!((DEFAULT_SERVICE_ID, service4.clone())));
-    Server::listen_and_resume(server4, &s4_addr);
+    Server::listen_and_resume(&server4, &s4_addr);
     assert!(RaftService::start(&service4));
     let join_result = service4.join(vec!(
         s1_addr.clone(),
@@ -150,7 +150,7 @@ fn log_replication(){
     join_result.unwrap();
 
     let server5 = Server::new(vec!((DEFAULT_SERVICE_ID, service5.clone())));
-    Server::listen_and_resume(server5, &s5_addr);
+    Server::listen_and_resume(&server5, &s5_addr);
     assert!(RaftService::start(&service5));
     let join_result = service5.join(vec!(
         s1_addr.clone(),

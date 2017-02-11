@@ -22,8 +22,8 @@ fn string(){
     let sm_id = string_sm.id;
     let server = Server::new(vec!((DEFAULT_SERVICE_ID, service.clone())));
     string_sm.init_callback(&service);
-    Server::listen_and_resume(server.clone(), &addr);
-    init_subscription(server.clone());
+    Server::listen_and_resume(&server, &addr);
+    init_subscription(&server);
     assert!(RaftService::start(&service));
     service.register_state_machine(Box::new(string_sm));
     service.bootstrap();

@@ -2,7 +2,9 @@ use bifrost::rpc::*;
 use bifrost::raft::*;
 use bifrost::membership::server::Membership;
 use bifrost::membership::member::MemberService;
+use bifrost::membership::client::Client;
 use bifrost::raft::client::RaftClient;
+use bifrost::raft::state_machine::callback::client::init_subscription;
 
 use std::mem::forget;
 
@@ -18,9 +20,25 @@ fn primary() {
     });
     let server = Server::new(vec!((0, raft_service.clone())));
     let heartbeat_service = Membership::new(&server, &raft_service);
-    Server::listen_and_resume(server.clone(), &addr);
+    init_subscription(&server);
+    Server::listen_and_resume(&server, &addr);
     RaftService::start(&raft_service);
     raft_service.bootstrap();
+
+    let group_1 = String::from("test_group_1");
+    let group_2 = String::from("test_group_2");
+    let group_3 = String::from("test_group_3");
+
+    let wild_raft_client = RaftClient::new(vec!(addr.clone()), 0).unwrap();
+    let client = Client::new(&wild_raft_client);
+
+    client.new_group(&group_1).unwrap().unwrap();
+    client.new_group(&group_2).unwrap().unwrap();
+    client.new_group(&group_3).unwrap().unwrap();
+
+    client.on_any_member_joined(|res| {
+        println!("NEW MEMBER: {}", res.unwrap().address);
+    }).unwrap().unwrap();
 
     let member1_raft_client = RaftClient::new(vec!(addr.clone()), 0).unwrap();
     let member1_addr = String::from("server1");
@@ -33,14 +51,6 @@ fn primary() {
     let member3_raft_client = RaftClient::new(vec!(addr.clone()), 0).unwrap();
     let member3_addr = String::from("server3");
     let member3_svr = MemberService::new(&member3_addr, &member3_raft_client);
-
-    let group_1 = String::from("test_group_1");
-    let group_2 = String::from("test_group_2");
-    let group_3 = String::from("test_group_3");
-
-    member1_svr.client().new_group(&group_1).unwrap().unwrap();
-    member1_svr.client().new_group(&group_2).unwrap().unwrap();
-    member1_svr.client().new_group(&group_3).unwrap().unwrap();
 
     member1_svr.join_group(&group_1).unwrap().unwrap();
     member2_svr.join_group(&group_1).unwrap().unwrap();
@@ -90,4 +100,6 @@ fn primary() {
 
     assert_eq!(member1_svr.client().group_members(&group_3, false).unwrap().unwrap().len(), 1);
     assert_eq!(member1_svr.client().group_members(&group_3, true).unwrap().unwrap().len(), 0);
+
+    wait();
 }

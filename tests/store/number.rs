@@ -30,8 +30,8 @@ mod u32 {
         });
         let sm_id = num_sm.id;
         let server = Server::new(vec!((DEFAULT_SERVICE_ID, service.clone())));
-        Server::listen_and_resume(server.clone(), &addr);
-        init_subscription(server.clone());
+        Server::listen_and_resume(&server, &addr);
+        init_subscription(&server);
         num_sm.init_callback(&service);
         assert!(RaftService::start(&service));
         service.register_state_machine(Box::new(num_sm));
@@ -97,7 +97,7 @@ mod f64 {
         });
         let sm_id = num_sm.id;
         let server = Server::new(vec!((DEFAULT_SERVICE_ID, service.clone())));
-        Server::listen_and_resume(server, &addr);
+        Server::listen_and_resume(&server, &addr);
         assert!(RaftService::start(&service));
         service.register_state_machine(Box::new(num_sm));
         service.bootstrap();

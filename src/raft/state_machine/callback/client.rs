@@ -13,7 +13,7 @@ lazy_static! {
     pub static ref SESSION_ID: Option<u64> = Some(get_time() as u64);
 }
 
-pub fn init_subscription(server: Arc<Server>) {
+pub fn init_subscription(server: &Arc<Server>) {
     let mut service_ref = SUBSCRIPTIONS_SERVICE.write();
     let empty_ref = service_ref.is_none();
     if empty_ref {

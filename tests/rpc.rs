@@ -33,7 +33,7 @@ mod simple_service {
         {
             let addr = addr.clone();
             let server = Server::new(vec!((0, Arc::new(HelloServer)))); // 0 is service id
-            Server::listen_and_resume(server, &addr);;
+            Server::listen_and_resume(&server, &addr);;
         }
         thread::sleep(Duration::from_millis(1000));
         let client = RPCSyncClient::new(&addr).unwrap();

@@ -108,7 +108,7 @@ impl Server {
             res
         }));
     }
-    pub fn listen_and_resume(server: Arc<Server>, addr: &String) {
+    pub fn listen_and_resume(server: &Arc<Server>, addr: &String) {
         server.reset_address(&addr);
         let addr = addr.clone();
         let server = server.clone();
