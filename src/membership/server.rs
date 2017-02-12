@@ -140,12 +140,14 @@ impl Membership {
                 thread::sleep(std_time::Duration::from_secs(1));
             }
         });
-        raft_service.register_state_machine(Box::new(Membership {
+        let mut membership_service = Membership {
             heartbeat: service.clone(),
             groups: HashMap::new(),
             members: HashMap::new(),
             callback: None,
-        }));
+        };
+        membership_service.init_callback(raft_service);
+        raft_service.register_state_machine(Box::new(membership_service));
         server.register_service(DEFAULT_SERVICE_ID, service.clone());
     }
     fn compose_client_member(&self, id: u64) -> ClientMember {
@@ -157,7 +159,7 @@ impl Membership {
             online: stat_map.get(&id).unwrap().online
         }
     }
-    pub fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
+    fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
         self.callback = Some(SMCallback::new(self.id(), raft_service.clone()));
     }
     fn notify_for_member_online(&self, id: u64) {
@@ -348,23 +350,25 @@ impl StateMachineCmds for Membership {
     }
     fn join(&mut self, address: String) -> Result<u64, ()> {
         let id = hash_str(&address);
-        let mut stat_map = self.heartbeat.status.write();
         let mut joined = false;
-        self.members.entry(id).or_insert_with(|| {
-            let current_time = time::get_time();
-            let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
-                online: true,
-                last_updated: current_time
+        {
+            let mut stat_map = self.heartbeat.status.write();
+            self.members.entry(id).or_insert_with(|| {
+                let current_time = time::get_time();
+                let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
+                    online: true,
+                    last_updated: current_time
+                });
+                stat.online = true;
+                stat.last_updated = current_time;
+                joined = true;
+                Member {
+                    id: id,
+                    address: address.clone(),
+                    groups: HashSet::new(),
+                }
             });
-            stat.online = true;
-            stat.last_updated = current_time;
-            joined = true;
-            Member {
-                id: id,
-                address: address.clone(),
-                groups: HashSet::new(),
-            }
-        });
+        }
         if joined {
             cb_notify(
                 &self.callback,

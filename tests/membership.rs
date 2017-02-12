@@ -39,39 +39,39 @@ fn primary() {
     client.new_group(&group_3).unwrap().unwrap();
 
     client.on_any_member_joined(|res| {
-        println!(">>>>>>>>>>>>>>>>>NEW MEMBER: {:?}", res.unwrap().address);
+        println!("NEW MEMBER: {:?}", res.unwrap().address);
     }).unwrap().unwrap();
 
     client.on_any_member_left(|res| {
-        println!(">>>>>>>>>>>>>>>>>MEMBER LEFT: {:?}", res.unwrap().address);
+        println!("MEMBER LEFT: {:?}", res.unwrap().address);
     }).unwrap().unwrap();
 
     client.on_any_member_offline(|res| {
-        println!(">>>>>>>>>>>>>>>>>MEMBER OFFLINE: {:?}", res.unwrap().address);
+        println!("MEMBER OFFLINE: {:?}", res.unwrap().address);
     }).unwrap().unwrap();
 
     client.on_any_member_online(|res| {
-        println!(">>>>>>>>>>>>>>>>>MEMBER ONLINE: {:?}", res.unwrap().address);
+        println!("MEMBER ONLINE: {:?}", res.unwrap().address);
     }).unwrap().unwrap();
 
     client.on_group_leader_changed(|res| {
-        println!(">>>>>>>>>>>>>>>>>GROUP LEADER CHANGED: {:?}", res.unwrap());
+        println!("GROUP LEADER CHANGED");
     }, &group_1).unwrap().unwrap();
 
     client.on_group_member_joined(|res| {
-        println!(">>>>>>>>>>>>>>>>>GROUP MEMBER JOINED: {:?}", res.unwrap());
+        println!("GROUP MEMBER JOINED: {:?}", res.unwrap().address);
     }, &group_1).unwrap().unwrap();
 
     client.on_group_member_left(|res| {
-        println!(">>>>>>>>>>>>>>>>>GROUP MEMBER LEFT: {:?}", res.unwrap());
+        println!("GROUP MEMBER LEFT: {:?}", res.unwrap().address);
     }, &group_1).unwrap().unwrap();
 
     client.on_group_member_online(|res| {
-        println!(">>>>>>>>>>>>>>>>>GROUP MEMBER ONLINE: {:?}", res.unwrap());
+        println!("GROUP MEMBER ONLINE: {:?}", res.unwrap().address);
     }, &group_1).unwrap().unwrap();
 
     client.on_group_member_offline(|res| {
-        println!(">>>>>>>>>>>>>>>>>GROUP MEMBER OFFLINE: {:?}", res.unwrap());
+        println!("GROUP MEMBER OFFLINE: {:?}", res.unwrap().address);
     }, &group_1).unwrap().unwrap();
 
     let member1_raft_client = RaftClient::new(vec!(addr.clone()), 0).unwrap();
