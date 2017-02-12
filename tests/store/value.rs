@@ -39,7 +39,7 @@ fn string(){
 //            assert_eq!(old, unchanged_str);
 //            assert_eq!(new, changed_str);
 //        }
-//    });
+//    }).unwrap().unwrap();
     assert_eq!(
         sm_client.get().unwrap().unwrap(),
         original_string.clone()

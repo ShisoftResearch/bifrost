@@ -15,7 +15,6 @@ use super::*;
 
 
 lazy_static! {
-    pub static ref SUBSCRIPTIONS: RwLock<HashMap<u64, Subscriptions>> = RwLock::new(HashMap::new());
     pub static ref THREAD_POOL: Mutex<ThreadPool> = Mutex::new(ThreadPool::new(num_cpus::get()));
 }
 
@@ -102,14 +101,19 @@ impl Subscriptions {
 }
 
 pub struct SMCallback {
+    pub subscriptions: Arc<RwLock<Subscriptions>>,
     pub raft_service: Arc<RaftService>,
     pub sm_id: u64,
 }
 
 impl SMCallback {
     pub fn new(state_machine_id: u64, raft_service: Arc<RaftService>) -> SMCallback {
+        let meta = raft_service.meta.read();
+        let sm = meta.state_machine.read();
+        let subs = sm.configs.subscriptions.clone();
         SMCallback {
-            raft_service: raft_service,
+            subscriptions: subs,
+            raft_service: raft_service.clone(),
             sm_id: state_machine_id,
         }
     }
@@ -123,29 +127,19 @@ impl SMCallback {
                 let raft_sid = self.raft_service.options.service_id;
                 let sm_id = self.sm_id;
                 let key = (raft_sid, sm_id, fn_id, pattern_id);
-                let subscriptions_map = SUBSCRIPTIONS.read();
-                if let Some(svr_subs) = subscriptions_map.get(&raft_sid) {
-                    if let Some(sub_ids) = svr_subs.subscriptions.get(&key) {
-                        let data = serialize!(&data);
-                        for sub_id in sub_ids {
-                            if let Some(subscriber_id) = svr_subs.sub_suber.get(&sub_id) {
-                                if let Some(subscriber) = svr_subs.subscribers.get(&subscriber_id) {
-                                    let data = data.clone();
-                                    let client = subscriber.client.clone();
-                                    THREAD_POOL.lock().execute(move || {
-                                        client.notify(key, data);
-                                    });
-                                }
+                let svr_subs = self.subscriptions.read();
+                if let Some(sub_ids) = svr_subs.subscriptions.get(&key) {
+                    let data = serialize!(&data);
+                    for sub_id in sub_ids {
+                        if let Some(subscriber_id) = svr_subs.sub_suber.get(&sub_id) {
+                            if let Some(subscriber) = svr_subs.subscribers.get(&subscriber_id) {
+                                let data = data.clone();
+                                let client = subscriber.client.clone();
+                                THREAD_POOL.lock().execute(move || {
+                                    client.notify(key, data);
+                                });
                             }
                         }
-                    } else {
-//                        //TODO: Check missing subscriptions
-//                        let keys: Vec<SubKey> = svr_subs.subscriptions.keys().cloned().collect();
-//                        if !keys.is_empty() {
-//                            println!(">>>>>>>>>>>>>> {:?} -> {:?}", keys, key);
-//                        } else {
-//                            println!(">>>>>>>>>>>>>> EMPTY -> {:?}", key);
-//                        }
                     }
                 }
             },

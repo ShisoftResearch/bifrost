@@ -2,7 +2,7 @@ use raft::SyncServiceClient;
 use rpc;
 use super::*;
 use super::callback::SubKey;
-use super::callback::server::{Subscriptions, SUBSCRIPTIONS};
+use super::callback::server::Subscriptions;
 use bifrost_hasher::hash_str;
 use std::sync::Arc;
 use parking_lot::{Mutex, RwLock};
@@ -19,6 +19,7 @@ pub struct RaftMember {
 
 pub struct Configures {
     pub members: HashMap<u64, RaftMember>,
+    pub subscriptions: Arc<RwLock<Subscriptions>>,
     service_id: u64,
 }
 
@@ -70,12 +71,8 @@ impl StateMachineCmds for Configures {
         Ok(members)
     }
     fn subscribe(&mut self, key: SubKey, address: String, session_id: u64) -> Result<u64, ()> {
-        let mut subscriptions_map = SUBSCRIPTIONS.write();
-        if let Some(ref mut subscriptions) = subscriptions_map.get_mut(&self.service_id) {
-            subscriptions.subscribe(key, &address, session_id)
-        } else {
-            Err(())
-        }
+        let mut subs = self.subscriptions.write();
+        subs.subscribe(key, &address, session_id)
     }
 }
 
@@ -99,11 +96,10 @@ impl StateMachineCtl for Configures {
 
 impl Configures {
     pub fn new(service_id: u64) -> Configures {
-        let mut subscription_map = SUBSCRIPTIONS.write();
-        subscription_map.insert(service_id, Subscriptions::new());
         Configures {
             members: HashMap::new(),
-            service_id: service_id
+            service_id: service_id,
+            subscriptions: Arc::new(RwLock::new(Subscriptions::new()))
         }
     }
     fn recover_members (&mut self, snapshot: &MemberConfigSnapshot) {

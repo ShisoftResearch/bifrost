@@ -133,7 +133,9 @@ impl Membership {
                         }
 
                     }
-                    service_clone.update_raft(backedin_members, outdated_members);
+                    if backedin_members.len() + outdated_members.len() > 0 {
+                        service_clone.update_raft(backedin_members, outdated_members);
+                    }
                 }
                 thread::sleep(std_time::Duration::from_secs(1));
             }
