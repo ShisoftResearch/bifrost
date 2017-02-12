@@ -42,13 +42,14 @@ Bifrost will ship with it's own reliable data store based on [raft consensus alg
             - [x] Recover
         - [X] Interfaces
         - [X] Update procedures
-    - [ ] Cluster bootstrap
-    - [ ] Client
+    - [x] Cluster bootstrap
+    - [x] Client
         - [x] Command 
         - [x] Query 
             - [x] Concurrency
         - [x] Failover
         - [x] Membership changes 
+        - [x] Subscription 
     - [ ] Raft Group
     - [ ] Tests
         - [x] State machine framework
@@ -64,7 +65,6 @@ Bifrost will ship with it's own reliable data store based on [raft consensus alg
 - [ ] Sharding
     - [ ] DHT
 - [ ] Reliable data store
-    - [ ] Raft interface
     - [x] Client group membership
     - [x] Client group leader election
     - [x] Map
