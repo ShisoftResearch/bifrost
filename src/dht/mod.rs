@@ -1,7 +1,7 @@
 use std;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockWriteGuard};
 use bincode::{SizeLimit, serde as bincode};
 use serde;
 
@@ -21,6 +21,7 @@ pub enum Action {
     Left,
 }
 
+#[derive(Clone)]
 struct Node {
     start: u64,
     server: u64,
@@ -36,7 +37,7 @@ pub struct DHT {
     membership: Arc<MembershipClient>,
     weight_sm_client: WeightSMClient,
     group_name: String,
-    watchers: RwLock<Vec<Box<Fn(&Member, &Action, &LookupTables, &Vec<Node>) + Send + Sync>>>
+    watchers: RwLock<Vec<Box<Fn(&Member, &Action, &RwLockWriteGuard<LookupTables>, &Vec<Node>) + Send + Sync>>>
 }
 
 impl DHT {
@@ -80,7 +81,7 @@ impl DHT {
             }, group);
             if let Ok(Ok(_)) = res {} else {return None;}
         }
-        if !dht.init_table() {return None;}
+        if !dht.init_table(&mut dht.tables.write()) {return None;}
         return Some(dht);
     }
     pub fn get_server(&self, hash: u64) -> Option<String> {
@@ -120,7 +121,7 @@ impl DHT {
         if let Ok(Ok(_)) = self.weight_sm_client.set_weight(group_id, server_id, weight) { true } else { false }
     }
     pub fn watch_all_actions<F>(&self, f: F)
-        where F: Fn(&Member, &Action, &LookupTables, &Vec<Node>) + 'static + Send + Sync {
+        where F: Fn(&Member, &Action, &RwLockWriteGuard<LookupTables>, &Vec<Node>) + 'static + Send + Sync {
         let mut watchers = self.watchers.write();
         watchers.push(Box::new(f));
     }
@@ -130,7 +131,7 @@ impl DHT {
         let server_id = hash_str(server);
         let wrapper = move |
             _: &Member,_: &Action,
-            lookup_table: &LookupTables, _: &Vec<Node>| {
+            lookup_table: &RwLockWriteGuard<LookupTables>, _: &Vec<Node>| {
             let nodes = &lookup_table.nodes;
             let node_len = nodes.len();
             let mut ranges: Vec<(u64, u64)> = Vec::new();
@@ -146,9 +147,10 @@ impl DHT {
             }
             f(ranges)
         };
+        self.watch_all_actions(wrapper);
     }
 
-    fn init_table(&self) -> bool {
+    fn init_table(&self, lookup_table: &mut RwLockWriteGuard<LookupTables>) -> bool {
         if let Ok(Ok(members)) = self.membership.group_members(&self.group_name, true) {
             let group_id = hash_str(&self.group_name);
             if let Ok(Ok(Some(weights))) = self.weight_sm_client.get_weights(group_id) {
@@ -159,7 +161,6 @@ impl DHT {
                     let factor_sum: f64 = factors.values().sum();
                     let nodes_size = if factor_sum > DEFAULT_NODE_LIST_SIZE {factor_sum} else {DEFAULT_NODE_LIST_SIZE};
                     let factor_scale = nodes_size / factor_sum;
-                    let mut lookup_table = self.tables.write();
                     for member in members.iter() {lookup_table.addrs.insert(member.id, member.address.clone());}
                     for (k, f) in factors.iter() {
                         let weight = (*f * factor_scale) as u64;
@@ -179,9 +180,18 @@ impl DHT {
         return false;
     }
     fn server_joined(&self, member: Member) {
-        self.init_table();
+        self.server_changed(member, Action::Joined);
     }
     fn server_left(&self, member: Member) {
-        self.init_table();
+        self.server_changed(member, Action::Left);
+    }
+    fn server_changed(&self, member: Member, action: Action) {
+        let mut lookup_table = self.tables.write();
+        let watchers = self.watchers.read();
+        let old_nodes = lookup_table.nodes.clone();
+        self.init_table(&mut lookup_table);
+        for watch in watchers.iter() {
+            watch(&member, &action, &lookup_table, &old_nodes);
+        }
     }
 }
