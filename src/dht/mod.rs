@@ -37,7 +37,7 @@ pub struct DHT {
     membership: Arc<MembershipClient>,
     weight_sm_client: WeightSMClient,
     group_name: String,
-    watchers: RwLock<Vec<Box<Fn(&Member, &Action, &RwLockWriteGuard<LookupTables>, &Vec<Node>) + Send + Sync>>>
+    watchers: RwLock<Vec<Box<Fn(&Member, &Action, &LookupTables, &Vec<Node>) + Send + Sync>>>
 }
 
 impl DHT {
@@ -121,7 +121,7 @@ impl DHT {
         if let Ok(Ok(_)) = self.weight_sm_client.set_weight(group_id, server_id, weight) { true } else { false }
     }
     pub fn watch_all_actions<F>(&self, f: F)
-        where F: Fn(&Member, &Action, &RwLockWriteGuard<LookupTables>, &Vec<Node>) + 'static + Send + Sync {
+        where F: Fn(&Member, &Action, &LookupTables, &Vec<Node>) + 'static + Send + Sync {
         let mut watchers = self.watchers.write();
         watchers.push(Box::new(f));
     }
@@ -131,7 +131,7 @@ impl DHT {
         let server_id = hash_str(server);
         let wrapper = move |
             _: &Member,_: &Action,
-            lookup_table: &RwLockWriteGuard<LookupTables>, _: &Vec<Node>| {
+            lookup_table: &LookupTables, _: &Vec<Node>| {
             let nodes = &lookup_table.nodes;
             let node_len = nodes.len();
             let mut ranges: Vec<(u64, u64)> = Vec::new();
@@ -191,7 +191,7 @@ impl DHT {
         let old_nodes = lookup_table.nodes.clone();
         self.init_table(&mut lookup_table);
         for watch in watchers.iter() {
-            watch(&member, &action, &lookup_table, &old_nodes);
+            watch(&member, &action, &*lookup_table, &old_nodes);
         }
     }
 }
