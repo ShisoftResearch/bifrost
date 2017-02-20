@@ -2,8 +2,8 @@
 macro_rules! def_store_value {
     ($m: ident, $t: ty) => {
         pub mod $m {
-            use raft::state_machine::StateMachineCtl;
             use bifrost_hasher::hash_str;
+            use $crate::raft::state_machine::StateMachineCtl;
             use $crate::raft::state_machine::callback::server::SMCallback;
             use $crate::raft::RaftService;
             use std::sync::{Arc};
