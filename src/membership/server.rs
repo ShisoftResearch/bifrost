@@ -330,6 +330,7 @@ impl Membership {
 
 impl StateMachineCmds for Membership {
     fn hb_online_changed(&mut self, online: Vec<u64>, offline: Vec<u64>) -> Result<(), ()> {
+        self.version += 1;
         {
             let mut stat_map = self.heartbeat.status.write();
             for id in &online {
@@ -351,10 +352,10 @@ impl StateMachineCmds for Membership {
             self.notify_for_member_offline(id);
             self.leader_candidate_unavailable(id);
         }
-        self.version += 1;
         Ok(())
     }
     fn join(&mut self, address: String) -> Result<u64, ()> {
+        self.version += 1;
         let id = hash_str(&address);
         let mut joined = false;
         {
@@ -388,6 +389,7 @@ impl StateMachineCmds for Membership {
     }
     fn leave(&mut self, id: u64) -> Result<(), ()> {
         if !self.members.contains_key(&id) {return Err(())};
+        self.version += 1;
         let mut groups:Vec<u64> = Vec::new();
         if let Some(member) = self.members.get(&id) {
             for group in &member.groups {
@@ -409,6 +411,7 @@ impl StateMachineCmds for Membership {
         Ok(())
     }
     fn join_group(&mut self, group_id: u64, id: u64) -> Result<(), ()> {
+        self.version += 1;
         let mut success = false;
         if let Some(ref mut group) = self.groups.get_mut(&group_id) {
             if let Some(ref mut member) = self.members.get_mut(&id) {
@@ -430,9 +433,11 @@ impl StateMachineCmds for Membership {
         }
     }
     fn leave_group(&mut self, group_id: u64, id: u64) -> Result<(), ()> {
+        self.version += 1;
         self.leave_group_(group_id, id, true)
     }
     fn new_group(&mut self, name: String) -> Result<u64, u64> {
+        self.version += 1;
         let id = hash_str(&name);
         let mut inserted = false;
         self.groups.entry(id).or_insert_with(|| {
@@ -451,6 +456,7 @@ impl StateMachineCmds for Membership {
         }
     }
     fn del_group(&mut self, id: u64) -> Result<(), ()> {
+        self.version += 1;
         let mut members: Option<BTreeSet<u64>> = None;
         if let Some(group) = self.groups.get(&id) {
             members = Some(group.members.clone());

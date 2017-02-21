@@ -18,6 +18,7 @@ pub mod weights;
 
 pub static DEFAULT_NODE_LIST_SIZE: f64 = 2048f64;
 
+#[derive(Debug)]
 pub enum Action {
     Joined,
     Left,
@@ -183,7 +184,7 @@ impl DHT {
                     }));
                 }
             }
-            f(ranges)
+            if !ranges.is_empty() {f(ranges);}
         };
         self.watch_all_actions(wrapper);
     }
@@ -194,6 +195,7 @@ impl DHT {
             match self.weight_sm_client.get_weights(group_id) {
                 Ok(Ok(Some(weights))) =>  {
                     if let Some(min_weight) = weights.values().min() {
+                        lookup_table.nodes.clear(); // refresh nodes
                         let mut factors: HashMap<u64, f64> = HashMap::new();
                         let min_weight = *min_weight as f64;
                         for member in members.iter() {
@@ -243,11 +245,14 @@ fn server_left(dht: &Arc<DHT>, member: Member, version: u64) {
     server_changed(dht, member, Action::Left, version);
 }
 fn server_changed(dht: &Arc<DHT>, member: Member, action: Action, version: u64) {
-    if dht.version.load(Ordering::Relaxed) < version {
+    let dht_version = dht.version.load(Ordering::Relaxed);
+    if dht_version < version {
         let dht = dht.clone();
         thread::spawn(move || {
             let mut lookup_table = dht.tables.write();
             let watchers = dht.watchers.read();
+            let dht_version = dht.version.load(Ordering::Relaxed);
+            if dht_version >= version {return;}
             let old_nodes = lookup_table.nodes.clone();
             dht.init_table_(&mut lookup_table);
             for watch in watchers.iter() {
