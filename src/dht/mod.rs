@@ -1,6 +1,9 @@
 use std;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::cmp::max;
+use std::thread;
+use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::{RwLock, RwLockWriteGuard};
 use bincode::{SizeLimit, serde as bincode};
 use serde;
@@ -10,7 +13,6 @@ use membership::client::{Client as MembershipClient, Member};
 use dht::weights::DEFAULT_SERVICE_ID;
 use dht::weights::client::{SMClient as WeightSMClient};
 use raft::client::{RaftClient, SubscriptionError};
-use std::cmp::max;
 
 pub mod weights;
 
@@ -52,7 +54,8 @@ pub struct DHT {
     membership: Arc<MembershipClient>,
     weight_sm_client: WeightSMClient,
     group_name: String,
-    watchers: RwLock<Vec<Box<Fn(&Member, &Action, &LookupTables, &Vec<Node>) + Send + Sync>>>
+    watchers: RwLock<Vec<Box<Fn(&Member, &Action, &LookupTables, &Vec<Node>) + Send + Sync>>>,
+    version: AtomicU64
 }
 
 impl DHT {
@@ -66,33 +69,34 @@ impl DHT {
             membership: membership.clone(),
             weight_sm_client: WeightSMClient::new(DEFAULT_SERVICE_ID, &raft_client),
             group_name: group.clone(),
-            watchers: RwLock::new(Vec::new())
+            watchers: RwLock::new(Vec::new()),
+            version: AtomicU64::new(0)
         });
         {
             let dht = dht.clone();
             let res = membership.on_group_member_joined(move |r| {
-                if let Ok(member) = r { dht.server_joined(member); }
+                if let Ok((member, version)) = r { server_joined(&dht, member, version); }
             }, group);
             if let Ok(Ok(_)) = res {} else {return Err(DHTError::WatchError);}
         }
         {
             let dht = dht.clone();
             let res = membership.on_group_member_online(move |r| {
-                if let Ok(member) = r { dht.server_joined(member) }
+                if let Ok((member, version)) = r { server_joined(&dht, member, version); }
             }, group);
             if let Ok(Ok(_)) = res {} else {return Err(DHTError::WatchError);}
         }
         {
             let dht = dht.clone();
             let res = membership.on_group_member_left(move |r| {
-                if let Ok(member) = r { dht.server_left(member) }
+                if let Ok((member, version)) = r { server_left(&dht, member, version); }
             }, group);
             if let Ok(Ok(_)) = res {} else {return Err(DHTError::WatchError);}
         }
         {
             let dht = dht.clone();
             let res = membership.on_group_member_offline(move |r| {
-                if let Ok(member) = r { dht.server_left(member) }
+                if let Ok((member, version)) = r { server_left(&dht, member, version); }
             }, group);
             if let Ok(Ok(_)) = res {} else {return Err(DHTError::WatchError);}
         }
@@ -185,7 +189,7 @@ impl DHT {
     }
 
     fn init_table_(&self, lookup_table: &mut RwLockWriteGuard<LookupTables>) -> Result<(), InitTableError> {
-        if let Ok(Ok(members)) = self.membership.group_members(&self.group_name, true) {
+        if let Ok(Ok((members, version))) = self.membership.group_members(&self.group_name, true) {
             let group_id = hash_str(&self.group_name);
             match self.weight_sm_client.get_weights(group_id) {
                 Ok(Ok(Some(weights))) =>  {
@@ -215,6 +219,7 @@ impl DHT {
                             }
                         };
                         lookup_table.nodes.sort_by(|n1, n2| n1.start.cmp(&n2.start));
+                        self.version.store(version, Ordering::Relaxed);
                         Ok(())
                     } else {
                         Err(InitTableError::NoWeightInfo)
@@ -229,19 +234,25 @@ impl DHT {
             Err(InitTableError::GroupNotExisted)
         }
     }
-    fn server_joined(&self, member: Member) {
-        self.server_changed(member, Action::Joined);
-    }
-    fn server_left(&self, member: Member) {
-        self.server_changed(member, Action::Left);
-    }
-    fn server_changed(&self, member: Member, action: Action) {
-        let mut lookup_table = self.tables.write();
-        let watchers = self.watchers.read();
-        let old_nodes = lookup_table.nodes.clone();
-        self.init_table_(&mut lookup_table);
-        for watch in watchers.iter() {
-            watch(&member, &action, &*lookup_table, &old_nodes);
-        }
+}
+
+fn server_joined(dht: &Arc<DHT>, member: Member, version: u64) {
+    server_changed(dht, member, Action::Joined, version);
+}
+fn server_left(dht: &Arc<DHT>, member: Member, version: u64) {
+    server_changed(dht, member, Action::Left, version);
+}
+fn server_changed(dht: &Arc<DHT>, member: Member, action: Action, version: u64) {
+    if dht.version.load(Ordering::Relaxed) < version {
+        let dht = dht.clone();
+        thread::spawn(move || {
+            let mut lookup_table = dht.tables.write();
+            let watchers = dht.watchers.read();
+            let old_nodes = lookup_table.nodes.clone();
+            dht.init_table_(&mut lookup_table);
+            for watch in watchers.iter() {
+                watch(&member, &action, &*lookup_table, &old_nodes);
+            }
+        });
     }
 }

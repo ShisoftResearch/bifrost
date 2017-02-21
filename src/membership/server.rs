@@ -8,7 +8,7 @@ use raft::state_machine::callback::server::{SMCallback, notify as cb_notify};
 use rpc::Server;
 use parking_lot::{RwLock};
 use std::collections::{HashMap, HashSet, BTreeSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::{thread, time as std_time};
 use bifrost_hasher::hash_str;
@@ -79,7 +79,7 @@ struct MemberGroup {
     name: String,
     id: u64,
     members: BTreeSet<u64>,
-    leader: Option<u64>
+    leader: Option<u64>,
 }
 
 pub struct Membership {
@@ -87,6 +87,7 @@ pub struct Membership {
     groups: HashMap<u64, MemberGroup>,
     members: HashMap<u64, Member>,
     callback: Option<SMCallback>,
+    version: u64,
 }
 impl Drop for Membership {
     fn drop(&mut self) {
@@ -145,6 +146,7 @@ impl Membership {
             groups: HashMap::new(),
             members: HashMap::new(),
             callback: None,
+            version: 0,
         };
         membership_service.init_callback(raft_service);
         raft_service.register_state_machine(Box::new(membership_service));
@@ -164,44 +166,47 @@ impl Membership {
     }
     fn notify_for_member_online(&self, id: u64) {
         let client_member = self.compose_client_member(id);
+        let version = self.version;
         cb_notify(
             &self.callback,
             &commands::on_any_member_online{},
-            || Ok(client_member.clone())
+            || Ok((client_member.clone(), version))
         );
         if let Some(ref member) = self.members.get(&id) {
             for group in &member.groups {
                 cb_notify(
                     &self.callback,
                     &commands::on_group_member_online{group: *group},
-                    || Ok(client_member.clone())
+                    || Ok((client_member.clone(), version))
                 );
             }
         }
     }
     fn notify_for_member_offline(&self, id: u64) {
         let client_member = self.compose_client_member(id);
+        let version = self.version;
         cb_notify(
             &self.callback,
             &commands::on_any_member_offline{},
-            || Ok(client_member.clone())
+            || Ok((client_member.clone(), version))
         );
         if let Some(ref member) = self.members.get(&id) {
             for group in &member.groups {
                 cb_notify(
                     &self.callback,
                     &commands::on_group_member_offline{group: *group},
-                    || Ok(client_member.clone())
+                    || Ok((client_member.clone(), version))
                 );
             }
         }
     }
     fn notify_for_member_left(&self, id: u64) {
         let client_member = self.compose_client_member(id);
+        let version = self.version;
         cb_notify(
             &self.callback,
             &commands::on_any_member_left{},
-            || Ok(client_member.clone())
+            || Ok((client_member.clone(), version))
         );
         if let Some(ref member) = self.members.get(&id) {
             for group in &member.groups {
@@ -213,7 +218,7 @@ impl Membership {
         cb_notify(
             &self.callback,
             &commands::on_group_member_left{group: group},
-            || Ok(member.clone())
+            || Ok((member.clone(), self.version))
         );
     }
     fn leave_group_(&mut self, group_id: u64, id: u64, need_notify: bool) -> Result<(), ()> {
@@ -275,7 +280,7 @@ impl Membership {
             cb_notify(
                 &self.callback,
                 &commands::on_group_leader_changed {group: group_id},
-                || Ok(( convert(old), convert(new)))
+                || Ok(( convert(old), convert(new), self.version))
             );
             Ok(())
         } else {
@@ -346,6 +351,7 @@ impl StateMachineCmds for Membership {
             self.notify_for_member_offline(id);
             self.leader_candidate_unavailable(id);
         }
+        self.version += 1;
         Ok(())
     }
     fn join(&mut self, address: String) -> Result<u64, ()> {
@@ -373,7 +379,7 @@ impl StateMachineCmds for Membership {
             cb_notify(
                 &self.callback,
                 &commands::on_any_member_joined{},
-                || Ok(self.compose_client_member(id))
+                || Ok((self.compose_client_member(id), self.version))
             );
             Ok(id)
         } else {
@@ -415,7 +421,7 @@ impl StateMachineCmds for Membership {
             cb_notify(
                 &self.callback,
                 &commands::on_group_member_joined{group: group_id},
-                || Ok(self.compose_client_member(id))
+                || Ok((self.compose_client_member(id), self.version))
             );
             self.group_leader_candidate_available(group_id, id);
             return Ok(());
@@ -461,31 +467,31 @@ impl StateMachineCmds for Membership {
             return Err(());
         }
     }
-    fn group_leader(&self, group_id: u64) -> Result<Option<ClientMember>, ()> {
+    fn group_leader(&self, group_id: u64) -> Result<(Option<ClientMember>, u64), ()> {
         if let Some(group) = self.groups.get(&group_id) {
-            Ok(match group.leader {
+            Ok((match group.leader {
                 Some(id) => Some(self.compose_client_member(id)),
                 None => None
-            })
+            }, self.version))
         } else {
             Err(())
         }
     }
-    fn group_members(&self, group: u64, online_only: bool) -> Result<Vec<ClientMember>, ()> {
+    fn group_members(&self, group: u64, online_only: bool) -> Result<(Vec<ClientMember>, u64), ()> {
         if let Some(group) = self.groups.get(&group) {
-            Ok(group.members.iter()
+            Ok((group.members.iter()
                 .map(|id| self.compose_client_member(*id))
                 .filter(|member| !online_only || member.online)
-                .collect())
+                .collect(), self.version))
         } else {
             Err(())
         }
     }
-    fn all_members(&self, online_only: bool) -> Result<Vec<ClientMember>, ()> {
-        Ok(self.members.iter()
+    fn all_members(&self, online_only: bool) -> Result<(Vec<ClientMember>, u64), ()> {
+        Ok((self.members.iter()
             .map(|(id, _)| self.compose_client_member(*id))
             .filter(|member| !online_only || member.online)
-            .collect())
+            .collect(), self.version))
     }
 }
 impl StateMachineCtl for Membership {

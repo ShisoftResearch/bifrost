@@ -122,4 +122,15 @@ fn primary() {
         println!("DHT 3: {} -> {}", k ,v);
     }
     assert_eq!(dht_3_mapping.get(&server_1).unwrap(), &30000);
+
+    member2_svr.leave().unwrap().unwrap();
+    let mut dht_1_mapping: HashMap<String, u64> = HashMap::new();
+    for i in 0..30000 {
+        let k = format!("k - {}", i);
+        let server = dht1.get_server_by_string(&k).unwrap();
+        *dht_1_mapping.entry(server.clone()).or_insert(0) += 1;
+    }
+    for (k, v) in dht_1_mapping.iter() {
+        println!("DHT 1 - DEL: {} -> {}", k ,v);
+    }
 }

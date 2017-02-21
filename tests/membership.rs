@@ -61,47 +61,38 @@ fn primary() {
 
     client.on_any_member_joined(move |res| {
         any_member_joined_count_clone.fetch_add(1, Ordering::Relaxed);
-        println!("NEW MEMBER: {:?}", res.unwrap().address);
     }).unwrap().unwrap();
 
     client.on_any_member_left(move |res| {
         any_member_left_count_clone.fetch_add(1, Ordering::Relaxed);
-        println!("MEMBER LEFT: {:?}", res.unwrap().address);
     }).unwrap().unwrap();
 
     client.on_any_member_offline(move |res| {
         any_member_offline_count_clone.fetch_add(1, Ordering::Relaxed);
-        println!("MEMBER OFFLINE: {:?}", res.unwrap().address);
     }).unwrap().unwrap();
 
     client.on_any_member_online(move |res| {
         any_member_online_count_clone.fetch_add(1, Ordering::Relaxed);
-        println!("MEMBER ONLINE: {:?}", res.unwrap().address);
     }).unwrap().unwrap();
 
     client.on_group_leader_changed(move |res| {
         group_leader_changed_count_clone.fetch_add(1, Ordering::Relaxed);
-        println!("GROUP LEADER CHANGED");
     }, &group_1).unwrap().unwrap();
 
     client.on_group_member_joined(move |res| {
         group_member_joined_count_clone.fetch_add(1, Ordering::Relaxed);
-        println!("GROUP MEMBER JOINED: {:?}", res.unwrap().address);
     }, &group_1).unwrap().unwrap();
 
     client.on_group_member_left(move |res| {
         group_member_left_count_clone.fetch_add(1, Ordering::Relaxed);
-        println!("GROUP MEMBER LEFT: {:?}", res.unwrap().address);
     }, &group_1).unwrap().unwrap();
 
     client.on_group_member_online(move |res| {
         group_member_online_count_clone.fetch_add(1, Ordering::Relaxed);
-        println!("GROUP MEMBER ONLINE: {:?}", res.unwrap().address);
     }, &group_1).unwrap().unwrap();
 
     client.on_group_member_offline(move |res| {
         group_member_offline_count_clone.fetch_add(1, Ordering::Relaxed);
-        println!("GROUP MEMBER OFFLINE: {:?}", res.unwrap().address);
     }, &group_1).unwrap().unwrap();
 
     let member1_raft_client = RaftClient::new(vec!(addr.clone()), 0).unwrap();
@@ -125,45 +116,45 @@ fn primary() {
 
     member1_svr.join_group(&group_3).unwrap().unwrap();
 
-    assert_eq!(member1_svr.client().all_members(false).unwrap().unwrap().len(), 3);
-    assert_eq!(member1_svr.client().all_members(true).unwrap().unwrap().len(), 3);
+    assert_eq!(member1_svr.client().all_members(false).unwrap().unwrap().0.len(), 3);
+    assert_eq!(member1_svr.client().all_members(true).unwrap().unwrap().0.len(), 3);
 
-    assert_eq!(member1_svr.client().group_members(&group_1, false).unwrap().unwrap().len(), 3);
-    assert_eq!(member1_svr.client().group_members(&group_1, true).unwrap().unwrap().len(), 3);
+    assert_eq!(member1_svr.client().group_members(&group_1, false).unwrap().unwrap().0.len(), 3);
+    assert_eq!(member1_svr.client().group_members(&group_1, true).unwrap().unwrap().0.len(), 3);
 
-    assert_eq!(member1_svr.client().group_members(&group_2, false).unwrap().unwrap().len(), 2);
-    assert_eq!(member1_svr.client().group_members(&group_2, true).unwrap().unwrap().len(), 2);
+    assert_eq!(member1_svr.client().group_members(&group_2, false).unwrap().unwrap().0.len(), 2);
+    assert_eq!(member1_svr.client().group_members(&group_2, true).unwrap().unwrap().0.len(), 2);
 
-    assert_eq!(member1_svr.client().group_members(&group_3, false).unwrap().unwrap().len(), 1);
-    assert_eq!(member1_svr.client().group_members(&group_3, true).unwrap().unwrap().len(), 1);
+    assert_eq!(member1_svr.client().group_members(&group_3, false).unwrap().unwrap().0.len(), 1);
+    assert_eq!(member1_svr.client().group_members(&group_3, true).unwrap().unwrap().0.len(), 1);
 
     member1_svr.close(); // close only end the heartbeat thread
     wait();
     wait();
-    assert_eq!(member1_svr.client().all_members(false).unwrap().unwrap().len(), 3);
-    assert_eq!(member1_svr.client().all_members(true).unwrap().unwrap().len(), 2);
+    assert_eq!(member1_svr.client().all_members(false).unwrap().unwrap().0.len(), 3);
+    assert_eq!(member1_svr.client().all_members(true).unwrap().unwrap().0.len(), 2);
 
-    assert_eq!(member1_svr.client().group_members(&group_1, false).unwrap().unwrap().len(), 3);
-    assert_eq!(member1_svr.client().group_members(&group_1, true).unwrap().unwrap().len(), 2);
+    assert_eq!(member1_svr.client().group_members(&group_1, false).unwrap().unwrap().0.len(), 3);
+    assert_eq!(member1_svr.client().group_members(&group_1, true).unwrap().unwrap().0.len(), 2);
 
-    assert_eq!(member1_svr.client().group_members(&group_2, false).unwrap().unwrap().len(), 2);
-    assert_eq!(member1_svr.client().group_members(&group_2, true).unwrap().unwrap().len(), 1);
+    assert_eq!(member1_svr.client().group_members(&group_2, false).unwrap().unwrap().0.len(), 2);
+    assert_eq!(member1_svr.client().group_members(&group_2, true).unwrap().unwrap().0.len(), 1);
 
-    assert_eq!(member1_svr.client().group_members(&group_3, false).unwrap().unwrap().len(), 1);
-    assert_eq!(member1_svr.client().group_members(&group_3, true).unwrap().unwrap().len(), 0);
+    assert_eq!(member1_svr.client().group_members(&group_3, false).unwrap().unwrap().0.len(), 1);
+    assert_eq!(member1_svr.client().group_members(&group_3, true).unwrap().unwrap().0.len(), 0);
 
     member2_svr.leave().unwrap().unwrap();// leave will report to the raft servers to remove it from the list
-    assert_eq!(member1_svr.client().all_members(false).unwrap().unwrap().len(), 2);
-    assert_eq!(member1_svr.client().all_members(true).unwrap().unwrap().len(), 1);
+    assert_eq!(member1_svr.client().all_members(false).unwrap().unwrap().0.len(), 2);
+    assert_eq!(member1_svr.client().all_members(true).unwrap().unwrap().0.len(), 1);
 
-    assert_eq!(member1_svr.client().group_members(&group_1, false).unwrap().unwrap().len(), 2);
-    assert_eq!(member1_svr.client().group_members(&group_1, true).unwrap().unwrap().len(), 1);
+    assert_eq!(member1_svr.client().group_members(&group_1, false).unwrap().unwrap().0.len(), 2);
+    assert_eq!(member1_svr.client().group_members(&group_1, true).unwrap().unwrap().0.len(), 1);
 
-    assert_eq!(member1_svr.client().group_members(&group_2, false).unwrap().unwrap().len(), 1);
-    assert_eq!(member1_svr.client().group_members(&group_2, true).unwrap().unwrap().len(), 0);
+    assert_eq!(member1_svr.client().group_members(&group_2, false).unwrap().unwrap().0.len(), 1);
+    assert_eq!(member1_svr.client().group_members(&group_2, true).unwrap().unwrap().0.len(), 0);
 
-    assert_eq!(member1_svr.client().group_members(&group_3, false).unwrap().unwrap().len(), 1);
-    assert_eq!(member1_svr.client().group_members(&group_3, true).unwrap().unwrap().len(), 0);
+    assert_eq!(member1_svr.client().group_members(&group_3, false).unwrap().unwrap().0.len(), 1);
+    assert_eq!(member1_svr.client().group_members(&group_3, true).unwrap().unwrap().0.len(), 0);
 
     wait();
 
