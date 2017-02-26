@@ -18,7 +18,7 @@ pub mod rpc;
 pub mod raft;
 pub mod store;
 pub mod membership;
-pub mod dht;
+pub mod conshash;
 
 extern crate mio;
 extern crate byteorder;

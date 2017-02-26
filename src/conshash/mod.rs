@@ -10,8 +10,8 @@ use serde;
 
 use bifrost_hasher::{hash_str, hash_bytes};
 use membership::client::{Client as MembershipClient, Member};
-use dht::weights::DEFAULT_SERVICE_ID;
-use dht::weights::client::{SMClient as WeightSMClient};
+use conshash::weights::DEFAULT_SERVICE_ID;
+use conshash::weights::client::{SMClient as WeightSMClient};
 use raft::client::{RaftClient, SubscriptionError};
 
 pub mod weights;
@@ -34,7 +34,7 @@ pub enum InitTableError {
 }
 
 #[derive(Debug)]
-pub enum DHTError {
+pub enum CHError {
     WatchError,
     InitTableError(InitTableError),
 }
@@ -50,7 +50,7 @@ struct LookupTables {
     addrs: HashMap<u64, String>
 }
 
-pub struct DHT {
+pub struct ConsistentHashing {
     tables: RwLock<LookupTables>,
     membership: Arc<MembershipClient>,
     weight_sm_client: WeightSMClient,
@@ -59,10 +59,10 @@ pub struct DHT {
     version: AtomicU64
 }
 
-impl DHT {
-    pub fn new(group: &String, raft_client: &Arc<RaftClient>) -> Result<Arc<DHT>, DHTError>  {
+impl ConsistentHashing {
+    pub fn new(group: &String, raft_client: &Arc<RaftClient>) -> Result<Arc<ConsistentHashing>, CHError>  {
         let membership = Arc::new(MembershipClient::new(raft_client));
-        let dht = Arc::new(DHT {
+        let ch = Arc::new(ConsistentHashing {
             tables: RwLock::new(LookupTables {
                 nodes: Vec::new(),
                 addrs: HashMap::new()
@@ -74,43 +74,43 @@ impl DHT {
             version: AtomicU64::new(0)
         });
         {
-            let dht = dht.clone();
+            let ch = ch.clone();
             let res = membership.on_group_member_joined(move |r| {
-                if let Ok((member, version)) = r { server_joined(&dht, member, version); }
+                if let Ok((member, version)) = r { server_joined(&ch, member, version); }
             }, group);
-            if let Ok(Ok(_)) = res {} else {return Err(DHTError::WatchError);}
+            if let Ok(Ok(_)) = res {} else {return Err(CHError::WatchError);}
         }
         {
-            let dht = dht.clone();
+            let ch = ch.clone();
             let res = membership.on_group_member_online(move |r| {
-                if let Ok((member, version)) = r { server_joined(&dht, member, version); }
+                if let Ok((member, version)) = r { server_joined(&ch, member, version); }
             }, group);
-            if let Ok(Ok(_)) = res {} else {return Err(DHTError::WatchError);}
+            if let Ok(Ok(_)) = res {} else {return Err(CHError::WatchError);}
         }
         {
-            let dht = dht.clone();
+            let ch = ch.clone();
             let res = membership.on_group_member_left(move |r| {
-                if let Ok((member, version)) = r { server_left(&dht, member, version); }
+                if let Ok((member, version)) = r { server_left(&ch, member, version); }
             }, group);
-            if let Ok(Ok(_)) = res {} else {return Err(DHTError::WatchError);}
+            if let Ok(Ok(_)) = res {} else {return Err(CHError::WatchError);}
         }
         {
-            let dht = dht.clone();
+            let ch = ch.clone();
             let res = membership.on_group_member_offline(move |r| {
-                if let Ok((member, version)) = r { server_left(&dht, member, version); }
+                if let Ok((member, version)) = r { server_left(&ch, member, version); }
             }, group);
-            if let Ok(Ok(_)) = res {} else {return Err(DHTError::WatchError);}
+            if let Ok(Ok(_)) = res {} else {return Err(CHError::WatchError);}
         }
-        Ok(dht)
+        Ok(ch)
     }
-    pub fn new_client(group: &String, raft_client: &Arc<RaftClient>) -> Result<Arc<DHT>, DHTError> {
-        let dht = DHT::new(group, raft_client);
-        match dht {
+    pub fn new_client(group: &String, raft_client: &Arc<RaftClient>) -> Result<Arc<ConsistentHashing>, CHError> {
+        let ch = ConsistentHashing::new(group, raft_client);
+        match ch {
             Err(e) => Err(e),
-            Ok(dht) => {
-                match dht.init_table() {
-                    Err(e) => Err(DHTError::InitTableError(e)),
-                    Ok(_) =>  Ok(dht.clone())
+            Ok(ch) => {
+                match ch.init_table() {
+                    Err(e) => Err(CHError::InitTableError(e)),
+                    Ok(_) =>  Ok(ch.clone())
                 }
             },
         }
@@ -238,23 +238,23 @@ impl DHT {
     }
 }
 
-fn server_joined(dht: &Arc<DHT>, member: Member, version: u64) {
-    server_changed(dht, member, Action::Joined, version);
+fn server_joined(ch: &Arc<ConsistentHashing>, member: Member, version: u64) {
+    server_changed(ch, member, Action::Joined, version);
 }
-fn server_left(dht: &Arc<DHT>, member: Member, version: u64) {
-    server_changed(dht, member, Action::Left, version);
+fn server_left(ch: &Arc<ConsistentHashing>, member: Member, version: u64) {
+    server_changed(ch, member, Action::Left, version);
 }
-fn server_changed(dht: &Arc<DHT>, member: Member, action: Action, version: u64) {
-    let dht_version = dht.version.load(Ordering::Relaxed);
-    if dht_version < version {
-        let dht = dht.clone();
+fn server_changed(ch: &Arc<ConsistentHashing>, member: Member, action: Action, version: u64) {
+    let ch_version = ch.version.load(Ordering::Relaxed);
+    if ch_version < version {
+        let ch = ch.clone();
         thread::spawn(move || {
-            let mut lookup_table = dht.tables.write();
-            let watchers = dht.watchers.read();
-            let dht_version = dht.version.load(Ordering::Relaxed);
-            if dht_version >= version {return;}
+            let mut lookup_table = ch.tables.write();
+            let watchers = ch.watchers.read();
+            let ch_version = ch.version.load(Ordering::Relaxed);
+            if ch_version >= version {return;}
             let old_nodes = lookup_table.nodes.clone();
-            dht.init_table_(&mut lookup_table);
+            ch.init_table_(&mut lookup_table);
             for watch in watchers.iter() {
                 watch(&member, &action, &*lookup_table, &old_nodes);
             }

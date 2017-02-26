@@ -16,7 +16,7 @@ mod raft;
 mod store;
 mod membership;
 mod utils;
-mod dht;
+mod conshash;
 
 mod mutex {
     use std::sync::Mutex;
