@@ -352,10 +352,10 @@ impl RaftService {
         };
         self.become_leader(&mut meta, last_log_id);
     }
-    pub fn join(&self, addresses: Vec<String>)
+    pub fn join(&self, servers: &Vec<String>)
         -> Result<Result<(), ()>, ExecError> {
         println!("Trying to join cluster with id {}", self.id);
-        let client = RaftClient::new(addresses, self.options.service_id);
+        let client = RaftClient::new(servers, self.options.service_id);
         if let Ok(client) = client {
             let result = client.execute(
                 CONFIG_SM_ID,
@@ -379,11 +379,11 @@ impl RaftService {
         }
     }
     pub fn leave(&self) -> bool {
-        let addresses = self.cluster_info().members.iter()
+        let servers = self.cluster_info().members.iter()
             .map(|&(_, ref address)|{
                 address.clone()
             }).collect();
-        if let Ok(client) = RaftClient::new(addresses, self.options.service_id) {
+        if let Ok(client) = RaftClient::new(&servers, self.options.service_id) {
             client.execute(
                 CONFIG_SM_ID,
                 &del_member_{address: self.options.address.clone()}

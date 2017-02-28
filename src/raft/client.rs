@@ -57,7 +57,7 @@ pub struct RaftClient {
 }
 
 impl RaftClient {
-    pub fn new(servers: Vec<String>, service_id: u64) -> Result<Arc<RaftClient>, ClientError> {
+    pub fn new(servers: &Vec<String>, service_id: u64) -> Result<Arc<RaftClient>, ClientError> {
         let mut client = RaftClient {
             qry_meta: QryMeta {
                 pos: AtomicU64::new(rand::random::<u64>())
@@ -76,7 +76,7 @@ impl RaftClient {
             let mut members = client.members.write();
             client.update_info(
                 &mut members,
-                &HashSet::from_iter(servers)
+                &HashSet::from_iter(servers.iter().cloned())
             )
         };
         match init {
@@ -90,10 +90,10 @@ impl RaftClient {
         *callback = Some(sub_service.clone());
     }
 
-   fn update_info(&self, members: &mut RwLockWriteGuard<Members>, addrs: &HashSet<String>) -> Result<(), ClientError> {
+   fn update_info(&self, members: &mut RwLockWriteGuard<Members>, servers: &HashSet<String>) -> Result<(), ClientError> {
         let info: ClientClusterInfo;
         let mut cluster_info = None;
-        for server_addr in addrs {
+        for server_addr in servers {
             let id = hash_str(&server_addr);
             if !members.clients.contains_key(&id) {
                 match rpc::DEFAULT_CLIENT_POOL.get(&server_addr) {
