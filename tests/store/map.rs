@@ -27,7 +27,7 @@ fn hash_map(){
     raft_service.register_state_machine(Box::new(map_sm));
     raft_service.bootstrap();
 
-    let raft_client = RaftClient::new(vec!(addr), DEFAULT_SERVICE_ID).unwrap();
+    let raft_client = RaftClient::new(&vec!(addr), DEFAULT_SERVICE_ID).unwrap();
     let sm_client = SMClient::new(sm_id, &raft_client);
     let subs_service = SubscriptionService::initialize(&server);
     raft_client.set_subscription(&subs_service);

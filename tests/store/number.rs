@@ -36,7 +36,7 @@ mod u32 {
         service.register_state_machine(Box::new(num_sm));
         service.bootstrap();
 
-        let client = RaftClient::new(vec!(addr), DEFAULT_SERVICE_ID).unwrap();
+        let client = RaftClient::new(&vec!(addr), DEFAULT_SERVICE_ID).unwrap();
         let sm_client = SMClient::new(sm_id, &client);
         let subs_service = SubscriptionService::initialize(&server);
         client.set_subscription(&subs_service);
@@ -103,7 +103,7 @@ mod f64 {
         service.register_state_machine(Box::new(num_sm));
         service.bootstrap();
 
-        let client = RaftClient::new(vec!(addr), DEFAULT_SERVICE_ID).unwrap();
+        let client = RaftClient::new(&vec!(addr), DEFAULT_SERVICE_ID).unwrap();
         assert_eq!(client.execute(sm_id, &get{}).unwrap().unwrap(), 0.0);
         client.execute(sm_id, &set{n: 1.0}).unwrap().unwrap();
         assert_eq!(client.execute(sm_id, &get{}).unwrap().unwrap(), 1.0);

@@ -27,7 +27,7 @@ fn string(){
     service.register_state_machine(Box::new(string_sm));
     service.bootstrap();
 
-    let client = RaftClient::new(vec!(addr), DEFAULT_SERVICE_ID).unwrap();
+    let client = RaftClient::new(&vec!(addr), DEFAULT_SERVICE_ID).unwrap();
     let sub_service = SubscriptionService::initialize(&server);
     let sm_client = SMClient::new(sm_id, &client);
     let unchanged_str = original_string.clone();

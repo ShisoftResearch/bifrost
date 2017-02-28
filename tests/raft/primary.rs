@@ -37,7 +37,7 @@ fn server_membership(){
     let server2 = Server::new(vec!((DEFAULT_SERVICE_ID, service2.clone())));
     Server::listen_and_resume(&server2, &s2_addr);
     assert!(RaftService::start(&service2));
-    let join_result = service2.join(vec!(s1_addr.clone()));
+    let join_result = service2.join(&vec!(s1_addr.clone()));
     match join_result {
         Err(ExecError::ServersUnreachable) => panic!("Server unreachable"),
         Err(ExecError::CannotConstructClient) => panic!("Cannot Construct Client"),
@@ -55,7 +55,7 @@ fn server_membership(){
     let server3 = Server::new(vec!((DEFAULT_SERVICE_ID, service3.clone())));
     Server::listen_and_resume(&server3, &s3_addr);
     assert!(RaftService::start(&service3));
-    let join_result = service3.join(vec!(
+    let join_result = service3.join(&vec!(
         s1_addr.clone(),
         s2_addr.clone(),
     ));
@@ -124,7 +124,7 @@ fn log_replication(){
     let server2 = Server::new(vec!((DEFAULT_SERVICE_ID, service2.clone())));
     Server::listen_and_resume(&server2, &s2_addr);
     assert!(RaftService::start(&service2));
-    let join_result = service2.join(vec!(
+    let join_result = service2.join(&vec!(
         s1_addr.clone(),
         s2_addr.clone(),
     ));
@@ -133,7 +133,7 @@ fn log_replication(){
     let server3 = Server::new(vec!((DEFAULT_SERVICE_ID, service3.clone())));
     Server::listen_and_resume(&server3, &s3_addr);
     assert!(RaftService::start(&service3));
-    let join_result = service3.join(vec!(
+    let join_result = service3.join(&vec!(
         s1_addr.clone(),
         s2_addr.clone(),
     ));
@@ -142,7 +142,7 @@ fn log_replication(){
     let server4 = Server::new(vec!((DEFAULT_SERVICE_ID, service4.clone())));
     Server::listen_and_resume(&server4, &s4_addr);
     assert!(RaftService::start(&service4));
-    let join_result = service4.join(vec!(
+    let join_result = service4.join(&vec!(
         s1_addr.clone(),
         s2_addr.clone(),
         s3_addr.clone(),
@@ -152,7 +152,7 @@ fn log_replication(){
     let server5 = Server::new(vec!((DEFAULT_SERVICE_ID, service5.clone())));
     Server::listen_and_resume(&server5, &s5_addr);
     assert!(RaftService::start(&service5));
-    let join_result = service5.join(vec!(
+    let join_result = service5.join(&vec!(
         s1_addr.clone(),
         s2_addr.clone(),
         s3_addr.clone(),

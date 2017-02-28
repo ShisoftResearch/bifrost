@@ -36,7 +36,7 @@ fn primary() {
     let server_2 = String::from("server2");
     let server_3 = String::from("server3");
 
-    let wild_raft_client = RaftClient::new(vec!(addr.clone()), 0).unwrap();
+    let wild_raft_client = RaftClient::new(&vec!(addr.clone()), 0).unwrap();
     let client = Client::new(&wild_raft_client);
 
     let subs_service = SubscriptionService::initialize(&server);
@@ -46,13 +46,13 @@ fn primary() {
     client.new_group(&group_2).unwrap().unwrap();
     client.new_group(&group_3).unwrap().unwrap();
 
-    let member1_raft_client = RaftClient::new(vec!(addr.clone()), 0).unwrap();
+    let member1_raft_client = RaftClient::new(&vec!(addr.clone()), 0).unwrap();
     let member1_svr = MemberService::new(&server_1, &member1_raft_client);
 
-    let member2_raft_client = RaftClient::new(vec!(addr.clone()), 0).unwrap();
+    let member2_raft_client = RaftClient::new(&vec!(addr.clone()), 0).unwrap();
     let member2_svr = MemberService::new(&server_2, &member2_raft_client);
 
-    let member3_raft_client = RaftClient::new(vec!(addr.clone()), 0).unwrap();
+    let member3_raft_client = RaftClient::new(&vec!(addr.clone()), 0).unwrap();
     let member3_svr = MemberService::new(&server_3, &member3_raft_client);
 
     member1_svr.join_group(&group_1).unwrap().unwrap();

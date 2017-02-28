@@ -60,7 +60,7 @@ fn dummy() {
     wait();
 
     let sub_service = SubscriptionService::initialize(&server);
-    let raft_client = RaftClient::new(vec!(addr), DEFAULT_SERVICE_ID).unwrap();
+    let raft_client = RaftClient::new(&vec!(addr), DEFAULT_SERVICE_ID).unwrap();
     let sm_client = Arc::new(client::SMClient::new(sm_id, &raft_client));
     let loops = 10;
     let counter = Arc::new(AtomicUsize::new(0));

@@ -29,7 +29,7 @@ fn primary() {
     let group_2 = String::from("test_group_2");
     let group_3 = String::from("test_group_3");
 
-    let wild_raft_client = RaftClient::new(vec!(addr.clone()), 0).unwrap();
+    let wild_raft_client = RaftClient::new(&vec!(addr.clone()), 0).unwrap();
     let client = Client::new(&wild_raft_client);
 
     let subs_service = SubscriptionService::initialize(&server);
@@ -95,15 +95,15 @@ fn primary() {
         group_member_offline_count_clone.fetch_add(1, Ordering::Relaxed);
     }, &group_1).unwrap().unwrap();
 
-    let member1_raft_client = RaftClient::new(vec!(addr.clone()), 0).unwrap();
+    let member1_raft_client = RaftClient::new(&vec!(addr.clone()), 0).unwrap();
     let member1_addr = String::from("server1");
     let member1_svr = MemberService::new(&member1_addr, &member1_raft_client);
 
-    let member2_raft_client = RaftClient::new(vec!(addr.clone()), 0).unwrap();
+    let member2_raft_client = RaftClient::new(&vec!(addr.clone()), 0).unwrap();
     let member2_addr = String::from("server2");
     let member2_svr = MemberService::new(&member2_addr, &member2_raft_client);
 
-    let member3_raft_client = RaftClient::new(vec!(addr.clone()), 0).unwrap();
+    let member3_raft_client = RaftClient::new(&vec!(addr.clone()), 0).unwrap();
     let member3_addr = String::from("server3");
     let member3_svr = MemberService::new(&member3_addr, &member3_raft_client);
 
