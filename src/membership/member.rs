@@ -65,6 +65,9 @@ impl MemberService {
     pub fn client(&self) -> ObserverClient {
         ObserverClient::new_from_sm(&self.sm_client)
     }
+    pub fn get_server_id(&self) -> u64 {
+        self.id
+    }
 }
 
 impl Drop for MemberService {

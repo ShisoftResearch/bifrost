@@ -119,15 +119,22 @@ impl ConsistentHashing {
         let mut table = &mut self.tables.write();
         self.init_table_(&mut table)
     }
-    pub fn get_server(&self, hash: u64) -> Option<String> {
+    pub fn to_server_name(&self, server_id: Option<u64>) -> Option<String> {
+        let lookup_table = self.tables.read();
+        match server_id {
+            Some(id) => Some(lookup_table.addrs.get(&id).unwrap().clone()),
+            None => None
+        }
+    }
+    pub fn get_server_id(&self, hash: u64) -> Option<u64> {
         let lookup_table = self.tables.read();
         let nodes = &lookup_table.nodes;
         let len = nodes.len();
         if len == 0 {return None;}
         let first_node = nodes.first().unwrap();
         let last_node = nodes.last().unwrap();
-        if hash < first_node.start {return Some(lookup_table.addrs.get(&first_node.server).unwrap().clone())}
-        if hash >= last_node.start {return Some(lookup_table.addrs.get(&last_node.server).unwrap().clone())}
+        if hash < first_node.start {return Some(first_node.server)}
+        if hash >= last_node.start {return Some(last_node.server)}
         let mut low = 0;
         let mut high = len - 1;
         while low <= high {
@@ -135,7 +142,7 @@ impl ConsistentHashing {
             let curr_node = &nodes[mid];
             let next_node = &nodes[mid + 1];
             if hash >= curr_node.start && hash < next_node.start {
-                return Some(lookup_table.addrs.get(&curr_node.server).unwrap().clone());
+                return Some(curr_node.server);
             } else if hash < curr_node.start {
                 high = mid - 1;
             } else {
@@ -144,11 +151,20 @@ impl ConsistentHashing {
         }
         None
     }
+    pub fn get_server(&self, hash: u64) -> Option<String> {
+        self.to_server_name(self.get_server_id(hash))
+    }
     pub fn get_server_by_string(&self, string: &String) -> Option<String> {
         self.get_server(hash_str(string))
     }
     pub fn get_server_by<T>(&self, obj: &T) -> Option<String> where T: serde::Serialize {
         self.get_server(hash_bytes(serialize!(obj).as_slice()))
+    }
+    pub fn get_server_id_by_string(&self, string: &String) -> Option<u64> {
+        self.get_server_id(hash_str(string))
+    }
+    pub fn get_server_id_by<T>(&self, obj: &T) -> Option<u64> where T: serde::Serialize {
+        self.get_server_id(hash_bytes(serialize!(obj).as_slice()))
     }
     pub fn nodes_count(&self) -> usize {
         let lookup_table = self.tables.read();
