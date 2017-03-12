@@ -28,7 +28,7 @@ pub struct MemberClient {
 
 impl MemberClient {
     pub fn join_group(&self, group: &String) -> Result<Result<(), ()>, ExecError> {
-        self.sm_client.join_group(hash_str(group), self.id)
+        self.sm_client.join_group(group.clone(), self.id)
     }
     pub fn leave_group(&self, group: &String) -> Result<Result<(), ()>, ExecError> {
         self.sm_client.leave_group(hash_str(group), self.id)

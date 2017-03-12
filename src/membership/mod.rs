@@ -13,7 +13,7 @@ mod raft {
         def cmd hb_online_changed(online: Vec<u64>, offline: Vec<u64>);
         def cmd join(address: String) -> u64;
         def cmd leave(id: u64);
-        def cmd join_group(group: u64, id: u64);
+        def cmd join_group(group_name: String, id: u64);
         def cmd leave_group(group: u64, id: u64);
         def cmd new_group(name: String) -> u64 | u64;
         def cmd del_group(id: u64);

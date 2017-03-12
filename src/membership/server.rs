@@ -410,9 +410,11 @@ impl StateMachineCmds for Membership {
         self.members.remove(&id);
         Ok(())
     }
-    fn join_group(&mut self, group_id: u64, id: u64) -> Result<(), ()> {
+    fn join_group(&mut self, group_name: String, id: u64) -> Result<(), ()> {
+        let group_id = hash_str(&group_name);
         self.version += 1;
         let mut success = false;
+        if !self.groups.contains_key(&group_id) {self.new_group(group_name);} // create group if not exists
         if let Some(ref mut group) = self.groups.get_mut(&group_id) {
             if let Some(ref mut member) = self.members.get_mut(&id) {
                 group.members.insert(id);
