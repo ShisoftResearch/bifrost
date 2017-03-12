@@ -35,18 +35,18 @@ impl MemberClient {
     }
 }
 
-pub struct Client {
+pub struct ObserverClient {
     pub sm_client: Arc<SMClient>
 }
 
-impl Client {
-    pub fn new(raft_client: &Arc<RaftClient>) -> Client {
-        Client {
+impl ObserverClient {
+    pub fn new(raft_client: &Arc<RaftClient>) -> ObserverClient {
+        ObserverClient {
             sm_client: Arc::new(SMClient::new(DEFAULT_SERVICE_ID, &raft_client))
         }
     }
-    pub fn new_from_sm(sm_client: &Arc<SMClient>) -> Client {
-        Client {
+    pub fn new_from_sm(sm_client: &Arc<SMClient>) -> ObserverClient {
+        ObserverClient {
             sm_client: sm_client.clone()
         }
     }

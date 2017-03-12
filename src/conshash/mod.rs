@@ -9,7 +9,7 @@ use bincode::{SizeLimit, serde as bincode};
 use serde;
 
 use bifrost_hasher::{hash_str, hash_bytes};
-use membership::client::{Client as MembershipClient, Member};
+use membership::client::{ObserverClient as MembershipClient, Member};
 use conshash::weights::DEFAULT_SERVICE_ID;
 use conshash::weights::client::{SMClient as WeightSMClient};
 use raft::client::{RaftClient, SubscriptionError};

@@ -3,7 +3,7 @@ use raft::state_machine::master::ExecError;
 use super::DEFAULT_SERVICE_ID;
 use super::heartbeat_rpc::*;
 use super::raft::client::SMClient;
-use super::client::{MemberClient, Client as ObserverClient};
+use super::client::{MemberClient, ObserverClient as ObserverClient};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{thread, time};

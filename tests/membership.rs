@@ -2,7 +2,7 @@ use bifrost::rpc::*;
 use bifrost::raft::*;
 use bifrost::membership::server::Membership;
 use bifrost::membership::member::MemberService;
-use bifrost::membership::client::Client;
+use bifrost::membership::client::ObserverClient;
 use bifrost::raft::client::RaftClient;
 use bifrost::raft::state_machine::callback::client::SubscriptionService;
 
@@ -30,7 +30,7 @@ fn primary() {
     let group_3 = String::from("test_group_3");
 
     let wild_raft_client = RaftClient::new(&vec!(addr.clone()), 0).unwrap();
-    let client = Client::new(&wild_raft_client);
+    let client = ObserverClient::new(&wild_raft_client);
 
     let subs_service = SubscriptionService::initialize(&server);
     wild_raft_client.set_subscription(&subs_service);
