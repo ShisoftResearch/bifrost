@@ -42,7 +42,7 @@ impl MemberService {
                 let rpc_client = service_clone.raft_client.current_leader_rpc_client();
                 if let Some(rpc_client) = rpc_client {
                     let heartbeat_client = SyncServiceClient::new(DEFAULT_SERVICE_ID, rpc_client);
-                    heartbeat_client.ping(service_clone.id);
+                    heartbeat_client.ping(&service_clone.id);
                 }
                 thread::sleep(time::Duration::from_millis(PING_INTERVAL))
             }

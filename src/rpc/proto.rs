@@ -124,19 +124,6 @@ macro_rules! service {
         use $crate::rpc::*;
         use $crate::utils::u8vec::*;
 
-        mod rpc_args {
-            #[allow(unused_variables)]
-            #[allow(unused_imports)]
-
-            use super::*;
-            $(
-                #[allow(non_camel_case_types)]
-                #[derive(Serialize, Deserialize, Debug)]
-                pub struct $fn_name {
-                    $(pub $arg:$in_),*
-                }
-            )*
-        }
         pub trait Service: RPCService {
            $(
                 $(#[$attr])*
@@ -146,8 +133,8 @@ macro_rules! service {
                let (func_id, body) = extract_u64_head(data);
                match func_id as usize {
                    $(hash_ident!($fn_name) => {
-                       let decoded: rpc_args::$fn_name = deserialize!(&body);
-                       let f_result = self.$fn_name($(decoded.$arg),*);
+                       let ($($arg,)*) : ($($in_,)*) = deserialize!(&body);
+                       let f_result = self.$fn_name($($arg,)*);
                        Ok(serialize!(&f_result))
                    }),*
                    _ => {
@@ -157,20 +144,6 @@ macro_rules! service {
            }
 
         }
-        mod encoders {
-            use super::*;
-            $(
-                pub fn $fn_name($($arg:$in_),*) -> Vec<u8> {
-                    let  obj = super::rpc_args::$fn_name {
-                        $(
-                            $arg: $arg
-                        ),*
-                    };
-                    let mut data_vec = serialize!(&obj);
-                    prepend_u64(hash_ident!($fn_name) as u64, data_vec)
-                }
-            )*
-        }
         pub struct SyncServiceClient {
             pub id: u64,
             pub client: Arc<RPCSyncClient>,
@@ -179,8 +152,10 @@ macro_rules! service {
            $(
                 #[allow(non_camel_case_types)]
                 $(#[$attr])*
-                pub fn $fn_name(&self, $($arg:$in_),*) -> Result<std::result::Result<$out, $error>, RPCError> {
-                    let req_bytes = encoders::$fn_name($($arg),*);
+                pub fn $fn_name(&self, $($arg:&$in_),*) -> Result<std::result::Result<$out, $error>, RPCError> {
+                    let req_data = ($($arg,)*);
+                    let req_data_bytes = serialize!(&req_data);
+                    let req_bytes = prepend_u64(hash_ident!($fn_name) as u64, req_data_bytes);
                     let res_bytes = self.client.send(self.id, req_bytes);
                     if let Ok(res_bytes) = res_bytes {
                         Ok(deserialize!(res_bytes.as_slice()))

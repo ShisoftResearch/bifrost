@@ -38,12 +38,12 @@ mod simple_service {
         thread::sleep(Duration::from_millis(1000));
         let client = RPCSyncClient::new(&addr).unwrap();
         let service_client = SyncServiceClient::new(0, client);
-        let response = service_client.hello(String::from("Jack"));
+        let response = service_client.hello(&String::from("Jack"));
         let greeting_str = response.unwrap().unwrap();
         println!("SERVER RESPONDED: {}", greeting_str);
         assert_eq!(greeting_str, String::from("Hello, Jack!"));
         let expected_err_msg = String::from("This error is a good one");
-        let response = service_client.error(expected_err_msg.clone());
+        let response = service_client.error(&expected_err_msg.clone());
         let error_msg = response.unwrap().err().unwrap();
         assert_eq!(error_msg, expected_err_msg);
     }
@@ -93,7 +93,7 @@ mod struct_service {
         thread::sleep(Duration::from_millis(1000));
         let client = RPCSyncClient::new(&addr).unwrap();
         let service_client = SyncServiceClient::new(0, client);
-        let response = service_client.hello(Greeting {
+        let response = service_client.hello(&Greeting {
             name: String::from("Jack"),
             time: 12
         });

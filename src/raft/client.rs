@@ -210,7 +210,7 @@ impl RaftClient {
                 }
             };
             num_members = members.clients.len();
-            client.c_query(self.gen_log_entry(sm_id, fn_id, data))
+            client.c_query(&self.gen_log_entry(sm_id, fn_id, data))
         };
         match res {
             Ok(Ok(res)) => {
@@ -255,7 +255,7 @@ impl RaftClient {
             }
             match self.current_leader_client() {
                 Some((leader_id, client)) => {
-                    match client.c_command(self.gen_log_entry(sm_id, fn_id, data)) {
+                    match client.c_command(&self.gen_log_entry(sm_id, fn_id, data)) {
                         Ok(Ok(ClientCmdResponse::Success {
                                   data: data, last_log_term: last_log_term,
                                   last_log_id: last_log_id

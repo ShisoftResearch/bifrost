@@ -136,7 +136,7 @@ impl SMCallback {
                                 let data = data.clone();
                                 let client = subscriber.client.clone();
                                 THREAD_POOL.lock().execute(move || {
-                                    client.notify(key, data);
+                                    client.notify(&key, &data);
                                 });
                             }
                         }
