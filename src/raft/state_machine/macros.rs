@@ -25,7 +25,7 @@ macro_rules! raft_client_fn {
         where F: Fn(raft_return_type!($out, $error)) + 'static + Send + Sync {
             self.client.subscribe(
                 self.sm_id,
-                $fn_name{$($arg:$arg),*},
+                $fn_name::new($($arg,)*),
                 f
             )
         }
@@ -35,7 +35,7 @@ macro_rules! raft_client_fn {
         -> Result<raft_return_type!($out, $error), ExecError> {
             self.client.execute(
                 self.sm_id,
-                &$fn_name{$($arg:$arg),*}
+                &$fn_name::new($($arg,)*)
             )
         }
     };
@@ -184,18 +184,26 @@ macro_rules! raft_state_machine {
             $(
                 #[derive(Serialize, Deserialize, Debug)]
                 pub struct $fn_name {
-                    $(pub $arg:$in_),*
+                    pub data: Vec<u8>
                 }
                 impl $crate::raft::RaftMsg<raft_return_type!($out, $error)> for $fn_name {
                     fn encode(&self) -> (u64, $crate::raft::state_machine::OpType, Vec<u8>) {
                         (
                             hash_ident!($fn_name) as u64,
                             raft_fn_op_type!($smt),
-                            serialize!(&self)
+                            &self.data
                         )
                     }
                     fn decode_return(&self, data: &Vec<u8>) -> raft_return_type!($out, $error) {
                         deserialize!(data)
+                     }
+                }
+                impl $fn_name {
+                    pub fn new($($arg:&$in_),*) -> $fn_name {
+                        let req_data = ($($arg,)*);
+                        $fn_name {
+                            data: serialize!(&req_data)
+                        }
                     }
                 }
             )*
@@ -253,7 +261,7 @@ macro_rules! raft_state_machine {
             impl SMClient {
                $(
                   $(#[$attr])*
-                  raft_client_fn!($smt $fn_name( $( $arg : $in_ ),* ) -> $out | $error);
+                  raft_client_fn!($smt $fn_name( $( $arg : &$in_ ),* ) -> $out | $error);
                )*
                pub fn new(sm_id: u64, client: &Arc<RaftClient>) -> SMClient {
                     SMClient {

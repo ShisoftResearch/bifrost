@@ -43,11 +43,8 @@ impl Service for HeartbeatService {
     }
 }
 impl HeartbeatService {
-    fn update_raft(&self, online: Vec<u64>, offline: Vec<u64>) {
-        let log = commands::hb_online_changed {
-            online: online,
-            offline: offline
-        };
+    fn update_raft(&self, online: &Vec<u64>, offline: &Vec<u64>) {
+        let log = commands::hb_online_changed::new(online, offline);
         let (fn_id, _, data) = log.encode();
         self.raft_service.c_command(LogEntry {
             id: 0,
@@ -135,7 +132,7 @@ impl Membership {
 
                     }
                     if backedin_members.len() + outdated_members.len() > 0 {
-                        service_clone.update_raft(backedin_members, outdated_members);
+                        service_clone.update_raft(&backedin_members, &outdated_members);
                     }
                 }
                 thread::sleep(std_time::Duration::from_secs(1));
@@ -169,14 +166,14 @@ impl Membership {
         let version = self.version;
         cb_notify(
             &self.callback,
-            &commands::on_any_member_online{},
+            &commands::on_any_member_online::new(),
             || Ok((client_member.clone(), version))
         );
         if let Some(ref member) = self.members.get(&id) {
             for group in &member.groups {
                 cb_notify(
                     &self.callback,
-                    &commands::on_group_member_online{group: *group},
+                    &commands::ofn_group_member_online::new(group),
                     || Ok((client_member.clone(), version))
                 );
             }
@@ -187,14 +184,14 @@ impl Membership {
         let version = self.version;
         cb_notify(
             &self.callback,
-            &commands::on_any_member_offline{},
+            &commands::on_any_member_offline::new(),
             || Ok((client_member.clone(), version))
         );
         if let Some(ref member) = self.members.get(&id) {
             for group in &member.groups {
                 cb_notify(
                     &self.callback,
-                    &commands::on_group_member_offline{group: *group},
+                    &commands::on_group_member_offline::new(group),
                     || Ok((client_member.clone(), version))
                 );
             }
@@ -205,7 +202,7 @@ impl Membership {
         let version = self.version;
         cb_notify(
             &self.callback,
-            &commands::on_any_member_left{},
+            &commands::on_any_member_left::new(),
             || Ok((client_member.clone(), version))
         );
         if let Some(ref member) = self.members.get(&id) {
@@ -217,7 +214,7 @@ impl Membership {
     fn notify_for_group_member_left(&self, group: u64, member: &ClientMember) {
         cb_notify(
             &self.callback,
-            &commands::on_group_member_left{group: group},
+            &commands::on_group_member_left::new(&group),
             || Ok((member.clone(), self.version))
         );
     }
@@ -279,7 +276,7 @@ impl Membership {
             } else {None};
             cb_notify(
                 &self.callback,
-                &commands::on_group_leader_changed {group: group_id},
+                &commands::on_group_leader_changed::new(&group_id),
                 || Ok(( convert(old), convert(new), self.version))
             );
             Ok(())
@@ -379,7 +376,7 @@ impl StateMachineCmds for Membership {
         if joined {
             cb_notify(
                 &self.callback,
-                &commands::on_any_member_joined{},
+                &commands::on_any_member_joined::new(),
                 || Ok((self.compose_client_member(id), self.version))
             );
             Ok(id)
@@ -425,7 +422,7 @@ impl StateMachineCmds for Membership {
         if success {
             cb_notify(
                 &self.callback,
-                &commands::on_group_member_joined{group: group_id},
+                &commands::on_group_member_joined::new(&group_id),
                 || Ok((self.compose_client_member(id), self.version))
             );
             self.group_leader_candidate_available(group_id, id);

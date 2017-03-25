@@ -35,7 +35,7 @@ impl MemberService {
             closed: AtomicBool::new(false),
             id: server_id,
         });
-        sm_client.join(server_address.clone());
+        sm_client.join(&server_address);
         let service_clone = service.clone();
         thread::spawn(move || {
             while !service_clone.closed.load(Ordering::Relaxed) {
@@ -54,7 +54,7 @@ impl MemberService {
     }
     pub fn leave(&self) -> Result<Result<(), ()>, ExecError>{
         self.close();
-        self.sm_client.leave(self.id)
+        self.sm_client.leave(&self.id)
     }
     pub fn join_group(&self, group: &String) -> Result<Result<(), ()>, ExecError> {
         self.member_client.join_group(group)

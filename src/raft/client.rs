@@ -181,11 +181,7 @@ impl RaftClient {
         subs_lst.push(Box::new(wrapper_fn));
         let cluster_subs = self.execute(
             CONFIG_SM_ID,
-            &conf_subscribe {
-                key: key,
-                address: callback.server_address(),
-                session_id: callback.session_id()
-            }
+            &conf_subscribe::new(&key, &callback.server_address, &callback.session_id)
         );
         match cluster_subs {
             Ok(sub_result) => match sub_result {

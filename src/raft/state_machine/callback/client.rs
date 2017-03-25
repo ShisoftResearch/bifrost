@@ -8,8 +8,8 @@ use utils::time::get_time;
 
 pub struct SubscriptionService {
     pub subs: RwLock<HashMap<SubKey, Vec<Box<Fn(Vec<u8>) + Send + Sync>>>>,
-    server_address: String,
-    session_id: u64
+    pub server_address: String,
+    pub session_id: u64
 }
 
 impl Service for SubscriptionService {
@@ -36,8 +36,4 @@ impl SubscriptionService {
         server.register_service(DEFAULT_SERVICE_ID, service.clone());
         return service;
     }
-    pub fn server_address(&self) -> String {
-        self.server_address.clone()
-    }
-    pub fn session_id(&self) -> u64 {self.session_id}
 }

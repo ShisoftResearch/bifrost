@@ -45,8 +45,8 @@ macro_rules! def_store_hash_map {
                 }
                 fn insert(&mut self, k: $kt, v: $vt) -> Result<Option<$vt>, ()> {
                     if let Some(ref callback) = self.callback {
-                        callback.notify(&commands::on_inserted{}, Ok((k.clone(), v.clone())));
-                        callback.notify(&commands::on_key_inserted{k: k.clone()}, Ok(v.clone()));
+                        callback.notify(&commands::on_inserted::new(), Ok((k.clone(), v.clone())));
+                        callback.notify(&commands::on_key_inserted::new(&k), Ok(v.clone()));
                     }
                     Ok(self.map.insert(k, v))
                 }
@@ -60,8 +60,8 @@ macro_rules! def_store_hash_map {
                     let res = self.map.remove(&k);
                     if let Some(ref callback) = self.callback {
                         if let Some(ref v) = res {
-                            callback.notify(&commands::on_removed{}, Ok((k.clone(), v.clone())));
-                            callback.notify(&commands::on_key_removed{k: k}, Ok(v.clone()));
+                            callback.notify(&commands::on_removed::new(), Ok((k.clone(), v.clone())));
+                            callback.notify(&commands::on_key_removed::new(&k), Ok(v.clone()));
                         }
                     }
                     Ok(res)
