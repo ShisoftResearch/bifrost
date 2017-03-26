@@ -51,7 +51,7 @@ impl HeartbeatService {
             term: 0,
             sm_id: DEFAULT_SERVICE_ID,
             fn_id: fn_id,
-            data: data
+            data: log.data
         });
     }
     fn transfer_leadership(&self) { //update timestamp for every alive server
@@ -173,7 +173,7 @@ impl Membership {
             for group in &member.groups {
                 cb_notify(
                     &self.callback,
-                    &commands::ofn_group_member_online::new(group),
+                    &commands::on_group_member_online::new(group),
                     || Ok((client_member.clone(), version))
                 );
             }

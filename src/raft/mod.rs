@@ -35,7 +35,7 @@ def_bindings! {
 }
 
 pub trait RaftMsg<R>: Send + Sync {
-    fn encode(&self) -> (u64, OpType, Vec<u8>);
+    fn encode(&self) -> (u64, OpType, &Vec<u8>);
     fn decode_return(&self, data: &Vec<u8>) -> R;
 }
 
@@ -359,11 +359,11 @@ impl RaftService {
         if let Ok(client) = client {
             let result = client.execute(
                 CONFIG_SM_ID,
-                &new_member_{address: self.options.address.clone()}
+                &new_member_::new(&self.options.address)
             );
             let members = client.execute(
                 CONFIG_SM_ID,
-                &member_address{}
+                &member_address::new()
             );
             let mut meta = self.write_meta();
             if let Ok(Ok(members)) = members {
@@ -386,7 +386,7 @@ impl RaftService {
         if let Ok(client) = RaftClient::new(&servers, self.options.service_id) {
             client.execute(
                 CONFIG_SM_ID,
-                &del_member_{address: self.options.address.clone()}
+                &del_member_::new(&self.options.address)
             );
         } else {
             return false

@@ -51,8 +51,9 @@ macro_rules! raft_fn_op_type {
 #[macro_export]
 macro_rules! raft_dispatch_fn {
     ($fn_name:ident $s: ident $d: ident ( $( $arg:ident : $in_:ty ),* )) => {{
-        let decoded: commands::$fn_name = deserialize!($d);
-        let f_result = $s.$fn_name($(decoded.$arg),*);
+        let decoded: ($($in_,)*) = deserialize!($d);
+        let ($($arg,)*) = decoded;
+        let f_result = $s.$fn_name($($arg),*);
         Some(serialize!(&f_result))
     }};
 }
@@ -187,7 +188,7 @@ macro_rules! raft_state_machine {
                     pub data: Vec<u8>
                 }
                 impl $crate::raft::RaftMsg<raft_return_type!($out, $error)> for $fn_name {
-                    fn encode(&self) -> (u64, $crate::raft::state_machine::OpType, Vec<u8>) {
+                    fn encode(&self) -> (u64, $crate::raft::state_machine::OpType, &Vec<u8>) {
                         (
                             hash_ident!($fn_name) as u64,
                             raft_fn_op_type!($smt),
@@ -196,7 +197,7 @@ macro_rules! raft_state_machine {
                     }
                     fn decode_return(&self, data: &Vec<u8>) -> raft_return_type!($out, $error) {
                         deserialize!(data)
-                     }
+                    }
                 }
                 impl $fn_name {
                     pub fn new($($arg:&$in_),*) -> $fn_name {
