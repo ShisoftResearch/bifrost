@@ -170,11 +170,13 @@ impl RaftClient {
         if callback.is_none() {return Ok(Err(SubscriptionError::SubServiceNotSet))}
         let callback = callback.clone().unwrap();
         let raft_sid = self.service_id;
-        let (fn_id, _, pattern_data) = msg.encode();
+        let (fn_id, pattern_id) = {
+            let (fn_id, _, pattern_data) = msg.encode();
+            (fn_id, hash_bytes(pattern_data.as_slice()))
+        };
         let wrapper_fn = move |data: Vec<u8>| {
             f(msg.decode_return(&data))
         };
-        let pattern_id = hash_bytes(&pattern_data.as_slice());
         let key = (raft_sid, sm_id, fn_id, pattern_id);
         let mut subs_map = callback.subs.write();
         let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
