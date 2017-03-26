@@ -25,7 +25,7 @@ raft_state_machine! {
 impl StateMachineCmds for Trigger {
     fn trigger(&mut self) -> Result<(), ()> {
         self.count += 1;
-        self.callback.notify(&commands::on_trigged{}, Ok(self.count));
+        self.callback.notify(&commands::on_trigged::new(), Ok(self.count));
         Ok(())
     }
 }

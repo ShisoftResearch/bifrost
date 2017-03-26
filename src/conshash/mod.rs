@@ -173,7 +173,7 @@ impl ConsistentHashing {
     pub fn set_weight(&self, server_name: &String, weight: u64) -> bool {
         let group_id = hash_str(&self.group_name);
         let server_id = hash_str(server_name);
-        if let Ok(Ok(_)) = self.weight_sm_client.set_weight(group_id, server_id, weight) { true } else { false }
+        if let Ok(Ok(_)) = self.weight_sm_client.set_weight(&group_id, &server_id, &weight) { true } else { false }
     }
     pub fn watch_all_actions<F>(&self, f: F)
         where F: Fn(&Member, &Action, &LookupTables, &Vec<Node>) + 'static + Send + Sync {
@@ -208,7 +208,7 @@ impl ConsistentHashing {
     fn init_table_(&self, lookup_table: &mut RwLockWriteGuard<LookupTables>) -> Result<(), InitTableError> {
         if let Ok(Ok((members, version))) = self.membership.group_members(&self.group_name, true) {
             let group_id = hash_str(&self.group_name);
-            match self.weight_sm_client.get_weights(group_id) {
+            match self.weight_sm_client.get_weights(&group_id) {
                 Ok(Ok(Some(weights))) =>  {
                     if let Some(min_weight) = weights.values().min() {
                         lookup_table.nodes.clear(); // refresh nodes

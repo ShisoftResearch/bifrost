@@ -41,12 +41,12 @@ fn string(){
 //        }
 //    }).unwrap().unwrap();
     assert_eq!(
-        sm_client.get().unwrap().unwrap(),
-        original_string.clone()
+        &sm_client.get().unwrap().unwrap(),
+        &original_string
     );
-    sm_client.set(altered_string.clone()).unwrap().unwrap();
+    sm_client.set(&altered_string).unwrap().unwrap();
     assert_eq!(
-        sm_client.get().unwrap().unwrap(),
-        altered_string.clone()
+        &sm_client.get().unwrap().unwrap(),
+        &altered_string
     );
 }

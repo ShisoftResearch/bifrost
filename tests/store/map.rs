@@ -68,37 +68,37 @@ fn hash_map(){
             println!("GOT K1 CALLBACK {:?}", value);
             assert_eq!(&String::from("v1"), &value);
         }
-    }, sk1.clone());
+    }, &sk1);
     sm_client.on_key_removed(|res| {
         if let Ok(value) = res {
             println!("GOT K2 CALLBACK {:?}", value);
             assert_eq!(&String::from("v2"), &value);
         }
-    }, sk2.clone());
+    }, &sk2);
     assert!(sm_client.is_empty().unwrap().unwrap());
-    sm_client.insert(sk1.clone(), sv1.clone()).unwrap().unwrap();
-    sm_client.insert(sk2.clone(), sv2.clone()).unwrap().unwrap();
+    sm_client.insert(&sk1, &sv1).unwrap().unwrap();
+    sm_client.insert(&sk2, &sv2).unwrap().unwrap();
     assert!(!sm_client.is_empty().unwrap().unwrap());
 
     assert_eq!(sm_client.len().unwrap().unwrap(), 2);
-    assert_eq!(sm_client.get(sk1.clone()).unwrap().unwrap().unwrap(), sv1.clone());
-    assert_eq!(sm_client.get(sk2.clone()).unwrap().unwrap().unwrap(), sv2.clone());
+    assert_eq!(sm_client.get(&sk1).unwrap().unwrap().unwrap(), sv1);
+    assert_eq!(sm_client.get(&sk2).unwrap().unwrap().unwrap(), sv2);
 
-    sm_client.insert_if_absent(sk2.clone(), String::from("kv2")).unwrap().unwrap();
+    sm_client.insert_if_absent(&sk2, &String::from("kv2")).unwrap().unwrap();
     assert_eq!(sm_client.len().unwrap().unwrap(), 2);
-    assert_eq!(sm_client.get(sk2.clone()).unwrap().unwrap().unwrap(), sv2.clone());
+    assert_eq!(sm_client.get(&sk2).unwrap().unwrap().unwrap(), sv2);
 
-    assert_eq!(sm_client.remove(sk2.clone()).unwrap().unwrap().unwrap(), sv2.clone());
+    assert_eq!(sm_client.remove(&sk2).unwrap().unwrap().unwrap(), sv2);
     assert_eq!(sm_client.len().unwrap().unwrap(), 1);
-    assert!(sm_client.get(sk2.clone()).unwrap().unwrap().is_none());
+    assert!(sm_client.get(&sk2).unwrap().unwrap().is_none());
 
     sm_client.clear().unwrap().unwrap();
     assert_eq!(sm_client.len().unwrap().unwrap(), 0);
 
-    sm_client.insert(sk1.clone(), sv1.clone()).unwrap().unwrap();
-    sm_client.insert(sk2.clone(), sv2.clone()).unwrap().unwrap();
-    sm_client.insert(sk3.clone(), sv3.clone()).unwrap().unwrap();
-    sm_client.insert(sk4.clone(), sv4.clone()).unwrap().unwrap();
+    sm_client.insert(&sk1, &sv1).unwrap().unwrap();
+    sm_client.insert(&sk2, &sv2).unwrap().unwrap();
+    sm_client.insert(&sk3, &sv3).unwrap().unwrap();
+    sm_client.insert(&sk4, &sv4).unwrap().unwrap();
     assert_eq!(sm_client.len().unwrap().unwrap(),  4);
 
     let remote_keys = sm_client.keys().unwrap().unwrap();
@@ -135,10 +135,10 @@ fn hash_map(){
     expected_hashmap.insert(sk4.clone(), sv4.clone());
     assert_eq!(expected_hashmap, sm_client.clone().unwrap().unwrap());
 
-    assert!(sm_client.contains_key(sk1.clone()).unwrap().unwrap());
-    assert!(sm_client.contains_key(sk2.clone()).unwrap().unwrap());
-    assert!(sm_client.contains_key(sk3.clone()).unwrap().unwrap());
-    assert!(sm_client.contains_key(sk4.clone()).unwrap().unwrap());
+    assert!(sm_client.contains_key(&sk1).unwrap().unwrap());
+    assert!(sm_client.contains_key(&sk2).unwrap().unwrap());
+    assert!(sm_client.contains_key(&sk3).unwrap().unwrap());
+    assert!(sm_client.contains_key(&sk4).unwrap().unwrap());
 
     wait();
 }

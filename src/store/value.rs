@@ -21,7 +21,7 @@ macro_rules! def_store_value {
                 fn set(&mut self, v: $t) -> Result<(),()> {
                     if let Some(ref callback) = self.callback {
                         let old = self.val.clone();
-                        callback.notify(&commands::on_changed{}, Ok((old, v.clone())));
+                        callback.notify(&commands::on_changed::new(), Ok((old, v.clone())));
                     }
                     self.val = v;
                     Ok(())
