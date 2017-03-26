@@ -48,24 +48,24 @@ mod u32 {
         });
 
         assert_eq!(sm_client.get().unwrap().unwrap(), 0);
-        sm_client.set(1).unwrap().unwrap();
+        sm_client.set(&1).unwrap().unwrap();
         assert_eq!(sm_client.get().unwrap().unwrap(), 1);
-        assert_eq!(client.execute(sm_id, &get_and_add{n: 2}).unwrap().unwrap(), 1);
-        assert_eq!(client.execute(sm_id, &add_and_get{n: 3}).unwrap().unwrap(), 6);
-        assert_eq!(client.execute(sm_id, &get_and_minus{n: 4}).unwrap().unwrap(), 6);
-        assert_eq!(client.execute(sm_id, &minus_and_get{n: 2}).unwrap().unwrap(), 0);
-        assert_eq!(client.execute(sm_id, &get_and_incr{}).unwrap().unwrap(), 0);
-        assert_eq!(client.execute(sm_id, &incr_and_get{}).unwrap().unwrap(), 2);
-        assert_eq!(client.execute(sm_id, &get_and_multiply{n: 2}).unwrap().unwrap(), 2);
-        assert_eq!(client.execute(sm_id, &multiply_and_get{n: 2}).unwrap().unwrap(), 8);
-        assert_eq!(client.execute(sm_id, &get_and_divide{n: 2}).unwrap().unwrap(), 8);
-        assert_eq!(client.execute(sm_id, &divide_and_get{n: 4}).unwrap().unwrap(), 1);
-        assert_eq!(client.execute(sm_id, &swap{n: 5}).unwrap().unwrap(), 1);
-        assert_eq!(client.execute(sm_id, &get{}).unwrap().unwrap(), 5);
-        assert_eq!(client.execute(sm_id, &compare_and_swap{original: 1, n: 10}).unwrap().unwrap(), 5);
-        assert_eq!(client.execute(sm_id, &get{}).unwrap().unwrap(), 5);
-        assert_eq!(client.execute(sm_id, &compare_and_swap{original: 5, n: 11}).unwrap().unwrap(), 5);
-        assert_eq!(client.execute(sm_id, &get{}).unwrap().unwrap(), 11);
+        assert_eq!(sm_client.get_and_add(&2).unwrap().unwrap(), 1);
+        assert_eq!(sm_client.add_and_get(&3).unwrap().unwrap(), 6);
+        assert_eq!(sm_client.get_and_minus(&4).unwrap().unwrap(), 6);
+        assert_eq!(sm_client.minus_and_get(&2).unwrap().unwrap(), 0);
+        assert_eq!(sm_client.get_and_incr().unwrap().unwrap(), 0);
+        assert_eq!(sm_client.incr_and_get().unwrap().unwrap(), 2);
+        assert_eq!(sm_client.get_and_multiply(&2).unwrap().unwrap(), 2);
+        assert_eq!(sm_client.multiply_and_get(&2).unwrap().unwrap(), 8);
+        assert_eq!(sm_client.get_and_divide(&2).unwrap().unwrap(), 8);
+        assert_eq!(sm_client.divide_and_get(&4).unwrap().unwrap(), 1);
+        assert_eq!(sm_client.swap(&5).unwrap().unwrap(), 1);
+        assert_eq!(sm_client.get().unwrap().unwrap(), 5);
+        assert_eq!(sm_client.compare_and_swap(&1, &10).unwrap().unwrap(), 5);
+        assert_eq!(sm_client.get().unwrap().unwrap(), 5);
+        assert_eq!(sm_client.compare_and_swap(&5 ,&11).unwrap().unwrap(), 5);
+        assert_eq!(sm_client.get().unwrap().unwrap(), 11);
     }
 }
 
@@ -80,9 +80,11 @@ mod f64 {
         get_and_incr, incr_and_get,
         get_and_decr, decr_and_get,
         get_and_multiply, multiply_and_get,
-        get_and_divide, divide_and_get
+        get_and_divide, divide_and_get,
+        compare_and_swap, swap
     };
     use bifrost::rpc::Server;
+    use bifrost::store::number::F64::client::SMClient;
 
     #[test]
     fn test(){
@@ -104,18 +106,26 @@ mod f64 {
         service.bootstrap();
 
         let client = RaftClient::new(&vec!(addr), DEFAULT_SERVICE_ID).unwrap();
-        assert_eq!(client.execute(sm_id, &get{}).unwrap().unwrap(), 0.0);
-        client.execute(sm_id, &set{n: 1.0}).unwrap().unwrap();
-        assert_eq!(client.execute(sm_id, &get{}).unwrap().unwrap(), 1.0);
-        assert_eq!(client.execute(sm_id, &get_and_add{n: 2.0}).unwrap().unwrap(), 1.0);
-        assert_eq!(client.execute(sm_id, &add_and_get{n: 3.0}).unwrap().unwrap(), 6.0);
-        assert_eq!(client.execute(sm_id, &get_and_minus{n: 4.0}).unwrap().unwrap(), 6.0);
-        assert_eq!(client.execute(sm_id, &minus_and_get{n: 2.0}).unwrap().unwrap(), 0.0);
-        assert_eq!(client.execute(sm_id, &get_and_incr{}).unwrap().unwrap(), 0.0);
-        assert_eq!(client.execute(sm_id, &incr_and_get{}).unwrap().unwrap(), 2.0);
-        assert_eq!(client.execute(sm_id, &get_and_multiply{n: 2.0}).unwrap().unwrap(), 2.0);
-        assert_eq!(client.execute(sm_id, &multiply_and_get{n: 2.0}).unwrap().unwrap(), 8.0);
-        assert_eq!(client.execute(sm_id, &get_and_divide{n: 2.0}).unwrap().unwrap(), 8.0);
-        assert_eq!(client.execute(sm_id, &divide_and_get{n: 4.0}).unwrap().unwrap(), 1.0);
+        let sm_client = SMClient::new(sm_id, &client);
+
+        assert_eq!(sm_client.get().unwrap().unwrap(), 0.0);
+        sm_client.set(&1.0).unwrap().unwrap();
+        assert_eq!(sm_client.get().unwrap().unwrap(), 1.0);
+        assert_eq!(sm_client.get_and_add(&2.0).unwrap().unwrap(), 1.0);
+        assert_eq!(sm_client.add_and_get(&3.0).unwrap().unwrap(), 6.0);
+        assert_eq!(sm_client.get_and_minus(&4.0).unwrap().unwrap(), 6.0);
+        assert_eq!(sm_client.minus_and_get(&2.0).unwrap().unwrap(), 0.0);
+        assert_eq!(sm_client.get_and_incr().unwrap().unwrap(), 0.0);
+        assert_eq!(sm_client.incr_and_get().unwrap().unwrap(), 2.0);
+        assert_eq!(sm_client.get_and_multiply(&2.0).unwrap().unwrap(), 2.0);
+        assert_eq!(sm_client.multiply_and_get(&2.0).unwrap().unwrap(), 8.0);
+        assert_eq!(sm_client.get_and_divide(&2.0).unwrap().unwrap(), 8.0);
+        assert_eq!(sm_client.divide_and_get(&4.0).unwrap().unwrap(), 1.0);
+        assert_eq!(sm_client.swap(&5.0).unwrap().unwrap(), 1.0);
+        assert_eq!(sm_client.get().unwrap().unwrap(), 5.0);
+        assert_eq!(sm_client.compare_and_swap(&1.0, &10.0).unwrap().unwrap(), 5.0);
+        assert_eq!(sm_client.get().unwrap().unwrap(), 5.0);
+        assert_eq!(sm_client.compare_and_swap(&5.0 ,&11.0).unwrap().unwrap(), 5.0);
+        assert_eq!(sm_client.get().unwrap().unwrap(), 11.0);
     }
 }
