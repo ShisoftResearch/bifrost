@@ -1,5 +1,7 @@
 use std::hash::Hash;
 use std::collections::HashMap;
+use parking_lot::RwLock;
+use bifrost_hasher::hash_str;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Relation {
@@ -60,5 +62,40 @@ impl <S: Hash + Eq + Copy>VectorClock<S> {
             let mut ba = self.map.entry(*server).or_insert(0);
             if *ba < *bc {*ba = *bc}
         }
+    }
+}
+
+pub struct ServerVectorClock {
+    server: u64,
+    clock: RwLock<VectorClock<u64>>
+}
+
+impl ServerVectorClock {
+    pub fn new(server_address: &String) -> ServerVectorClock {
+        ServerVectorClock {
+            server: hash_str(server_address),
+            clock: RwLock::new(VectorClock::new())
+        }
+    }
+    pub fn inc(&mut self) {
+        let mut clock = self.clock.write();
+        clock.inc(self.server)
+    }
+
+    pub fn happened_after(&self, clock_b: &VectorClock<u64>) -> bool {
+        let clock = self.clock.read();
+        clock.happened_after(clock_b)
+    }
+    pub fn equals(&self, clock_b: &VectorClock<u64>) -> bool {
+        let clock = self.clock.read();
+        clock.equals(clock_b)
+    }
+    pub fn relation(&self, clock_b: &VectorClock<u64>) -> Relation {
+        let clock = self.clock.read();
+        clock.relation(clock_b)
+    }
+    pub fn merge_with(&mut self, clock_b: &VectorClock<u64>) {
+        let mut clock = self.clock.write();
+        clock.merge_with(clock_b)
     }
 }
