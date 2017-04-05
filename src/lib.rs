@@ -19,6 +19,7 @@ pub mod raft;
 pub mod store;
 pub mod membership;
 pub mod conshash;
+pub mod vector_clock;
 
 extern crate mio;
 extern crate byteorder;
