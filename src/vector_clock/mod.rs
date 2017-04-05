@@ -9,7 +9,8 @@ pub enum Relation {
     Concurrent
 }
 
-pub struct VectorClock<S> {
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct VectorClock<S: Hash + Eq + Copy> {
     map: HashMap<S, u64>
 }
 
