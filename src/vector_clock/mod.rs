@@ -58,9 +58,16 @@ impl <S: Hash + Eq + Copy>VectorClock<S> {
         return Relation::Concurrent;
     }
     pub fn merge_with(&mut self, clock_b: &VectorClock<S>) {
+        // merge_with is used to update counter for other servers (also learn from it)
         for (server, bc) in clock_b.map.iter() {
             let mut ba = self.map.entry(*server).or_insert(0);
             if *ba < *bc {*ba = *bc}
+        }
+    }
+    pub fn learn_from(&mut self, clock_b: &VectorClock<S>) {
+        // learn_from only insert missing servers into the clock
+        for (server, bc) in clock_b.map.iter() {
+            self.map.entry(*server).or_insert(*bc);
         }
     }
 }
