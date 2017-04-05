@@ -84,7 +84,7 @@ impl ServerVectorClock {
             clock: RwLock::new(VectorClock::new())
         }
     }
-    pub fn inc(&mut self) {
+    pub fn inc(&self) {
         let mut clock = self.clock.write();
         clock.inc(self.server)
     }
@@ -101,8 +101,16 @@ impl ServerVectorClock {
         let clock = self.clock.read();
         clock.relation(clock_b)
     }
-    pub fn merge_with(&mut self, clock_b: &VectorClock<u64>) {
+    pub fn merge_with(&self, clock_b: &VectorClock<u64>) {
         let mut clock = self.clock.write();
         clock.merge_with(clock_b)
+    }
+    pub fn learn_from(&self, clock_b: &VectorClock<u64>) {
+        let mut clock = self.clock.write();
+        clock.learn_from(clock_b)
+    }
+    pub fn to_clock(&self) -> VectorClock<u64> {
+        let clock = self.clock.read();
+        clock.clone()
     }
 }
