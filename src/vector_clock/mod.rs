@@ -27,12 +27,12 @@ impl <S: Hash + Eq + Copy>VectorClock<S> {
         *self.map.entry(server).or_insert(0) += 1;
     }
 
-    pub fn happened_after(&self, clock_b: &VectorClock<S>) -> bool {
+    pub fn happened_before(&self, clock_b: &VectorClock<S>) -> bool {
         for (server, ac) in self.map.iter() {
             if let Some(bc) = clock_b.map.get(server) {
                 // We only check servers that existed in the clock
                 // Because we can't tell sequences from missing servers
-                if ac > bc {return true;}
+                if ac < bc {return true;}
             }
         }
         return false;
@@ -49,11 +49,11 @@ impl <S: Hash + Eq + Copy>VectorClock<S> {
         if self.equals(clock_b) {
             return Relation::Equal;
         }
-        if self.happened_after(clock_b) {
-            return Relation::After;
-        }
-        if clock_b.happened_after(self) {
+        if self.happened_before(clock_b) {
             return Relation::Before;
+        }
+        if clock_b.happened_before(self) {
+            return Relation::After;
         }
         return Relation::Concurrent;
     }
@@ -89,9 +89,9 @@ impl ServerVectorClock {
         clock.inc(self.server)
     }
 
-    pub fn happened_after(&self, clock_b: &VectorClock<u64>) -> bool {
+    pub fn happened_before(&self, clock_b: &VectorClock<u64>) -> bool {
         let clock = self.clock.read();
-        clock.happened_after(clock_b)
+        clock.happened_before(clock_b)
     }
     pub fn equals(&self, clock_b: &VectorClock<u64>) -> bool {
         let clock = self.clock.read();
