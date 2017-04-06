@@ -1,5 +1,5 @@
 use std::hash::Hash;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use parking_lot::RwLock;
 use bifrost_hasher::hash_str;
 
@@ -29,11 +29,12 @@ impl <S: Hash + Eq + Copy>VectorClock<S> {
 
     pub fn happened_before(&self, clock_b: &VectorClock<S>) -> bool {
         for (server, ac) in self.map.iter() {
-            if let Some(bc) = clock_b.map.get(server) {
-                // We only check servers that existed in the clock
-                // Because we can't tell sequences from missing servers
-                if ac < bc {return true;}
-            }
+            let bc = *clock_b.map.get(server).unwrap_or(&0);
+            if *ac >= bc {return false;}
+        }
+        for (server, bc) in clock_b.map.iter() {
+            let ac = *self.map.get(server).unwrap_or(&0);
+            if ac >= *bc {return false;}
         }
         return false;
     }
