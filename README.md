@@ -1,5 +1,5 @@
 # bifrost
-WIP Raft and RPC impelementation
+Pure rust building block for distributed systems
 
 ### Objective
 
