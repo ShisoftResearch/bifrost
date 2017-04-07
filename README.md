@@ -78,4 +78,5 @@ Bifrost will ship with it's own reliable data store based on [raft consensus alg
     - [ ] gPRC
 - [ ] Utility
     - [x] [Global bindings](https://clojuredocs.org/clojure.core/binding)
-    
+- [x] Consistent hashing
+- [x] Vector clock
