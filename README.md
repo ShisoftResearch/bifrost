@@ -63,7 +63,7 @@ Bifrost will ship with it's own reliable data store based on [raft consensus alg
         - [ ] Stress and benchmark
         - [ ] Stress + Safety
 - [ ] Sharding
-    - [ ] DHT
+    - [x] Consistent hash
 - [ ] Reliable data store
     - [x] Client group membership
     - [x] Client group leader election
