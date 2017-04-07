@@ -9,7 +9,7 @@ Bifrost will ship with it's own reliable data store based on [raft consensus alg
 
 **Bifrost is still in very early stage of development and it is not suggested to be used in any kinds of projects until it is stabilized and fully tested** 
 
-###Progress Check List
+### Progress Check List
 
 - [ ] RPC
     - [x] TCP Server
