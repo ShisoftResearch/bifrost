@@ -1,9 +1,10 @@
 use std::hash::Hash;
 use std::collections::{HashMap, HashSet};
+use std::cmp::Ordering;
 use parking_lot::RwLock;
 use bifrost_hasher::hash_str;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub enum Relation {
     Equal,
     Before,
@@ -16,11 +17,47 @@ pub struct VectorClock<S: Hash + Eq + Copy> {
     map: HashMap<S, u64>
 }
 
-//impl PartialOrd for VectorClock<S> {
-//    fn partial_cmp(&self, other: &Rhs) -> Option<Ordering> {
-//
-//    }
-//}
+impl <S: Eq + Copy + Hash> PartialOrd for VectorClock<S> {
+    fn partial_cmp(&self, other: &VectorClock<S>) -> Option<Ordering> {
+        let rel = self.relation(other);
+        match rel {
+            Relation::Before => Some(Ordering::Less),
+            Relation::After => Some(Ordering::Greater),
+            Relation::Equal => Some(Ordering::Equal),
+            Relation::Concurrent => None
+        }
+    }
+
+    fn lt(&self, other: &VectorClock<S>) -> bool {
+        self.relation(other) == Relation::Before
+    }
+
+    fn le(&self, other: &VectorClock<S>) -> bool {
+        let rel = self.relation(other);
+        rel == Relation::Before || rel == Relation::Equal
+    }
+
+    fn gt(&self, other: &VectorClock<S>) -> bool {
+        self.relation(other) == Relation::After
+    }
+
+    fn ge(&self, other: &VectorClock<S>) -> bool {
+        let rel = self.relation(other);
+        rel == Relation::After || rel == Relation::Equal
+    }
+}
+
+impl <S: Eq + Copy + Hash> PartialEq for VectorClock<S> {
+    fn eq(&self, other: &VectorClock<S>) -> bool {
+        let rel = self.relation(other);
+        rel == Relation::Equal
+    }
+
+    fn ne(&self, other: &VectorClock<S>) -> bool {
+        let rel = self.relation(other);
+        !(rel == Relation::After || rel == Relation::Before)
+    }
+}
 
 impl <S: Hash + Eq + Copy>VectorClock<S> {
     pub fn new() -> VectorClock<S> {
