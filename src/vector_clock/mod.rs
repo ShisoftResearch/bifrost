@@ -16,6 +16,12 @@ pub struct VectorClock<S: Hash + Eq + Copy> {
     map: HashMap<S, u64>
 }
 
+//impl PartialOrd for VectorClock<S> {
+//    fn partial_cmp(&self, other: &Rhs) -> Option<Ordering> {
+//
+//    }
+//}
+
 impl <S: Hash + Eq + Copy>VectorClock<S> {
     pub fn new() -> VectorClock<S> {
         VectorClock {
@@ -28,15 +34,18 @@ impl <S: Hash + Eq + Copy>VectorClock<S> {
     }
 
     pub fn happened_before(&self, clock_b: &VectorClock<S>) -> bool {
-        for (server, ac) in self.map.iter() {
-            let bc = *clock_b.map.get(server).unwrap_or(&0);
-            if *ac >= bc {return false;}
+        let mut a_lt_b = false;
+        for (server, ai) in self.map.iter() {
+            let bi = *clock_b.map.get(server).unwrap_or(&0);
+            if *ai > bi {return false;}
+            a_lt_b = a_lt_b || *ai < bi;
         }
-        for (server, bc) in clock_b.map.iter() {
-            let ac = *self.map.get(server).unwrap_or(&0);
-            if ac >= *bc {return false;}
+        for (server, bi) in clock_b.map.iter() {
+            let ai = *self.map.get(server).unwrap_or(&0);
+            if ai > *bi {return false;}
+            a_lt_b = a_lt_b || ai < *bi;
         }
-        return false;
+        return a_lt_b;
     }
     pub fn equals(&self, clock_b: &VectorClock<S>) -> bool {
         for (server, ac) in self.map.iter() {
