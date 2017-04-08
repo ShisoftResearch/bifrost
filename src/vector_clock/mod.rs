@@ -161,3 +161,5 @@ impl ServerVectorClock {
         clock.clone()
     }
 }
+
+pub type StandardVectorClock = VectorClock<u64>;
