@@ -165,7 +165,7 @@ macro_rules! service {
                     }
                 }
            )*
-           pub fn new(service_id: u64, client: Arc<RPCClient>) -> Arc<SyncServiceClient> {
+           pub fn new(service_id: u64, client: &Arc<RPCClient>) -> Arc<SyncServiceClient> {
                 Arc::new(SyncServiceClient{
                     id: service_id,
                     client: client.clone()
@@ -194,7 +194,7 @@ macro_rules! service {
                     }))
                 }
            )*
-           pub fn new(service_id: u64, client: Arc<RPCClient>) -> Arc<SyncServiceClient> {
+           pub fn new(service_id: u64, client: &Arc<RPCClient>) -> Arc<SyncServiceClient> {
                 Arc::new(SyncServiceClient{
                     id: service_id,
                     client: client.clone()

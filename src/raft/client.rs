@@ -98,7 +98,7 @@ impl RaftClient {
             if !members.clients.contains_key(&id) {
                 match rpc::DEFAULT_CLIENT_POOL.get(&server_addr) {
                     Ok(client) => {
-                        members.clients.insert(id, SyncServiceClient::new(self.service_id, client));
+                        members.clients.insert(id, SyncServiceClient::new(self.service_id, &client));
                     },
                     Err(_) => {continue;}
                 }
@@ -128,7 +128,7 @@ impl RaftClient {
                     let addr = members.id_map.get(id).unwrap().clone();
                     if !members.clients.contains_key(id) {
                         if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(&addr) {
-                            members.clients.insert(*id, SyncServiceClient::new(self.service_id, client));
+                            members.clients.insert(*id, SyncServiceClient::new(self.service_id, &client));
                         }
                     }
                 }
