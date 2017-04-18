@@ -7,6 +7,7 @@
 #![feature(proc_macro)]
 #![feature(btree_range)]
 #![feature(fnbox)]
+#![feature(conservative_impl_trait)]
 
 
 #[macro_use]

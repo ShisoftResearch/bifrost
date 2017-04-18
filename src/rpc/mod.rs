@@ -11,6 +11,7 @@ use bincode::{SizeLimit, serde as bincode};
 use tcp;
 use utils::time;
 use utils::u8vec::*;
+use futures::Future;
 
 lazy_static! {
     pub static ref DEFAULT_CLIENT_POOL: ClientPool = ClientPool::new();
@@ -136,7 +137,11 @@ impl RPCClient {
     pub fn send(&self, svr_id: u64, data: Vec<u8>) -> Result<Vec<u8>, RPCError> {
         decode_res(self.client.lock().send(prepend_u64(svr_id, data)))
     }
-
+    pub fn send_async(&self, svr_id: u64, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = RPCError>> {
+        Box::new(self.client.lock()
+            .send_async(prepend_u64(svr_id, data))
+            .then(move |res| decode_res(res)))
+    }
     pub fn new(addr: &String) -> io::Result<Arc<RPCClient>> {
         Ok(Arc::new(RPCClient {
             client: Mutex::new(tcp::client::Client::connect(addr)?),
