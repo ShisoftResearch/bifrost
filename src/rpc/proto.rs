@@ -123,6 +123,7 @@ macro_rules! service {
         use std::io;
         use $crate::rpc::*;
         use $crate::utils::u8vec::*;
+        use futures::Future;
 
         pub trait Service: RPCService {
            $(
@@ -162,6 +163,35 @@ macro_rules! service {
                     } else {
                         Err(res_bytes.err().unwrap())
                     }
+                }
+           )*
+           pub fn new(service_id: u64, client: Arc<RPCClient>) -> Arc<SyncServiceClient> {
+                Arc::new(SyncServiceClient{
+                    id: service_id,
+                    client: client.clone()
+                })
+           }
+        }
+        pub struct AsyncServiceClient {
+            pub id: u64,
+            pub client: Arc<RPCClient>,
+        }
+        impl AsyncServiceClient {
+           $(
+                #[allow(non_camel_case_types)]
+                $(#[$attr])*
+                pub fn $fn_name(&self, $($arg:&$in_),*) -> Box<Future<Item = std::result::Result<$out, $error>, Error = RPCError>> {
+                    let req_data = ($($arg,)*);
+                    let req_data_bytes = serialize!(&req_data);
+                    let req_bytes = prepend_u64(hash_ident!($fn_name) as u64, req_data_bytes);
+                    let res_bytes = self.client.send_async(self.id, req_bytes);
+                    Box::new(res_bytes.then(|res_bytes| -> Result<std::result::Result<$out, $error>, RPCError> {
+                        if let Ok(res_bytes) = res_bytes {
+                            Ok(deserialize!(res_bytes.as_slice()))
+                        } else {
+                            Err(res_bytes.err().unwrap())
+                        }
+                    }))
                 }
            )*
            pub fn new(service_id: u64, client: Arc<RPCClient>) -> Arc<SyncServiceClient> {

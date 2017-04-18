@@ -7,6 +7,7 @@
 extern crate bifrost;
 extern crate byteorder;
 extern crate bincode;
+extern crate futures;
 
 #[macro_use]
 extern crate serde_derive;
