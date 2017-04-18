@@ -16,7 +16,7 @@ use tokio_timer::Timer;
 
 use tcp::proto::BytesClientProto;
 
-struct ClientCore {
+pub struct ClientCore {
     inner: ClientService<TcpStream, BytesClientProto>,
 }
 
@@ -60,8 +60,11 @@ impl Client {
         Client::connect_with_timeout(address, Duration::from_secs(5))
     }
     pub fn send(&mut self, msg: Vec<u8>) -> io::Result<Vec<u8>> {
-        let resq = self.client.call(msg);
-        self.core.run(resq)
+        let future = self.send_async(msg);
+        self.core.run(future)
+    }
+    pub fn send_async(&mut self, msg: Vec<u8>) -> ::tokio_timer::Timeout<<ClientCore as Service>::Future> {
+        self.client.call(msg)
     }
 }
 
