@@ -341,7 +341,7 @@ impl RaftClient {
             }
         }
     }
-    pub fn current_leader_rpc_client(&self) -> Option<Arc<rpc::RPCSyncClient>> {
+    pub fn current_leader_rpc_client(&self) -> Option<Arc<rpc::RPCClient>> {
         match self.current_leader_client() {
             Some((_, client)) => Some(client.client.clone()),
             None => None
