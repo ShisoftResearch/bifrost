@@ -66,8 +66,9 @@ impl <S: Hash + Eq + Copy>VectorClock<S> {
         }
     }
 
-    pub fn inc(&mut self, server: S) {
+    pub fn inc(&mut self, server: S) -> VectorClock<S> {
         *self.map.entry(server).or_insert(0) += 1;
+        self.clone()
     }
 
     pub fn happened_before(&self, clock_b: &VectorClock<S>) -> bool {
@@ -131,32 +132,32 @@ impl ServerVectorClock {
             clock: RwLock::new(VectorClock::new())
         }
     }
-    pub fn inc(&self) {
+    pub fn inc(&self) -> StandardVectorClock {
         let mut clock = self.clock.write();
         clock.inc(self.server)
     }
 
-    pub fn happened_before(&self, clock_b: &VectorClock<u64>) -> bool {
+    pub fn happened_before(&self, clock_b: &StandardVectorClock) -> bool {
         let clock = self.clock.read();
         clock.happened_before(clock_b)
     }
-    pub fn equals(&self, clock_b: &VectorClock<u64>) -> bool {
+    pub fn equals(&self, clock_b: &StandardVectorClock) -> bool {
         let clock = self.clock.read();
         clock.equals(clock_b)
     }
-    pub fn relation(&self, clock_b: &VectorClock<u64>) -> Relation {
+    pub fn relation(&self, clock_b: &StandardVectorClock) -> Relation {
         let clock = self.clock.read();
         clock.relation(clock_b)
     }
-    pub fn merge_with(&self, clock_b: &VectorClock<u64>) {
+    pub fn merge_with(&self, clock_b: &StandardVectorClock) {
         let mut clock = self.clock.write();
         clock.merge_with(clock_b)
     }
-    pub fn learn_from(&self, clock_b: &VectorClock<u64>) {
+    pub fn learn_from(&self, clock_b: &StandardVectorClock) {
         let mut clock = self.clock.write();
         clock.learn_from(clock_b)
     }
-    pub fn to_clock(&self) -> VectorClock<u64> {
+    pub fn to_clock(&self) -> StandardVectorClock {
         let clock = self.clock.read();
         clock.clone()
     }
