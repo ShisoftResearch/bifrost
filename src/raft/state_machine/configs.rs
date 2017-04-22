@@ -47,7 +47,7 @@ impl StateMachineCmds for Configures {
             match rpc::DEFAULT_CLIENT_POOL.get(&address) {
                 Ok(client) => {
                     self.members.insert(id, RaftMember {
-                        rpc: SyncServiceClient::new(self.service_id, client),
+                        rpc: SyncServiceClient::new(self.service_id, &client),
                         address: address,
                         id: id,
                     });

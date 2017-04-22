@@ -11,6 +11,7 @@ use bincode::{SizeLimit, serde as bincode};
 use tcp;
 use utils::time;
 use utils::u8vec::*;
+use futures::Future;
 
 lazy_static! {
     pub static ref DEFAULT_CLIENT_POOL: ClientPool = ClientPool::new();
@@ -39,7 +40,7 @@ pub struct Server {
 }
 
 pub struct ClientPool {
-    clients: Mutex<HashMap<String, Arc<RPCSyncClient>>>
+    clients: Mutex<HashMap<String, Arc<RPCClient>>>
 }
 
 fn encode_res(res: Result<Vec<u8>, RPCRequestError>) -> Vec<u8> {
@@ -127,24 +128,28 @@ impl Server {
     }
 }
 
-pub struct RPCSyncClient {
+pub struct RPCClient {
     client: Mutex<tcp::client::Client>,
     pub address: String
 }
 
-impl RPCSyncClient {
+impl RPCClient {
     pub fn send(&self, svr_id: u64, data: Vec<u8>) -> Result<Vec<u8>, RPCError> {
         decode_res(self.client.lock().send(prepend_u64(svr_id, data)))
     }
-
-    pub fn new(addr: &String) -> io::Result<Arc<RPCSyncClient>> {
-        Ok(Arc::new(RPCSyncClient {
+    pub fn send_async(&self, svr_id: u64, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = RPCError>> {
+        Box::new(self.client.lock()
+            .send_async(prepend_u64(svr_id, data))
+            .then(move |res| decode_res(res)))
+    }
+    pub fn new(addr: &String) -> io::Result<Arc<RPCClient>> {
+        Ok(Arc::new(RPCClient {
             client: Mutex::new(tcp::client::Client::connect(addr)?),
             address: addr.clone()
         }))
     }
-    pub fn with_timeout(addr: &String, timeout: Duration) -> io::Result<Arc<RPCSyncClient>> {
-        Ok(Arc::new(RPCSyncClient {
+    pub fn with_timeout(addr: &String, timeout: Duration) -> io::Result<Arc<RPCClient>> {
+        Ok(Arc::new(RPCClient {
             client: Mutex::new(tcp::client::Client::connect_with_timeout(addr, timeout)?),
             address: addr.clone()
         }))
@@ -158,12 +163,12 @@ impl ClientPool {
         }
     }
 
-    pub fn get(&self, addr: &String) -> io::Result<Arc<RPCSyncClient>> {
+    pub fn get(&self, addr: &String) -> io::Result<Arc<RPCClient>> {
         let mut clients = self.clients.lock();
         if clients.contains_key(addr) {
             Ok(clients.get(addr).unwrap().clone())
         } else {
-            let client = RPCSyncClient::new(addr);
+            let client = RPCClient::new(addr);
             if let Ok(client) = client {
                 clients.insert(addr.clone(), client.clone());
                 Ok(client)
