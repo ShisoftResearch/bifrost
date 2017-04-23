@@ -2,7 +2,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use futures::{self, Future};
+use futures::{self, BoxFuture, Future};
 
 use tokio_service::Service;
 use tokio_core::io::Io;
@@ -15,14 +15,20 @@ use tokio_middleware::Timeout;
 use tokio_timer::Timer;
 
 use tcp::proto::BytesClientProto;
+use bifrost_hasher::hash_str;
+use shortcut::{tcp as shortcut};
+
+pub type ResFuture = Future<Item = Vec<u8>, Error = io::Error>;
 
 pub struct ClientCore {
     inner: ClientService<TcpStream, BytesClientProto>,
 }
 
 pub struct Client {
-    client: Timeout<ClientCore>,
+    client: Option<Timeout<ClientCore>>,
+    server_id: u64,
     core: Box<Core>,
+    timeout: Duration,
 }
 
 impl Service for ClientCore {
@@ -41,19 +47,21 @@ impl Service for ClientCore {
 impl Client {
     pub fn connect_with_timeout (address: &String, timeout: Duration) -> io::Result<Client> {
         let mut core = Core::new()?;
-        let address = address.parse().unwrap();
+        let socket_address = address.parse().unwrap();
         let future = Box::new(TcpClient::new(BytesClientProto)
-                                  .connect(&address, &core.handle())
+                                  .connect(&socket_address, &core.handle())
                                   .map(|c| Timeout::new(
                                       ClientCore {
                                           inner: c,
                                       },
                                       Timer::default(),
-                                      timeout)));
+                                      timeout.clone())));
         let client = core.run(future)?;
         Ok(Client {
-            client: client,
+            client: Some(client),
             core: Box::new(core),
+            server_id: hash_str(address),
+            timeout: timeout
         })
     }
     pub fn connect (address: &String) -> io::Result<Client> {
@@ -63,8 +71,12 @@ impl Client {
         let future = self.send_async(msg);
         self.core.run(future)
     }
-    pub fn send_async(&mut self, msg: Vec<u8>) -> ::tokio_timer::Timeout<<ClientCore as Service>::Future> {
-        self.client.call(msg)
+    pub fn send_async(&mut self, msg: Vec<u8>) -> Box<ResFuture> {
+        if let Some(ref client) = self.client {
+            Box::new(client.call(msg))
+        } else {
+            shortcut::call(self.server_id, &self.timeout, msg)
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 use std::io::{self, ErrorKind, Write};
 use std::sync::Arc;
+use std::net::SocketAddr;
 
 use tokio_proto::TcpServer;
 use tokio_service::{Service, NewService};
@@ -7,15 +8,16 @@ use futures::{future, Future, BoxFuture};
 
 use tcp::framed::BytesCodec;
 use tcp::proto::BytesServerProto;
+use shortcut::{tcp as shortcut};
 
-pub type ServerCallback = Fn(Vec<u8>) -> Vec<u8> + Send + Sync;
+pub type ServerCallback = Box<Fn(Vec<u8>) -> Vec<u8> + Send + Sync>;
 
 pub struct Server {
-    callback: Arc<Box<ServerCallback>>
+    callback: Arc<ServerCallback>
 }
 
 pub struct NewServer {
-    callback: Arc<Box<ServerCallback>>
+    callback: Arc<ServerCallback>
 }
 
 impl Service for Server {
@@ -44,11 +46,13 @@ impl NewService for NewServer {
 }
 
 impl Server {
-    pub fn new(addr: &String, callback: Box<ServerCallback>) {
-        let addr = addr.parse().unwrap();
+    pub fn new(addr: &String, callback: ServerCallback) {
+        let socket_addr: SocketAddr = addr.parse().unwrap();
+        let callback_ref = Arc::new(callback);
+        shortcut::register_server(addr, &callback_ref);
         let new_server = NewServer {
-            callback: Arc::new(callback)
+            callback: callback_ref
         };
-        TcpServer::new(BytesServerProto, addr).serve(new_server);
+        TcpServer::new(BytesServerProto, socket_addr).serve(new_server);
     }
 }
