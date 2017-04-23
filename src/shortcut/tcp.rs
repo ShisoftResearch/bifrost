@@ -25,6 +25,7 @@ pub fn call(server_id: u64, data: Vec<u8>) -> BoxFuture<Vec<u8>, Error> {
             future::finished(callback(data))
         },
         _ => {
+            println!("{}", server_id);
             future::err(Error::new(ErrorKind::Other, "cannot found callback"))
         }
     })

@@ -74,7 +74,11 @@ impl Client {
     }
     pub fn send(&mut self, msg: Vec<u8>) -> io::Result<Vec<u8>> {
         let future = self.send_async(msg);
-        self.core.run(future)
+        if let Some(ref client) = self.client {
+            self.core.run(future)
+        } else {
+            future.wait()
+        }
     }
     pub fn send_async(&mut self, msg: Vec<u8>) -> Box<ResFuture> {
         if let Some(ref client) = self.client {
