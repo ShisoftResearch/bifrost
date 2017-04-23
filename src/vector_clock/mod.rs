@@ -12,7 +12,7 @@ pub enum Relation {
     Concurrent
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, Hash, Eq)]
 pub struct VectorClock<S: Ord + Eq + Copy> {
     map: BTreeMap<S, u64>
 }
