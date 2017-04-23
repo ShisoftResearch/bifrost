@@ -25,9 +25,8 @@ pub struct ClientCore {
 }
 
 pub struct Client {
-    client: Option<Timeout<ClientCore>>,
+    client: Option<(Timeout<ClientCore>, Core)>,
     server_id: u64,
-    core: Box<Core>,
 }
 
 impl Service for ClientCore {
@@ -45,9 +44,9 @@ impl Service for ClientCore {
 
 impl Client {
     pub fn connect_with_timeout (address: &String, timeout: Duration) -> io::Result<Client> {
-        let mut core = Core::new()?;
         let server_id = hash_str(address);
         let client = {
+            let mut core = Core::new()?;
             if shortcut::is_local(server_id) {
                 None
             } else {
@@ -60,12 +59,11 @@ impl Client {
                         },
                         Timer::default(),
                         timeout)));
-                Some(core.run(future)?)
+                Some((core.run(future)?, core))
             }
         };
         Ok(Client {
             client: client,
-            core: Box::new(core),
             server_id: server_id,
         })
     }
@@ -74,14 +72,14 @@ impl Client {
     }
     pub fn send(&mut self, msg: Vec<u8>) -> io::Result<Vec<u8>> {
         let future = self.send_async(msg);
-        if let Some(ref client) = self.client {
-            self.core.run(future)
+        if let Some((ref client, ref mut core)) = self.client {
+            core.run(future)
         } else {
             future.wait()
         }
     }
     pub fn send_async(&mut self, msg: Vec<u8>) -> Box<ResFuture> {
-        if let Some(ref client) = self.client {
+        if let Some((ref client, _)) = self.client {
             Box::new(client.call(msg))
         } else {
             shortcut::call(self.server_id, msg)
