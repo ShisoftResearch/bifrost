@@ -18,7 +18,7 @@ pub fn register_server(server_address: &String, callback: &Arc<ServerCallback>) 
     servers_cbs.insert(server_id, callback.clone());
 }
 
-pub fn call(server_id: u64, timeout: &Duration, data: Vec<u8>) -> BoxFuture<Vec<u8>, Error> {
+pub fn call(server_id: u64, data: Vec<u8>) -> BoxFuture<Vec<u8>, Error> {
     let server_cbs = TCP_CALLBACKS.read();
     Box::new(match server_cbs.get(&server_id) {
         Some(callback) => {
@@ -28,4 +28,9 @@ pub fn call(server_id: u64, timeout: &Duration, data: Vec<u8>) -> BoxFuture<Vec<
             future::err(Error::new(ErrorKind::Other, "cannot found callback"))
         }
     })
+}
+
+pub fn is_local(server_id: u64) -> bool {
+    let cbs = TCP_CALLBACKS.read();
+    cbs.contains_key(&server_id)
 }

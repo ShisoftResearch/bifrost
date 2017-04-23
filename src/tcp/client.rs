@@ -28,7 +28,6 @@ pub struct Client {
     client: Option<Timeout<ClientCore>>,
     server_id: u64,
     core: Box<Core>,
-    timeout: Duration,
 }
 
 impl Service for ClientCore {
@@ -47,21 +46,27 @@ impl Service for ClientCore {
 impl Client {
     pub fn connect_with_timeout (address: &String, timeout: Duration) -> io::Result<Client> {
         let mut core = Core::new()?;
-        let socket_address = address.parse().unwrap();
-        let future = Box::new(TcpClient::new(BytesClientProto)
-                                  .connect(&socket_address, &core.handle())
-                                  .map(|c| Timeout::new(
-                                      ClientCore {
-                                          inner: c,
-                                      },
-                                      Timer::default(),
-                                      timeout.clone())));
-        let client = core.run(future)?;
+        let server_id = hash_str(address);
+        let client = {
+            if shortcut::is_local(server_id) {
+                None
+            } else {
+                let socket_address = address.parse().unwrap();
+                let future = Box::new(TcpClient::new(BytesClientProto)
+                    .connect(&socket_address, &core.handle())
+                    .map(|c| Timeout::new(
+                        ClientCore {
+                            inner: c,
+                        },
+                        Timer::default(),
+                        timeout)));
+                Some(core.run(future)?)
+            }
+        };
         Ok(Client {
-            client: Some(client),
+            client: client,
             core: Box::new(core),
-            server_id: hash_str(address),
-            timeout: timeout
+            server_id: server_id,
         })
     }
     pub fn connect (address: &String) -> io::Result<Client> {
@@ -75,7 +80,7 @@ impl Client {
         if let Some(ref client) = self.client {
             Box::new(client.call(msg))
         } else {
-            shortcut::call(self.server_id, &self.timeout, msg)
+            shortcut::call(self.server_id, msg)
         }
     }
 }
