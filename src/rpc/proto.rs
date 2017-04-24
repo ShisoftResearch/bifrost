@@ -17,7 +17,7 @@ macro_rules! dispatch_rpc_service_functions {
             fn dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, $crate::rpc::RPCRequestError> {
                 self.inner_dispatch(data)
             }
-            fn register_service(&self, server_id: u64, service_id: u64) {
+            fn register_service(&self, service: &Arc<::rpc::RPCService>, server_id: u64, service_id: u64) {
 
             }
         }
