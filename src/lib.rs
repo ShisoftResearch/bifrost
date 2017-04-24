@@ -22,8 +22,6 @@ pub mod membership;
 pub mod conshash;
 pub mod vector_clock;
 
-mod shortcut;
-
 extern crate mio;
 extern crate byteorder;
 

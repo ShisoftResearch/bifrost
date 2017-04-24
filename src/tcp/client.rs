@@ -15,8 +15,8 @@ use tokio_middleware::Timeout;
 use tokio_timer::Timer;
 
 use tcp::proto::BytesClientProto;
+use tcp::shortcut;
 use bifrost_hasher::hash_str;
-use shortcut::{tcp as shortcut};
 
 pub type ResFuture = Future<Item = Vec<u8>, Error = io::Error>;
 

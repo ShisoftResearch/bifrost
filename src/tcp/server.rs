@@ -8,7 +8,7 @@ use futures::{future, Future, BoxFuture};
 
 use tcp::framed::BytesCodec;
 use tcp::proto::BytesServerProto;
-use shortcut::{tcp as shortcut};
+use tcp::shortcut;
 
 pub type ServerCallback = Box<Fn(Vec<u8>) -> Vec<u8> + Send + Sync>;
 
