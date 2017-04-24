@@ -12,6 +12,7 @@ use tcp;
 use utils::time;
 use utils::u8vec::*;
 use futures::Future;
+use bifrost_hasher::hash_str;
 
 lazy_static! {
     pub static ref DEFAULT_CLIENT_POOL: ClientPool = ClientPool::new();
@@ -32,11 +33,13 @@ pub enum RPCError {
 
 pub trait RPCService: Sync + Send {
     fn dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, RPCRequestError>;
+    fn register_service(&self, server_id: u64, service_id: u64);
 }
 
 pub struct Server {
     services: RwLock<HashMap<u64, Arc<RPCService>>>,
     address: String,
+    server_id: u64
 }
 
 pub struct ClientPool {
@@ -81,6 +84,7 @@ impl Server {
         Arc::new(Server {
             services: RwLock::new(HashMap::new()),
             address: address.clone(),
+            server_id: hash_str(address)
         })
     }
     pub fn listen(server: &Arc<Server>) {
@@ -109,6 +113,7 @@ impl Server {
         });
     }
     pub fn register_service(&self, service_id: u64,  service: Arc<RPCService>) {
+        service.register_service(self.server_id, service_id);
         self.services.write().insert(service_id, service);
     }
     pub fn remove_service(&self, service_id: u64) {
@@ -121,6 +126,7 @@ impl Server {
 
 pub struct RPCClient {
     client: Mutex<tcp::client::Client>,
+    pub server_id: u64,
     pub address: String
 }
 
@@ -134,14 +140,18 @@ impl RPCClient {
             .then(move |res| decode_res(res)))
     }
     pub fn new(addr: &String) -> io::Result<Arc<RPCClient>> {
+        let client = tcp::client::Client::connect(addr)?;
         Ok(Arc::new(RPCClient {
-            client: Mutex::new(tcp::client::Client::connect(addr)?),
+            server_id: client.server_id,
+            client: Mutex::new(client),
             address: addr.clone()
         }))
     }
     pub fn with_timeout(addr: &String, timeout: Duration) -> io::Result<Arc<RPCClient>> {
+        let client = tcp::client::Client::connect_with_timeout(addr, timeout)?;
         Ok(Arc::new(RPCClient {
-            client: Mutex::new(tcp::client::Client::connect_with_timeout(addr, timeout)?),
+            server_id: client.server_id,
+            client: Mutex::new(client),
             address: addr.clone()
         }))
     }

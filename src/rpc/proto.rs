@@ -17,6 +17,9 @@ macro_rules! dispatch_rpc_service_functions {
             fn dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, $crate::rpc::RPCRequestError> {
                 self.inner_dispatch(data)
             }
+            fn register_service(&self, server_id: u64, service_id: u64) {
+
+            }
         }
     };
 }
@@ -146,7 +149,8 @@ macro_rules! service {
 
         }
         pub struct SyncServiceClient {
-            pub id: u64,
+            pub service_id: u64,
+            pub server_id: u64,
             pub client: Arc<RPCClient>,
         }
         impl SyncServiceClient {
@@ -157,7 +161,7 @@ macro_rules! service {
                     let req_data = ($($arg,)*);
                     let req_data_bytes = serialize!(&req_data);
                     let req_bytes = prepend_u64(hash_ident!($fn_name) as u64, req_data_bytes);
-                    let res_bytes = self.client.send(self.id, req_bytes);
+                    let res_bytes = self.client.send(self.service_id, req_bytes);
                     if let Ok(res_bytes) = res_bytes {
                         Ok(deserialize!(res_bytes.as_slice()))
                     } else {
@@ -167,13 +171,15 @@ macro_rules! service {
            )*
            pub fn new(service_id: u64, client: &Arc<RPCClient>) -> Arc<SyncServiceClient> {
                 Arc::new(SyncServiceClient{
-                    id: service_id,
+                    service_id: service_id,
+                    server_id:client.server_id,
                     client: client.clone()
                 })
            }
         }
         pub struct AsyncServiceClient {
-            pub id: u64,
+            pub service_id: u64,
+            pub server_id: u64,
             pub client: Arc<RPCClient>,
         }
         impl AsyncServiceClient {
@@ -184,7 +190,7 @@ macro_rules! service {
                     let req_data = ($($arg,)*);
                     let req_data_bytes = serialize!(&req_data);
                     let req_bytes = prepend_u64(hash_ident!($fn_name) as u64, req_data_bytes);
-                    let res_bytes = self.client.send_async(self.id, req_bytes);
+                    let res_bytes = self.client.send_async(self.service_id, req_bytes);
                     Box::new(res_bytes.then(|res_bytes| -> Result<std::result::Result<$out, $error>, RPCError> {
                         if let Ok(res_bytes) = res_bytes {
                             Ok(deserialize!(res_bytes.as_slice()))
@@ -196,7 +202,8 @@ macro_rules! service {
            )*
            pub fn new(service_id: u64, client: &Arc<RPCClient>) -> Arc<SyncServiceClient> {
                 Arc::new(SyncServiceClient{
-                    id: service_id,
+                    service_id: service_id,
+                    server_id:client.server_id,
                     client: client.clone()
                 })
            }

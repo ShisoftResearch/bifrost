@@ -26,7 +26,7 @@ pub struct ClientCore {
 
 pub struct Client {
     client: Option<(Timeout<ClientCore>, Core)>,
-    server_id: u64,
+    pub server_id: u64,
 }
 
 impl Service for ClientCore {
