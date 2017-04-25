@@ -18,10 +18,9 @@ macro_rules! dispatch_rpc_service_functions {
                 self.inner_dispatch(data)
             }
             fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64) {
-                let cbs = RPC_CALLBACKS.write();
-//                let service = service.clone();
-//                let svr_ptr = Arc::into_raw(service.clone()) as *const $s;
-                //cbs.insert((server_id, service_id), service);
+                let mut cbs = RPC_CALLBACKS.write();
+                let service = unsafe {Arc::from_raw(service_ptr as *const $s)};
+                cbs.insert((server_id, service_id), service);
             }
         }
     };
