@@ -33,7 +33,7 @@ pub enum RPCError {
 
 pub trait RPCService: Sync + Send {
     fn dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, RPCRequestError>;
-    fn register_service(&self, service: &Arc<RPCService>, server_id: u64, service_id: u64);
+    fn register_shortcut_service(&self, service: &Arc<RPCService>, server_id: u64, service_id: u64);
 }
 
 pub struct Server {
@@ -113,7 +113,7 @@ impl Server {
         });
     }
     pub fn register_service(&self, service_id: u64,  service: Arc<RPCService>) {
-        service.register_service(&service, self.server_id, service_id);
+        service.register_shortcut_service(&service, self.server_id, service_id);
         self.services.write().insert(service_id, service);
     }
     pub fn remove_service(&self, service_id: u64) {
