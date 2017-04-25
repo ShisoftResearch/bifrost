@@ -33,7 +33,7 @@ mod simple_service {
         {
             let addr = addr.clone();
             let server = Server::new(&addr);
-            server.register_service(0, Arc::new(HelloServer));
+            server.register_service(0, &Arc::new(HelloServer));
             Server::listen_and_resume(&server);;
         }
         thread::sleep(Duration::from_millis(1000));
@@ -87,7 +87,7 @@ mod struct_service {
         {
             let addr = addr.clone();
             let server = Server::new(&addr); // 0 is service id
-            server.register_service(0, Arc::new(HelloServer));
+            server.register_service(0, &Arc::new(HelloServer));
             Server::listen_and_resume(&server);
         }
         thread::sleep(Duration::from_millis(1000));
@@ -136,7 +136,7 @@ mod multi_server {
                 let addr = addr.clone();
                 thread::spawn(move|| {
                     let server = Server::new(&addr); // 0 is service id
-                    server.register_service(id, Arc::new(IdServer {id: id}));
+                    server.register_service(id, &Arc::new(IdServer {id: id}));
                     Server::listen(&server);
                 });
                 id += 1;

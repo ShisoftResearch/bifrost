@@ -24,7 +24,7 @@ fn primary() {
     });
     let server = Server::new(&addr);
     let heartbeat_service = Membership::new(&server, &raft_service);
-    server.register_service(0, raft_service.clone());
+    server.register_service(0, &raft_service);
     Server::listen_and_resume(&server);
     RaftService::start(&raft_service);
     raft_service.bootstrap();

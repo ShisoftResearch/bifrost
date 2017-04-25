@@ -17,10 +17,10 @@ macro_rules! dispatch_rpc_service_functions {
             fn dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, $crate::rpc::RPCRequestError> {
                 self.inner_dispatch(data)
             }
-            fn register_shortcut_service(&self, service: &Arc<::rpc::RPCService>, server_id: u64, service_id: u64) {
+            fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64) {
                 let cbs = RPC_CALLBACKS.write();
-                let service = service.clone();
-                let svr_ptr = Arc::into_raw(service.clone());
+//                let service = service.clone();
+//                let svr_ptr = Arc::into_raw(service.clone()) as *const $s;
                 //cbs.insert((server_id, service_id), service);
             }
         }
