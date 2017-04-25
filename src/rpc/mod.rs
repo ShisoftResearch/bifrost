@@ -117,7 +117,7 @@ impl Server {
         let service = service.clone();
         let service_ptr = Arc::into_raw(service.clone()) as usize;
         service.register_shortcut_service(service_ptr, self.server_id, service_id);
-        self.services.write().insert(service_id, service.clone());
+        self.services.write().insert(service_id, service);
     }
     pub fn remove_service(&self, service_id: u64) {
         self.services.write().remove(&service_id);
