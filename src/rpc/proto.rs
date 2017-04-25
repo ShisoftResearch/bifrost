@@ -18,7 +18,9 @@ macro_rules! dispatch_rpc_service_functions {
                 self.inner_dispatch(data)
             }
             fn register_service(&self, service: &Arc<::rpc::RPCService>, server_id: u64, service_id: u64) {
-
+                let cbs = RPC_CALLBACKS.write();
+                let service = service.clone();
+                cbs.insert((server_id, service_id), service);
             }
         }
     };
@@ -127,6 +129,12 @@ macro_rules! service {
         use $crate::rpc::*;
         use $crate::utils::u8vec::*;
         use futures::Future;
+
+        lazy_static! {
+            pub static ref RPC_CALLBACKS:
+            ::parking_lot::RwLock<::std::collections::BTreeMap<(u64, u64), Arc<Service>>>
+            = ::parking_lot::RwLock::new(::std::collections::BTreeMap::new());
+        }
 
         pub trait Service: RPCService {
            $(
