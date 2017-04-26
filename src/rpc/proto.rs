@@ -18,7 +18,7 @@ macro_rules! dispatch_rpc_service_functions {
                 self.inner_dispatch(data)
             }
             fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64) {
-                let mut cbs = RPC_CALLBACKS.write();
+                let mut cbs = RPC_SVRS.write();
                 let service = unsafe {Arc::from_raw(service_ptr as *const $s)};
                 cbs.insert((server_id, service_id), service);
             }
@@ -131,7 +131,7 @@ macro_rules! service {
         use futures::Future;
 
         lazy_static! {
-            pub static ref RPC_CALLBACKS:
+            pub static ref RPC_SVRS:
             ::parking_lot::RwLock<::std::collections::BTreeMap<(u64, u64), Arc<Service>>>
             = ::parking_lot::RwLock::new(::std::collections::BTreeMap::new());
         }
@@ -154,7 +154,6 @@ macro_rules! service {
                    }
                }
            }
-
         }
         pub struct SyncServiceClient {
             pub service_id: u64,
@@ -166,14 +165,25 @@ macro_rules! service {
                 #[allow(non_camel_case_types)]
                 $(#[$attr])*
                 pub fn $fn_name(&self, $($arg:&$in_),*) -> Result<std::result::Result<$out, $error>, RPCError> {
-                    let req_data = ($($arg,)*);
-                    let req_data_bytes = serialize!(&req_data);
-                    let req_bytes = prepend_u64(hash_ident!($fn_name) as u64, req_data_bytes);
-                    let res_bytes = self.client.send(self.service_id, req_bytes);
-                    if let Ok(res_bytes) = res_bytes {
-                        Ok(deserialize!(res_bytes.as_slice()))
+                    let local_svr = {
+                        let svrs = RPC_SVRS.read();
+                        match svrs.get(&(self.server_id, self.service_id)) {
+                            Some(s) => Some(s.clone()),
+                            _ => None
+                        }
+                    };
+                    if let Some(local) = local_svr {
+                        Ok(local.$fn_name($($arg.clone()),*))
                     } else {
-                        Err(res_bytes.err().unwrap())
+                        let req_data = ($($arg,)*);
+                        let req_data_bytes = serialize!(&req_data);
+                        let req_bytes = prepend_u64(hash_ident!($fn_name) as u64, req_data_bytes);
+                        let res_bytes = self.client.send(self.service_id, req_bytes);
+                        if let Ok(res_bytes) = res_bytes {
+                            Ok(deserialize!(res_bytes.as_slice()))
+                        } else {
+                            Err(res_bytes.err().unwrap())
+                        }
                     }
                 }
            )*
