@@ -128,7 +128,7 @@ macro_rules! service {
         use std::io;
         use $crate::rpc::*;
         use $crate::utils::u8vec::*;
-        use futures::Future;
+        use futures::{Future, future};
 
         lazy_static! {
             pub static ref RPC_SVRS:
@@ -160,19 +160,19 @@ macro_rules! service {
             pub server_id: u64,
             pub client: Arc<RPCClient>,
         }
+        pub fn get_local(server_id: u64, service_id: u64) -> Option<Arc<Service>> {
+            let svrs = RPC_SVRS.read();
+            match svrs.get(&(server_id, service_id)) {
+                Some(s) => Some(s.clone()),
+                _ => None
+            }
+        }
         impl SyncServiceClient {
            $(
                 #[allow(non_camel_case_types)]
                 $(#[$attr])*
                 pub fn $fn_name(&self, $($arg:&$in_),*) -> Result<std::result::Result<$out, $error>, RPCError> {
-                    let local_svr = {
-                        let svrs = RPC_SVRS.read();
-                        match svrs.get(&(self.server_id, self.service_id)) {
-                            Some(s) => Some(s.clone()),
-                            _ => None
-                        }
-                    };
-                    if let Some(local) = local_svr {
+                    if let Some(local) = get_local(self.server_id, self.service_id) {
                         Ok(local.$fn_name($($arg.clone()),*))
                     } else {
                         let req_data = ($($arg,)*);
@@ -205,17 +205,21 @@ macro_rules! service {
                 #[allow(non_camel_case_types)]
                 $(#[$attr])*
                 pub fn $fn_name(&self, $($arg:&$in_),*) -> Box<Future<Item = std::result::Result<$out, $error>, Error = RPCError>> {
-                    let req_data = ($($arg,)*);
-                    let req_data_bytes = serialize!(&req_data);
-                    let req_bytes = prepend_u64(hash_ident!($fn_name) as u64, req_data_bytes);
-                    let res_bytes = self.client.send_async(self.service_id, req_bytes);
-                    Box::new(res_bytes.then(|res_bytes| -> Result<std::result::Result<$out, $error>, RPCError> {
-                        if let Ok(res_bytes) = res_bytes {
-                            Ok(deserialize!(res_bytes.as_slice()))
-                        } else {
-                            Err(res_bytes.err().unwrap())
-                        }
-                    }))
+                    if let Some(local) = get_local(self.server_id, self.service_id) {
+                        Box::new(future::finished(local.$fn_name($($arg.clone()),*)))
+                    } else {
+                        let req_data = ($($arg,)*);
+                        let req_data_bytes = serialize!(&req_data);
+                        let req_bytes = prepend_u64(hash_ident!($fn_name) as u64, req_data_bytes);
+                        let res_bytes = self.client.send_async(self.service_id, req_bytes);
+                        Box::new(res_bytes.then(|res_bytes| -> Result<std::result::Result<$out, $error>, RPCError> {
+                            if let Ok(res_bytes) = res_bytes {
+                                Ok(deserialize!(res_bytes.as_slice()))
+                            } else {
+                                Err(res_bytes.err().unwrap())
+                            }
+                        }))
+                    }
                 }
            )*
            pub fn new(service_id: u64, client: &Arc<RPCClient>) -> Arc<SyncServiceClient> {
@@ -242,7 +246,7 @@ mod syntax_test {
 #[cfg(test)]
 mod struct_test {
 
-    #[derive(Serialize, Deserialize, Debug)]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
     pub struct a {
         b: u32,
         d: u64,

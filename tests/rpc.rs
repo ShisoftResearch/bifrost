@@ -53,7 +53,7 @@ mod simple_service {
 mod struct_service {
     use std::thread;
 
-    #[derive(Serialize, Deserialize, Debug)]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
     pub struct Greeting {
         name: String,
         time: u32
