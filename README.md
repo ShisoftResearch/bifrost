@@ -1,4 +1,4 @@
-# bifrost
+# bifrost [![Build Status](https://travis-ci.org/shisoft/bifrost.svg?branch=develop)](https://travis-ci.org/shisoft/bifrost)
 Pure rust building block for distributed systems
 
 ### Objective
