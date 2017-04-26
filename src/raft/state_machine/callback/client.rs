@@ -30,10 +30,10 @@ impl SubscriptionService {
     pub fn initialize(server: &Arc<Server>) -> Arc<SubscriptionService> {
         let service = Arc::new(SubscriptionService {
             subs: RwLock::new(HashMap::new()),
-            server_address: server.address().clone().unwrap(),
+            server_address: server.address().clone(),
             session_id: get_time() as u64
         });
-        server.register_service(DEFAULT_SERVICE_ID, service.clone());
+        server.register_service(DEFAULT_SERVICE_ID, &service);
         return service;
     }
 }

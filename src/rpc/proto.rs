@@ -17,6 +17,11 @@ macro_rules! dispatch_rpc_service_functions {
             fn dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, $crate::rpc::RPCRequestError> {
                 self.inner_dispatch(data)
             }
+            fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64) {
+                let mut cbs = RPC_SVRS.write();
+                let service = unsafe {Arc::from_raw(service_ptr as *const $s)};
+                cbs.insert((server_id, service_id), service);
+            }
         }
     };
 }
@@ -123,7 +128,13 @@ macro_rules! service {
         use std::io;
         use $crate::rpc::*;
         use $crate::utils::u8vec::*;
-        use futures::Future;
+        use futures::{Future, future};
+
+        lazy_static! {
+            pub static ref RPC_SVRS:
+            ::parking_lot::RwLock<::std::collections::BTreeMap<(u64, u64), Arc<Service>>>
+            = ::parking_lot::RwLock::new(::std::collections::BTreeMap::new());
+        }
 
         pub trait Service: RPCService {
            $(
@@ -143,37 +154,50 @@ macro_rules! service {
                    }
                }
            }
-
         }
         pub struct SyncServiceClient {
-            pub id: u64,
+            pub service_id: u64,
+            pub server_id: u64,
             pub client: Arc<RPCClient>,
+        }
+        pub fn get_local(server_id: u64, service_id: u64) -> Option<Arc<Service>> {
+            let svrs = RPC_SVRS.read();
+            match svrs.get(&(server_id, service_id)) {
+                Some(s) => Some(s.clone()),
+                _ => None
+            }
         }
         impl SyncServiceClient {
            $(
                 #[allow(non_camel_case_types)]
                 $(#[$attr])*
                 pub fn $fn_name(&self, $($arg:&$in_),*) -> Result<std::result::Result<$out, $error>, RPCError> {
-                    let req_data = ($($arg,)*);
-                    let req_data_bytes = serialize!(&req_data);
-                    let req_bytes = prepend_u64(hash_ident!($fn_name) as u64, req_data_bytes);
-                    let res_bytes = self.client.send(self.id, req_bytes);
-                    if let Ok(res_bytes) = res_bytes {
-                        Ok(deserialize!(res_bytes.as_slice()))
+                    if let Some(local) = get_local(self.server_id, self.service_id) {
+                        Ok(local.$fn_name($($arg.clone()),*))
                     } else {
-                        Err(res_bytes.err().unwrap())
+                        let req_data = ($($arg,)*);
+                        let req_data_bytes = serialize!(&req_data);
+                        let req_bytes = prepend_u64(hash_ident!($fn_name) as u64, req_data_bytes);
+                        let res_bytes = self.client.send(self.service_id, req_bytes);
+                        if let Ok(res_bytes) = res_bytes {
+                            Ok(deserialize!(res_bytes.as_slice()))
+                        } else {
+                            Err(res_bytes.err().unwrap())
+                        }
                     }
                 }
            )*
            pub fn new(service_id: u64, client: &Arc<RPCClient>) -> Arc<SyncServiceClient> {
                 Arc::new(SyncServiceClient{
-                    id: service_id,
+                    service_id: service_id,
+                    server_id:client.server_id,
                     client: client.clone()
                 })
            }
         }
         pub struct AsyncServiceClient {
-            pub id: u64,
+            pub service_id: u64,
+            pub server_id: u64,
             pub client: Arc<RPCClient>,
         }
         impl AsyncServiceClient {
@@ -181,22 +205,27 @@ macro_rules! service {
                 #[allow(non_camel_case_types)]
                 $(#[$attr])*
                 pub fn $fn_name(&self, $($arg:&$in_),*) -> Box<Future<Item = std::result::Result<$out, $error>, Error = RPCError>> {
-                    let req_data = ($($arg,)*);
-                    let req_data_bytes = serialize!(&req_data);
-                    let req_bytes = prepend_u64(hash_ident!($fn_name) as u64, req_data_bytes);
-                    let res_bytes = self.client.send_async(self.id, req_bytes);
-                    Box::new(res_bytes.then(|res_bytes| -> Result<std::result::Result<$out, $error>, RPCError> {
-                        if let Ok(res_bytes) = res_bytes {
-                            Ok(deserialize!(res_bytes.as_slice()))
-                        } else {
-                            Err(res_bytes.err().unwrap())
-                        }
-                    }))
+                    if let Some(local) = get_local(self.server_id, self.service_id) {
+                        Box::new(future::finished(local.$fn_name($($arg.clone()),*)))
+                    } else {
+                        let req_data = ($($arg,)*);
+                        let req_data_bytes = serialize!(&req_data);
+                        let req_bytes = prepend_u64(hash_ident!($fn_name) as u64, req_data_bytes);
+                        let res_bytes = self.client.send_async(self.service_id, req_bytes);
+                        Box::new(res_bytes.then(|res_bytes| -> Result<std::result::Result<$out, $error>, RPCError> {
+                            if let Ok(res_bytes) = res_bytes {
+                                Ok(deserialize!(res_bytes.as_slice()))
+                            } else {
+                                Err(res_bytes.err().unwrap())
+                            }
+                        }))
+                    }
                 }
            )*
            pub fn new(service_id: u64, client: &Arc<RPCClient>) -> Arc<SyncServiceClient> {
                 Arc::new(SyncServiceClient{
-                    id: service_id,
+                    service_id: service_id,
+                    server_id:client.server_id,
                     client: client.clone()
                 })
            }
@@ -217,7 +246,7 @@ mod syntax_test {
 #[cfg(test)]
 mod struct_test {
 
-    #[derive(Serialize, Deserialize, Debug)]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
     pub struct a {
         b: u32,
         d: u64,

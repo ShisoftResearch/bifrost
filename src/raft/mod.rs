@@ -340,8 +340,9 @@ impl RaftService {
         let address = opts.address.clone();
         let svr_id = opts.service_id;
         let service = RaftService::new(opts);
-        let server = Server::new(vec!((svr_id, service.clone())));
-        Server::listen_and_resume(&server, &address);
+        let server = Server::new(&address);
+        Server::listen_and_resume(&server);
+        server.register_service(svr_id, &service);
         (RaftService::start(&service), service, server)
     }
     pub fn bootstrap(&self) {

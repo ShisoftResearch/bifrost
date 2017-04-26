@@ -147,7 +147,7 @@ impl Membership {
         };
         membership_service.init_callback(raft_service);
         raft_service.register_state_machine(Box::new(membership_service));
-        server.register_service(DEFAULT_SERVICE_ID, service.clone());
+        server.register_service(DEFAULT_SERVICE_ID, &service);
     }
     fn compose_client_member(&self, id: u64) -> ClientMember {
         let member = self.members.get(&id).unwrap();

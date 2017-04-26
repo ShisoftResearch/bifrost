@@ -22,9 +22,10 @@ fn primary() {
         address: addr.clone(),
         service_id: 0,
     });
-    let server = Server::new(vec!((0, raft_service.clone())));
+    let server = Server::new(&addr);
     let heartbeat_service = Membership::new(&server, &raft_service);
-    Server::listen_and_resume(&server, &addr);
+    server.register_service(0, &raft_service);
+    Server::listen_and_resume(&server);
     RaftService::start(&raft_service);
     raft_service.bootstrap();
 

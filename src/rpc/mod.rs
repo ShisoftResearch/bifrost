@@ -12,6 +12,7 @@ use tcp;
 use utils::time;
 use utils::u8vec::*;
 use futures::Future;
+use bifrost_hasher::hash_str;
 
 lazy_static! {
     pub static ref DEFAULT_CLIENT_POOL: ClientPool = ClientPool::new();
@@ -32,11 +33,13 @@ pub enum RPCError {
 
 pub trait RPCService: Sync + Send {
     fn dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, RPCRequestError>;
+    fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64);
 }
 
 pub struct Server {
     services: RwLock<HashMap<u64, Arc<RPCService>>>,
-    pub address: RwLock<Option<String>>,
+    address: String,
+    server_id: u64
 }
 
 pub struct ClientPool {
@@ -77,24 +80,17 @@ fn decode_res(res: io::Result<Vec<u8>>) -> Result<Vec<u8>, RPCError> {
 }
 
 impl Server {
-    pub fn new(services: Vec<(u64, Arc<RPCService>)>) -> Arc<Server> {
-        let mut svr_map = HashMap::with_capacity(services.len());
-        for (svr_id, svr) in services {
-            svr_map.insert(svr_id, svr.clone());
-        }
+    pub fn new(address: &String) -> Arc<Server> {
         Arc::new(Server {
-            services: RwLock::new(svr_map),
-            address: RwLock::new(None),
+            services: RwLock::new(HashMap::new()),
+            address: address.clone(),
+            server_id: hash_str(address)
         })
     }
-    fn reset_address(&self, addr: &String) {
-        let mut server_address = self.address.write();
-        *server_address = Some(addr.clone());
-    }
-    pub fn listen(server: Arc<Server>, addr: &String) {
-        server.reset_address(addr);
+    pub fn listen(server: &Arc<Server>) {
+        let address = &server.address;
         let server = server.clone();
-        tcp::server::Server::new(addr, Box::new(move |data| {
+        tcp::server::Server::new(address, Box::new(move |data| {
             let (svr_id, data) = extract_u64_head(data);
             let t = time::get_time();
             let svr_map = server.services.read();
@@ -109,27 +105,31 @@ impl Server {
             res
         }));
     }
-    pub fn listen_and_resume(server: &Arc<Server>, addr: &String) {
-        server.reset_address(&addr);
-        let addr = addr.clone();
+    pub fn listen_and_resume(server: &Arc<Server>) {
         let server = server.clone();
         thread::spawn(move|| {
-            Server::listen(server, &addr);
+            let server = server;
+            Server::listen(&server);
         });
     }
-    pub fn register_service(&self, service_id: u64,  service: Arc<RPCService>) {
+    pub fn register_service<T>(&self, service_id: u64,  service: &Arc<T>)
+    where T: RPCService + Sized + 'static{
+        let service = service.clone();
+        let service_ptr = Arc::into_raw(service.clone()) as usize;
+        service.register_shortcut_service(service_ptr, self.server_id, service_id);
         self.services.write().insert(service_id, service);
     }
     pub fn remove_service(&self, service_id: u64) {
         self.services.write().remove(&service_id);
     }
-    pub fn address(&self) -> Option<String> {
-        self.address.read().clone()
+    pub fn address(&self) -> &String {
+        &self.address
     }
 }
 
 pub struct RPCClient {
     client: Mutex<tcp::client::Client>,
+    pub server_id: u64,
     pub address: String
 }
 
@@ -143,14 +143,18 @@ impl RPCClient {
             .then(move |res| decode_res(res)))
     }
     pub fn new(addr: &String) -> io::Result<Arc<RPCClient>> {
+        let client = tcp::client::Client::connect(addr)?;
         Ok(Arc::new(RPCClient {
-            client: Mutex::new(tcp::client::Client::connect(addr)?),
+            server_id: client.server_id,
+            client: Mutex::new(client),
             address: addr.clone()
         }))
     }
     pub fn with_timeout(addr: &String, timeout: Duration) -> io::Result<Arc<RPCClient>> {
+        let client = tcp::client::Client::connect_with_timeout(addr, timeout)?;
         Ok(Arc::new(RPCClient {
-            client: Mutex::new(tcp::client::Client::connect_with_timeout(addr, timeout)?),
+            server_id: client.server_id,
+            client: Mutex::new(client),
             address: addr.clone()
         }))
     }

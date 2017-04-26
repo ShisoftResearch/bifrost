@@ -19,8 +19,9 @@ fn hash_map(){
         address: addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
     });
-    let server = Server::new(vec!((DEFAULT_SERVICE_ID, raft_service.clone())));
-    Server::listen_and_resume(&server, &addr);
+    let server = Server::new(&addr);
+    server.register_service(DEFAULT_SERVICE_ID, &raft_service);
+    Server::listen_and_resume(&server);
     let sm_id = map_sm.id;
     map_sm.init_callback(&raft_service);
     assert!(RaftService::start(&raft_service));

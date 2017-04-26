@@ -32,8 +32,9 @@ mod simple_service {
         let addr = String::from("127.0.0.1:1300");
         {
             let addr = addr.clone();
-            let server = Server::new(vec!((0, Arc::new(HelloServer)))); // 0 is service id
-            Server::listen_and_resume(&server, &addr);;
+            let server = Server::new(&addr);
+            server.register_service(0, &Arc::new(HelloServer));
+            Server::listen_and_resume(&server);;
         }
         thread::sleep(Duration::from_millis(1000));
         let client = RPCClient::new(&addr).unwrap();
@@ -52,7 +53,7 @@ mod simple_service {
 mod struct_service {
     use std::thread;
 
-    #[derive(Serialize, Deserialize, Debug)]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
     pub struct Greeting {
         name: String,
         time: u32
@@ -85,10 +86,9 @@ mod struct_service {
         let addr = String::from("127.0.0.1:1400");
         {
             let addr = addr.clone();
-            let server = Server::new(vec!((0, Arc::new(HelloServer)))); // 0 is service id
-            thread::spawn(move|| {
-                Server::listen(server, &addr);
-            });
+            let server = Server::new(&addr); // 0 is service id
+            server.register_service(0, &Arc::new(HelloServer));
+            Server::listen_and_resume(&server);
         }
         thread::sleep(Duration::from_millis(1000));
         let client = RPCClient::new(&addr).unwrap();
@@ -135,8 +135,9 @@ mod multi_server {
             {
                 let addr = addr.clone();
                 thread::spawn(move|| {
-                    let server = Server::new(vec!((id, Arc::new(IdServer {id: id})))); // 0 is service id
-                    Server::listen(server, &addr);
+                    let server = Server::new(&addr); // 0 is service id
+                    server.register_service(id, &Arc::new(IdServer {id: id}));
+                    Server::listen(&server);
                 });
                 id += 1;
             }

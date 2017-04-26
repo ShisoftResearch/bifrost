@@ -12,6 +12,10 @@ extern crate futures;
 #[macro_use]
 extern crate serde_derive;
 
+#[macro_use]
+extern crate lazy_static;
+extern crate parking_lot;
+
 mod rpc;
 mod raft;
 mod store;
