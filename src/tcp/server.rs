@@ -9,6 +9,7 @@ use futures::{future, Future, BoxFuture};
 use tcp::framed::BytesCodec;
 use tcp::proto::BytesServerProto;
 use tcp::shortcut;
+use super::STANDALONE_ADDRESS;
 
 pub type ServerCallback = Box<Fn(Vec<u8>) -> Vec<u8> + Send + Sync>;
 
@@ -47,12 +48,14 @@ impl NewService for NewServer {
 
 impl Server {
     pub fn new(addr: &String, callback: ServerCallback) {
-        let socket_addr: SocketAddr = addr.parse().unwrap();
         let callback_ref = Arc::new(callback);
         shortcut::register_server(addr, &callback_ref);
         let new_server = NewServer {
             callback: callback_ref
         };
-        TcpServer::new(BytesServerProto, socket_addr).serve(new_server);
+        if !addr.eq(&STANDALONE_ADDRESS) {
+            let socket_addr: SocketAddr = addr.parse().unwrap();
+            TcpServer::new(BytesServerProto, socket_addr).serve(new_server);
+        }
     }
 }

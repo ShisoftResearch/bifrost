@@ -17,6 +17,7 @@ use tokio_timer::Timer;
 use tcp::proto::BytesClientProto;
 use tcp::shortcut;
 use bifrost_hasher::hash_str;
+use super::STANDALONE_ADDRESS;
 
 pub type ResFuture = Future<Item = Vec<u8>, Error = io::Error>;
 
@@ -46,10 +47,13 @@ impl Client {
     pub fn connect_with_timeout (address: &String, timeout: Duration) -> io::Result<Client> {
         let server_id = hash_str(address);
         let client = {
-            let mut core = Core::new()?;
             if shortcut::is_local(server_id) {
                 None
             } else {
+                if address.eq(&STANDALONE_ADDRESS) {
+                    return Err(io::Error::new(io::ErrorKind::Other, "STANDALONE server is not found"))
+                }
+                let mut core = Core::new()?;
                 let socket_address = address.parse().unwrap();
                 let future = Box::new(TcpClient::new(BytesClientProto)
                     .connect(&socket_address, &core.handle())
