@@ -18,11 +18,11 @@ mod simple_service {
     struct HelloServer;
 
     impl Service for HelloServer {
-        fn hello(&self, name: String) -> Result<String, ()> {
+        fn hello(&self, name: &String) -> Result<String, ()> {
             Ok(format!("Hello, {}!", name))
         }
-        fn error(&self, message: String) -> Result<(), String> {
-            Err(message)
+        fn error(&self, message: &String) -> Result<(), String> {
+            Err(message.clone())
         }
     }
     dispatch_rpc_service_functions!(HelloServer);
@@ -72,7 +72,7 @@ mod struct_service {
     struct HelloServer;
 
     impl Service for HelloServer {
-        fn hello(&self, gret: Greeting) -> Result<Respond, ()> {
+        fn hello(&self, gret: &Greeting) -> Result<Respond, ()> {
             Ok(Respond {
                 text: format!("Hello, {}. It is {} now!", gret.name, gret.time),
                 owner: 42

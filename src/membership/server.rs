@@ -29,10 +29,10 @@ pub struct HeartbeatService {
 }
 
 impl Service for HeartbeatService {
-    fn ping(&self, id: u64) -> Result<(), ()> {
+    fn ping(&self, id: &u64) -> Result<(), ()> {
         let mut stat_map = self.status.write();
         let current_time = time::get_time();
-        let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
+        let mut stat = stat_map.entry(*id).or_insert_with(|| HBStatus {
             online: false,
             last_updated: current_time,
             //orthodoxy info will trigger the watcher thread to update
@@ -46,7 +46,7 @@ impl HeartbeatService {
     fn update_raft(&self, online: &Vec<u64>, offline: &Vec<u64>) {
         let log = commands::hb_online_changed::new(online, offline);
         let fn_id = log.encode().0;
-        self.raft_service.c_command(LogEntry {
+        self.raft_service.c_command(&LogEntry {
             id: 0,
             term: 0,
             sm_id: DEFAULT_SERVICE_ID,

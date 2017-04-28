@@ -139,14 +139,14 @@ macro_rules! service {
         pub trait Service: RPCService {
            $(
                 $(#[$attr])*
-                fn $fn_name(&self, $($arg:$in_),*) -> std::result::Result<$out, $error>;
+                fn $fn_name(&self, $($arg:&$in_),*) -> std::result::Result<$out, $error>;
            )*
            fn inner_dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, RPCRequestError> {
                let (func_id, body) = extract_u64_head(data);
                match func_id as usize {
                    $(hash_ident!($fn_name) => {
                        let ($($arg,)*) : ($($in_,)*) = deserialize!(&body);
-                       let f_result = self.$fn_name($($arg,)*);
+                       let f_result = self.$fn_name($(&$arg,)*);
                        Ok(serialize!(&f_result))
                    }),*
                    _ => {
@@ -173,7 +173,7 @@ macro_rules! service {
                 $(#[$attr])*
                 pub fn $fn_name(&self, $($arg:&$in_),*) -> Result<std::result::Result<$out, $error>, RPCError> {
                     if let Some(local) = get_local(self.server_id, self.service_id) {
-                        Ok(local.$fn_name($($arg.clone()),*))
+                        Ok(local.$fn_name($($arg),*))
                     } else {
                         let req_data = ($($arg,)*);
                         let req_data_bytes = serialize!(&req_data);
@@ -206,7 +206,7 @@ macro_rules! service {
                 $(#[$attr])*
                 pub fn $fn_name(&self, $($arg:&$in_),*) -> Box<Future<Item = std::result::Result<$out, $error>, Error = RPCError>> {
                     if let Some(local) = get_local(self.server_id, self.service_id) {
-                        Box::new(future::finished(local.$fn_name($($arg.clone()),*)))
+                        Box::new(future::finished(local.$fn_name($($arg),*)))
                     } else {
                         let req_data = ($($arg,)*);
                         let req_data_bytes = serialize!(&req_data);

@@ -13,8 +13,8 @@ pub struct SubscriptionService {
 }
 
 impl Service for SubscriptionService {
-    fn notify(&self, key: SubKey, data: Vec<u8>) -> Result<(), ()> {
-        let (raft_sid, sm_id, fn_id, pattern_id) = key;
+    fn notify(&self, key: &SubKey, data: &Vec<u8>) -> Result<(), ()> {
+        let (raft_sid, sm_id, fn_id, pattern_id) = *key;
         let subs = self.subs.read();
         if let Some(sub_fns) = subs.get(&key) {
             for fun in sub_fns {
