@@ -27,24 +27,6 @@ impl <S: Eq + Copy + Ord> PartialOrd for VectorClock<S> {
             Relation::Concurrent => None
         }
     }
-
-    fn lt(&self, other: &VectorClock<S>) -> bool {
-        self.relation(other) == Relation::Before
-    }
-
-    fn le(&self, other: &VectorClock<S>) -> bool {
-        let rel = self.relation(other);
-        rel == Relation::Before || rel == Relation::Equal
-    }
-
-    fn gt(&self, other: &VectorClock<S>) -> bool {
-        self.relation(other) == Relation::After
-    }
-
-    fn ge(&self, other: &VectorClock<S>) -> bool {
-        let rel = self.relation(other);
-        rel == Relation::After || rel == Relation::Equal
-    }
 }
 
 impl <S: Eq + Copy + Ord> Ord for VectorClock<S> {
@@ -62,11 +44,6 @@ impl <S: Eq + Copy + Ord> PartialEq for VectorClock<S> {
     fn eq(&self, other: &VectorClock<S>) -> bool {
         let rel = self.relation(other);
         rel == Relation::Equal
-    }
-
-    fn ne(&self, other: &VectorClock<S>) -> bool {
-        let rel = self.relation(other);
-        !(rel == Relation::After || rel == Relation::Before)
     }
 }
 
