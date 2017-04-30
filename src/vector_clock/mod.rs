@@ -47,6 +47,17 @@ impl <S: Eq + Copy + Ord> PartialOrd for VectorClock<S> {
     }
 }
 
+impl <S: Eq + Copy + Ord> Ord for VectorClock<S> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let rel = self.relation(other);
+        match rel {
+            Relation::Before => Ordering::Less,
+            Relation::After => Ordering::Greater,
+            _ => Ordering::Equal // not justified, but sufficient for BTreeSet data structure
+        }
+    }
+}
+
 impl <S: Eq + Copy + Ord> PartialEq for VectorClock<S> {
     fn eq(&self, other: &VectorClock<S>) -> bool {
         let rel = self.relation(other);
