@@ -38,8 +38,8 @@ pub trait RPCService: Sync + Send {
 
 pub struct Server {
     services: RwLock<HashMap<u64, Arc<RPCService>>>,
-    address: String,
-    server_id: u64
+    pub address: String,
+    pub server_id: u64
 }
 
 pub struct ClientPool {
