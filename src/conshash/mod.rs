@@ -13,6 +13,7 @@ use membership::client::{ObserverClient as MembershipClient, Member};
 use conshash::weights::DEFAULT_SERVICE_ID;
 use conshash::weights::client::{SMClient as WeightSMClient};
 use raft::client::{RaftClient, SubscriptionError};
+use utils::bincode::{serialize, deserialize};
 
 pub mod weights;
 
@@ -158,13 +159,13 @@ impl ConsistentHashing {
         self.get_server(hash_str(string))
     }
     pub fn get_server_by<T>(&self, obj: &T) -> Option<String> where T: serde::Serialize {
-        self.get_server(hash_bytes(serialize!(obj).as_slice()))
+        self.get_server(hash_bytes(serialize(obj).as_slice()))
     }
     pub fn get_server_id_by_string(&self, string: &String) -> Option<u64> {
         self.get_server_id(hash_str(string))
     }
     pub fn get_server_id_by<T>(&self, obj: &T) -> Option<u64> where T: serde::Serialize {
-        self.get_server_id(hash_bytes(serialize!(obj).as_slice()))
+        self.get_server_id(hash_bytes(serialize(obj).as_slice()))
     }
     pub fn nodes_count(&self) -> usize {
         let lookup_table = self.tables.read();

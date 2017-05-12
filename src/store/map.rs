@@ -98,10 +98,10 @@ macro_rules! def_store_hash_map {
             impl StateMachineCtl for Map {
                 raft_sm_complete!();
                 fn snapshot(&self) -> Option<Vec<u8>> {
-                    Some(serialize!(&self.map))
+                    Some($crate::utils::bincode::serialize(&self.map))
                 }
                 fn recover(&mut self, data: Vec<u8>) {
-                    self.map = deserialize!(&data);
+                    self.map = $crate::utils::bincode::deserialize(&data);
                 }
                 fn id(&self) -> u64 {self.id}
             }

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
 use std::io;
+use utils::bincode;
 
 pub const CONFIG_SM_ID: u64 = 1;
 
@@ -85,10 +86,10 @@ impl StateMachineCtl for Configures {
         for (_, member) in self.members.iter() {
             snapshot.members.insert(member.address.clone());
         }
-        Some(serialize!(&snapshot))
+        Some(bincode::serialize(&snapshot))
     }
     fn recover(&mut self, data: Vec<u8>) {
-        let snapshot:ConfigSnapshot = deserialize!(&data);
+        let snapshot:ConfigSnapshot = bincode::deserialize(&data);
         self.recover_members(&snapshot.members)
     }
     fn id(&self) -> u64 {CONFIG_SM_ID}

@@ -8,6 +8,7 @@ use num_cpus;
 use bifrost_hasher::{hash_str, hash_bytes};
 use raft::{RaftService, IS_LEADER};
 use rpc;
+use utils::bincode;
 use serde;
 use super::super::{StateMachineCtl, OpType};
 use super::super::super::RaftMsg;
@@ -129,7 +130,7 @@ impl SMCallback {
                 let key = (raft_sid, sm_id, fn_id, pattern_id);
                 let svr_subs = self.subscriptions.read();
                 if let Some(sub_ids) = svr_subs.subscriptions.get(&key) {
-                    let data = serialize!(&data);
+                    let data = bincode::serialize(&data);
                     for sub_id in sub_ids {
                         if let Some(subscriber_id) = svr_subs.sub_suber.get(&sub_id) {
                             if let Some(subscriber) = svr_subs.subscribers.get(&subscriber_id) {

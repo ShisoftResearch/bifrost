@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use raft::state_machine::StateMachineCtl;
 use raft::RaftService;
+use utils::bincode;
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_DHT_WEIGHTS) as u64;
 
@@ -41,10 +42,10 @@ impl StateMachineCmds for Weights {
 impl StateMachineCtl for Weights {
     raft_sm_complete!();
     fn snapshot(&self) -> Option<Vec<u8>> {
-        Some(serialize!(&self.groups))
+        Some(bincode::serialize(&self.groups))
     }
     fn recover(&mut self, data: Vec<u8>) {
-        self.groups = deserialize!(&data);
+        self.groups = bincode::deserialize(&data);
     }
     fn id(&self) -> u64 {DEFAULT_SERVICE_ID}
 }

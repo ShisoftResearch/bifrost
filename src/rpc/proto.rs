@@ -1,26 +1,6 @@
 use bincode;
 
 #[macro_export]
-macro_rules! serialize {
-    ($e:expr) => {
-        match ::bincode::serialize($e, ::bincode::Infinite) {
-            Ok(data) => data,
-            Err(e) => {panic!("Cannot serialize: {:?}", e)}
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! deserialize {
-    ($e:expr) => {
-        match ::bincode::deserialize($e){
-            Ok(data) => data,
-            Err(e) => {panic!("Cannot deserialize: {:?}", e)}
-        }
-    };
-}
-
-#[macro_export]
 macro_rules! dispatch_rpc_service_functions {
     ($s:ty) => {
         impl $crate::rpc::RPCService for $s {
@@ -154,9 +134,9 @@ macro_rules! service {
                let (func_id, body) = extract_u64_head(data);
                match func_id as usize {
                    $(hash_ident!($fn_name) => {
-                       let ($($arg,)*) : ($($in_,)*) = deserialize!(&body);
+                       let ($($arg,)*) : ($($in_,)*) = $crate::utils::bincode::deserialize(&body);
                        let f_result = self.$fn_name($(&$arg,)*);
-                       Ok(serialize!(&f_result))
+                       Ok($crate::utils::bincode::serialize(&f_result))
                    }),*
                    _ => {
                        Err(RPCRequestError::FunctionIdNotFound)
@@ -185,11 +165,11 @@ macro_rules! service {
                         Ok(local.$fn_name($($arg),*))
                     } else {
                         let req_data = ($($arg,)*);
-                        let req_data_bytes = serialize!(&req_data);
+                        let req_data_bytes = $crate::utils::bincode::serialize(&req_data);
                         let req_bytes = prepend_u64(hash_ident!($fn_name) as u64, req_data_bytes);
                         let res_bytes = self.client.send(self.service_id, req_bytes);
                         if let Ok(res_bytes) = res_bytes {
-                            Ok(deserialize!(res_bytes.as_slice()))
+                            Ok($crate::utils::bincode::deserialize(&res_bytes))
                         } else {
                             Err(res_bytes.err().unwrap())
                         }
@@ -218,12 +198,12 @@ macro_rules! service {
                         Box::new(future::finished(local.$fn_name($($arg),*)))
                     } else {
                         let req_data = ($($arg,)*);
-                        let req_data_bytes = serialize!(&req_data);
+                        let req_data_bytes = $crate::utils::bincode::serialize(&req_data);
                         let req_bytes = prepend_u64(hash_ident!($fn_name) as u64, req_data_bytes);
                         let res_bytes = self.client.send_async(self.service_id, req_bytes);
                         Box::new(res_bytes.then(|res_bytes| -> Result<std::result::Result<$out, $error>, RPCError> {
                             if let Ok(res_bytes) = res_bytes {
-                                Ok(deserialize!(res_bytes.as_slice()))
+                                Ok($crate::utils::bincode::deserialize(&res_bytes))
                             } else {
                                 Err(res_bytes.err().unwrap())
                             }

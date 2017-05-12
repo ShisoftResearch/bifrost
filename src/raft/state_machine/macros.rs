@@ -3,7 +3,7 @@
 
 #[macro_export]
 macro_rules! raft_return_type {
-    ($out: ty, $error: ty) => {std::result::Result<$out, $error>};
+    ($out: ty, $error: ty) => {::std::result::Result<$out, $error>};
 }
 
 #[macro_export]
@@ -51,10 +51,10 @@ macro_rules! raft_fn_op_type {
 #[macro_export]
 macro_rules! raft_dispatch_fn {
     ($fn_name:ident $s: ident $d: ident ( $( $arg:ident : $in_:ty ),* )) => {{
-        let decoded: ($($in_,)*) = deserialize!($d);
+        let decoded: ($($in_,)*) = $crate::utils::bincode::deserialize($d);
         let ($($arg,)*) = decoded;
         let f_result = $s.$fn_name($($arg),*);
-        Some(serialize!(&f_result))
+        Some($crate::utils::bincode::serialize(&f_result))
     }};
 }
 
@@ -177,8 +177,6 @@ macro_rules! raft_state_machine {
             def $smt:ident $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty;
         )*
     ) => {
-        use std;
-
         pub mod commands {
             use super::*;
             $(
@@ -195,14 +193,14 @@ macro_rules! raft_state_machine {
                         )
                     }
                     fn decode_return(&self, data: &Vec<u8>) -> raft_return_type!($out, $error) {
-                        deserialize!(data)
+                        $crate::utils::bincode::deserialize(data)
                     }
                 }
                 impl $fn_name {
                     pub fn new($($arg:&$in_),*) -> $fn_name {
                         let req_data = ($($arg,)*);
                         $fn_name {
-                            data: serialize!(&req_data)
+                            data: $crate::utils::bincode::serialize(&req_data)
                         }
                     }
                 }

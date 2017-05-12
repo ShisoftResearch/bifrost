@@ -2,6 +2,7 @@ use super::super::*;
 use super::*;
 use std::collections::HashMap;
 use self::configs::{Configures, RaftMember, CONFIG_SM_ID};
+use utils::bincode;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ExecError {
@@ -46,11 +47,11 @@ impl StateMachineCtl for MasterStateMachine {
             }
         }
         sms.push((self.configs.id(), self.configs.snapshot().unwrap()));
-        let data = serialize!(&sms);
+        let data = bincode::serialize(&sms);
         Some(data)
     }
     fn recover(&mut self, data: Vec<u8>) {
-        let mut sms: SnapshotDataItems = deserialize!(&data);
+        let mut sms: SnapshotDataItems = bincode::deserialize(&data);
         for (sm_id, snapshot) in sms {
             if let Some(sm) = self.subs.get_mut(&sm_id) {
                 sm.recover(snapshot);
