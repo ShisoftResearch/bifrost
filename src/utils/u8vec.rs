@@ -1,5 +1,5 @@
 use byteorder::{ByteOrder, LittleEndian};
-use bincode::{SizeLimit, serde as bincode};
+use bincode;
 
 pub fn prepend_u64 (num: u64, vec: Vec<u8>) -> Vec<u8> {
     let mut s_id_vec = [0u8; 8].to_vec();

@@ -22,7 +22,6 @@ pub mod membership;
 pub mod conshash;
 pub mod vector_clock;
 
-extern crate mio;
 extern crate byteorder;
 
 extern crate tokio_core;

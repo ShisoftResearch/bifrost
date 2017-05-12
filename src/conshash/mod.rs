@@ -5,7 +5,7 @@ use std::cmp::max;
 use std::thread;
 use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::{RwLock, RwLockWriteGuard};
-use bincode::{SizeLimit, serde as bincode};
+use bincode;
 use serde;
 
 use bifrost_hasher::{hash_str, hash_bytes};

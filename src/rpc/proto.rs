@@ -1,13 +1,13 @@
-use bincode::{SizeLimit, serde as bincode};
+use bincode;
 
 #[macro_export]
 macro_rules! serialize {
-    ($e:expr) => {bincode::serialize($e, SizeLimit::Infinite).unwrap()};
+    ($e:expr) => {::bincode::serialize($e, ::bincode::Infinite).unwrap()};
 }
 
 #[macro_export]
 macro_rules! deserialize {
-    ($e:expr) => {bincode::deserialize($e).unwrap()};
+    ($e:expr) => { ::bincode::deserialize($e).unwrap()};
 }
 
 #[macro_export]
@@ -123,7 +123,6 @@ macro_rules! service {
     ) => {
         use std;
         use std::time::Duration;
-        use bincode::{SizeLimit, serde as bincode};
         use std::sync::Arc;
         use std::io;
         use $crate::rpc::*;

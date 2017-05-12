@@ -7,7 +7,6 @@ use std::io;
 use std::time::Duration;
 use parking_lot::{Mutex, RwLock};
 use std::thread;
-use bincode::{SizeLimit, serde as bincode};
 use tcp;
 use utils::time;
 use utils::u8vec::*;

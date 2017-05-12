@@ -10,7 +10,7 @@ use raft::state_machine::callback::{
 use raft::state_machine::configs::CONFIG_SM_ID;
 use raft::state_machine::configs::commands::{subscribe as conf_subscribe};
 use rpc::Server;
-use bincode::{SizeLimit, serde as bincode};
+use bincode;
 use std::collections::{HashMap, BTreeMap, HashSet};
 use std::iter::FromIterator;
 use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};

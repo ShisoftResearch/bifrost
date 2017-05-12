@@ -178,7 +178,6 @@ macro_rules! raft_state_machine {
         )*
     ) => {
         use std;
-        use bincode::{SizeLimit, serde as bincode};
 
         pub mod commands {
             use super::*;
