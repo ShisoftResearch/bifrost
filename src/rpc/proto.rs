@@ -2,12 +2,22 @@ use bincode;
 
 #[macro_export]
 macro_rules! serialize {
-    ($e:expr) => {::bincode::serialize($e, ::bincode::Infinite).unwrap()};
+    ($e:expr) => {
+        match ::bincode::serialize($e, ::bincode::Infinite) {
+            Ok(data) => data,
+            Err(e) => {panic!("Cannot serialize: {:?}", e)}
+        }
+    };
 }
 
 #[macro_export]
 macro_rules! deserialize {
-    ($e:expr) => { ::bincode::deserialize($e).unwrap()};
+    ($e:expr) => {
+        match ::bincode::deserialize($e){
+            Ok(data) => data,
+            Err(e) => {panic!("Cannot deserialize: {:?}", e)}
+        }
+    };
 }
 
 #[macro_export]
