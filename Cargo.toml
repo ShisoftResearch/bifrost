@@ -10,13 +10,13 @@ name = "bifrost"
 name = "tests"
 
 [dependencies]
-bincode = "0.8.0"
+bincode = "*"
 byteorder = "1"
 env_logger = "0.3.1"
 log = "0.3.1"
 slab = "0.3.0"
-serde = "1.0.4"
-serde_derive = "1.0.4"
+serde = "*"
+serde_derive = "*"
 bifrost_plugins = { path = "src/plugins" }
 bifrost_hasher = { path = "src/hasher" }
 rand = "0.3"
