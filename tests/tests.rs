@@ -22,6 +22,7 @@ mod store;
 mod membership;
 mod utils;
 mod conshash;
+mod vector_clock;
 
 mod mutex {
     use std::sync::Mutex;

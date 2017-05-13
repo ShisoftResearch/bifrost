@@ -74,10 +74,20 @@ impl <S: Ord + Eq + Copy>VectorClock<S> {
         return a_lt_b;
     }
     pub fn equals(&self, clock_b: &VectorClock<S>) -> bool {
+        let b_keys: Vec<_> = clock_b.map.keys().collect();
+        let self_keys: Vec<_> = self.map.keys().collect();
+        if  b_keys != self_keys {
+            return false;
+        }
         for (server, ac) in self.map.iter() {
-            if let Some(bc) = clock_b.map.get(server) {
-                if ac != bc {return false;}
-            }
+            let bc: u64 = {
+                match clock_b.map.get(server) {
+                    Some(v) => *v, None => {
+                        return false;
+                    }
+                }
+            };
+            if *ac != bc {return false;}
         }
         return true;
     }
