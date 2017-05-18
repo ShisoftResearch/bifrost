@@ -16,6 +16,8 @@ extern crate serde_derive;
 extern crate lazy_static;
 extern crate parking_lot;
 
+
+#[cfg(disable_shortcut)]
 mod rpc;
 mod raft;
 mod store;

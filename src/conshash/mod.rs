@@ -2,7 +2,6 @@ use std;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
-
 use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::{RwLock, RwLockWriteGuard};
 use serde;

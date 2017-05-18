@@ -3,12 +3,15 @@
 
 #![feature(plugin)]
 #![feature(integer_atomics)]
-#![feature(collections_bound)]
 #![feature(proc_macro)]
-#![feature(btree_range)]
 #![feature(fnbox)]
 #![feature(conservative_impl_trait)]
 
+#[cfg(disable_shortcut)]
+pub static DISABLE_SHORTCUT: bool = true;
+
+#[cfg(not(disable_shortcut))]
+pub static DISABLE_SHORTCUT: bool = false;
 
 #[macro_use]
 pub mod utils;

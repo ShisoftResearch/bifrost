@@ -15,6 +15,7 @@ use tcp::proto::BytesClientProto;
 use tcp::shortcut;
 use bifrost_hasher::hash_str;
 use super::STANDALONE_ADDRESS;
+use DISABLE_SHORTCUT;
 
 pub type ResFuture = Future<Item = Vec<u8>, Error = io::Error>;
 
@@ -44,7 +45,7 @@ impl Client {
     pub fn connect_with_timeout (address: &String, timeout: Duration) -> io::Result<Client> {
         let server_id = hash_str(address);
         let client = {
-            if shortcut::is_local(server_id) {
+            if !DISABLE_SHORTCUT && shortcut::is_local(server_id) {
                 None
             } else {
                 if address.eq(&STANDALONE_ADDRESS) {

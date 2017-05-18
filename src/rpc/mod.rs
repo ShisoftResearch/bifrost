@@ -12,6 +12,7 @@ use utils::time;
 use utils::u8vec::*;
 use futures::Future;
 use bifrost_hasher::hash_str;
+use DISABLE_SHORTCUT;
 
 lazy_static! {
     pub static ref DEFAULT_CLIENT_POOL: ClientPool = ClientPool::new();
@@ -113,8 +114,11 @@ impl Server {
     pub fn register_service<T>(&self, service_id: u64,  service: &Arc<T>)
     where T: RPCService + Sized + 'static{
         let service = service.clone();
-        let service_ptr = Arc::into_raw(service.clone()) as usize;
-        service.register_shortcut_service(service_ptr, self.server_id, service_id);
+        if !DISABLE_SHORTCUT {
+            println!("SERVICE SHORTCUT DISABLED");
+            let service_ptr = Arc::into_raw(service.clone()) as usize;
+            service.register_shortcut_service(service_ptr, self.server_id, service_id);
+        }
         self.services.write().insert(service_id, service);
     }
     pub fn remove_service(&self, service_id: u64) {
