@@ -1,19 +1,18 @@
 use std;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::cmp::max;
 use std::thread;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::{RwLock, RwLockWriteGuard};
-use bincode;
 use serde;
 
 use bifrost_hasher::{hash_str, hash_bytes};
 use membership::client::{ObserverClient as MembershipClient, Member};
 use conshash::weights::DEFAULT_SERVICE_ID;
 use conshash::weights::client::{SMClient as WeightSMClient};
-use raft::client::{RaftClient, SubscriptionError};
-use utils::bincode::{serialize, deserialize};
+use raft::client::{RaftClient};
+use utils::bincode::{serialize};
 
 pub mod weights;
 

@@ -1,8 +1,6 @@
-use std::boxed::FnBox;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use parking_lot::{RwLock, Mutex};
-use std::sync::atomic::{AtomicU64, Ordering};
 use threadpool::ThreadPool;
 use num_cpus;
 use bifrost_hasher::{hash_str, hash_bytes};
@@ -10,7 +8,7 @@ use raft::{RaftService, IS_LEADER};
 use rpc;
 use utils::bincode;
 use serde;
-use super::super::{StateMachineCtl, OpType};
+use super::super::{OpType};
 use super::super::super::RaftMsg;
 use super::*;
 

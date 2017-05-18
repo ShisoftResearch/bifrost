@@ -1,21 +1,15 @@
 use raft::{
-    SyncServiceClient, ClientClusterInfo, RaftMsg,
-    RaftStateMachine, LogEntry,
-    ClientQryResponse, ClientCmdResponse};
+    SyncServiceClient, RaftMsg, LogEntry, ClientQryResponse, 
+    ClientCmdResponse};
 use raft::state_machine::OpType;
 use raft::state_machine::master::{ExecResult, ExecError};
 use raft::state_machine::callback::client::SubscriptionService;
-use raft::state_machine::callback::{
-    DEFAULT_SERVICE_ID as CALLBACK_DEFAULT_SERVICE_ID, };
 use raft::state_machine::configs::CONFIG_SM_ID;
 use raft::state_machine::configs::commands::{subscribe as conf_subscribe};
-use rpc::Server;
-use bincode;
 use std::collections::{HashMap, BTreeMap, HashSet};
 use std::iter::FromIterator;
-use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use parking_lot::{RwLock, RwLockWriteGuard};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::cell::RefCell;
 use std::sync::Arc;
 use std::cmp::max;
 use bifrost_hasher::{hash_str, hash_bytes};
@@ -58,7 +52,7 @@ pub struct RaftClient {
 
 impl RaftClient {
     pub fn new(servers: &Vec<String>, service_id: u64) -> Result<Arc<RaftClient>, ClientError> {
-        let mut client = RaftClient {
+        let client = RaftClient {
             qry_meta: QryMeta {
                 pos: AtomicU64::new(rand::random::<u64>())
             },
@@ -91,7 +85,6 @@ impl RaftClient {
     }
 
    fn update_info(&self, members: &mut RwLockWriteGuard<Members>, servers: &HashSet<String>) -> Result<(), ClientError> {
-        let info: ClientClusterInfo;
         let mut cluster_info = None;
         for server_addr in servers {
             let id = hash_str(&server_addr);
@@ -103,7 +96,7 @@ impl RaftClient {
                     Err(_) => {continue;}
                 }
             }
-            let mut client = members.clients.get(&id).unwrap();
+            let client = members.clients.get(&id).unwrap();
             if let Ok(Ok(info)) = client.c_server_cluster_info() {
                 if info.leader_id != 0 {
                     cluster_info = Some(info);
@@ -199,7 +192,7 @@ impl RaftClient {
         let mut num_members = 0;
         let res = {
             let members = self.members.read();
-            let mut client = {
+            let client = {
                 let members_count = members.clients.len();
                 if members_count < 1 {
                     return Err(ExecError::ServersUnreachable)
@@ -221,9 +214,7 @@ impl RaftClient {
                         }
                     },
                     ClientQryResponse::Success{
-                        data: data,
-                        last_log_term: last_log_term,
-                        last_log_id: last_log_id
+                        data, last_log_term, last_log_id
                     } => {
                         swap_when_greater(&self.last_log_id, last_log_id);
                         swap_when_greater(&self.last_log_term, last_log_term);
@@ -255,8 +246,7 @@ impl RaftClient {
                 Some((leader_id, client)) => {
                     match client.c_command(&self.gen_log_entry(sm_id, fn_id, data)) {
                         Ok(Ok(ClientCmdResponse::Success {
-                                  data: data, last_log_term: last_log_term,
-                                  last_log_id: last_log_id
+                                  data, last_log_term, last_log_id
                               })) => {
                             swap_when_greater(&self.last_log_id, last_log_id);
                             swap_when_greater(&self.last_log_term, last_log_term);

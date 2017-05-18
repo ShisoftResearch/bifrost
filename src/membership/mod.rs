@@ -2,8 +2,7 @@ pub mod client;
 pub mod server;
 pub mod member;
 
-use membership::client::{Group as ClientGroup, Member as ClientMember};
-use std::collections::HashSet;
+use membership::client::{Member as ClientMember};
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_MEMBERSHIP_SERVICE) as u64;
 

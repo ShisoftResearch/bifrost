@@ -91,7 +91,6 @@ impl Server {
         let server = server.clone();
         tcp::server::Server::new(address, Box::new(move |data| {
             let (svr_id, data) = extract_u64_head(data);
-            let t = time::get_time();
             let svr_map = server.services.read();
             let service = svr_map.get(&svr_id);
             let res = match service {

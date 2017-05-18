@@ -220,7 +220,7 @@ impl Membership {
     }
     fn leave_group_(&mut self, group_id: u64, id: u64, need_notify: bool) -> Result<(), ()> {
         let mut success = false;
-        let mut client_member: Option<ClientMember> = None;
+        let client_member: Option<ClientMember> = None;
         if let Some(ref mut group) = self.groups.get_mut(&group_id) {
             if let Some(ref mut member) = self.members.get_mut(&id) {
                 group.members.remove(&id);

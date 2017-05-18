@@ -5,8 +5,6 @@ use bifrost_hasher::hash_str;
 use super::raft::client::SMClient;
 use super::DEFAULT_SERVICE_ID;
 
-use membership::server::Membership;
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Member {
     pub id: u64,

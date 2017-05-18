@@ -1,19 +1,15 @@
 use rand;
-use rand::Rng;
 use rand::distributions::{IndependentSample, Range};
 use std::thread;
-use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard, Mutex, MutexGuard};
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard, Mutex};
 use std::collections::{BTreeMap, HashMap};
 use std::collections::Bound::{Included, Unbounded};
-use std::cell::RefCell;
 use std::cmp::{min, max};
-use std::borrow::BorrowMut;
 use std::sync::mpsc::channel;
 use self::state_machine::OpType;
 use self::state_machine::master::{
-    MasterStateMachine, StateMachineCmds, ExecResult,
+    MasterStateMachine, ExecResult,
     ExecError, SubStateMachine};
-use self::state_machine::configs::Configures;
 use self::state_machine::configs::{CONFIG_SM_ID, RaftMember};
 use self::state_machine::configs::commands::{new_member_, del_member_, member_address};
 use self::client::RaftClient;
@@ -21,8 +17,6 @@ use bifrost_hasher::hash_str;
 use utils::time::get_time;
 use threadpool::ThreadPool;
 use num_cpus;
-use self::client::ClientError;
-use std::fmt;
 
 #[macro_use]
 pub mod state_machine;
@@ -268,7 +262,7 @@ impl RaftService {
         info!("Waiting for server to be initialized");
         {
             let start_time = get_time();
-            let mut meta = server.meta.write();
+            let meta = server.meta.write();
             let mut sm = meta.state_machine.write();
             let mut inited = false;
             while get_time() < start_time + 5000 { //waiting for 5 secs
@@ -290,7 +284,7 @@ impl RaftService {
                 {
                     let mut meta = server.meta.write(); //WARNING: Reentering not supported
                     let action = match meta.membership {
-                        Membership::Leader(ref leader_meta) => {
+                        Membership::Leader(_) => {
                             CheckerAction::SendHeartbeat
                         },
                         Membership::Follower | Membership::Candidate => {
@@ -533,7 +527,6 @@ impl RaftService {
         meta.workers.lock().execute(move ||{
             let mut granted = 0;
             let mut timeout = 2000;
-            let mut check_time = get_time();
             for _ in 0..members {
                 if timeout <= 0 {break;}
                 if let Ok(res)= rx.recv_timeout(Duration::from_millis(timeout as u64)) {
@@ -556,7 +549,6 @@ impl RaftService {
                 }
                 let curr_time = get_time();
                 timeout -= get_time() - curr_time;
-                check_time = curr_time;
             }
             //println!("GRANTED: {}/{}", granted, members);
         });
@@ -646,7 +638,6 @@ impl RaftService {
                                         },
                                         None => {
                                             panic!("Cannot find old logs for follower, first_id: {}, follower_last: {}");
-                                            (0, 0)
                                         }
                                     }
                                 }
@@ -699,7 +690,6 @@ impl RaftService {
                     let mut leader_meta = leader_meta.write();
                     let mut updated_followers = 0;
                     let mut timeout = 2000 as i64; // assume client timeout is more than 2s　(5 by default)
-                    let mut check_time = get_time();
                     for _ in 0..members {
                         if timeout <= 0 {break;}
                         if let Ok(last_matched_id) = rx.recv_timeout(Duration::from_millis(timeout as u64)) { // adaptive
@@ -711,7 +701,6 @@ impl RaftService {
                         }
                         let current_time = get_time();
                         timeout -= get_time() - current_time;
-                        check_time = current_time;
                     }
                     leader_meta.last_updated = get_time();
                     is_majority(members, updated_followers)

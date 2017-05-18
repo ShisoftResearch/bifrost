@@ -5,9 +5,8 @@ use super::callback::SubKey;
 use super::callback::server::Subscriptions;
 use bifrost_hasher::hash_str;
 use std::sync::Arc;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{RwLock};
 use std::collections::{HashMap, HashSet};
-use std::io;
 use utils::bincode;
 
 pub const CONFIG_SM_ID: u64 = 1;
