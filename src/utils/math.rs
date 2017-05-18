@@ -15,7 +15,7 @@ pub fn max<T>(nums: &Vec<T>) -> Option<T> where T: Ord + Copy {
 pub fn avg_scale(nums: &Vec<u64>) -> Option<u64> {
     if nums.len() > 0 {
         let count = nums.len() as u64;
-        let max_num = max(nums).unwrap();
+        //let max_num = max(nums).unwrap();
         let min_num = min(nums).unwrap();
         let sum: u64 = nums.iter().sum();
         let mid_abs = (sum - (min_num * count)) / count;

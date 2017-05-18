@@ -1,16 +1,13 @@
 use std::io;
-use std::net::SocketAddr;
 use std::time::Duration;
 
-use futures::{self, BoxFuture, Future};
+use futures::{Future};
 
 use tokio_service::Service;
-use tokio_core::io::Io;
-use tokio_core::reactor::Handle;
 use tokio_core::net::TcpStream;
 use tokio_core::reactor::Core;
 use tokio_proto::TcpClient;
-use tokio_proto::multiplex::{ClientProto, ClientService};
+use tokio_proto::multiplex::{ClientService};
 use tokio_middleware::Timeout;
 use tokio_timer::Timer;
 

@@ -30,6 +30,7 @@ parking_lot = {version = "0.3", features = ["nightly"]}
 thread-id = "3.0.0"
 
 tokio-core = "0.1"
+tokio-io = "0.1"
 tokio-proto = "0.1"
 tokio-service = "0.1"
 tokio-timer = "0.1"

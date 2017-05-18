@@ -1,11 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap};
 use std::sync::Arc;
-use std::time::Duration;
 use std::io::{Error, ErrorKind, Result};
 use bifrost_hasher::hash_str;
 use parking_lot::RwLock;
 use tcp::server::ServerCallback;
-use tokio_timer::Timer;
 use futures::{future, BoxFuture};
 
 lazy_static! {

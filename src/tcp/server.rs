@@ -1,4 +1,4 @@
-use std::io::{self, ErrorKind, Write};
+use std::io::{self};
 use std::sync::Arc;
 use std::net::SocketAddr;
 
@@ -6,7 +6,6 @@ use tokio_proto::TcpServer;
 use tokio_service::{Service, NewService};
 use futures::{future, Future, BoxFuture};
 
-use tcp::framed::BytesCodec;
 use tcp::proto::BytesServerProto;
 use tcp::shortcut;
 use super::STANDALONE_ADDRESS;

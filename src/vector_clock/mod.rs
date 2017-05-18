@@ -1,5 +1,4 @@
-use std::hash::Hash;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap};
 use std::cmp::Ordering;
 use parking_lot::RwLock;
 use bifrost_hasher::hash_str;
