@@ -115,9 +115,10 @@ impl Server {
     where T: RPCService + Sized + 'static{
         let service = service.clone();
         if !DISABLE_SHORTCUT {
-            println!("SERVICE SHORTCUT DISABLED");
             let service_ptr = Arc::into_raw(service.clone()) as usize;
             service.register_shortcut_service(service_ptr, self.server_id, service_id);
+        } else {
+            println!("SERVICE SHORTCUT DISABLED");
         }
         self.services.write().insert(service_id, service);
     }
