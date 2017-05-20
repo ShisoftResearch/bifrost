@@ -29,11 +29,10 @@ fn string(){
     service.bootstrap();
 
     let client = RaftClient::new(&vec!(addr), DEFAULT_SERVICE_ID).unwrap();
-    let sub_service = SubscriptionService::initialize(&server);
     let sm_client = SMClient::new(sm_id, &client);
     let unchanged_str = original_string.clone();
     let changed_str = altered_string.clone();
-    client.set_subscription(&sub_service);
+    client.prepare_subscription(&server);
 //    sm_client.on_changed(move |res| {
 //        if let Ok((old, new)) = res {
 //            println!("GOT VAL CALLBACK {:?} -> {:?}", old, new);

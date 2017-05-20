@@ -30,8 +30,7 @@ fn hash_map(){
 
     let raft_client = RaftClient::new(&vec!(addr), DEFAULT_SERVICE_ID).unwrap();
     let sm_client = SMClient::new(sm_id, &raft_client);
-    let subs_service = SubscriptionService::initialize(&server);
-    raft_client.set_subscription(&subs_service);
+    raft_client.prepare_subscription(&server);
 
     let sk1 = String::from("k1");
     let sk2 = String::from("k2");

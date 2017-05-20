@@ -78,10 +78,12 @@ impl RaftClient {
             Err(e) => Err(e)
         }
     }
-
-    pub fn set_subscription(&self, sub_service: &Arc<SubscriptionService>) {
+    pub fn prepare_subscription(&self, server: &Arc<rpc::Server>) {
         let mut callback = self.callback.write();
-        *callback = Some(sub_service.clone());
+        if callback.is_none() {
+            let sub_service = SubscriptionService::initialize(&server);
+            *callback = Some(sub_service.clone());
+        }
     }
 
    fn update_info(&self, members: &mut RwLockWriteGuard<Members>, servers: &HashSet<String>) -> Result<(), ClientError> {
