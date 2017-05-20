@@ -7,7 +7,7 @@ use parking_lot::{RwLock, RwLockWriteGuard};
 use serde;
 
 use bifrost_hasher::{hash_str, hash_bytes};
-use membership::client::{ObserverClient as MembershipClient, Member};
+use membership::client::{ObserverClient as MembershipClient, Member, WatchResult};
 use conshash::weights::DEFAULT_SERVICE_ID;
 use conshash::weights::client::{SMClient as WeightSMClient};
 use raft::client::{RaftClient};
@@ -35,7 +35,7 @@ pub enum InitTableError {
 
 #[derive(Debug)]
 pub enum CHError {
-    WatchError,
+    WatchError(WatchResult),
     InitTableError(InitTableError),
 }
 
@@ -78,34 +78,33 @@ impl ConsistentHashing {
             let res = membership.on_group_member_joined(move |r| {
                 if let Ok((member, version)) = r { server_joined(&ch, member, version); }
             }, group);
-            if let Ok(Ok(_)) = res {} else {return Err(CHError::WatchError);}
+            if let Ok(Ok(_)) = res {} else {return Err(CHError::WatchError(res));}
         }
         {
             let ch = ch.clone();
             let res = membership.on_group_member_online(move |r| {
                 if let Ok((member, version)) = r { server_joined(&ch, member, version); }
             }, group);
-            if let Ok(Ok(_)) = res {} else {return Err(CHError::WatchError);}
+            if let Ok(Ok(_)) = res {} else {return Err(CHError::WatchError(res));}
         }
         {
             let ch = ch.clone();
             let res = membership.on_group_member_left(move |r| {
                 if let Ok((member, version)) = r { server_left(&ch, member, version); }
             }, group);
-            if let Ok(Ok(_)) = res {} else {return Err(CHError::WatchError);}
+            if let Ok(Ok(_)) = res {} else {return Err(CHError::WatchError(res));}
         }
         {
             let ch = ch.clone();
             let res = membership.on_group_member_offline(move |r| {
                 if let Ok((member, version)) = r { server_left(&ch, member, version); }
             }, group);
-            if let Ok(Ok(_)) = res {} else {return Err(CHError::WatchError);}
+            if let Ok(Ok(_)) = res {} else {return Err(CHError::WatchError(res));}
         }
         Ok(ch)
     }
     pub fn new_client(group: &String, raft_client: &Arc<RaftClient>) -> Result<Arc<ConsistentHashing>, CHError> {
-        let ch = ConsistentHashing::new(group, raft_client);
-        match ch {
+        match ConsistentHashing::new(group, raft_client) {
             Err(e) => Err(e),
             Ok(ch) => {
                 match ch.init_table() {

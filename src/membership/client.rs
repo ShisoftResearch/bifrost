@@ -5,6 +5,8 @@ use bifrost_hasher::hash_str;
 use super::raft::client::SMClient;
 use super::DEFAULT_SERVICE_ID;
 
+pub type WatchResult = Result<Result<u64, SubscriptionError>, ExecError>;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Member {
     pub id: u64,
@@ -63,48 +65,40 @@ impl ObserverClient {
     pub fn all_members(&self, online_only: bool) -> Result<Result<(Vec<Member>, u64), ()>, ExecError> {
         self.sm_client.all_members(&online_only)
     }
-    pub fn on_group_member_offline<F>(&self, f: F, group: &String)
-        -> Result<Result<u64, SubscriptionError>, ExecError>
+    pub fn on_group_member_offline<F>(&self, f: F, group: &String) -> WatchResult
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_group_member_offline(f, &hash_str(group))
     }
-    pub fn on_any_member_offline<F>(&self, f: F)
-        -> Result<Result<u64, SubscriptionError>, ExecError>
+    pub fn on_any_member_offline<F>(&self, f: F) -> WatchResult
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_any_member_offline(f)
     }
-    pub fn on_group_member_online<F>(&self, f: F, group: &String)
-        -> Result<Result<u64, SubscriptionError>, ExecError>
+    pub fn on_group_member_online<F>(&self, f: F, group: &String) -> WatchResult
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_group_member_online(f, &hash_str(group))
     }
-    pub fn on_any_member_online<F>(&self, f: F)
-        -> Result<Result<u64, SubscriptionError>, ExecError>
+    pub fn on_any_member_online<F>(&self, f: F) -> WatchResult
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_any_member_online(f)
     }
-    pub fn on_group_member_joined<F>(&self, f: F, group: &String)
-        -> Result<Result<u64, SubscriptionError>, ExecError>
+    pub fn on_group_member_joined<F>(&self, f: F, group: &String) -> WatchResult
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_group_member_joined(f, &hash_str(group))
     }
-    pub fn on_any_member_joined<F>(&self, f: F)
-        -> Result<Result<u64, SubscriptionError>, ExecError>
+    pub fn on_any_member_joined<F>(&self, f: F) -> WatchResult
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_any_member_joined(f)
     }
-    pub fn on_group_member_left<F>(&self, f: F, group: &String)
-        -> Result<Result<u64, SubscriptionError>, ExecError>
+    pub fn on_group_member_left<F>(&self, f: F, group: &String) -> WatchResult
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_group_member_left(f, &hash_str(group))
     }
-    pub fn on_any_member_left<F>(&self, f: F)
-        -> Result<Result<u64, SubscriptionError>, ExecError>
+    pub fn on_any_member_left<F>(&self, f: F) -> WatchResult
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_any_member_left(f)
     }
     pub fn on_group_leader_changed<F>(&self, f: F, group: &String)
-        -> Result<Result<u64, SubscriptionError>, ExecError>
+        -> WatchResult
         where F: Fn(Result<(Option<Member>, Option<Member>, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_group_leader_changed(f, &hash_str(group))
     }
