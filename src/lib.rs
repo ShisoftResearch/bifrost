@@ -54,6 +54,7 @@ extern crate num_cpus;
 
 #[macro_use]
 extern crate lazy_static;
+extern crate backtrace;
 
 extern crate bifrost_plugins;
 extern crate bifrost_hasher;

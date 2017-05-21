@@ -15,6 +15,7 @@ use std::cmp::max;
 use bifrost_hasher::{hash_str, hash_bytes};
 use rand;
 use rpc;
+use backtrace::Backtrace;
 
 const ORDERING: Ordering = Ordering::Relaxed;
 pub type Client = Arc<SyncServiceClient>;
@@ -162,7 +163,10 @@ impl RaftClient {
           F: Fn(R) + 'static + Send + Sync
     {
         let callback = self.callback.read();
-        if callback.is_none() {return Ok(Err(SubscriptionError::SubServiceNotSet))}
+        if callback.is_none() {
+            println!("Subscription service not set: {:?}", Backtrace::new());
+            return Ok(Err(SubscriptionError::SubServiceNotSet))
+        }
         let callback = callback.clone().unwrap();
         let raft_sid = self.service_id;
         let (fn_id, pattern_id) = {

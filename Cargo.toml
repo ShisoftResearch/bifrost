@@ -28,6 +28,7 @@ threadpool = "1.0"
 num_cpus = "1.0"
 parking_lot = {version = "0.3", features = ["nightly"]}
 thread-id = "3.0.0"
+backtrace = "0.3"
 
 tokio-core = "0.1"
 tokio-io = "0.1"
