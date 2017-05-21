@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use parking_lot::{RwLock, Mutex};
-use threadpool::ThreadPool;
 use num_cpus;
 use bifrost_hasher::{hash_str, hash_bytes};
 use raft::{RaftService, IS_LEADER};
@@ -11,15 +10,11 @@ use serde;
 use super::super::{OpType};
 use super::super::super::RaftMsg;
 use super::*;
-
-
-lazy_static! {
-    pub static ref THREAD_POOL: Mutex<ThreadPool> = Mutex::new(ThreadPool::new(num_cpus::get()));
-}
+use futures::future;
 
 pub struct Subscriber {
     pub session_id: u64,
-    pub client: Arc<SyncServiceClient>
+    pub client: Arc<AsyncServiceClient>
 }
 
 pub struct Subscriptions {
@@ -61,7 +56,7 @@ impl Subscriptions {
                 session_id: session_id,
                 client: {
                     if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(address) {
-                        SyncServiceClient::new(sub_service_id, &client)
+                        AsyncServiceClient::new(sub_service_id, &client)
                     } else {
                         return Err(());
                     }
@@ -105,6 +100,15 @@ pub struct SMCallback {
     pub sm_id: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum NotifyFailure {
+    IsNotLeader,
+    OpTypeNotSubscribe,
+    CannotFindSubscription,
+    CannotFindSubscribers,
+    CannotFindSubscriber
+}
+
 impl SMCallback {
     pub fn new(state_machine_id: u64, raft_service: Arc<RaftService>) -> SMCallback {
         let meta = raft_service.meta.read();
@@ -117,8 +121,9 @@ impl SMCallback {
         }
     }
     pub fn notify<R>(&self, func: &RaftMsg<R>, data: R)
+        -> Result<(Vec<NotifyFailure>, Vec<rpc::RPCError>), NotifyFailure>
     where R: serde::Serialize + Send + Sync {
-        if !IS_LEADER.get() {return;}
+        if !IS_LEADER.get() {return Err(NotifyFailure::IsNotLeader);}
         let (fn_id, op_type, pattern_data) = func.encode();
         match op_type {
             OpType::SUBSCRIBE => {
@@ -129,21 +134,38 @@ impl SMCallback {
                 let svr_subs = self.subscriptions.read();
                 if let Some(sub_ids) = svr_subs.subscriptions.get(&key) {
                     let data = bincode::serialize(&data);
-                    for sub_id in sub_ids {
+                    let sub_result: Vec<_> = sub_ids.iter().map(|sub_id| {
                         if let Some(subscriber_id) = svr_subs.sub_suber.get(&sub_id) {
                             if let Some(subscriber) = svr_subs.subscribers.get(&subscriber_id) {
                                 let data = data.clone();
                                 let client = subscriber.client.clone();
-                                THREAD_POOL.lock().execute(move || {
-                                    client.notify(&key, &data);
-                                });
+                                Ok(client.notify(&key, &data))
+                            } else {
+                                Err(NotifyFailure::CannotFindSubscriber)
                             }
+                        } else {
+                            Err(NotifyFailure::CannotFindSubscribers)
                         }
-                    }
+                    }).collect();
+                    let errors = sub_result.iter()
+                        .filter(|r| r.is_err())
+                        .map(|r| {if let &Err(e) = r { Some(e) } else { None }})
+                        .map(|o| o.clone().unwrap())
+                        .collect::<Vec<NotifyFailure>>();
+                    let req_errors = sub_result.into_iter()
+                        .filter(|r| r.is_ok())
+                        .map(|r| r.unwrap())
+                        .map(|req| req.wait())
+                        .filter(|res| res.is_err())
+                        .map(|res| res.err().unwrap())
+                        .collect::<Vec<_>>();
+                    return Ok((errors, req_errors));
+                } else {
+                    return Err(NotifyFailure::CannotFindSubscription)
                 }
             },
             _ => {
-                panic!("Cannot notify on {:?}")
+                return Err(NotifyFailure::OpTypeNotSubscribe)
             }
         }
     }
