@@ -105,6 +105,12 @@ pub struct SMCallback {
     pub sm_id: u64,
 }
 
+pub enum NotifyFailure {
+    IsNotLeader,
+    OpTypeNotSubscribe,
+    CannotFindSubscription
+}
+
 impl SMCallback {
     pub fn new(state_machine_id: u64, raft_service: Arc<RaftService>) -> SMCallback {
         let meta = raft_service.meta.read();
@@ -116,9 +122,9 @@ impl SMCallback {
             sm_id: state_machine_id,
         }
     }
-    pub fn notify<R>(&self, func: &RaftMsg<R>, data: R)
+    pub fn notify<R>(&self, func: &RaftMsg<R>, data: R) -> Result<(), NotifyFailure>
     where R: serde::Serialize + Send + Sync {
-        if !IS_LEADER.get() {return;}
+        if !IS_LEADER.get() {return Err(NotifyFailure::IsNotLeader);}
         let (fn_id, op_type, pattern_data) = func.encode();
         match op_type {
             OpType::SUBSCRIBE => {
@@ -140,12 +146,15 @@ impl SMCallback {
                             }
                         }
                     }
+                } else {
+                    return Err(NotifyFailure::CannotFindSubscription)
                 }
             },
             _ => {
-                panic!("Cannot notify on {:?}")
+                return Err(NotifyFailure::OpTypeNotSubscribe)
             }
         }
+        return Ok(());
     }
 }
 
