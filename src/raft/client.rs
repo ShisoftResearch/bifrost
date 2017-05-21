@@ -79,11 +79,14 @@ impl RaftClient {
             Err(e) => Err(e)
         }
     }
-    pub fn prepare_subscription(&self, server: &Arc<rpc::Server>) {
+    pub fn prepare_subscription(&self, server: &Arc<rpc::Server>) -> Option<()> {
         let mut callback = self.callback.write();
         if callback.is_none() {
             let sub_service = SubscriptionService::initialize(&server);
             *callback = Some(sub_service.clone());
+            return Some(())
+        } else {
+            return None
         }
     }
 
