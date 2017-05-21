@@ -159,6 +159,11 @@ impl RaftClient {
         }
     }
 
+    pub fn can_callback(&self) -> bool {
+        let callback = self.callback.read();
+        callback.is_some()
+    }
+
     pub fn subscribe
     <M, R, F>
     (&self, sm_id: u64, msg: M, f: F) -> Result<Result<u64, SubscriptionError>, ExecError>
@@ -167,7 +172,7 @@ impl RaftClient {
     {
         let callback = self.callback.read();
         if callback.is_none() {
-            println!("Subscription service not set: {:?}", Backtrace::new());
+            debug!("Subscription service not set: {:?}", Backtrace::new());
             return Ok(Err(SubscriptionError::SubServiceNotSet))
         }
         let callback = callback.clone().unwrap();

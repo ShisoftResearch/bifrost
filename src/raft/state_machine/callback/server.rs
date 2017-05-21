@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use parking_lot::{RwLock, Mutex};
-use num_cpus;
+use parking_lot::{RwLock};
 use bifrost_hasher::{hash_str, hash_bytes};
 use raft::{RaftService, IS_LEADER};
 use rpc;
@@ -10,7 +9,6 @@ use serde;
 use super::super::{OpType};
 use super::super::super::RaftMsg;
 use super::*;
-use futures::future;
 
 pub struct Subscriber {
     pub session_id: u64,
@@ -123,7 +121,7 @@ impl SMCallback {
     }
 
     pub fn notify<R>(&self, func: &RaftMsg<R>, data: R)
-                     -> Result<(Vec<NotifyFailure>, Vec<rpc::RPCError>), NotifyFailure>
+        -> Result<(usize, Vec<NotifyFailure>, Vec<Result<Result<(), ()>, rpc::RPCError>>), NotifyFailure>
         where R: serde::Serialize + Send + Sync {
         if !IS_LEADER.get() {return Err(NotifyFailure::IsNotLeader);}
         let (fn_id, op_type, pattern_data) = func.encode();
@@ -134,6 +132,8 @@ impl SMCallback {
                 let sm_id = self.sm_id;
                 let key = (raft_sid, sm_id, fn_id, pattern_id);
                 let svr_subs = self.subscriptions.read();
+                println!("Subs key: {:?}", svr_subs.subscriptions.keys());
+                println!("Looking for: {:?}", &key);
                 if let Some(sub_ids) = svr_subs.subscriptions.get(&key) {
                     let data = bincode::serialize(&data);
                     let sub_result: Vec<_> = sub_ids.iter().map(|sub_id| {
@@ -154,14 +154,12 @@ impl SMCallback {
                         .map(|r| {if let &Err(e) = r { Some(e) } else { None }})
                         .map(|o| o.clone().unwrap())
                         .collect::<Vec<NotifyFailure>>();
-                    let req_errors = sub_result.into_iter()
+                    let response = sub_result.into_iter()
                         .filter(|r| r.is_ok())
                         .map(|r| r.unwrap())
                         .map(|req| req.wait())
-                        .filter(|res| res.is_err())
-                        .map(|res| res.err().unwrap())
                         .collect::<Vec<_>>();
-                    return Ok((errors, req_errors));
+                    return Ok((sub_ids.len(), errors, response));
                 } else {
                     return Err(NotifyFailure::CannotFindSubscription)
                 }
