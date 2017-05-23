@@ -132,8 +132,8 @@ impl SMCallback {
                 let sm_id = self.sm_id;
                 let key = (raft_sid, sm_id, fn_id, pattern_id);
                 let svr_subs = self.subscriptions.read();
-                debug!("Subs key: {:?}", svr_subs.subscriptions.keys());
-                debug!("Looking for: {:?}", &key);
+                println!("Subs key: {:?}", svr_subs.subscriptions.keys());
+                println!("Looking for: {:?}", &key);
                 if let Some(sub_ids) = svr_subs.subscriptions.get(&key) {
                     let data = bincode::serialize(&data);
                     let sub_result: Vec<_> = sub_ids.iter().map(|sub_id| {
