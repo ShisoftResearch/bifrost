@@ -43,7 +43,8 @@ impl Subscriptions {
         let suber_exists = self.subscribers.contains_key(&suber_id);
         let sub_id = self.next_id;
         let require_reload_suber = if suber_exists {
-            let session_match = self.subscribers.get(&suber_id).unwrap().session_id == session_id;
+            let suber_session_id = self.subscribers.get(&suber_id).unwrap().session_id;
+            let session_match = (suber_session_id == session_id);
             if !session_match {
                 self.remove_subscriber(suber_id);
                 true
@@ -132,8 +133,8 @@ impl SMCallback {
                 let sm_id = self.sm_id;
                 let key = (raft_sid, sm_id, fn_id, pattern_id);
                 let svr_subs = self.subscriptions.read();
-                println!("Subs key: {:?}", svr_subs.subscriptions.keys());
-                println!("Looking for: {:?}", &key);
+                debug!("Subs key: {:?}", svr_subs.subscriptions.keys());
+                debug!("Looking for: {:?}", &key);
                 if let Some(sub_ids) = svr_subs.subscriptions.get(&key) {
                     let data = bincode::serialize(&data);
                     let sub_result: Vec<_> = sub_ids.iter().map(|sub_id| {

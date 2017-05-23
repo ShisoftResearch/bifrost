@@ -40,7 +40,7 @@ fn primary() {
     let wild_raft_client = RaftClient::new(&vec!(addr.clone()), 0).unwrap();
     let client = ObserverClient::new(&wild_raft_client);
 
-    wild_raft_client.prepare_subscription(&server);
+    RaftClient::prepare_subscription(&server);
 
     client.new_group(&group_1).unwrap().unwrap();
     client.new_group(&group_2).unwrap().unwrap();

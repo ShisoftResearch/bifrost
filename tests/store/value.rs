@@ -32,7 +32,7 @@ fn string(){
     let sm_client = SMClient::new(sm_id, &client);
     let unchanged_str = original_string.clone();
     let changed_str = altered_string.clone();
-    client.prepare_subscription(&server);
+    RaftClient::prepare_subscription(&server);
 //    sm_client.on_changed(move |res| {
 //        if let Ok((old, new)) = res {
 //            println!("GOT VAL CALLBACK {:?} -> {:?}", old, new);

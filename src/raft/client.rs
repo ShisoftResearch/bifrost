@@ -20,6 +20,10 @@ use backtrace::Backtrace;
 const ORDERING: Ordering = Ordering::Relaxed;
 pub type Client = Arc<SyncServiceClient>;
 
+lazy_static! {
+    pub static ref CALLBACK: RwLock<Option<Arc<SubscriptionService>>> = RwLock::new(None);
+}
+
 #[derive(Debug)]
 pub enum ClientError {
     LeaderIdValid,
@@ -44,7 +48,6 @@ struct Members {
 pub struct RaftClient {
     qry_meta: QryMeta,
     members: RwLock<Members>,
-    callback: RwLock<Option<Arc<SubscriptionService>>>,
     leader_id: AtomicU64,
     last_log_id: AtomicU64,
     last_log_term: AtomicU64,
@@ -65,7 +68,6 @@ impl RaftClient {
             last_log_id: AtomicU64::new(0),
             last_log_term: AtomicU64::new(0),
             service_id: service_id,
-            callback: RwLock::new(None)
         };
         let init = {
             let mut members = client.members.write();
@@ -79,8 +81,8 @@ impl RaftClient {
             Err(e) => Err(e)
         }
     }
-    pub fn prepare_subscription(&self, server: &Arc<rpc::Server>) -> Option<()> {
-        let mut callback = self.callback.write();
+    pub fn prepare_subscription(server: &Arc<rpc::Server>) -> Option<()> {
+        let mut callback = CALLBACK.write();
         if callback.is_none() {
             let sub_service = SubscriptionService::initialize(&server);
             *callback = Some(sub_service.clone());
@@ -159,8 +161,8 @@ impl RaftClient {
         }
     }
 
-    pub fn can_callback(&self) -> bool {
-        let callback = self.callback.read();
+    pub fn can_callback() -> bool {
+        let callback = CALLBACK.read();
         callback.is_some()
     }
 
@@ -170,7 +172,7 @@ impl RaftClient {
     where M: RaftMsg<R> + 'static,
           F: Fn(R) + 'static + Send + Sync
     {
-        let callback = self.callback.read();
+        let callback = CALLBACK.read();
         if callback.is_none() {
             debug!("Subscription service not set: {:?}", Backtrace::new());
             return Ok(Err(SubscriptionError::SubServiceNotSet))

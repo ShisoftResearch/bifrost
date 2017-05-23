@@ -39,7 +39,7 @@ mod u32 {
 
         let client = RaftClient::new(&vec!(addr), DEFAULT_SERVICE_ID).unwrap();
         let sm_client = SMClient::new(sm_id, &client);
-        client.prepare_subscription(&server);
+        RaftClient::prepare_subscription(&server);
 
         sm_client.on_changed(|res| {
            if let Ok((old, new)) = res {

@@ -68,7 +68,7 @@ fn dummy() {
     let sumer = Arc::new(AtomicUsize::new(0));
     let sumer_clone = sumer.clone();
     let mut expected_sum = 0;
-    raft_client.prepare_subscription(&server);
+    RaftClient::prepare_subscription(&server);
     sm_client.on_trigged(move |res| {
         counter_clone.fetch_add(1, Ordering::Relaxed);
         sumer_clone.fetch_add(res.unwrap() as usize, Ordering::Relaxed);
