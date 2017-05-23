@@ -293,7 +293,7 @@ impl RaftService {
                             let timeout_elapsed = current_time - timeout_time;
                             if  meta.vote_for == None && timeout_elapsed > 0 { // TODO: in my test sometimes timeout_elapsed may go 1 for no reason, require investigation
                                 //Timeout, require election
-                                //println!("TIMEOUT!!! GOING TO CANDIDATE!!! {}, {}", server_id, timeout_elapsed);
+                                //debug!("TIMEOUT!!! GOING TO CANDIDATE!!! {}, {}", server_id, timeout_elapsed);
                                 CheckerAction::BecomeCandidate
                             } else {
                                 CheckerAction::None
@@ -349,7 +349,7 @@ impl RaftService {
     }
     pub fn join(&self, servers: &Vec<String>)
         -> Result<Result<(), ()>, ExecError> {
-        println!("Trying to join cluster with id {}", self.id);
+        debug!("Trying to join cluster with id {}", self.id);
         let client = RaftClient::new(servers, self.options.service_id);
         if let Ok(client) = client {
             let result = client.execute(
@@ -550,7 +550,7 @@ impl RaftService {
                 let curr_time = get_time();
                 timeout -= get_time() - curr_time;
             }
-            //println!("GRANTED: {}/{}", granted, members);
+            debug!("GRANTED: {}/{}", granted, members);
         });
     }
 
@@ -591,7 +591,7 @@ impl RaftService {
                         if let Some(follower) = leader_meta.followers.get(&id) {
                             follower.clone()
                         } else {
-                            println!(
+                            debug!(
                                 "follower not found, {}, {}",
                                 id,
                                 leader_meta.followers.len()
@@ -611,7 +611,7 @@ impl RaftService {
                                 if list.is_empty() {None} else {Some(list)}
                             };
                             if is_retry && entries.is_none() { // break when retry and there is no entry
-                                //println!("stop retry when entry is empty, {}", follower.next_index);
+                                debug!("stop retry when entry is empty, {}", follower.next_index);
                                 break;
                             }
                             let last_entries_id = match &entries { // get last entry id
@@ -654,14 +654,14 @@ impl RaftService {
                                 Ok(Ok((follower_term, result))) => {
                                     match result {
                                         AppendEntriesResult::Ok => {
-                                            //println!("log updated");
+                                            debug!("log updated");
                                             if let Some(last_entries_id) = last_entries_id {
                                                 follower.next_index = last_entries_id + 1;
                                                 follower.match_index = last_entries_id;
                                             }
                                         },
                                         AppendEntriesResult::LogMismatch => {
-                                            //println!("log mismatch, {}", follower.next_index);
+                                            debug!("log mismatch, {}", follower.next_index);
                                             follower.next_index -= 1;
                                         },
                                         AppendEntriesResult::TermOut(actual_leader_id) => {
@@ -777,7 +777,7 @@ impl Service for RaftService {
         let term_ok = self.check_term(&mut meta, *term, *leader_id); // RI, 1
         let result = if term_ok {
             if let Membership::Candidate = meta.membership {
-                println!("SWITCH FROM CANDIDATE BACK TO FOLLOWER {}", self.id);
+                debug!("SWITCH FROM CANDIDATE BACK TO FOLLOWER {}", self.id);
                 self.become_follower(&mut meta, *term, *leader_id);
             }
             if *prev_log_id > 0 {
@@ -850,27 +850,27 @@ impl Service for RaftService {
             let logs = meta.logs.read();
             let conf_sm = &meta.state_machine.read().configs;
             let candidate_valid = conf_sm.member_existed(*candidate_id);
-            println!("{} VOTE FOR: {}, valid: {}", self.id, candidate_id, candidate_valid);
+            debug!("{} VOTE FOR: {}, valid: {}", self.id, candidate_id, candidate_valid);
             if (vote_for.is_none() || vote_for.unwrap() == *candidate_id) && candidate_valid{
                 let (last_id, last_term) = get_last_log_info!(self, logs);
                 if *last_log_id >= last_id && *last_log_term >= last_term {
                     vote_granted = true;
                 } else {
-                    println!("{} VOTE FOR: {}, not granted due to log check", self.id, candidate_id);
+                    debug!("{} VOTE FOR: {}, not granted due to log check", self.id, candidate_id);
                 }
             } else {
-                println!(
+                debug!(
                     "{} VOTE FOR: {}, not granted due to voted for {}",
                     self.id, candidate_id, vote_for.unwrap()
                 );
             }
         } else {
-            println!("{} VOTE FOR: {}, not granted due to term out", self.id, candidate_id);
+            debug!("{} VOTE FOR: {}, not granted due to term out", self.id, candidate_id);
         }
         if vote_granted {
             meta.vote_for = Some(*candidate_id);
         }
-        println!("{} VOTE FOR: {}, granted: {}", self.id, candidate_id, vote_granted);
+        debug!("{} VOTE FOR: {}, granted: {}", self.id, candidate_id, vote_granted);
         Ok(((meta.term, meta.leader_id), vote_granted))
     }
 

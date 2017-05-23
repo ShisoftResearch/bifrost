@@ -274,11 +274,11 @@ impl RaftClient {
                             FailureAction::NotCommitted
                         },
                         Err(e) => {
-                            println!("CLIENT: E1 - {} - {:?}", leader_id, e);
+                            debug!("CLIENT: E1 - {} - {:?}", leader_id, e);
                             FailureAction::SwitchLeader // need switch server for leader
                         }
                         Ok(Err(e)) => {
-                            println!("CLIENT: E2 - {} - {:?}", leader_id, e);
+                            debug!("CLIENT: E2 - {} - {:?}", leader_id, e);
                             FailureAction::SwitchLeader // need switch server for leader
                         }
                     }
@@ -296,7 +296,7 @@ impl RaftClient {
                     .nth(pos as usize % num_members)
                     .unwrap();
                 self.leader_id.compare_and_swap(leader_id, *index, ORDERING);
-                println!("CLIENT: Switch leader");
+                debug!("CLIENT: Switch leader");
             },
             _ => {}
         }

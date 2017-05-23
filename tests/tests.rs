@@ -16,6 +16,9 @@ extern crate serde_derive;
 extern crate lazy_static;
 extern crate parking_lot;
 
+#[macro_use]
+extern crate log;
+extern crate env_logger;
 
 #[cfg(disable_shortcut)]
 mod rpc;

@@ -217,7 +217,7 @@ macro_rules! raft_state_machine {
                        Some(raft_fn_op_type!($smt))
                    }),*
                    _ => {
-                       println!("Undefined function id: {}", fn_id);
+                       debug!("Undefined function id: {}", fn_id);
                        None
                    }
                 }
@@ -228,7 +228,7 @@ macro_rules! raft_state_machine {
                         raft_dispatch_cmd!($smt $fn_name self data( $( $arg : $in_ ),* ))
                    }),*
                    _ => {
-                       println!("Undefined function id: {}", fn_id);
+                       debug!("Undefined function id: {}", fn_id);
                        None
                    }
                }
@@ -239,7 +239,7 @@ macro_rules! raft_state_machine {
                         raft_dispatch_qry!($smt $fn_name self data( $( $arg : $in_ ),* ))
                    }),*
                    _ => {
-                       println!("Undefined function id: {}", fn_id);
+                       debug!("Undefined function id: {}", fn_id);
                        None
                    }
                }
