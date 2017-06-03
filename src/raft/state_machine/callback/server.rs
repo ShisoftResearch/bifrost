@@ -44,7 +44,7 @@ impl Subscriptions {
         let sub_id = self.next_id;
         let require_reload_suber = if suber_exists {
             let suber_session_id = self.subscribers.get(&suber_id).unwrap().session_id;
-            let session_match = (suber_session_id == session_id);
+            let session_match = suber_session_id == session_id;
             if !session_match {
                 self.remove_subscriber(suber_id);
                 true
