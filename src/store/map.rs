@@ -8,6 +8,7 @@ macro_rules! def_store_hash_map {
             use bifrost_hasher::hash_str;
             use std::collections::HashMap;
             use std::sync::{Arc};
+            use super::*;
             pub struct Map {
                 map: HashMap<$kt, $vt>,
                 callback: Option<SMCallback>,
