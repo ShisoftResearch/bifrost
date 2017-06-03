@@ -12,7 +12,7 @@ name = "tests"
 [dependencies]
 bincode = "*"
 byteorder = "1"
-env_logger = "0.3.1"
+env_logger = "0.4"
 log = "0.3.1"
 slab = "0.3.0"
 serde = "*"
