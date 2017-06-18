@@ -5,6 +5,7 @@
 
 #[macro_use]
 extern crate bifrost;
+extern crate bifrost_hasher;
 extern crate byteorder;
 extern crate bincode;
 extern crate futures;
@@ -63,4 +64,15 @@ mod mutex {
 //        }
 //        println!("Unlocked A");
 //    }
+}
+
+mod hasher {
+
+    use bifrost_hasher::hash_bytes_secondary;
+
+    #[test]
+    fn secondary() {
+        println!("{}", hash_bytes_secondary(&[1u8, 10]));
+        println!("{}", hash_bytes_secondary(&[2u8, 20]));
+    }
 }

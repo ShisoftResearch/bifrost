@@ -114,9 +114,9 @@ fn primary() {
         let server = ch1.get_server_by_string(&k).unwrap();
         *ch_1_mapping.entry(server.clone()).or_insert(0) += 1;
     }
-    assert_eq!(ch_1_mapping.get(&server_1).unwrap(), &4922);
-    assert_eq!(ch_1_mapping.get(&server_2).unwrap(), &9963);
-    assert_eq!(ch_1_mapping.get(&server_3).unwrap(), &15115); // hard coded due to constant
+    assert_eq!(ch_1_mapping.get(&server_1).unwrap(), &5060);
+    assert_eq!(ch_1_mapping.get(&server_2).unwrap(), &9777);
+    assert_eq!(ch_1_mapping.get(&server_3).unwrap(), &15163); // hard coded due to constant
 
     let mut ch_2_mapping: HashMap<String, u64> = HashMap::new();
     for i in 0..30000 {
@@ -124,8 +124,8 @@ fn primary() {
         let server = ch2.get_server_by_string(&k).unwrap();
         *ch_2_mapping.entry(server.clone()).or_insert(0) += 1;
     }
-    assert_eq!(ch_2_mapping.get(&server_1).unwrap(), &14981);
-    assert_eq!(ch_2_mapping.get(&server_2).unwrap(), &15019);
+    assert_eq!(ch_2_mapping.get(&server_1).unwrap(), &14757);
+    assert_eq!(ch_2_mapping.get(&server_2).unwrap(), &15243);
 
     let mut ch_3_mapping: HashMap<String, u64> = HashMap::new();
     for i in 0..30000 {
@@ -143,8 +143,8 @@ fn primary() {
         let server = ch1.get_server_by_string(&k).unwrap();
         *ch_1_mapping.entry(server.clone()).or_insert(0) += 1;
     }
-    assert_eq!(ch_1_mapping.get(&server_2).unwrap(), &12001);
-    assert_eq!(ch_1_mapping.get(&server_3).unwrap(), &17999);
+    assert_eq!(ch_1_mapping.get(&server_2).unwrap(), &11849);
+    assert_eq!(ch_1_mapping.get(&server_3).unwrap(), &18151);
 
     let mut ch_2_mapping: HashMap<String, u64> = HashMap::new();
     for i in 0..30000 {
