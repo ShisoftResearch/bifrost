@@ -5,3 +5,6 @@ authors = ["Hao Shi <shisoftgenius@gmail.com>"]
 
 [lib]
 name = "bifrost_hasher"
+
+[dependencies]
+twox-hash = "1"
