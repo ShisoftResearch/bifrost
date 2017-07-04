@@ -9,7 +9,7 @@ pub fn hash_bytes(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
-pub fn hash_str (text: &String) -> u64 { // the same as the one in utils hash
+pub fn hash_str<'a>(text: &'a str) -> u64 { // the same as the one in utils hash
     let text_bytes = text.as_bytes();
     hash_bytes(text_bytes)
 }
