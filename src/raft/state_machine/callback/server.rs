@@ -100,8 +100,8 @@ pub struct SMCallback {
 }
 
 
-#[derive(Debug, Clone, Copy)]
-pub enum NotifyFailure {
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum NotifyError {
     IsNotLeader,
     OpTypeNotSubscribe,
     CannotFindSubscription,
@@ -122,9 +122,9 @@ impl SMCallback {
     }
 
     pub fn notify<R>(&self, func: &RaftMsg<R>, data: R)
-        -> Result<(usize, Vec<NotifyFailure>, Vec<Result<Result<(), ()>, rpc::RPCError>>), NotifyFailure>
+        -> Result<(usize, Vec<NotifyError>, Vec<Result<Result<(), ()>, rpc::RPCError>>), NotifyError>
         where R: serde::Serialize + Send + Sync {
-        if !IS_LEADER.get() {return Err(NotifyFailure::IsNotLeader);}
+        if !IS_LEADER.get() {return Err(NotifyError::IsNotLeader);}
         let (fn_id, op_type, pattern_data) = func.encode();
         match op_type {
             OpType::SUBSCRIBE => {
@@ -144,17 +144,17 @@ impl SMCallback {
                                 let client = subscriber.client.clone();
                                 Ok(client.notify(&key, &data))
                             } else {
-                                Err(NotifyFailure::CannotFindSubscriber)
+                                Err(NotifyError::CannotFindSubscriber)
                             }
                         } else {
-                            Err(NotifyFailure::CannotFindSubscribers)
+                            Err(NotifyError::CannotFindSubscribers)
                         }
                     }).collect();
                     let errors = sub_result.iter()
                         .filter(|r| r.is_err())
                         .map(|r| {if let &Err(e) = r { Some(e) } else { None }})
                         .map(|o| o.clone().unwrap())
-                        .collect::<Vec<NotifyFailure>>();
+                        .collect::<Vec<NotifyError>>();
                     let response = sub_result.into_iter()
                         .filter(|r| r.is_ok())
                         .map(|r| r.unwrap())
@@ -162,11 +162,11 @@ impl SMCallback {
                         .collect::<Vec<_>>();
                     return Ok((sub_ids.len(), errors, response));
                 } else {
-                    return Err(NotifyFailure::CannotFindSubscription)
+                    return Err(NotifyError::CannotFindSubscription)
                 }
             },
             _ => {
-                return Err(NotifyFailure::OpTypeNotSubscribe)
+                return Err(NotifyError::OpTypeNotSubscribe)
             }
         }
     }

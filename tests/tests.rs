@@ -21,7 +21,7 @@ extern crate parking_lot;
 extern crate log;
 extern crate env_logger;
 
-#[cfg(disable_shortcut)]
+// #[cfg(disable_shortcut)]
 mod rpc;
 mod raft;
 mod store;
