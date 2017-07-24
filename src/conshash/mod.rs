@@ -60,7 +60,7 @@ pub struct ConsistentHashing {
 }
 
 impl ConsistentHashing {
-    pub fn new(group: &String, raft_client: &Arc<RaftClient>) -> Result<Arc<ConsistentHashing>, CHError>  {
+    pub fn new<'a>(group: &'a str, raft_client: &Arc<RaftClient>) -> Result<Arc<ConsistentHashing>, CHError>  {
         let membership = Arc::new(MembershipClient::new(raft_client));
         let ch = Arc::new(ConsistentHashing {
             tables: RwLock::new(LookupTables {
@@ -69,7 +69,7 @@ impl ConsistentHashing {
             }),
             membership: membership.clone(),
             weight_sm_client: WeightSMClient::new(DEFAULT_SERVICE_ID, &raft_client),
-            group_name: group.clone(),
+            group_name: group.to_string(),
             watchers: RwLock::new(Vec::new()),
             version: AtomicU64::new(0)
         });
@@ -103,7 +103,7 @@ impl ConsistentHashing {
         }
         Ok(ch)
     }
-    pub fn new_client(group: &String, raft_client: &Arc<RaftClient>) -> Result<Arc<ConsistentHashing>, CHError> {
+    pub fn new_client<'a>(group: &'a str, raft_client: &Arc<RaftClient>) -> Result<Arc<ConsistentHashing>, CHError> {
         match ConsistentHashing::new(group, raft_client) {
             Err(e) => Err(e),
             Ok(ch) => {

@@ -65,7 +65,7 @@ impl ObserverClient {
     pub fn all_members(&self, online_only: bool) -> Result<Result<(Vec<Member>, u64), ()>, ExecError> {
         self.sm_client.all_members(&online_only)
     }
-    pub fn on_group_member_offline<F>(&self, f: F, group: &String) -> WatchResult
+    pub fn on_group_member_offline<'a, F>(&self, f: F, group: &'a str) -> WatchResult
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_group_member_offline(f, &hash_str(group))
     }
@@ -73,7 +73,7 @@ impl ObserverClient {
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_any_member_offline(f)
     }
-    pub fn on_group_member_online<F>(&self, f: F, group: &String) -> WatchResult
+    pub fn on_group_member_online<'a, F>(&self, f: F, group: &'a str) -> WatchResult
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_group_member_online(f, &hash_str(group))
     }
@@ -81,7 +81,7 @@ impl ObserverClient {
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_any_member_online(f)
     }
-    pub fn on_group_member_joined<F>(&self, f: F, group: &String) -> WatchResult
+    pub fn on_group_member_joined<'a, F>(&self, f: F, group: &'a str) -> WatchResult
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_group_member_joined(f, &hash_str(group))
     }
@@ -89,7 +89,7 @@ impl ObserverClient {
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_any_member_joined(f)
     }
-    pub fn on_group_member_left<F>(&self, f: F, group: &String) -> WatchResult
+    pub fn on_group_member_left<'a, F>(&self, f: F, group: &'a str) -> WatchResult
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_group_member_left(f, &hash_str(group))
     }
