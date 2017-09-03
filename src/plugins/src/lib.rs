@@ -17,7 +17,8 @@ fn hash_ident (cx: &mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacResult 
     if args.len() != 1 {
         cx.span_err(
             sp,
-            &format!("argument should be a single identifier, but got {} arguments", args.len()));
+            &format!("argument should be a single identifier, but got {} arguments {:?}",
+                     args.len(), args));
         return DummyResult::any(sp);
     }
 
