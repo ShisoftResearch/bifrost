@@ -19,6 +19,7 @@ pub struct RaftMember {
 
 pub struct Configures {
     pub members: HashMap<u64, RaftMember>,
+    // keep it in arc lock for reference in callback server.rs
     pub subscriptions: Arc<RwLock<Subscriptions>>,
     service_id: u64,
 }
@@ -48,8 +49,8 @@ impl StateMachineCmds for Configures {
                 Ok(client) => {
                     self.members.insert(id, RaftMember {
                         rpc: SyncServiceClient::new(self.service_id, &client),
-                        address: address,
-                        id: id,
+                        address,
+                        id,
                     });
                     return Ok(());
                 },
