@@ -6,7 +6,7 @@ use membership::client::{Member as ClientMember};
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_MEMBERSHIP_SERVICE) as u64;
 
-mod raft {
+pub mod raft {
     use super::*;
     raft_state_machine! {
         def cmd hb_online_changed(online: Vec<u64>, offline: Vec<u64>);
