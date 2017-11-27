@@ -442,8 +442,7 @@ impl StateMachineCmds for Membership {
         self.groups.entry(id).or_insert_with(|| {
             inserted = true;
             MemberGroup {
-                name: name,
-                id: id,
+                name, id,
                 members: BTreeSet::new(),
                 leader: None
             }

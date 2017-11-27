@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::any::Any;
 use parking_lot::{RwLock};
 use bifrost_hasher::{hash_str, hash_bytes};
 use raft::{RaftService, IS_LEADER};
@@ -52,7 +53,7 @@ impl Subscriptions {
         } else {true};
         if !self.subscribers.contains_key(&suber_id) {
             self.subscribers.insert(suber_id, Subscriber {
-                session_id: session_id,
+                session_id,
                 client: {
                     if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(address) {
                         AsyncServiceClient::new(sub_service_id, &client)
@@ -93,9 +94,16 @@ impl Subscriptions {
     }
 }
 
+
+// used for raft services to subscribe directly from state machine instances
+pub struct InternalSubscription {
+    action: Box<Fn(&Any) + Sync + Send>
+}
+
 pub struct SMCallback {
     pub subscriptions: Arc<RwLock<Subscriptions>>,
     pub raft_service: Arc<RaftService>,
+    pub internal_subs: RwLock<HashMap<u64, Vec<InternalSubscription>>>,
     pub sm_id: u64,
 }
 
@@ -106,7 +114,8 @@ pub enum NotifyError {
     OpTypeNotSubscribe,
     CannotFindSubscription,
     CannotFindSubscribers,
-    CannotFindSubscriber
+    CannotFindSubscriber,
+    CannotCastInternalSub
 }
 
 impl SMCallback {
@@ -118,30 +127,37 @@ impl SMCallback {
             subscriptions: subs,
             raft_service: raft_service.clone(),
             sm_id: state_machine_id,
+            internal_subs: RwLock::new(HashMap::new())
         }
     }
 
-    pub fn notify<R>(&self, func: &RaftMsg<R>, data: R)
+    pub fn notify<R>(&self, msg: &RaftMsg<R>, data: R)
         -> Result<(usize, Vec<NotifyError>, Vec<Result<Result<(), ()>, rpc::RPCError>>), NotifyError>
-        where R: serde::Serialize + Send + Sync {
+        where R: serde::Serialize + Send + Sync + Clone + Any + 'static
+    {
         if !IS_LEADER.get() {return Err(NotifyError::IsNotLeader);}
-        let (fn_id, op_type, pattern_data) = func.encode();
+        let (fn_id, op_type, pattern_data) = msg.encode();
         match op_type {
             OpType::SUBSCRIBE => {
                 let pattern_id = hash_bytes(&pattern_data.as_slice());
                 let raft_sid = self.raft_service.options.service_id;
                 let sm_id = self.sm_id;
                 let key = (raft_sid, sm_id, fn_id, pattern_id);
+                let internal_subs = self.internal_subs.read();
                 let svr_subs = self.subscriptions.read();
                 debug!("Subs key: {:?}", svr_subs.subscriptions.keys());
                 debug!("Looking for: {:?}", &key);
+                if let Some(internal_subs) = internal_subs.get(&pattern_id) {
+                    for is in internal_subs {
+                        (is.action)(&data)
+                    }
+                }
                 if let Some(sub_ids) = svr_subs.subscriptions.get(&key) {
                     let data = bincode::serialize(&data);
                     let sub_result: Vec<_> = sub_ids.iter().map(|sub_id| {
                         if let Some(subscriber_id) = svr_subs.sub_suber.get(&sub_id) {
                             if let Some(subscriber) = svr_subs.subscribers.get(&subscriber_id) {
-                                let data = data.clone();
-                                let client = subscriber.client.clone();
+                                let client = &subscriber.client;
                                 Ok(client.notify(&key, &data))
                             } else {
                                 Err(NotifyError::CannotFindSubscriber)
@@ -153,7 +169,7 @@ impl SMCallback {
                     let errors = sub_result.iter()
                         .filter(|r| r.is_err())
                         .map(|r| {if let &Err(e) = r { Some(e) } else { None }})
-                        .map(|o| o.clone().unwrap())
+                        .map(|o| o.unwrap())
                         .collect::<Vec<NotifyError>>();
                     let response = sub_result.into_iter()
                         .filter(|r| r.is_ok())
@@ -170,12 +186,41 @@ impl SMCallback {
             }
         }
     }
+    pub fn internal_subscribe<R, F, M>(&self, msg: &M, trigger: F) -> Result<(), NotifyError>
+        where M: RaftMsg<R>,
+              F: Fn(&R) + Sync + Send + 'static,
+              R: 'static
+    {
+        let (_, op_type, pattern_data) = msg.encode();
+        match op_type {
+            OpType::SUBSCRIBE => {
+                let pattern_id = hash_bytes(&pattern_data.as_slice());
+                let mut internal_subs = self.internal_subs.write();
+                internal_subs
+                    .entry(pattern_id)
+                    .or_insert_with(|| Vec::new())
+                    .push(InternalSubscription {
+                        action: Box::new(move |any: &Any| {
+                            match any.downcast_ref::<R>() {
+                                Some(r) => trigger(r),
+                                None => {
+                                    warn!("type mismatch in internal subscription")
+                                }
+                            }
+                        })
+                    });
+                Ok(())
+            },
+            _ => Err(NotifyError::OpTypeNotSubscribe)
+        }
+    }
 }
 
-pub fn notify<R, F>(callback: &Option<SMCallback>, func: &RaftMsg<R>, data: F)
+pub fn notify<R, F>(callback: &Option<SMCallback>, msg: &RaftMsg<R>, data: F)
     where F: Fn() -> R,
-          R: serde::Serialize + Send + Sync {
+          R: serde::Serialize + Send + Sync + Clone + Any + 'static
+{
     if let Some(ref callback) = *callback {
-        callback.notify(func, data());
+        callback.notify(msg, data());
     }
 }
