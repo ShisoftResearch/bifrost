@@ -153,8 +153,7 @@ impl Membership {
         let member = self.members.get(&id).unwrap();
         let stat_map = self.heartbeat.status.read();
         ClientMember {
-            id: id,
-            address: member.address.clone(),
+            id, address: member.address.clone(),
             online: stat_map.get(&id).unwrap().online
         }
     }
@@ -367,8 +366,7 @@ impl StateMachineCmds for Membership {
                 stat.last_updated = current_time;
                 joined = true;
                 Member {
-                    id: id,
-                    address: address.clone(),
+                    id, address: address.clone(),
                     groups: HashSet::new(),
                 }
             });
