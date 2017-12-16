@@ -125,7 +125,7 @@ impl ConsistentHashing {
             None => None
         }
     }
-    pub fn get_by_server_id(&self, hash: u64) -> Option<u64> {
+    pub fn get_server_id(&self, hash: u64) -> Option<u64> {
         let lookup_table = self.tables.read();
         let nodes = &lookup_table.nodes;
         let len = nodes.len();
@@ -151,7 +151,7 @@ impl ConsistentHashing {
         None
     }
     pub fn get_server(&self, hash: u64) -> Option<String> {
-        self.to_server_name(self.get_by_server_id(hash))
+        self.to_server_name(self.get_server_id(hash))
     }
     pub fn get_server_by_string(&self, string: &String) -> Option<String> {
         self.get_server(hash_str(string))
@@ -160,10 +160,10 @@ impl ConsistentHashing {
         self.get_server(hash_bytes(serialize(obj).as_slice()))
     }
     pub fn get_server_id_by_string(&self, string: &String) -> Option<u64> {
-        self.get_by_server_id(hash_str(string))
+        self.get_server_id(hash_str(string))
     }
     pub fn get_server_id_by<T>(&self, obj: &T) -> Option<u64> where T: serde::Serialize {
-        self.get_by_server_id(hash_bytes(serialize(obj).as_slice()))
+        self.get_server_id(hash_bytes(serialize(obj).as_slice()))
     }
     pub fn rand_server(&self) -> Option<String> {
         let rand = rand::random::<u64>();
