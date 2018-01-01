@@ -10,7 +10,7 @@ use std::thread;
 use tcp;
 use utils::time;
 use utils::u8vec::*;
-use futures::Future;
+use futures::{Future, future};
 use bifrost_hasher::hash_str;
 use DISABLE_SHORTCUT;
 
@@ -101,7 +101,7 @@ impl Server {
                 None => encode_res(Err(RPCRequestError::ServiceIdNotFound) as Result<Vec<u8>, RPCRequestError>)
             };
             //println!("SVR RPC: {} - {}ms", svr_id, time::get_time() - t);
-            res
+            Box::new(future::finished(res))
         }));
     }
     pub fn listen_and_resume(server: &Arc<Server>) {
