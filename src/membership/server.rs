@@ -50,7 +50,7 @@ impl HeartbeatService {
             id: 0,
             term: 0,
             sm_id: DEFAULT_SERVICE_ID,
-            fn_id: fn_id,
+            fn_id,
             data: log.data
         });
     }

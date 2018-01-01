@@ -10,6 +10,8 @@ use tcp::proto::BytesServerProto;
 use tcp::shortcut;
 use super::STANDALONE_ADDRESS;
 
+// TODO: USE FUTURE IN THIS FUNCTION TO ENSURE FULL ASYNC CHAIN TO SERVICES
+// WARN: current implementation cannot employ performance gain from tokio
 pub type ServerCallback = Box<Fn(Vec<u8>) -> Vec<u8> + Send + Sync>;
 
 pub struct Server {

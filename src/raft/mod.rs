@@ -408,9 +408,9 @@ impl RaftService {
         }
         let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
         ClientClusterInfo{
-            members: members,
-            last_log_id: last_log_id,
-            last_log_term: last_log_term,
+            members,
+            last_log_id,
+            last_log_term,
             leader_id: meta.leader_id,
         }
     }
@@ -901,7 +901,7 @@ impl Service for RaftService {
         }; // Some for committed and None for not committed
         if let Some(data) = data {
             Ok(ClientCmdResponse::Success{
-                data: data,
+                data,
                 last_log_id: new_log_id,
                 last_log_term: new_log_term,
             })
@@ -918,8 +918,8 @@ impl Service for RaftService {
         } else {
             Ok(ClientQryResponse::Success{
                 data: meta.state_machine.read().exec_qry(&entry),
-                last_log_id: last_log_id,
-                last_log_term: last_log_term,
+                last_log_id,
+                last_log_term,
             })
         }
     }

@@ -65,8 +65,8 @@ impl Client {
             }
         };
         Ok(Client {
-            client: client,
-            server_id: server_id,
+            client,
+            server_id,
         })
     }
     pub fn connect (address: &String) -> io::Result<Client> {
