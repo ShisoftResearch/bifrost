@@ -4,7 +4,7 @@ use bincode;
 macro_rules! dispatch_rpc_service_functions {
     ($s:ty) => {
         impl $crate::rpc::RPCService for $s {
-            fn dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, $crate::rpc::RPCRequestError> {
+            fn dispatch(&self, data: Vec<u8>) -> BoxFuture<Vec<u8>, $crate::rpc::RPCRequestError> {
                 self.inner_dispatch(data)
             }
             fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64) {
@@ -130,7 +130,7 @@ macro_rules! service {
                 $(#[$attr])*
                 fn $fn_name(&self, $($arg:&$in_),*) -> std::result::Result<$out, $error>;
            )*
-           fn inner_dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, RPCRequestError> {
+           fn inner_dispatch(&self, data: Vec<u8>) -> BoxFuture<Vec<u8>, RPCRequestError> {
                let (func_id, body) = extract_u64_head(data);
                match func_id as usize {
                    $(hash_ident!($fn_name) => {

@@ -10,7 +10,7 @@ use std::thread;
 use tcp;
 use utils::time;
 use utils::u8vec::*;
-use futures::{Future, future};
+use futures::{Future, BoxFuture, future};
 use bifrost_hasher::hash_str;
 use DISABLE_SHORTCUT;
 
@@ -32,7 +32,7 @@ pub enum RPCError {
 }
 
 pub trait RPCService: Sync + Send {
-    fn dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, RPCRequestError>;
+    fn dispatch(&self, data: Vec<u8>) -> BoxFuture<Vec<u8>, RPCRequestError>;
     fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64);
 }
 
@@ -94,14 +94,17 @@ impl Server {
             let (svr_id, data) = extract_u64_head(data);
             let svr_map = server.services.read();
             let service = svr_map.get(&svr_id);
-            let res = match service {
+            match service {
                 Some(service) => {
-                    encode_res(service.dispatch(data))
+                    service
+                        .dispatch(data)
+                        .then(|r|
+                            Ok(encode_res(r)))
+                        .map_err(|e|
+                            io::Error::new(io::ErrorKind::Other, "")).boxed()
                 },
-                None => encode_res(Err(RPCRequestError::ServiceIdNotFound) as Result<Vec<u8>, RPCRequestError>)
-            };
-            //println!("SVR RPC: {} - {}ms", svr_id, time::get_time() - t);
-            Box::new(future::finished(res))
+                None => future::finished(encode_res(Err(RPCRequestError::ServiceIdNotFound))).boxed()
+            }
         }));
     }
     pub fn listen_and_resume(server: &Arc<Server>) {
