@@ -95,14 +95,13 @@ impl Server {
             let svr_map = server.services.read();
             let service = svr_map.get(&svr_id);
             match service {
-                Some(service) => {
-                    service
-                        .dispatch(data)
-                        .then(|r|
-                            Ok(encode_res(r)))
-                        .map_err(|e|
-                            io::Error::new(io::ErrorKind::Other, "")).boxed()
-                },
+                Some(service) => service
+                    .dispatch(data)
+                    .then(|r|
+                        Ok(encode_res(r)))
+                    .map_err(|e|
+                        io::Error::new(io::ErrorKind::Other, ""))
+                    .boxed(),
                 None => future::finished(encode_res(Err(RPCRequestError::ServiceIdNotFound))).boxed()
             }
         }));
