@@ -37,7 +37,7 @@ impl Service for ClientCore {
     type Future = Box<Future<Item = Self::Response, Error = io::Error>>;
 
     fn call(&self, req: Self::Request) -> Self::Future {
-        self.inner.call(req).boxed()
+        Box::new(self.inner.call(req))
     }
 }
 
@@ -77,14 +77,14 @@ impl Client {
             let future = client.call(msg);
             core.run(future)
         } else {
-            shortcut::call(self.server_id, msg)
+            shortcut::call(self.server_id, msg).wait()
         }
     }
     pub fn send_async(&mut self, msg: Vec<u8>) -> Box<ResFuture> {
         if let Some((ref client, _)) = self.client {
             Box::new(client.call(msg))
         } else {
-            shortcut::call_async(self.server_id, msg)
+            shortcut::call(self.server_id, msg)
         }
     }
 }

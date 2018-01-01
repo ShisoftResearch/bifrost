@@ -12,7 +12,7 @@ use super::STANDALONE_ADDRESS;
 
 // TODO: USE FUTURE IN THIS FUNCTION TO ENSURE FULL ASYNC CHAIN TO SERVICES
 // WARN: current implementation cannot employ performance gain from tokio
-pub type ServerCallback = Box<Fn(Vec<u8>) -> Vec<u8> + Send + Sync>;
+pub type ServerCallback = Box<Fn(Vec<u8>) -> BoxFuture<Vec<u8>, io::Error> + Send + Sync>;
 
 pub struct Server {
     callback: Arc<ServerCallback>
@@ -29,7 +29,7 @@ impl Service for Server {
     type Future = BoxFuture<Vec<u8>, io::Error>;
 
     fn call(&self, req: Self::Request) -> Self::Future {
-        future::finished((self.callback) (req)).boxed()
+        (self.callback) (req)
     }
 }
 
