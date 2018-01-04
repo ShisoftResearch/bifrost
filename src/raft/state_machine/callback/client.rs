@@ -15,8 +15,8 @@ pub struct SubscriptionService {
 }
 
 impl Service for SubscriptionService {
-    #[async]
-    fn notify(&self, key: &SubKey, data: &Vec<u8>) -> Result<(), ()> {
+    #[async(boxed)]
+    fn notify(self: Box<Self>, key: SubKey, data: Vec<u8>) -> Result<(), ()> {
         let subs = self.subs.read();
         if let Some(sub_fns) = subs.get(&key) {
             for fun in sub_fns {

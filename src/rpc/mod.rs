@@ -32,7 +32,7 @@ pub enum RPCError {
 }
 
 pub trait RPCService: Sync + Send {
-    fn dispatch(self: Box<Self>, data: Vec<u8>) -> BoxFuture<Vec<u8>, RPCRequestError>;
+    fn dispatch(self: Box<Self>, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = RPCRequestError>>;
     fn register_shortcut_service(self: Box<Self>, service_ptr: usize, server_id: u64, service_id: u64);
 }
 
