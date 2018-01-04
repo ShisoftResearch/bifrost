@@ -1,4 +1,4 @@
-use raft::SyncServiceClient;
+use raft::AsyncServiceClient;
 use rpc;
 use super::*;
 use super::callback::SubKey;
@@ -12,7 +12,7 @@ use utils::bincode;
 pub const CONFIG_SM_ID: u64 = 1;
 
 pub struct RaftMember {
-    pub rpc: Arc<SyncServiceClient>,
+    pub rpc: Arc<AsyncServiceClient>,
     pub address: String,
     pub id: u64,
 }
@@ -48,7 +48,7 @@ impl StateMachineCmds for Configures {
             match rpc::DEFAULT_CLIENT_POOL.get(&address) {
                 Ok(client) => {
                     self.members.insert(id, RaftMember {
-                        rpc: SyncServiceClient::new(self.service_id, &client),
+                        rpc: AsyncServiceClient::new(self.service_id, &client),
                         address,
                         id,
                     });

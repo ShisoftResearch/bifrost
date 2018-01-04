@@ -1,5 +1,5 @@
 use raft::{
-    SyncServiceClient, RaftMsg, LogEntry, ClientQryResponse, 
+    AsyncServiceClient, RaftMsg, LogEntry, ClientQryResponse,
     ClientCmdResponse};
 use raft::state_machine::OpType;
 use raft::state_machine::master::{ExecResult, ExecError};
@@ -19,7 +19,7 @@ use backtrace::Backtrace;
 use futures::BoxFuture;
 
 const ORDERING: Ordering = Ordering::Relaxed;
-pub type Client = Arc<SyncServiceClient>;
+pub type Client = Arc<AsyncServiceClient>;
 
 lazy_static! {
     pub static ref CALLBACK: RwLock<Option<Arc<Box<SubscriptionService>>>> = RwLock::new(None);
@@ -100,7 +100,7 @@ impl RaftClient {
             if !members.clients.contains_key(&id) {
                 match rpc::DEFAULT_CLIENT_POOL.get(&server_addr) {
                     Ok(client) => {
-                        members.clients.insert(id, SyncServiceClient::new(self.service_id, &client));
+                        members.clients.insert(id, AsyncServiceClient::new(self.service_id, &client));
                     },
                     Err(_) => {continue;}
                 }
@@ -130,7 +130,7 @@ impl RaftClient {
                     let addr = members.id_map.get(id).unwrap().clone();
                     if !members.clients.contains_key(id) {
                         if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(&addr) {
-                            members.clients.insert(*id, SyncServiceClient::new(self.service_id, &client));
+                            members.clients.insert(*id, AsyncServiceClient::new(self.service_id, &client));
                         }
                     }
                 }

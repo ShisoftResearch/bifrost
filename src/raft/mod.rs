@@ -19,9 +19,7 @@ use utils::time::get_time;
 use threadpool::ThreadPool;
 use num_cpus;
 
-use futures::future;
 use futures::prelude::*;
-use futures::{Future, BoxFuture};
 
 #[macro_use]
 pub mod state_machine;

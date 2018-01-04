@@ -38,7 +38,7 @@ mod simple_service {
         }
         thread::sleep(Duration::from_millis(1000));
         let client = RPCClient::new(&addr).unwrap();
-        let service_client = SyncServiceClient::new(0, &client);
+        let service_client = AsyncServiceClient::new(0, &client);
         let response = service_client.hello(&String::from("Jack"));
         let greeting_str = response.unwrap().unwrap();
         println!("SERVER RESPONDED: {}", greeting_str);
@@ -92,7 +92,7 @@ mod struct_service {
         }
         thread::sleep(Duration::from_millis(1000));
         let client = RPCClient::new(&addr).unwrap();
-        let service_client = SyncServiceClient::new(0, &client);
+        let service_client = AsyncServiceClient::new(0, &client);
         let response = service_client.hello(&Greeting {
             name: String::from("Jack"),
             time: 12
@@ -146,7 +146,7 @@ mod multi_server {
         thread::sleep(Duration::from_millis(1000));
         for addr in &addrs {
             let client = RPCClient::new(&addr).unwrap();
-            let service_client = SyncServiceClient::new(id, &client);
+            let service_client = AsyncServiceClient::new(id, &client);
             let id_res = service_client.query_server_id().unwrap();
             assert_eq!(id_res.unwrap(), id);
             id += 1;

@@ -41,7 +41,7 @@ impl MemberService {
             while !service_clone.closed.load(Ordering::Relaxed) {
                 let rpc_client = service_clone.raft_client.current_leader_rpc_client();
                 if let Some(rpc_client) = rpc_client {
-                    let heartbeat_client = SyncServiceClient::new(DEFAULT_SERVICE_ID, &rpc_client);
+                    let heartbeat_client = AsyncServiceClient::new(DEFAULT_SERVICE_ID, &rpc_client);
                     heartbeat_client.ping(&service_clone.id);
                 }
                 thread::sleep(time::Duration::from_millis(PING_INTERVAL))

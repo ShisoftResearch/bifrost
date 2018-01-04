@@ -128,7 +128,7 @@ macro_rules! service {
         pub trait Service: RPCService {
            $(
                 $(#[$attr])*
-                fn $fn_name(self: Box<Self>, $($arg:$in_),*) -> futures::BoxFuture<$out, $error>;
+                fn $fn_name(self: Box<Self>, $($arg:$in_),*) -> BoxFuture<$out, $error>;
            )*
            fn inner_dispatch(self: Box<Self>, data: Vec<u8>) -> BoxFuture<Vec<u8>, RPCRequestError> {
                let (func_id, body) = extract_u64_head(data);
