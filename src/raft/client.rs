@@ -16,12 +16,13 @@ use bifrost_hasher::{hash_str, hash_bytes};
 use rand;
 use rpc;
 use backtrace::Backtrace;
+use futures::BoxFuture;
 
 const ORDERING: Ordering = Ordering::Relaxed;
 pub type Client = Arc<SyncServiceClient>;
 
 lazy_static! {
-    pub static ref CALLBACK: RwLock<Option<Arc<SubscriptionService>>> = RwLock::new(None);
+    pub static ref CALLBACK: RwLock<Option<Arc<Box<SubscriptionService>>>> = RwLock::new(None);
 }
 
 #[derive(Debug)]
@@ -170,7 +171,7 @@ impl RaftClient {
     <M, R, F>
     (&self, sm_id: u64, msg: M, f: F) -> Result<Result<u64, SubscriptionError>, ExecError>
     where M: RaftMsg<R> + 'static,
-          F: Fn(R) + 'static + Send + Sync
+          F: Fn(R) -> BoxFuture<(), ()> + 'static + Send + Sync
     {
         let callback = CALLBACK.read();
         if callback.is_none() {

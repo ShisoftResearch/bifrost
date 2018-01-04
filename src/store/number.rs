@@ -137,7 +137,7 @@ macro_rules! def_store_number {
                 pub fn new_by_name(name: &String, num: $t) -> Number {
                     Number::new(hash_str(name), num)
                 }
-                pub fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
+                pub fn init_callback(&mut self, raft_service: &Arc<Box<RaftService>>) {
                     self.callback = Some(SMCallback::new(self.id(), raft_service.clone()));
                 }
             }

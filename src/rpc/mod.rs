@@ -113,7 +113,7 @@ impl Server {
             Server::listen(&server);
         });
     }
-    pub fn register_service<T>(&self, service_id: u64,  service: &Arc<T>)
+    pub fn register_service<T>(&self, service_id: u64,  service: &Arc<Box<T>>)
     where T: RPCService + Sized + 'static{
         let service = service.clone();
         if !DISABLE_SHORTCUT {

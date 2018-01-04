@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::{thread, time as std_time};
 use bifrost_hasher::hash_str;
 use membership::client::{Group as ClientGroup, Member as ClientMember};
+use futures::prelude::*;
 
 static MAX_TIMEOUT: i64 = 1000; //5 secs for 500ms heartbeat
 
@@ -23,16 +24,17 @@ struct HBStatus {
 
 pub struct HeartbeatService {
     status: RwLock<HashMap<u64, HBStatus>>,
-    raft_service: Arc<RaftService>,
+    raft_service: Arc<Box<RaftService>>,
     closed: AtomicBool,
     was_leader: AtomicBool,
 }
 
 impl Service for HeartbeatService {
-    fn ping(&self, id: &u64) -> Result<(), ()> {
+    #[async]
+    fn ping(self: Box<Self>, id: u64) -> Result<(), ()> {
         let mut stat_map = self.status.write();
         let current_time = time::get_time();
-        let mut stat = stat_map.entry(*id).or_insert_with(|| HBStatus {
+        let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
             online: false,
             last_updated: current_time,
             //orthodoxy info will trigger the watcher thread to update
@@ -80,7 +82,7 @@ struct MemberGroup {
 }
 
 pub struct Membership {
-    heartbeat: Arc<HeartbeatService>,
+    heartbeat: Arc<Box<HeartbeatService>>,
     groups: HashMap<u64, MemberGroup>,
     members: HashMap<u64, Member>,
     callback: Option<SMCallback>,
@@ -93,13 +95,13 @@ impl Drop for Membership {
 }
 
 impl Membership {
-    pub fn new(server: &Arc<Server>, raft_service: &Arc<RaftService>) {
-        let service = Arc::new(HeartbeatService {
+    pub fn new(server: &Arc<Server>, raft_service: &Arc<Box<RaftService>>) {
+        let service = Arc::new(Box::new(HeartbeatService {
             status: RwLock::new(HashMap::new()),
             closed: AtomicBool::new(false),
             raft_service: raft_service.clone(),
             was_leader: AtomicBool::new(false),
-        });
+        }));
         let service_clone = service.clone();
         thread::spawn(move || {
             while !service_clone.closed.load(Ordering::Relaxed) {
@@ -157,7 +159,7 @@ impl Membership {
             online: stat_map.get(&id).unwrap().online
         }
     }
-    fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
+    fn init_callback(&mut self, raft_service: &Arc<Box<RaftService>>) {
         self.callback = Some(SMCallback::new(self.id(), raft_service.clone()));
     }
     fn notify_for_member_online(&self, id: u64) {
