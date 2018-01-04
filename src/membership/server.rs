@@ -48,7 +48,7 @@ impl HeartbeatService {
     fn update_raft(&self, online: &Vec<u64>, offline: &Vec<u64>) {
         let log = commands::hb_online_changed::new(online, offline);
         let fn_id = log.encode().0;
-        self.raft_service.c_command(&LogEntry {
+        self.raft_service.c_command(LogEntry {
             id: 0,
             term: 0,
             sm_id: DEFAULT_SERVICE_ID,

@@ -515,7 +515,7 @@ impl RaftService {
                 tx.send(RequestVoteResponse::Granted);
             } else {
                 meta.workers.lock().execute(move||{
-                    if let Ok(Ok(((remote_term, remote_leader_id), vote_granted))) = rpc.request_vote(&term, &id, &last_log_id, &last_log_term) {
+                    if let Ok(Ok(((remote_term, remote_leader_id), vote_granted))) = rpc.request_vote(&term, &id, &last_log_id, &last_log_term).wait() {
                         if vote_granted {
                             tx.send(RequestVoteResponse::Granted);
                         } else if remote_term > term {
@@ -652,7 +652,7 @@ impl RaftService {
                                 &follower_last_log_term,
                                 &entries,
                                 &commit_index
-                            );
+                            ).wait();
                             match append_result {
                                 Ok(Ok((follower_term, result))) => {
                                     match result {

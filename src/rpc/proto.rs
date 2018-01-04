@@ -135,11 +135,14 @@ macro_rules! service {
                match func_id as usize {
                    $(hash_ident!($fn_name) => {
                        let ($($arg,)*) : ($($in_,)*) = $crate::utils::bincode::deserialize(&body);
-                       self.$fn_name($($arg,)*)
-                            .then(|&f_result|$crate::utils::bincode::serialize(&f_result))
+                       Box::new(
+                           self.$fn_name($($arg,)*)
+                               .then(|f_result| future::ok($crate::utils::bincode::serialize(&f_result)))
+                               .map_err(|_| RPCRequestError::Other) // in this case error it is impossible
+                       )
                    }),*
                    _ => {
-                       future::failed(RPCRequestError::FunctionIdNotFound).boxed()
+                       Box::new(future::err(RPCRequestError::FunctionIdNotFound))
                    }
                }
            }
@@ -162,7 +165,7 @@ macro_rules! service {
                 $(#[$attr])*
                 pub fn $fn_name(&self, $($arg:&$in_),*) -> Box<Future<Item = std::result::Result<$out, $error>, Error = RPCError>> {
                     if let Some(local) = get_local(self.server_id, self.service_id) {
-                        Box::new(future::finished(local.$fn_name($($arg),*)))
+                        Box::new(future::finished(local.$fn_name($($arg.clone()),*).wait()))
                     } else {
                         let req_data = ($($arg,)*);
                         let req_data_bytes = $crate::utils::bincode::serialize(&req_data);

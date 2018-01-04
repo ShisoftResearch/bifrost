@@ -16,7 +16,7 @@ use bifrost_hasher::{hash_str, hash_bytes};
 use rand;
 use rpc;
 use backtrace::Backtrace;
-use futures::BoxFuture;
+use futures::Future;
 
 const ORDERING: Ordering = Ordering::Relaxed;
 pub type Client = Arc<AsyncServiceClient>;
@@ -106,7 +106,7 @@ impl RaftClient {
                 }
             }
             let client = members.clients.get(&id).unwrap();
-            if let Ok(Ok(info)) = client.c_server_cluster_info() {
+            if let Ok(Ok(info)) = client.c_server_cluster_info().wait() {
                 if info.leader_id != 0 {
                     cluster_info = Some(info);
                     break;
@@ -218,7 +218,7 @@ impl RaftClient {
                 }
             };
             num_members = members.clients.len();
-            client.c_query(&self.gen_log_entry(sm_id, fn_id, data))
+            client.c_query(&self.gen_log_entry(sm_id, fn_id, data)).wait()
         };
         match res {
             Ok(Ok(res)) => {
@@ -261,7 +261,7 @@ impl RaftClient {
             }
             match self.current_leader_client() {
                 Some((leader_id, client)) => {
-                    match client.c_command(&self.gen_log_entry(sm_id, fn_id, data)) {
+                    match client.c_command(&self.gen_log_entry(sm_id, fn_id, data)).wait() {
                         Ok(Ok(ClientCmdResponse::Success {
                                   data, last_log_term, last_log_id
                               })) => {
@@ -310,8 +310,8 @@ impl RaftClient {
         LogEntry {
             id: self.last_log_id.load(ORDERING),
             term: self.last_log_term.load(ORDERING),
-            sm_id: sm_id,
-            fn_id: fn_id,
+            sm_id,
+            fn_id,
             data: data.clone()
         }
     }
