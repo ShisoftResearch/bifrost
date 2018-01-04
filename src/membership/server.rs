@@ -30,7 +30,7 @@ pub struct HeartbeatService {
 }
 
 impl Service for HeartbeatService {
-    #[async]
+    #[async(boxed)]
     fn ping(self: Box<Self>, id: u64) -> Result<(), ()> {
         let mut stat_map = self.status.write();
         let current_time = time::get_time();

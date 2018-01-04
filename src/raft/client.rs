@@ -68,7 +68,7 @@ impl RaftClient {
             leader_id: AtomicU64::new(0),
             last_log_id: AtomicU64::new(0),
             last_log_term: AtomicU64::new(0),
-            service_id: service_id,
+            service_id,
         };
         let init = {
             let mut members = client.members.write();
@@ -171,7 +171,7 @@ impl RaftClient {
     <M, R, F>
     (&self, sm_id: u64, msg: M, f: F) -> Result<Result<u64, SubscriptionError>, ExecError>
     where M: RaftMsg<R> + 'static,
-          F: Fn(R) -> BoxFuture<(), ()> + 'static + Send + Sync
+          F: Fn(R) + 'static + Send + Sync
     {
         let callback = CALLBACK.read();
         if callback.is_none() {

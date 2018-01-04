@@ -139,7 +139,7 @@ macro_rules! service {
                             .then(|&f_result|$crate::utils::bincode::serialize(&f_result))
                    }),*
                    _ => {
-                       feature::failed(RPCRequestError::FunctionIdNotFound).boxed()
+                       future::failed(RPCRequestError::FunctionIdNotFound).boxed()
                    }
                }
            }

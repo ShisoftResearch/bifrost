@@ -9,7 +9,7 @@ use futures::prelude::*;
 use futures::BoxFuture;
 
 pub struct SubscriptionService {
-    pub subs: RwLock<HashMap<SubKey, Vec<Box<Fn(Vec<u8>) -> BoxFuture<(), ()> + Send + Sync>>>>,
+    pub subs: RwLock<HashMap<SubKey, Vec<Box<Fn(Vec<u8>) + Send + Sync>>>>,
     pub server_address: String,
     pub session_id: u64
 }
@@ -20,7 +20,7 @@ impl Service for SubscriptionService {
         let subs = self.subs.read();
         if let Some(sub_fns) = subs.get(&key) {
             for fun in sub_fns {
-                await!(fun(data.clone()));
+                fun(data.clone());
             }
         }
         Ok(())
