@@ -10,7 +10,7 @@ use std::thread;
 use tcp;
 use utils::time;
 use utils::u8vec::*;
-use futures::{Future, BoxFuture, future};
+use futures::{Future, future};
 use bifrost_hasher::hash_str;
 use DISABLE_SHORTCUT;
 
@@ -90,21 +90,26 @@ impl Server {
     pub fn listen(server: &Arc<Server>) {
         let address = &server.address;
         let server = server.clone();
-        tcp::server::Server::new(address, Box::new(move |data| {
-            let (svr_id, data) = extract_u64_head(data);
-            let svr_map = server.services.read();
-            let service = svr_map.get(&svr_id);
-            match service {
-                Some(service) => service
-                    .dispatch(data)
-                    .then(|r|
-                        Ok(encode_res(r)))
-                    .map_err(|e|
-                        io::Error::new(io::ErrorKind::Other, ""))
-                    .boxed(),
-                None => future::finished(encode_res(Err(RPCRequestError::ServiceIdNotFound))).boxed()
-            }
-        }));
+        tcp::server::Server::new(
+            address,
+            tcp::server::ServerCallback::new(
+                move |data| {
+                    let (svr_id, data) = extract_u64_head(data);
+                    let svr_map = server.services.read();
+                    let service = svr_map.get(&svr_id);
+                    match service {
+                        Some(service) =>
+                            Box::new(
+                                service
+                                    .dispatch(data)
+                                    .then(|r|
+                                        Ok(encode_res(r)))
+                            ),
+                        None => Box::new(future::finished(encode_res(Err(RPCRequestError::ServiceIdNotFound))))
+                    }
+                }
+            )
+        );
     }
     pub fn listen_and_resume(server: &Arc<Server>) {
         let server = server.clone();
