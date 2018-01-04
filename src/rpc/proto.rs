@@ -117,7 +117,7 @@ macro_rules! service {
         use std::io;
         use $crate::rpc::*;
         use $crate::utils::u8vec::*;
-        use futures::{Future, BoxFuture, future};
+        use futures::{Future, future};
 
         lazy_static! {
             pub static ref RPC_SVRS:

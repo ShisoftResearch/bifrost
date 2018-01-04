@@ -6,7 +6,6 @@ use super::*;
 use rpc::Server;
 use utils::time::get_time;
 use futures::prelude::*;
-use futures::BoxFuture;
 
 pub struct SubscriptionService {
     pub subs: RwLock<HashMap<SubKey, Vec<Box<Fn(Vec<u8>) + Send + Sync>>>>,
