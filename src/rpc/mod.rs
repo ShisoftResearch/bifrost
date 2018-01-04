@@ -32,12 +32,12 @@ pub enum RPCError {
 }
 
 pub trait RPCService: Sync + Send {
-    fn dispatch(&self, data: Vec<u8>) -> BoxFuture<Vec<u8>, RPCRequestError>;
-    fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64);
+    fn dispatch(self: Box<Self>, data: Vec<u8>) -> BoxFuture<Vec<u8>, RPCRequestError>;
+    fn register_shortcut_service(self: Box<Self>, service_ptr: usize, server_id: u64, service_id: u64);
 }
 
 pub struct Server {
-    services: RwLock<HashMap<u64, Arc<RPCService>>>,
+    services: RwLock<HashMap<u64, Arc<Box<RPCService>>>>,
     pub address: String,
     pub server_id: u64
 }

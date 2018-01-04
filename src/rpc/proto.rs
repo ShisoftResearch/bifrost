@@ -4,12 +4,12 @@ use bincode;
 macro_rules! dispatch_rpc_service_functions {
     ($s:ty) => {
         impl $crate::rpc::RPCService for $s {
-            fn dispatch(&self, data: Vec<u8>) -> BoxFuture<Vec<u8>, $crate::rpc::RPCRequestError> {
+            fn dispatch(self: Box<Self>, data: Vec<u8>) -> BoxFuture<Vec<u8>, $crate::rpc::RPCRequestError> {
                 self.inner_dispatch(data)
             }
-            fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64) {
+            fn register_shortcut_service(self: Box<Self>, service_ptr: usize, server_id: u64, service_id: u64) {
                 let mut cbs = RPC_SVRS.write();
-                let service = unsafe {Arc::from_raw(service_ptr as *const $s)};
+                let service = unsafe {Arc::from_raw(service_ptr as *const Box<$s>)};
                 cbs.insert((server_id, service_id), service);
             }
         }
@@ -121,7 +121,7 @@ macro_rules! service {
 
         lazy_static! {
             pub static ref RPC_SVRS:
-            ::parking_lot::RwLock<::std::collections::BTreeMap<(u64, u64), Arc<Service>>>
+            ::parking_lot::RwLock<::std::collections::BTreeMap<(u64, u64), Arc<Box<Service>>>>
             = ::parking_lot::RwLock::new(::std::collections::BTreeMap::new());
         }
 
@@ -130,7 +130,7 @@ macro_rules! service {
                 $(#[$attr])*
                 fn $fn_name(self: Box<Self>, $($arg:$in_),*) -> futures::BoxFuture<$out, $error>;
            )*
-           fn inner_dispatch(&self, data: Vec<u8>) -> BoxFuture<Vec<u8>, RPCRequestError> {
+           fn inner_dispatch(self: Box<Self>, data: Vec<u8>) -> BoxFuture<Vec<u8>, RPCRequestError> {
                let (func_id, body) = extract_u64_head(data);
                match func_id as usize {
                    $(hash_ident!($fn_name) => {
@@ -139,12 +139,12 @@ macro_rules! service {
                             .then(|&f_result|$crate::utils::bincode::serialize(&f_result))
                    }),*
                    _ => {
-                       Box::new(feature::failed(RPCRequestError::FunctionIdNotFound))
+                       feature::failed(RPCRequestError::FunctionIdNotFound).boxed()
                    }
                }
            }
         }
-        pub fn get_local(server_id: u64, service_id: u64) -> Option<Arc<Service>> {
+        pub fn get_local(server_id: u64, service_id: u64) -> Option<Arc<Box<Service>>> {
             let svrs = RPC_SVRS.read();
             match svrs.get(&(server_id, service_id)) {
                 Some(s) => Some(s.clone()),
