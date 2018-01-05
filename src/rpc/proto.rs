@@ -4,14 +4,15 @@ use bincode;
 macro_rules! dispatch_rpc_service_functions {
     ($s:ty) => {
         impl $crate::rpc::RPCService for $s {
-            fn dispatch(&self, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = $crate::rpc::RPCRequestError>> {
-                self.inner_dispatch(data)
+            fn dispatch(this: Arc<Self>, data: Vec<u8>)
+                -> Box<Future<Item = Vec<u8>, Error = $crate::rpc::RPCRequestError>>
+                where Self: Sized
+            {
+                Self::inner_dispatch(this, data)
             }
-            fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64) {
+            fn register_shortcut_service(this: Arc<Self>, server_id: u64, service_id: u64) where Self: Sized {
                 let mut cbs = RPC_SVRS.write();
-                // TODO: remove service from Arc
-                let service = unsafe {Arc::from_raw(service_ptr as *const $s)};
-                cbs.insert((server_id, service_id), service);
+                cbs.insert((server_id, service_id), this);
             }
         }
     };
@@ -131,13 +132,13 @@ macro_rules! service {
                 $(#[$attr])*
                 fn $fn_name(this: Arc<Self>, $($arg:$in_),*) -> Box<Future<Item = $out, Error = $error>> where Self: Sized;
            )*
-           fn inner_dispatch(&self, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = RPCRequestError>> {
+           fn inner_dispatch(this: Arc<Self>, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = RPCRequestError>> where Self: Sized {
                let (func_id, body) = extract_u64_head(data);
                match func_id as usize {
                    $(hash_ident!($fn_name) => {
                        let ($($arg,)*) : ($($in_,)*) = $crate::utils::bincode::deserialize(&body);
                        Box::new(
-                           self.$fn_name($($arg,)*)
+                           Self::$fn_name(this, $($arg,)*)
                                .then(|f_result| future::ok($crate::utils::bincode::serialize(&f_result)))
                                .map_err(|_:$error| RPCRequestError::Other) // in this case error it is impossible
                        )
