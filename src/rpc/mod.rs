@@ -32,13 +32,12 @@ pub enum RPCError {
 }
 
 pub trait RPCService: Sync + Send {
-    fn dispatch(self: Box<Self>, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = RPCRequestError>>;
-    fn register_shortcut_service(self: Box<Self>, service_ptr: usize, server_id: u64, service_id: u64);
-    fn into_boxed(self: Box<Self>) -> Box<RPCService>;
+    fn dispatch(&self, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = RPCRequestError>>;
+    fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64);
 }
 
 pub struct Server {
-    services: RwLock<HashMap<u64, Arc<Box<RPCService>>>>,
+    services: RwLock<HashMap<u64, Arc<RPCService>>>,
     pub address: String,
     pub server_id: u64
 }
@@ -121,7 +120,7 @@ impl Server {
             Server::listen(&server);
         });
     }
-    pub fn register_service<T>(&self, service_id: u64,  service: &Arc<Box<T>>)
+    pub fn register_service<T>(&self, service_id: u64,  service: &Arc<T>)
     where T: RPCService + Sized + 'static{
         let service = service.clone();
         if !DISABLE_SHORTCUT {
@@ -130,7 +129,7 @@ impl Server {
         } else {
             println!("SERVICE SHORTCUT DISABLED");
         }
-        self.services.write().insert(service_id, Arc::new(service.into_boxed()));
+        self.services.write().insert(service_id, Arc::new(service));
     }
 
     pub fn remove_service(&self, service_id: u64) {

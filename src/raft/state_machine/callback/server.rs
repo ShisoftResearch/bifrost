@@ -102,7 +102,7 @@ pub struct InternalSubscription {
 
 pub struct SMCallback {
     pub subscriptions: Arc<RwLock<Subscriptions>>,
-    pub raft_service: Arc<Box<RaftService>>,
+    pub raft_service: Arc<RaftService>,
     pub internal_subs: RwLock<HashMap<u64, Vec<InternalSubscription>>>,
     pub sm_id: u64,
 }
@@ -119,7 +119,7 @@ pub enum NotifyError {
 }
 
 impl SMCallback {
-    pub fn new(state_machine_id: u64, raft_service: Arc<Box<RaftService>>) -> SMCallback {
+    pub fn new(state_machine_id: u64, raft_service: Arc<RaftService>) -> SMCallback {
         let meta = raft_service.meta.read();
         let sm = meta.state_machine.read();
         let subs = sm.configs.subscriptions.clone();

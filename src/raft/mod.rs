@@ -234,7 +234,7 @@ fn alter_term(meta: &mut RwLockWriteGuard<RaftMeta>, term: u64) {
 
 
 impl RaftService {
-    pub fn new(opts: Options) -> Arc<Box<RaftService>> {
+    pub fn new(opts: Options) -> Arc<RaftService> {
         let server_address = opts.address.clone();
         let server_id = hash_str(&server_address);
         let server_obj = RaftService {
@@ -258,9 +258,9 @@ impl RaftService {
             id: server_id,
             options: opts,
         };
-        Arc::new(Box::new(server_obj))
+        Arc::new(server_obj)
     }
-    pub fn start(server: &Arc<Box<RaftService>>) -> bool {
+    pub fn start(server: &Arc<RaftService>) -> bool {
         let server_address = server.options.address.clone();
         info!("Waiting for server to be initialized");
         {
@@ -333,7 +333,7 @@ impl RaftService {
         }
         return true;
     }
-    pub fn new_server(opts: Options) -> (bool, Arc<Box<RaftService>>, Arc<Server>) {
+    pub fn new_server(opts: Options) -> (bool, Arc<RaftService>, Arc<Server>) {
         let address = opts.address.clone();
         let svr_id = opts.service_id;
         let service = RaftService::new(opts);
@@ -495,7 +495,7 @@ impl RaftService {
     pub fn read_meta(&self) -> RwLockReadGuard<RaftMeta> {
         self.meta.read()
     }
-    fn become_candidate(server: Arc<Box<RaftService>>, meta: &mut RwLockWriteGuard<RaftMeta>) {
+    fn become_candidate(server: Arc<RaftService>, meta: &mut RwLockWriteGuard<RaftMeta>) {
         server.reset_last_checked(meta);
         let term = meta.term;
         alter_term(meta, term + 1);
@@ -770,7 +770,7 @@ impl RaftService {
 impl Service for RaftService {
     #[async(boxed)]
     fn append_entries(
-        self: Box<Self>,
+        this: Arc<Self>,
         term: u64, leader_id: u64,
         prev_log_id: u64, prev_log_term: u64,
         entries: Option<LogEntries>,
@@ -844,7 +844,7 @@ impl Service for RaftService {
 
     #[async(boxed)]
     fn request_vote(
-        self: Box<Self>,
+        this: Arc<Self>,
         term: u64, candidate_id: u64,
         last_log_id: u64, last_log_term: u64
     ) -> Result<((u64, u64), bool), ()> {
@@ -882,7 +882,7 @@ impl Service for RaftService {
 
     #[async(boxed)]
     fn install_snapshot(
-        self: Box<Self>,
+        this: Arc<Self>,
         term: u64, leader_id: u64, last_included_index: u64,
         last_included_term: u64, data: Vec<u8>, done: bool
     ) -> Result<u64, ()> {
@@ -895,7 +895,7 @@ impl Service for RaftService {
     }
 
     #[async(boxed)]
-    fn c_command(self: Box<Self>, entry: LogEntry) -> Result<ClientCmdResponse, ()> {
+    fn c_command(this: Arc<Self>, entry: LogEntry) -> Result<ClientCmdResponse, ()> {
         let mut meta = self.write_meta();
         let mut entry = entry;
         if !is_leader(&meta) {
@@ -919,7 +919,7 @@ impl Service for RaftService {
     }
 
     #[async(boxed)]
-    fn c_query(self: Box<Self>, entry: LogEntry) -> Result<ClientQryResponse, ()> {
+    fn c_query(this: Arc<Self>, entry: LogEntry) -> Result<ClientQryResponse, ()> {
         let mut meta = self.meta.read();
         let logs = meta.logs.read();
         let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
@@ -935,12 +935,12 @@ impl Service for RaftService {
     }
 
     #[async(boxed)]
-    fn c_server_cluster_info(self: Box<Self>) -> Result<ClientClusterInfo, ()> {
+    fn c_server_cluster_info(this: Arc<Self>) -> Result<ClientClusterInfo, ()> {
         Ok(self.cluster_info())
     }
 
     #[async(boxed)]
-    fn c_put_offline(self: Box<Self>) -> Result<bool, ()> {
+    fn c_put_offline(this: Arc<Self>) -> Result<bool, ()> {
         Ok(self.leave())
     }
 }

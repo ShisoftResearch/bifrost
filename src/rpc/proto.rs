@@ -4,18 +4,14 @@ use bincode;
 macro_rules! dispatch_rpc_service_functions {
     ($s:ty) => {
         impl $crate::rpc::RPCService for $s {
-            fn dispatch(self: Box<Self>, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = $crate::rpc::RPCRequestError>> {
+            fn dispatch(&self, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = $crate::rpc::RPCRequestError>> {
                 self.inner_dispatch(data)
             }
-            fn register_shortcut_service(self: Box<Self>, service_ptr: usize, server_id: u64, service_id: u64) {
-                let boxed_trait = self as Box<Service>;
+            fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64) {
                 let mut cbs = RPC_SVRS.write();
                 // TODO: remove service from Arc
-                let service = unsafe {Arc::from_raw(service_ptr as *const Box<$s>)};
-                cbs.insert((server_id, service_id), Arc::new(boxed_trait));
-            }
-            fn into_boxed(self: Box<Self>) -> Box<$crate::rpc::RPCService> {
-                self as Box<$crate::rpc::RPCService>
+                let service = unsafe {Arc::from_raw(service_ptr as *const $s)};
+                cbs.insert((server_id, service_id), service);
             }
         }
     };
@@ -126,16 +122,16 @@ macro_rules! service {
 
         lazy_static! {
             pub static ref RPC_SVRS:
-            ::parking_lot::RwLock<::std::collections::BTreeMap<(u64, u64), Arc<Box<Service>>>>
+            ::parking_lot::RwLock<::std::collections::BTreeMap<(u64, u64), Arc<Service>>>
             = ::parking_lot::RwLock::new(::std::collections::BTreeMap::new());
         }
 
         pub trait Service: RPCService {
            $(
                 $(#[$attr])*
-                fn $fn_name(self: Box<Self>, $($arg:$in_),*) -> Box<Future<Item = $out, Error = $error>>;
+                fn $fn_name(this: Arc<Self>, $($arg:$in_),*) -> Box<Future<Item = $out, Error = $error>> where Self: Sized;
            )*
-           fn inner_dispatch(self: Box<Self>, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = RPCRequestError>> {
+           fn inner_dispatch(&self, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = RPCRequestError>> {
                let (func_id, body) = extract_u64_head(data);
                match func_id as usize {
                    $(hash_ident!($fn_name) => {
@@ -152,7 +148,7 @@ macro_rules! service {
                }
            }
         }
-        pub fn get_local(server_id: u64, service_id: u64) -> Option<Arc<Box<Service>>> {
+        pub fn get_local(server_id: u64, service_id: u64) -> Option<Arc<Service>> {
             let svrs = RPC_SVRS.read();
             match svrs.get(&(server_id, service_id)) {
                 Some(s) => Some(s.clone()),

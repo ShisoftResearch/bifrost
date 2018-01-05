@@ -22,7 +22,7 @@ const ORDERING: Ordering = Ordering::Relaxed;
 pub type Client = Arc<AsyncServiceClient>;
 
 lazy_static! {
-    pub static ref CALLBACK: RwLock<Option<Arc<Box<SubscriptionService>>>> = RwLock::new(None);
+    pub static ref CALLBACK: RwLock<Option<Arc<SubscriptionService>>> = RwLock::new(None);
 }
 
 #[derive(Debug)]
