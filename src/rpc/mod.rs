@@ -34,6 +34,7 @@ pub enum RPCError {
 pub trait RPCService: Sync + Send {
     fn dispatch(self: Box<Self>, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = RPCRequestError>>;
     fn register_shortcut_service(self: Box<Self>, service_ptr: usize, server_id: u64, service_id: u64);
+    fn into_boxed(self: Box<Self>) -> Box<RPCService>;
 }
 
 pub struct Server {
@@ -98,13 +99,15 @@ impl Server {
                     let svr_map = server.services.read();
                     let service = svr_map.get(&svr_id);
                     match service {
-                        Some(service) =>
+                        Some(ref service) => {
+                            let service = service.clone();
                             Box::new(
                                 service
                                     .dispatch(data)
                                     .then(|r|
                                         Ok(encode_res(r)))
-                            ),
+                            )
+                        },
                         None => Box::new(future::finished(encode_res(Err(RPCRequestError::ServiceIdNotFound))))
                     }
                 }
@@ -127,8 +130,9 @@ impl Server {
         } else {
             println!("SERVICE SHORTCUT DISABLED");
         }
-        self.services.write().insert(service_id, service);
+        self.services.write().insert(service_id, Arc::new(service.into_boxed()));
     }
+
     pub fn remove_service(&self, service_id: u64) {
         self.services.write().remove(&service_id);
     }

@@ -8,9 +8,14 @@ macro_rules! dispatch_rpc_service_functions {
                 self.inner_dispatch(data)
             }
             fn register_shortcut_service(self: Box<Self>, service_ptr: usize, server_id: u64, service_id: u64) {
+                let boxed_trait = self as Box<Service>;
                 let mut cbs = RPC_SVRS.write();
+                // TODO: remove service from Arc
                 let service = unsafe {Arc::from_raw(service_ptr as *const Box<$s>)};
-                cbs.insert((server_id, service_id), service);
+                cbs.insert((server_id, service_id), Arc::new(boxed_trait));
+            }
+            fn into_boxed(self: Box<Self>) -> Box<$crate::rpc::RPCService> {
+                self as Box<$crate::rpc::RPCService>
             }
         }
     };
@@ -138,7 +143,7 @@ macro_rules! service {
                        Box::new(
                            self.$fn_name($($arg,)*)
                                .then(|f_result| future::ok($crate::utils::bincode::serialize(&f_result)))
-                               .map_err(|_| RPCRequestError::Other) // in this case error it is impossible
+                               .map_err(|_:$error| RPCRequestError::Other) // in this case error it is impossible
                        )
                    }),*
                    _ => {
@@ -164,7 +169,8 @@ macro_rules! service {
                 #[allow(non_camel_case_types)]
                 $(#[$attr])*
                 pub fn $fn_name(&self, $($arg:&$in_),*) -> Box<Future<Item = std::result::Result<$out, $error>, Error = RPCError>> {
-                    if let Some(local) = get_local(self.server_id, self.service_id) {
+                    if let Some(ref local) = get_local(self.server_id, self.service_id) {
+                        let local = local.clone();
                         Box::new(future::finished(local.$fn_name($($arg.clone()),*).wait()))
                     } else {
                         let req_data = ($($arg,)*);
