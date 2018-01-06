@@ -1,5 +1,6 @@
 use parking_lot;
 use futures::{Future, Async, Poll};
+use std::ops::{Deref};
 
 pub struct Mutex<T> {
     inner: parking_lot::Mutex<T>
@@ -32,7 +33,12 @@ impl <T> Mutex <T> {
             outer: self
         }
     }
-    pub fn lock(&self) -> parking_lot::MutexGuard<T> {
-        self.inner.lock()
+}
+
+impl <T> Deref for Mutex<T> {
+    type Target = parking_lot::Mutex<T>;
+    #[inline]
+    fn deref(&self) -> &parking_lot::Mutex<T> {
+        &self.inner
     }
 }
