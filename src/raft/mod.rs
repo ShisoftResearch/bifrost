@@ -898,7 +898,7 @@ impl Service for RaftService {
         let mut meta = self.write_meta();
         let mut entry = entry;
         if !is_leader(&meta) {
-            box future::finished(ClientCmdResponse::NotLeader(meta.leader_id));
+            return box future::finished(ClientCmdResponse::NotLeader(meta.leader_id));
         }
         let (new_log_id, new_log_term) = self.append_log(&meta, &mut entry);
         let mut data = match entry.sm_id {
