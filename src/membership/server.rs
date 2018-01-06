@@ -14,6 +14,7 @@ use std::{thread, time as std_time};
 use bifrost_hasher::hash_str;
 use membership::client::{Group as ClientGroup, Member as ClientMember};
 use futures::prelude::*;
+use futures::future;
 
 static MAX_TIMEOUT: i64 = 1000; //5 secs for 500ms heartbeat
 
@@ -30,8 +31,7 @@ pub struct HeartbeatService {
 }
 
 impl Service for HeartbeatService {
-    #[async(boxed)]
-    fn ping(this: Arc<Self>, id: u64) -> Result<(), ()> {
+    fn ping(&self, id: u64) -> Box<Future<Item = (), Error = ()>> {
         let mut stat_map = self.status.write();
         let current_time = time::get_time();
         let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
@@ -41,15 +41,14 @@ impl Service for HeartbeatService {
         });
         stat.last_updated = current_time;
         // only update the timestamp, let the watcher thread to decide
-        Ok(())
+        box future::finished(())
     }
 }
 impl HeartbeatService {
     fn update_raft(&self, online: &Vec<u64>, offline: &Vec<u64>) {
         let log = commands::hb_online_changed::new(online, offline);
         let fn_id = log.encode().0;
-        RaftService::c_command(
-            self.raft_service,
+        self.raft_service.c_command(
             LogEntry {
                 id: 0,
                 term: 0,

@@ -6,6 +6,7 @@ use super::*;
 use rpc::Server;
 use utils::time::get_time;
 use futures::prelude::*;
+use futures::future;
 
 pub struct SubscriptionService {
     pub subs: RwLock<HashMap<SubKey, Vec<Box<Fn(Vec<u8>) + Send + Sync>>>>,
@@ -14,15 +15,14 @@ pub struct SubscriptionService {
 }
 
 impl Service for SubscriptionService {
-    #[async(boxed)]
-    fn notify(this: Arc<Self>, key: SubKey, data: Vec<u8>) -> Result<(), ()> {
+    fn notify(&self, key: SubKey, data: Vec<u8>) -> Box<Future<Item = (), Error = ()>> {
         let subs = self.subs.read();
         if let Some(sub_fns) = subs.get(&key) {
             for fun in sub_fns {
                 fun(data.clone());
             }
         }
-        Ok(())
+        box future::finished(())
     }
 }
 dispatch_rpc_service_functions!(SubscriptionService);

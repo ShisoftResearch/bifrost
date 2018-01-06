@@ -4,13 +4,13 @@ use bincode;
 macro_rules! dispatch_rpc_service_functions {
     ($s:ty) => {
         impl $crate::rpc::RPCService for $s {
-            fn dispatch(this: Arc<Self>, data: Vec<u8>)
+            fn dispatch(&self, data: Vec<u8>)
                 -> Box<Future<Item = Vec<u8>, Error = $crate::rpc::RPCRequestError>>
                 where Self: Sized
             {
                 Self::inner_dispatch(this, data)
             }
-            fn register_shortcut_service(this: Arc<Self>, server_id: u64, service_id: u64) where Self: Sized {
+            fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64) {
                 let mut cbs = RPC_SVRS.write();
                 cbs.insert((server_id, service_id), this);
             }
@@ -130,15 +130,15 @@ macro_rules! service {
         pub trait Service: RPCService {
            $(
                 $(#[$attr])*
-                fn $fn_name(this: Arc<Self>, $($arg:$in_),*) -> Box<Future<Item = $out, Error = $error>> where Self: Sized;
+                fn $fn_name(&self, $($arg:$in_),*) -> Box<Future<Item = $out, Error = $error>> where Self: Sized;
            )*
-           fn inner_dispatch(this: Arc<Self>, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = RPCRequestError>> where Self: Sized {
+           fn inner_dispatch(&self, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = RPCRequestError>> where Self: Sized {
                let (func_id, body) = extract_u64_head(data);
                match func_id as usize {
                    $(hash_ident!($fn_name) => {
                        let ($($arg,)*) : ($($in_,)*) = $crate::utils::bincode::deserialize(&body);
                        Box::new(
-                           Self::$fn_name(this, $($arg,)*)
+                           self.$fn_name($($arg,)*)
                                .then(|f_result| future::ok($crate::utils::bincode::serialize(&f_result)))
                                .map_err(|_:$error| RPCRequestError::Other) // in this case error it is impossible
                        )

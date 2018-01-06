@@ -8,6 +8,7 @@
 #![feature(conservative_impl_trait)]
 
 #![feature(proc_macro, conservative_impl_trait, generators)]
+#![feature(box_syntax)]
 
 #[cfg(disable_shortcut)]
 pub static DISABLE_SHORTCUT: bool = true;
