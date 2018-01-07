@@ -32,7 +32,7 @@ pub enum RPCError {
 }
 
 pub trait RPCService: Sync + Send {
-    fn dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, RPCRequestError>;
+    fn dispatch(&self, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = RPCRequestError>>;
     fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64);
 }
 
@@ -90,19 +90,28 @@ impl Server {
     pub fn listen(server: &Arc<Server>) {
         let address = &server.address;
         let server = server.clone();
-        tcp::server::Server::new(address, Box::new(move |data| {
-            let (svr_id, data) = extract_u64_head(data);
-            let svr_map = server.services.read();
-            let service = svr_map.get(&svr_id);
-            let res = match service {
-                Some(service) => {
-                    encode_res(service.dispatch(data))
-                },
-                None => encode_res(Err(RPCRequestError::ServiceIdNotFound) as Result<Vec<u8>, RPCRequestError>)
-            };
-            //println!("SVR RPC: {} - {}ms", svr_id, time::get_time() - t);
-            Box::new(future::finished(res))
-        }));
+        tcp::server::Server::new(
+            address,
+            tcp::server::ServerCallback::new(
+                move |data| {
+                    let (svr_id, data) = extract_u64_head(data);
+                    let svr_map = server.services.read();
+                    let service = svr_map.get(&svr_id);
+                    match service {
+                        Some(ref service) => {
+                            let service = service.clone();
+                            Box::new(
+                                service
+                                    .dispatch(data)
+                                    .then(|r|
+                                        Ok(encode_res(r)))
+                            )
+                        },
+                        None => Box::new(future::finished(encode_res(Err(RPCRequestError::ServiceIdNotFound))))
+                    }
+                }
+            )
+        );
     }
     pub fn listen_and_resume(server: &Arc<Server>) {
         let server = server.clone();
@@ -122,6 +131,7 @@ impl Server {
         }
         self.services.write().insert(service_id, service);
     }
+
     pub fn remove_service(&self, service_id: u64) {
         self.services.write().remove(&service_id);
     }

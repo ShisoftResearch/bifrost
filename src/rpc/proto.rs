@@ -4,7 +4,10 @@ use bincode;
 macro_rules! dispatch_rpc_service_functions {
     ($s:ty) => {
         impl $crate::rpc::RPCService for $s {
-            fn dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, $crate::rpc::RPCRequestError> {
+            fn dispatch(&self, data: Vec<u8>)
+                -> Box<Future<Item = Vec<u8>, Error = $crate::rpc::RPCRequestError>>
+                where Self: Sized
+            {
                 self.inner_dispatch(data)
             }
             fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64) {
@@ -128,26 +131,24 @@ macro_rules! service {
         pub trait Service: RPCService {
            $(
                 $(#[$attr])*
-                fn $fn_name(&self, $($arg:&$in_),*) -> std::result::Result<$out, $error>;
+                fn $fn_name(&self, $($arg:$in_),*) -> Box<Future<Item = $out, Error = $error>>;
            )*
-           fn inner_dispatch(&self, data: Vec<u8>) -> Result<Vec<u8>, RPCRequestError> {
+           fn inner_dispatch(&self, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = RPCRequestError>> {
                let (func_id, body) = extract_u64_head(data);
                match func_id as usize {
                    $(hash_ident!($fn_name) => {
                        let ($($arg,)*) : ($($in_,)*) = $crate::utils::bincode::deserialize(&body);
-                       let f_result = self.$fn_name($(&$arg,)*);
-                       Ok($crate::utils::bincode::serialize(&f_result))
+                       Box::new(
+                           self.$fn_name($($arg,)*)
+                               .then(|f_result| future::ok($crate::utils::bincode::serialize(&f_result)))
+                               .map_err(|_:$error| RPCRequestError::Other) // in this case error it is impossible
+                       )
                    }),*
                    _ => {
-                       Err(RPCRequestError::FunctionIdNotFound)
+                       Box::new(future::err(RPCRequestError::FunctionIdNotFound))
                    }
                }
            }
-        }
-        pub struct SyncServiceClient {
-            pub service_id: u64,
-            pub server_id: u64,
-            pub client: Arc<RPCClient>,
         }
         pub fn get_local(server_id: u64, service_id: u64) -> Option<Arc<Service>> {
             let svrs = RPC_SVRS.read();
@@ -155,34 +156,6 @@ macro_rules! service {
                 Some(s) => Some(s.clone()),
                 _ => None
             }
-        }
-        impl SyncServiceClient {
-           $(
-                #[allow(non_camel_case_types)]
-                $(#[$attr])*
-                pub fn $fn_name(&self, $($arg:&$in_),*) -> Result<std::result::Result<$out, $error>, RPCError> {
-                    if let Some(local) = get_local(self.server_id, self.service_id) {
-                        Ok(local.$fn_name($($arg),*))
-                    } else {
-                        let req_data = ($($arg,)*);
-                        let req_data_bytes = $crate::utils::bincode::serialize(&req_data);
-                        let req_bytes = prepend_u64(hash_ident!($fn_name) as u64, req_data_bytes);
-                        let res_bytes = self.client.send(self.service_id, req_bytes);
-                        if let Ok(res_bytes) = res_bytes {
-                            Ok($crate::utils::bincode::deserialize(&res_bytes))
-                        } else {
-                            Err(res_bytes.err().unwrap())
-                        }
-                    }
-                }
-           )*
-           pub fn new(service_id: u64, client: &Arc<RPCClient>) -> Arc<SyncServiceClient> {
-                Arc::new(SyncServiceClient{
-                    service_id: service_id,
-                    server_id:client.server_id,
-                    client: client.clone()
-                })
-           }
         }
         pub struct AsyncServiceClient {
             pub service_id: u64,
@@ -194,8 +167,9 @@ macro_rules! service {
                 #[allow(non_camel_case_types)]
                 $(#[$attr])*
                 pub fn $fn_name(&self, $($arg:&$in_),*) -> Box<Future<Item = std::result::Result<$out, $error>, Error = RPCError>> {
-                    if let Some(local) = get_local(self.server_id, self.service_id) {
-                        Box::new(future::finished(local.$fn_name($($arg),*)))
+                    if let Some(ref local) = get_local(self.server_id, self.service_id) {
+                        let local = local.clone();
+                        Box::new(future::finished(local.$fn_name($($arg.clone()),*).wait()))
                     } else {
                         let req_data = ($($arg,)*);
                         let req_data_bytes = $crate::utils::bincode::serialize(&req_data);

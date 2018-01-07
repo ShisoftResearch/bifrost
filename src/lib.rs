@@ -7,6 +7,9 @@
 #![feature(fnbox)]
 #![feature(conservative_impl_trait)]
 
+#![feature(proc_macro, conservative_impl_trait, generators)]
+#![feature(box_syntax)]
+
 #[cfg(disable_shortcut)]
 pub static DISABLE_SHORTCUT: bool = true;
 
@@ -33,7 +36,7 @@ extern crate tokio_service;
 extern crate tokio_proto;
 extern crate tokio_timer;
 extern crate tokio_middleware;
-extern crate futures;
+extern crate futures_await as futures;
 extern crate futures_cpupool;
 extern crate parking_lot;
 extern crate thread_id;

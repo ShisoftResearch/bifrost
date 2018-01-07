@@ -1,5 +1,5 @@
 use raft::{
-    SyncServiceClient, RaftMsg, LogEntry, ClientQryResponse, 
+    AsyncServiceClient, RaftMsg, LogEntry, ClientQryResponse,
     ClientCmdResponse};
 use raft::state_machine::OpType;
 use raft::state_machine::master::{ExecResult, ExecError};
@@ -16,9 +16,10 @@ use bifrost_hasher::{hash_str, hash_bytes};
 use rand;
 use rpc;
 use backtrace::Backtrace;
+use futures::Future;
 
 const ORDERING: Ordering = Ordering::Relaxed;
-pub type Client = Arc<SyncServiceClient>;
+pub type Client = Arc<AsyncServiceClient>;
 
 lazy_static! {
     pub static ref CALLBACK: RwLock<Option<Arc<SubscriptionService>>> = RwLock::new(None);
@@ -67,7 +68,7 @@ impl RaftClient {
             leader_id: AtomicU64::new(0),
             last_log_id: AtomicU64::new(0),
             last_log_term: AtomicU64::new(0),
-            service_id: service_id,
+            service_id,
         };
         let init = {
             let mut members = client.members.write();
@@ -99,13 +100,13 @@ impl RaftClient {
             if !members.clients.contains_key(&id) {
                 match rpc::DEFAULT_CLIENT_POOL.get(&server_addr) {
                     Ok(client) => {
-                        members.clients.insert(id, SyncServiceClient::new(self.service_id, &client));
+                        members.clients.insert(id, AsyncServiceClient::new(self.service_id, &client));
                     },
                     Err(_) => {continue;}
                 }
             }
             let client = members.clients.get(&id).unwrap();
-            if let Ok(Ok(info)) = client.c_server_cluster_info() {
+            if let Ok(Ok(info)) = client.c_server_cluster_info().wait() {
                 if info.leader_id != 0 {
                     cluster_info = Some(info);
                     break;
@@ -129,7 +130,7 @@ impl RaftClient {
                     let addr = members.id_map.get(id).unwrap().clone();
                     if !members.clients.contains_key(id) {
                         if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(&addr) {
-                            members.clients.insert(*id, SyncServiceClient::new(self.service_id, &client));
+                            members.clients.insert(*id, AsyncServiceClient::new(self.service_id, &client));
                         }
                     }
                 }
@@ -217,7 +218,7 @@ impl RaftClient {
                 }
             };
             num_members = members.clients.len();
-            client.c_query(&self.gen_log_entry(sm_id, fn_id, data))
+            client.c_query(&self.gen_log_entry(sm_id, fn_id, data)).wait()
         };
         match res {
             Ok(Ok(res)) => {
@@ -260,7 +261,7 @@ impl RaftClient {
             }
             match self.current_leader_client() {
                 Some((leader_id, client)) => {
-                    match client.c_command(&self.gen_log_entry(sm_id, fn_id, data)) {
+                    match client.c_command(&self.gen_log_entry(sm_id, fn_id, data)).wait() {
                         Ok(Ok(ClientCmdResponse::Success {
                                   data, last_log_term, last_log_id
                               })) => {
@@ -309,8 +310,8 @@ impl RaftClient {
         LogEntry {
             id: self.last_log_id.load(ORDERING),
             term: self.last_log_term.load(ORDERING),
-            sm_id: sm_id,
-            fn_id: fn_id,
+            sm_id,
+            fn_id,
             data: data.clone()
         }
     }

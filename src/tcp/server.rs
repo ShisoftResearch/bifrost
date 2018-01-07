@@ -4,15 +4,31 @@ use std::net::SocketAddr;
 
 use tokio_proto::TcpServer;
 use tokio_service::{Service, NewService};
-use futures::{future, Future, BoxFuture};
+use futures::{future, Future};
 
 use tcp::proto::BytesServerProto;
 use tcp::shortcut;
 use super::STANDALONE_ADDRESS;
 
-// TODO: USE FUTURE IN THIS FUNCTION TO ENSURE FULL ASYNC CHAIN TO SERVICES
-// WARN: current implementation cannot employ performance gain from tokio
-pub type ServerCallback = Box<Fn(Vec<u8>) -> BoxFuture<Vec<u8>, io::Error> + Send + Sync>;
+pub struct ServerCallback {
+    closure: Box<Fn(Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = io::Error>>>
+}
+
+impl ServerCallback {
+    pub fn new<F: 'static>(f: F) -> ServerCallback
+        where F: Fn(Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = io::Error>>
+    {
+        ServerCallback {
+            closure: Box::new(f)
+        }
+    }
+    pub fn call(&self, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = io::Error>> {
+        (self.closure)(data)
+    }
+}
+
+unsafe impl Send for ServerCallback {}
+unsafe impl Sync for ServerCallback {}
 
 pub struct Server {
     callback: Arc<ServerCallback>
@@ -26,10 +42,10 @@ impl Service for Server {
     type Request = Vec<u8>;
     type Response = Vec<u8>;
     type Error = io::Error;
-    type Future = BoxFuture<Vec<u8>, io::Error>;
+    type Future = Box<Future<Item = Vec<u8>, Error = io::Error>>;
 
     fn call(&self, req: Self::Request) -> Self::Future {
-        (self.callback) (req)
+        self.callback.call(req)
     }
 }
 
