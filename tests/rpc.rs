@@ -5,6 +5,7 @@ use byteorder::{ByteOrder, LittleEndian};
 use std::thread;
 use std::sync::Mutex;
 use std::time::Duration;
+
 mod simple_service {
 
     use std::thread;
@@ -17,11 +18,11 @@ mod simple_service {
     struct HelloServer;
 
     impl Service for HelloServer {
-        fn hello(&self, name: String) -> Box<Future<Item = String, Error = ()>> {
-            box future::finished(format!("Hello, {}!", name))
+        fn hello(&self, name: &String) -> Result<String, ()> {
+            Ok(format!("Hello, {}!", name))
         }
-        fn error(&self, message: String) -> Box<Future<Item = (), Error = String>> {
-            box future::failed(message.clone())
+        fn error(&self, message: &String) -> Result<(), String> {
+            Err(message.clone())
         }
     }
     dispatch_rpc_service_functions!(HelloServer);
@@ -39,12 +40,12 @@ mod simple_service {
         let client = RPCClient::new(&addr).unwrap();
         let service_client = AsyncServiceClient::new(0, &client);
         let response = service_client.hello(&String::from("Jack"));
-        let greeting_str = response.wait().unwrap().unwrap();
+        let greeting_str = response.unwrap().unwrap();
         println!("SERVER RESPONDED: {}", greeting_str);
         assert_eq!(greeting_str, String::from("Hello, Jack!"));
         let expected_err_msg = String::from("This error is a good one");
         let response = service_client.error(&expected_err_msg.clone());
-        let error_msg = response.wait().unwrap().err().unwrap();
+        let error_msg = response.unwrap().err().unwrap();
         assert_eq!(error_msg, expected_err_msg);
     }
 }
@@ -71,8 +72,8 @@ mod struct_service {
     struct HelloServer;
 
     impl Service for HelloServer {
-        fn hello(&self, gret: Greeting) -> Box<Future<Item = Respond, Error = ()>> {
-            box future::ok(Respond {
+        fn hello(&self, gret: &Greeting) -> Result<Respond, ()> {
+            Ok(Respond {
                 text: format!("Hello, {}. It is {} now!", gret.name, gret.time),
                 owner: 42
             })
@@ -96,7 +97,7 @@ mod struct_service {
             name: String::from("Jack"),
             time: 12
         });
-        let res = response.wait().unwrap().unwrap();
+        let res = response.unwrap().unwrap();
         let greeting_str = res.text;
         println!("SERVER RESPONDED: {}", greeting_str);
         assert_eq!(greeting_str, String::from("Hello, Jack. It is 12 now!"));
@@ -115,8 +116,8 @@ mod multi_server {
         id: u64
     }
     impl Service for IdServer {
-        fn query_server_id(&self) -> Box<Future<Item = u64, Error = ()>> {
-            box future::ok(self.id)
+        fn query_server_id(&self) -> Result<u64, ()> {
+            Ok(self.id)
         }
     }
     dispatch_rpc_service_functions!(IdServer);
@@ -146,7 +147,7 @@ mod multi_server {
         for addr in &addrs {
             let client = RPCClient::new(&addr).unwrap();
             let service_client = AsyncServiceClient::new(id, &client);
-            let id_res = service_client.query_server_id().wait().unwrap();
+            let id_res = service_client.query_server_id().unwrap();
             assert_eq!(id_res.unwrap(), id);
             id += 1;
         }

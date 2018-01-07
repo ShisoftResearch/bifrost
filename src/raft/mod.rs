@@ -8,6 +8,7 @@ use std::collections::Bound::{Included, Unbounded};
 use std::cmp::{min, max};
 use std::sync::mpsc::channel;
 use std::rc::Rc;
+use std::ops::Deref;
 use self::state_machine::OpType;
 use self::state_machine::master::{
     MasterStateMachine, ExecResult,
@@ -165,11 +166,16 @@ pub struct Options {
     pub service_id: u64,
 }
 
-pub struct RaftService {
+pub struct RaftServiceInner {
     meta: RwLock<RaftMeta>,
     pub id: u64,
     pub options: Options,
 }
+
+pub struct RaftService {
+    inner: Arc<RaftServiceInner>
+}
+
 dispatch_rpc_service_functions!(RaftService);
 
 #[derive(Debug)]
@@ -234,11 +240,11 @@ fn alter_term(meta: &mut RwLockWriteGuard<RaftMeta>, term: u64) {
 }
 
 
-impl RaftService {
-    pub fn new(opts: Options) -> Arc<RaftService> {
+impl RaftServiceInner {
+    pub fn new(opts: Options) -> Arc<RaftServiceInner> {
         let server_address = opts.address.clone();
         let server_id = hash_str(&server_address);
-        let server_obj = RaftService {
+        let server_obj = RaftServiceInner {
             meta: RwLock::new(
                 RaftMeta {
                     term: 0, //TODO: read from persistent state
@@ -261,7 +267,7 @@ impl RaftService {
         };
         Arc::new(server_obj)
     }
-    pub fn start(server: &Arc<RaftService>) -> bool {
+    pub fn start(server: &Arc<RaftServiceInner>) -> bool {
         let server_address = server.options.address.clone();
         info!("Waiting for server to be initialized");
         {
@@ -313,7 +319,7 @@ impl RaftService {
                             server.send_followers_heartbeat(&mut meta, None);
                         },
                         CheckerAction::BecomeCandidate => {
-                            RaftService::become_candidate(server.clone(), &mut meta);
+                            Self::become_candidate(server.clone(), &mut meta);
                         },
                         CheckerAction::ExitLoop => {
                             break;
@@ -341,7 +347,7 @@ impl RaftService {
         let server = Server::new(&address);
         Server::listen_and_resume(&server);
         server.register_service(svr_id, &service);
-        (RaftService::start(&service), service, server)
+        (service.start(), service, server)
     }
     pub fn bootstrap(&self) {
         let mut meta = self.write_meta();
@@ -496,7 +502,7 @@ impl RaftService {
     pub fn read_meta(&self) -> RwLockReadGuard<RaftMeta> {
         self.meta.read()
     }
-    fn become_candidate(server: Arc<RaftService>, meta: &mut RwLockWriteGuard<RaftMeta>) {
+    fn become_candidate(server: Arc<RaftServiceInner>, meta: &mut RwLockWriteGuard<RaftMeta>) {
         server.reset_last_checked(meta);
         let term = meta.term;
         alter_term(meta, term + 1);
@@ -766,10 +772,6 @@ impl RaftService {
         self.send_followers_heartbeat(meta, Some(new_log_id));
         data
     }
-}
-
-impl Service for RaftService {
-
     fn append_entries(
         &self,
         term: u64, leader_id: u64,
@@ -894,7 +896,7 @@ impl Service for RaftService {
     }
 
     fn c_command(&self, entry: LogEntry)
-        -> Box<Future<Item = ClientCmdResponse, Error = ()>>
+                 -> Box<Future<Item = ClientCmdResponse, Error = ()>>
     {
         let mut meta = self.write_meta();
         let mut entry = entry;
@@ -939,6 +941,78 @@ impl Service for RaftService {
 
     fn c_put_offline(&self) -> Box<Future<Item = bool, Error = ()>> {
         box future::finished(self.leave())
+    }
+}
+
+impl Service for RaftService {
+    fn append_entries(
+        &self,
+        term: u64, leader_id: u64,
+        prev_log_id: u64, prev_log_term: u64,
+        entries: Option<LogEntries>,
+        leader_commit: u64
+    ) -> Box<Future<Item = (u64, AppendEntriesResult), Error = ()>>  {
+        unimplemented!()
+    }
+
+    fn request_vote(
+        &self,
+        term: u64, candidate_id: u64,
+        last_log_id: u64, last_log_term: u64
+    ) -> Box<Future<Item = ((u64, u64), bool), Error = ()>> {
+        unimplemented!()
+    }
+
+    fn install_snapshot(
+        &self,
+        term: u64, leader_id: u64, last_included_index: u64,
+        last_included_term: u64, data: Vec<u8>, done: bool
+    ) -> Box<Future<Item = u64, Error = ()>> {
+        unimplemented!()
+    }
+
+    fn c_command(&self, entry: LogEntry)
+                 -> Box<Future<Item = ClientCmdResponse, Error = ()>>
+    {
+        unimplemented!()
+    }
+
+    fn c_query(&self, entry: LogEntry) -> Box<Future<Item = ClientQryResponse, Error = ()>> {
+        unimplemented!()
+    }
+
+    fn c_server_cluster_info(&self) -> Box<Future<Item = ClientClusterInfo, Error = ()>> {
+        unimplemented!()
+    }
+
+    fn c_put_offline(&self) -> Box<Future<Item = bool, Error = ()>> {
+        unimplemented!()
+    }
+}
+
+impl RaftService {
+    pub fn new(opts: Options) -> Arc<RaftService> {
+        Arc::new(
+            RaftService {
+                inner: RaftServiceInner::new(opts)
+            }
+        )
+    }
+    pub fn start(&self) -> bool {
+        RaftServiceInner::start(&self.inner)
+    }
+    pub fn register_state_machine(&self, state_machine: SubStateMachine) {
+        let meta = self.meta.read();
+        let mut master_sm = meta.state_machine.write();
+        master_sm.register(state_machine);
+    }
+}
+
+impl Deref for RaftService {
+    type Target = RaftServiceInner;
+
+    fn deref(&self) -> &RaftServiceInner {
+        &*self.inner
     }
 }
 

@@ -2,14 +2,14 @@
 #![plugin(bifrost_plugins)]
 
 #![feature(proc_macro)]
-#![feature(box_syntax)]
 
 #[macro_use]
 extern crate bifrost;
 extern crate bifrost_hasher;
 extern crate byteorder;
 extern crate bincode;
-extern crate futures_await as futures;
+extern crate futures;
+
 #[macro_use]
 extern crate serde_derive;
 
