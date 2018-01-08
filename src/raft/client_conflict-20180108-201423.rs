@@ -94,8 +94,7 @@ impl RaftClient {
         }
     }
 
-
-    fn update_info(&self, members: &mut RwLockWriteGuard<Members>, servers: &HashSet<String>) -> Result<(), ClientError> {
+   fn update_info(&self, members: &mut RwLockWriteGuard<Members>, servers: &HashSet<String>) -> Result<(), ClientError> {
         let mut cluster_info = None;
         for server_addr in servers {
             let id = hash_str(&server_addr);
@@ -172,8 +171,8 @@ impl RaftClient {
     pub fn subscribe
     <M, R, F>
     (&self, sm_id: u64, msg: M, f: F) -> Result<Result<u64, SubscriptionError>, ExecError>
-        where M: RaftMsg<R> + 'static,
-              F: Fn(R) + 'static + Send + Sync
+    where M: RaftMsg<R> + 'static,
+          F: Fn(R) + 'static + Send + Sync
     {
         let callback = CALLBACK.read();
         if callback.is_none() {

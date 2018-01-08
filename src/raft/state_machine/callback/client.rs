@@ -6,7 +6,6 @@ use super::*;
 use rpc::Server;
 use utils::time::get_time;
 use futures::prelude::*;
-use futures::future;
 
 pub struct SubscriptionService {
     pub subs: RwLock<HashMap<SubKey, Vec<Box<Fn(Vec<u8>) + Send + Sync>>>>,
@@ -28,13 +27,14 @@ impl Service for SubscriptionService {
 dispatch_rpc_service_functions!(SubscriptionService);
 
 impl SubscriptionService {
-    pub fn initialize(server: &Arc<Server>) -> Arc<SubscriptionService> {
+    #[async]
+    pub fn initialize(server: Arc<Server>) -> Result<Arc<SubscriptionService>, ()> {
         let service = Arc::new(SubscriptionService {
             subs: RwLock::new(HashMap::new()),
             server_address: server.address().clone(),
             session_id: get_time() as u64
         });
-        server.register_service(DEFAULT_SERVICE_ID, &service);
-        return service;
+        await!(Server::register_service_async(server, DEFAULT_SERVICE_ID, service.clone()))?;
+        return Ok(service);
     }
 }

@@ -5,12 +5,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::io;
 use std::time::Duration;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Mutex};
+use utils::future_parking_lot::RwLock;
 use std::thread;
 use tcp;
 use utils::time;
 use utils::u8vec::*;
-use futures::{Future, future};
+use futures::prelude::*;
+use futures::future;
 use bifrost_hasher::hash_str;
 use DISABLE_SHORTCUT;
 
@@ -113,6 +115,7 @@ impl Server {
             )
         );
     }
+
     pub fn listen_and_resume(server: &Arc<Server>) {
         let server = server.clone();
         thread::spawn(move|| {
@@ -120,16 +123,20 @@ impl Server {
             Server::listen(&server);
         });
     }
-    pub fn register_service<T>(&self, service_id: u64,  service: &Arc<T>)
-    where T: RPCService + Sized + 'static{
+
+    #[async]
+    pub fn register_service_async<T>(this: Arc<Self>, service_id: u64,  service: Arc<T>) -> Result<(), ()>
+        where T: RPCService + Sized + 'static
+    {
         let service = service.clone();
         if !DISABLE_SHORTCUT {
             let service_ptr = Arc::into_raw(service.clone()) as usize;
-            service.register_shortcut_service(service_ptr, self.server_id, service_id);
+            service.register_shortcut_service(service_ptr, this.server_id, service_id);
         } else {
             println!("SERVICE SHORTCUT DISABLED");
         }
-        self.services.write().insert(service_id, service);
+        await!(this.services.write_async())?.insert(service_id, service);
+        Ok(())
     }
 
     pub fn remove_service(&self, service_id: u64) {
