@@ -15,7 +15,7 @@ fn string(){
         original_string.clone()
     );
     let service = RaftService::new(Options{
-        storage: Storage::Default(),
+        storage: Storage::default(),
         address: addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
     });

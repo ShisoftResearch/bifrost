@@ -24,7 +24,7 @@ mod u32 {
             0
         );
         let service = RaftService::new(Options{
-            storage: Storage::Default(),
+            storage: Storage::default(),
             address: addr.clone(),
             service_id: DEFAULT_SERVICE_ID,
         });
@@ -94,7 +94,7 @@ mod f64 {
             0.0
         );
         let service = RaftService::new(Options{
-            storage: Storage::Default(),
+            storage: Storage::default(),
             address: addr.clone(),
             service_id: DEFAULT_SERVICE_ID,
         });

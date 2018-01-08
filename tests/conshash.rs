@@ -18,7 +18,7 @@ use raft::wait;
 fn primary() {
     let addr = String::from("127.0.0.1:2200");
     let raft_service = RaftService::new(Options {
-        storage: Storage::Default(),
+        storage: Storage::default(),
         address: addr.clone(),
         service_id: 0,
     });

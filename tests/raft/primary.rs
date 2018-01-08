@@ -7,7 +7,7 @@ use super::wait;
 #[test]
 fn startup(){
     let (success, _, _) = RaftService::new_server(Options {
-        storage: Storage::Default(),
+        storage: Storage::default(),
         address: String::from("127.0.0.1:2000"),
         service_id: DEFAULT_SERVICE_ID,
     });
@@ -20,7 +20,7 @@ fn server_membership(){
     let s2_addr = String::from("127.0.0.1:2002");
     let s3_addr = String::from("127.0.0.1:2003");
     let service1 = RaftService::new(Options {
-        storage: Storage::Default(),
+        storage: Storage::default(),
         address: s1_addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
     });
@@ -31,7 +31,7 @@ fn server_membership(){
     service1.bootstrap();
     assert_eq!(service1.num_members(), 1);
     let service2 = RaftService::new(Options {
-        storage: Storage::Default(),
+        storage: Storage::default(),
         address: s2_addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
     });
@@ -50,7 +50,7 @@ fn server_membership(){
     assert_eq!(service1.num_members(), 2);
     assert_eq!(service2.num_members(), 2);
     let service3 = RaftService::new(Options {
-        storage: Storage::Default(),
+        storage: Storage::default(),
         address: s3_addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
     });
@@ -92,27 +92,27 @@ fn log_replication(){
     let s4_addr = String::from("127.0.0.1:2007");
     let s5_addr = String::from("127.0.0.1:2008");
     let service1 = RaftService::new(Options {
-        storage: Storage::Default(),
+        storage: Storage::default(),
         address: s1_addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
     });
     let service2 = RaftService::new(Options {
-        storage: Storage::Default(),
+        storage: Storage::default(),
         address: s2_addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
     });
     let service3 = RaftService::new(Options {
-        storage: Storage::Default(),
+        storage: Storage::default(),
         address: s3_addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
     });
     let service4 = RaftService::new(Options {
-        storage: Storage::Default(),
+        storage: Storage::default(),
         address: s4_addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
     });
     let service5 = RaftService::new(Options {
-        storage: Storage::Default(),
+        storage: Storage::default(),
         address: s5_addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
     });

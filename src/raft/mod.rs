@@ -159,7 +159,7 @@ pub enum Storage {
 }
 
 impl Storage {
-    pub fn Default() -> Storage {
+    pub fn default() -> Storage {
         Storage::MEMORY
     }
 }
