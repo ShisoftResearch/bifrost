@@ -94,7 +94,6 @@ impl RaftClient {
         }
     }
 
-
     fn update_info(&self, members: &mut RwLockWriteGuard<Members>, servers: &HashSet<String>) -> Result<(), ClientError> {
         let mut cluster_info = None;
         for server_addr in servers {

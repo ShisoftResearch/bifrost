@@ -1,7 +1,7 @@
 use std::io;
 use std::time::Duration;
 
-use futures::{Future};
+use futures::{Future, future};
 
 use tokio_service::Service;
 use tokio_core::net::TcpStream;
@@ -24,7 +24,7 @@ pub struct ClientCore {
 }
 
 pub struct Client {
-    client: Option<(Timeout<ClientCore>, Core)>,
+    client: Option<Timeout<ClientCore>>,
     pub server_id: u64,
 }
 
@@ -42,46 +42,47 @@ impl Service for ClientCore {
 }
 
 impl Client {
-    pub fn connect_with_timeout (address: &String, timeout: Duration) -> io::Result<Client> {
+
+    pub fn connect_with_timeout_async (address: String, timeout: Duration)
+        -> Box<Future<Item = Client, Error = io::Error>>
+    {
         let server_id = hash_str(address);
         let client = {
             if !DISABLE_SHORTCUT && shortcut::is_local(server_id) {
                 None
             } else {
                 if address.eq(&STANDALONE_ADDRESS) {
-                    return Err(io::Error::new(io::ErrorKind::Other, "STANDALONE server is not found"))
+                    return future::err(io::Error::new(io::ErrorKind::Other, "STANDALONE server is not found"))
                 }
                 let mut core = Core::new()?;
                 let socket_address = address.parse().unwrap();
-                let future = Box::new(TcpClient::new(BytesClientProto)
+                return Box::new(TcpClient::new(BytesClientProto)
                     .connect(&socket_address, &core.handle())
-                    .map(|c| Timeout::new(
-                        ClientCore {
-                            inner: c,
-                        },
-                        Timer::default(),
-                        timeout)));
-                Some((core.run(future)?, core))
+                    .map(|c| {
+                        Some(Timeout::new(
+                            ClientCore {
+                                inner: c,
+                            },
+                            Timer::default(),
+                            timeout
+                        ))
+                    })
+                    .map(|client|
+                        Client {
+                            client,
+                            server_id,
+                        }))
             }
         };
-        Ok(Client {
-            client,
-            server_id,
-        })
     }
-    pub fn connect (address: &String) -> io::Result<Client> {
-        Client::connect_with_timeout(address, Duration::from_secs(5))
+    pub fn connect_async (address: String) -> Box<Future<Item = Client, Error = io::Error>> {
+        Client::connect_with_timeout_async(address, Duration::from_secs(5))
     }
     pub fn send(&mut self, msg: Vec<u8>) -> io::Result<Vec<u8>> {
-        if let Some((ref client, ref mut core)) = self.client {
-            let future = client.call(msg);
-            core.run(future)
-        } else {
-            shortcut::call(self.server_id, msg).wait()
-        }
+        self.send_async(msg).wait()
     }
     pub fn send_async(&mut self, msg: Vec<u8>) -> Box<ResFuture> {
-        if let Some((ref client, _)) = self.client {
+        if let Some(ref client) = self.client {
             Box::new(client.call(msg))
         } else {
             shortcut::call(self.server_id, msg)

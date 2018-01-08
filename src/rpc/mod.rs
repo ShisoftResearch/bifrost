@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::io;
 use std::time::Duration;
-use parking_lot::{Mutex};
+use utils::future_parking_lot::{Mutex};
 use utils::future_parking_lot::RwLock;
 use std::thread;
 use tcp;
@@ -158,16 +158,21 @@ impl RPCClient {
         decode_res(self.client.lock().send(prepend_u64(svr_id, data)))
     }
     pub fn send_async(&self, svr_id: u64, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = RPCError>> {
-        Box::new(self.client.lock()
-            .send_async(prepend_u64(svr_id, data))
-            .then(move |res| decode_res(res)))
+        Box::new(
+            self.client
+                .lock_async()
+                .and_then(move |mut c|
+                    c.send_async(prepend_u64(svr_id, data)))
+                .then(move |res|
+                    decode_res(res)))
     }
-    pub fn new(addr: &String) -> io::Result<Arc<RPCClient>> {
-        let client = tcp::client::Client::connect(addr)?;
+    #[async]
+    pub fn new(addr: String) -> io::Result<Arc<RPCClient>> {
+        let client = await!(tcp::client::Client::connect_async(addr.clone()))?;
         Ok(Arc::new(RPCClient {
             server_id: client.server_id,
             client: Mutex::new(client),
-            address: addr.clone()
+            address: addr
         }))
     }
     pub fn with_timeout(addr: &String, timeout: Duration) -> io::Result<Arc<RPCClient>> {
@@ -187,18 +192,18 @@ impl ClientPool {
         }
     }
 
-    pub fn get(&self, addr: &String) -> io::Result<Arc<RPCClient>> {
-        let mut clients = self.clients.lock();
-        if clients.contains_key(addr) {
-            Ok(clients.get(addr).unwrap().clone())
-        } else {
-            let client = RPCClient::new(addr);
-            if let Ok(client) = client {
-                clients.insert(addr.clone(), client.clone());
-                Ok(client)
-            } else {
-                Err(client.err().unwrap())
-            }
-        }
+    pub fn get(&self, addr: String) -> impl Future<Item = Arc<RPCClient>, Error = io::Error> {
+        self.clients
+            .lock_async()
+            .and_then(move |mut clients|
+                if clients.contains_key(&addr) {
+                    future::ok(clients.get(&addr).unwrap().clone())
+                } else {
+                    RPCClient::new(addr)
+                        .and_then(|client| {
+                            clients.insert(addr, client.clone());
+                            return client;
+                        })
+                })
     }
 }
