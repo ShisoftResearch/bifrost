@@ -113,6 +113,7 @@ struct FollowerStatus {
 
 pub struct LeaderMeta {
     last_updated: i64,
+    // this mutex is used to achieve parallel send heartbeat to followers
     followers: HashMap<u64, Arc<Mutex<FollowerStatus>>>
 }
 
@@ -126,6 +127,8 @@ impl LeaderMeta {
 }
 
 pub enum Membership {
+    // this lock is to prevent conflicts from
+    // new command logs and periodic heartbeats
     Leader(RwLock<LeaderMeta>),
     Follower,
     Candidate,
@@ -139,12 +142,14 @@ pub struct RaftMeta {
     timeout: i64,
     last_checked: i64,
     membership: Membership,
+    // this lock is for sending heartbeats in parallel
     logs: Arc<RwLock<LogsMap>>,
+    // state machine map will not operate with raft,
+    // it should have it's own lock
     state_machine: RwLock<MasterStateMachine>,
     commit_index: u64,
     last_applied: u64,
-    leader_id: u64,
-    workers: Mutex<ThreadPool>,
+    leader_id: u64
 }
 
 #[derive(Clone)]
@@ -256,10 +261,7 @@ impl RaftServiceInner {
                     state_machine: RwLock::new(MasterStateMachine::new(opts.service_id)),
                     commit_index: 0,
                     last_applied: 0,
-                    leader_id: 0,
-                    workers: Mutex::new(ThreadPool::new(
-                        max(num_cpus::get() * 5, 10)
-                    )),
+                    leader_id: 0
                 }
             ),
             id: server_id,
@@ -358,7 +360,7 @@ impl RaftServiceInner {
         self.become_leader(&mut meta, last_log_id);
     }
     pub fn join(&self, servers: &Vec<String>)
-        -> Result<Result<(), ()>, ExecError> {
+                -> Result<Result<(), ()>, ExecError> {
         debug!("Trying to join cluster with id {}", self.id);
         let client = RaftClient::new(servers, self.options.service_id);
         if let Ok(client) = client {
@@ -383,7 +385,7 @@ impl RaftServiceInner {
             Err(ExecError::CannotConstructClient)
         }
     }
-        pub fn leave(&self) -> bool {
+    pub fn leave(&self) -> bool {
         let servers = self.cluster_info().members.iter()
             .map(|&(_, ref address)|{
                 address.clone()
@@ -493,10 +495,10 @@ impl RaftServiceInner {
         }
     }
     fn write_meta(&self) -> RwLockWriteGuard<RaftMeta> {
-//        let t = get_time();
+        //        let t = get_time();
         let lock_mon = self.meta.write();
-//        let acq_time = get_time() - t;
-//        println!("Meta write locked acquired for {}ms for {}, leader {}", acq_time, self.id, lock_mon.leader_id);
+        //        let acq_time = get_time() - t;
+        //        println!("Meta write locked acquired for {}ms for {}, leader {}", acq_time, self.id, lock_mon.leader_id);
         lock_mon
     }
     pub fn read_meta(&self) -> RwLockReadGuard<RaftMeta> {
@@ -675,11 +677,11 @@ impl RaftServiceInner {
                                             follower.next_index -= 1;
                                         },
                                         AppendEntriesResult::TermOut(actual_leader_id) => {
-//                                            let actual_leader = actual_leader_id.clone();
-//                                            println!(
-//                                                "term out, new term from follower is {} but this leader is {}",
-//                                                follower_term, term
-//                                            );
+                                            //                                            let actual_leader = actual_leader_id.clone();
+                                            //                                            println!(
+                                            //                                                "term out, new term from follower is {} but this leader is {}",
+                                            //                                                follower_term, term
+                                            //                                            );
                                             break;
                                         }
                                     }
@@ -765,8 +767,8 @@ impl RaftServiceInner {
         if let Membership::Leader(ref leader_meta) = meta.membership {//  ||| TODO: New member should install newest snapshot
             let mut leader_meta = leader_meta.write();
             self.reload_leader_meta( //                                   |||       and logs to get updated first before leader
-                &members_from_meta!(meta), //                             |||       add it to member list in configuration
-                &mut leader_meta, new_log_id
+                                     &members_from_meta!(meta), //                             |||       add it to member list in configuration
+                                     &mut leader_meta, new_log_id
             );
         }
         self.send_followers_heartbeat(meta, Some(new_log_id));
