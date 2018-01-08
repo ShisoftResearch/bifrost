@@ -342,13 +342,14 @@ impl RaftServiceInner {
         }
         return true;
     }
+
     pub fn new_server(opts: Options) -> (bool, Arc<RaftService>, Arc<Server>) {
         let address = opts.address.clone();
         let svr_id = opts.service_id;
         let service = RaftService::new(opts);
         let server = Server::new(&address);
         Server::listen_and_resume(&server);
-        server.register_service(svr_id, &service);
+        server.register_service(, svr_id, &service);
         (service.start(), service, server)
     }
     pub fn bootstrap(&self) {

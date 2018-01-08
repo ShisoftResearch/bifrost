@@ -8,6 +8,7 @@ use std::sync::Arc;
 use parking_lot::{RwLock};
 use std::collections::{HashMap, HashSet};
 use utils::bincode;
+use futures::Future;
 
 pub const CONFIG_SM_ID: u64 = 1;
 
@@ -45,7 +46,7 @@ impl StateMachineCmds for Configures {
         let addr = address.clone();
         let id = hash_str(&addr);
         if !self.members.contains_key(&id) {
-            match rpc::DEFAULT_CLIENT_POOL.get(&address) {
+            match rpc::DEFAULT_CLIENT_POOL.get(address.clone()).wait() {
                 Ok(client) => {
                     self.members.insert(id, RaftMember {
                         rpc: AsyncServiceClient::new(self.service_id, &client),

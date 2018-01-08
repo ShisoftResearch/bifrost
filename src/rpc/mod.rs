@@ -45,7 +45,7 @@ pub struct Server {
 }
 
 pub struct ClientPool {
-    clients: Mutex<HashMap<String, Arc<RPCClient>>>
+    clients: Arc<Mutex<HashMap<String, Arc<RPCClient>>>>
 }
 
 fn encode_res(res: Result<Vec<u8>, RPCRequestError>) -> Vec<u8> {
@@ -124,8 +124,8 @@ impl Server {
         });
     }
 
-    #[async]
-    pub fn register_service_async<T>(this: Arc<Self>, service_id: u64,  service: Arc<T>) -> Result<(), ()>
+    pub fn register_service_async<T>(&self, service_id: u64,  service: Arc<T>)
+        -> impl Future<Item = (), Error = ()>
         where T: RPCService + Sized + 'static
     {
         let service = service.clone();
@@ -135,8 +135,10 @@ impl Server {
         } else {
             println!("SERVICE SHORTCUT DISABLED");
         }
-        await!(this.services.write_async())?.insert(service_id, service);
-        Ok(())
+        this.services.write_async()
+            .map(|mut svrs|
+                svrs.insert(service_id, service))
+            .map(|_| ())
     }
 
     pub fn remove_service(&self, service_id: u64) {
@@ -157,17 +159,20 @@ impl RPCClient {
     pub fn send(&self, svr_id: u64, data: Vec<u8>) -> Result<Vec<u8>, RPCError> {
         decode_res(self.client.lock().send(prepend_u64(svr_id, data)))
     }
-    pub fn send_async(&self, svr_id: u64, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = RPCError>> {
-        Box::new(
-            self.client
-                .lock_async()
-                .and_then(move |mut c|
-                    c.send_async(prepend_u64(svr_id, data)))
-                .then(move |res|
-                    decode_res(res)))
+    pub fn send_async(&self, svr_id: u64, data: Vec<u8>)
+        -> impl Future<Item = Vec<u8>, Error = RPCError>
+    {
+        self.client
+            .lock_async()
+            .map_err(|_| io::Error::from(io::error::ErrorKind::Other))
+            .then(move |mut cr|
+                cr.map(|c|
+                    send_async(prepend_u64(svr_id, data))))
+            .then(move |res|
+                decode_res(res))
     }
     #[async]
-    pub fn new(addr: String) -> io::Result<Arc<RPCClient>> {
+    pub fn new_async(addr: String) -> io::Result<Arc<RPCClient>> {
         let client = await!(tcp::client::Client::connect_async(addr.clone()))?;
         Ok(Arc::new(RPCClient {
             server_id: client.server_id,
@@ -175,35 +180,45 @@ impl RPCClient {
             address: addr
         }))
     }
-    pub fn with_timeout(addr: &String, timeout: Duration) -> io::Result<Arc<RPCClient>> {
-        let client = tcp::client::Client::connect_with_timeout(addr, timeout)?;
-        Ok(Arc::new(RPCClient {
-            server_id: client.server_id,
-            client: Mutex::new(client),
-            address: addr.clone()
-        }))
+
+    pub fn with_timeout_async(addr: String, timeout: Duration)
+                              -> impl Future<Item = Arc<RPCClient>, Error = io::Error>
+    {
+        tcp::client::Client::connect_with_timeout_async(
+            addr.clone(),
+            timeout
+        ).map(|client|
+            Arc::new(RPCClient {
+                server_id: client.server_id,
+                client: Mutex::new(client),
+                address: addr.clone()
+            })
+        )
     }
 }
 
 impl ClientPool {
     pub fn new() -> ClientPool {
         ClientPool {
-            clients: Mutex::new(HashMap::new())
+            clients: Arc::new(Mutex::new(HashMap::new()))
         }
     }
 
     pub fn get(&self, addr: String) -> impl Future<Item = Arc<RPCClient>, Error = io::Error> {
         self.clients
+            .clone()
             .lock_async()
+            .map_err(|_| io::Error::from(io::ErrorKind::Other))
             .and_then(move |mut clients|
-                if clients.contains_key(&addr) {
-                    future::ok(clients.get(&addr).unwrap().clone())
-                } else {
-                    RPCClient::new(addr)
-                        .and_then(|client| {
+                future::result(clients.get(&addr)
+                    .cloned()
+                    .ok_or(Err(())))
+                    .or_else(|_| RPCClient::new_async(addr)
+                        .map(|client| {
                             clients.insert(addr, client.clone());
                             return client;
                         })
-                })
+                    )
+            )
     }
 }

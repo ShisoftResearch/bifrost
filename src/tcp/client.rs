@@ -17,8 +17,6 @@ use bifrost_hasher::hash_str;
 use super::STANDALONE_ADDRESS;
 use DISABLE_SHORTCUT;
 
-pub type ResFuture = Future<Item = Vec<u8>, Error = io::Error>;
-
 pub struct ClientCore {
     inner: ClientService<TcpStream, BytesClientProto>,
 }
@@ -46,42 +44,51 @@ impl Client {
     pub fn connect_with_timeout_async (address: String, timeout: Duration)
         -> Box<Future<Item = Client, Error = io::Error>>
     {
-        let server_id = hash_str(address);
-        let client = {
-            if !DISABLE_SHORTCUT && shortcut::is_local(server_id) {
-                None
-            } else {
-                if address.eq(&STANDALONE_ADDRESS) {
-                    return future::err(io::Error::new(io::ErrorKind::Other, "STANDALONE server is not found"))
-                }
-                let mut core = Core::new()?;
-                let socket_address = address.parse().unwrap();
-                return Box::new(TcpClient::new(BytesClientProto)
-                    .connect(&socket_address, &core.handle())
-                    .map(|c| {
-                        Some(Timeout::new(
-                            ClientCore {
-                                inner: c,
-                            },
-                            Timer::default(),
-                            timeout
-                        ))
-                    })
-                    .map(|client|
-                        Client {
-                            client,
-                            server_id,
-                        }))
+        let server_id = hash_str(&address);
+        if !DISABLE_SHORTCUT && shortcut::is_local(server_id) {
+            return box future::ok(Client {
+                client: None,
+                server_id
+            })
+        } else {
+            if address.eq(&STANDALONE_ADDRESS) {
+                return box future::err(io::Error::new(io::ErrorKind::Other, "STANDALONE server is not found"))
             }
-        };
+            let mut core = match Core::new() {
+                Ok(c) => c,
+                Err(e) => return box future::err(e)
+            };
+            let socket_address = address.parse().unwrap();
+            return box TcpClient::new(BytesClientProto)
+                .connect(&socket_address, &core.handle())
+                .map(|c| {
+                    Some(Timeout::new(
+                        ClientCore {
+                            inner: c,
+                        },
+                        Timer::default(),
+                        timeout
+                    ))
+                })
+                .map(|client| {
+                    Client {
+                        client,
+                        server_id,
+                    }
+                })
+        }
     }
-    pub fn connect_async (address: String) -> Box<Future<Item = Client, Error = io::Error>> {
+    pub fn connect_async (address: String)
+        -> impl Future<Item = Client, Error = io::Error>
+    {
         Client::connect_with_timeout_async(address, Duration::from_secs(5))
     }
     pub fn send(&mut self, msg: Vec<u8>) -> io::Result<Vec<u8>> {
         self.send_async(msg).wait()
     }
-    pub fn send_async(&mut self, msg: Vec<u8>) -> Box<ResFuture> {
+    pub fn send_async(&mut self, msg: Vec<u8>)
+        -> impl Future<Item = Vec<u8>, Error = io::Error>
+    {
         if let Some(ref client) = self.client {
             Box::new(client.call(msg))
         } else {

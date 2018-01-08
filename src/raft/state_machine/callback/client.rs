@@ -34,7 +34,7 @@ impl SubscriptionService {
             server_address: server.address().clone(),
             session_id: get_time() as u64
         });
-        await!(Server::register_service_async(server, DEFAULT_SERVICE_ID, service.clone()))?;
+        await!(server.register_service_async(DEFAULT_SERVICE_ID, service.clone()))?;
         return Ok(service);
     }
 }
