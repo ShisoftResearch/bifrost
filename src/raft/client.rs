@@ -94,20 +94,22 @@ impl RaftClient {
         }
     }
 
-    fn update_info(&self, members: &mut RwLockWriteGuard<Members>, servers: &HashSet<String>) -> Result<(), ClientError> {
+    fn update_info(this: Arc<Self>, members: &mut RwLockWriteGuard<Members>, servers: &HashSet<String>)
+        -> Result<(), ClientError>
+    {
         let mut cluster_info = None;
         for server_addr in servers {
             let id = hash_str(&server_addr);
             if !members.clients.contains_key(&id) {
-                match rpc::DEFAULT_CLIENT_POOL.get(&server_addr) {
+                match await!(rpc::DEFAULT_CLIENT_POOL.get(server_addr.clone())) {
                     Ok(client) => {
-                        members.clients.insert(id, AsyncServiceClient::new(self.service_id, &client));
+                        members.clients.insert(id, AsyncServiceClient::new(this.service_id, &client));
                     },
                     Err(_) => {continue;}
                 }
             }
             let client = members.clients.get(&id).unwrap();
-            if let Ok(Ok(info)) = client.c_server_cluster_info().wait() {
+            if let Ok(Ok(info)) = await!(client.c_server_cluster_info()) {
                 if info.leader_id != 0 {
                     cluster_info = Some(info);
                     break;
@@ -130,12 +132,12 @@ impl RaftClient {
                 for id in remote_ids.difference(&connected_ids) {
                     let addr = members.id_map.get(id).unwrap().clone();
                     if !members.clients.contains_key(id) {
-                        if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(&addr) {
-                            members.clients.insert(*id, AsyncServiceClient::new(self.service_id, &client));
+                        if let Ok(client) = await!(rpc::DEFAULT_CLIENT_POOL.get(addr)) {
+                            members.clients.insert(*id, AsyncServiceClient::new(this.service_id, &client));
                         }
                     }
                 }
-                self.leader_id.store(info.leader_id, ORDERING);
+                this.leader_id.store(info.leader_id, ORDERING);
                 Ok(())
             },
             None => Err(ClientError::ServerUnreachable),
@@ -205,11 +207,12 @@ impl RaftClient {
         }
     }
 
+    #[async]
     fn query(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>, depth: usize) -> Result<ExecResult, ExecError> {
         let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
         let mut num_members = 0;
         let res = {
-            let members = self.members.read();
+            let members = await!(self.members.read_async());
             let client = {
                 let members_count = members.clients.len();
                 if members_count < 1 {
@@ -219,7 +222,7 @@ impl RaftClient {
                 }
             };
             num_members = members.clients.len();
-            client.c_query(&self.gen_log_entry(sm_id, fn_id, data)).wait()
+            await!(client.c_query(&self.gen_log_entry(sm_id, fn_id, data)))
         };
         match res {
             Ok(Ok(res)) => {
