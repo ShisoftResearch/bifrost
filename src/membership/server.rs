@@ -1,4 +1,4 @@
-use utils::time;
+use utils::{time, FutureResult};
 use super::heartbeat_rpc::*;
 use super::raft::*;
 use super::*;
@@ -31,7 +31,7 @@ pub struct HeartbeatService {
 }
 
 impl Service for HeartbeatService {
-    fn ping(&self, id: u64) -> Box<Future<Item = (), Error = ()>> {
+    fn ping(&self, id: u64) -> FutureResult<(), ()> {
         let mut stat_map = self.status.write();
         let current_time = time::get_time();
         let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
@@ -328,7 +328,7 @@ impl Membership {
 }
 
 impl StateMachineCmds for Membership {
-    fn hb_online_changed(&mut self, online: Vec<u64>, offline: Vec<u64>) -> Result<(), ()> {
+    fn hb_online_changed(&mut self, online: Vec<u64>, offline: Vec<u64>) -> FutureResult<(), ()> {
         self.version += 1;
         {
             let mut stat_map = self.heartbeat.status.write();
@@ -353,7 +353,7 @@ impl StateMachineCmds for Membership {
         }
         Ok(())
     }
-    fn join(&mut self, address: String) -> Result<u64, ()> {
+    fn join(&mut self, address: String) -> FutureResult<u64, ()> {
         self.version += 1;
         let id = hash_str(&address);
         let mut joined = false;
@@ -385,7 +385,7 @@ impl StateMachineCmds for Membership {
             Err(())
         }
     }
-    fn leave(&mut self, id: u64) -> Result<(), ()> {
+    fn leave(&mut self, id: u64) -> FutureResult<(), ()> {
         if !self.members.contains_key(&id) {return Err(())};
         self.version += 1;
         let mut groups:Vec<u64> = Vec::new();
@@ -408,7 +408,7 @@ impl StateMachineCmds for Membership {
         self.members.remove(&id);
         Ok(())
     }
-    fn join_group(&mut self, group_name: String, id: u64) -> Result<(), ()> {
+    fn join_group(&mut self, group_name: String, id: u64) -> FutureResult<(), ()> {
         let group_id = hash_str(&group_name);
         self.version += 1;
         let mut success = false;
@@ -432,11 +432,11 @@ impl StateMachineCmds for Membership {
             return Err(());
         }
     }
-    fn leave_group(&mut self, group_id: u64, id: u64) -> Result<(), ()> {
+    fn leave_group(&mut self, group_id: u64, id: u64) -> FutureResult<(), ()> {
         self.version += 1;
         self.leave_group_(group_id, id, true)
     }
-    fn new_group(&mut self, name: String) -> Result<u64, u64> {
+    fn new_group(&mut self, name: String) -> FutureResult<u64, u64> {
         self.version += 1;
         let id = hash_str(&name);
         let mut inserted = false;
@@ -454,7 +454,7 @@ impl StateMachineCmds for Membership {
             Err(id)
         }
     }
-    fn del_group(&mut self, id: u64) -> Result<(), ()> {
+    fn del_group(&mut self, id: u64) -> FutureResult<(), ()> {
         self.version += 1;
         let mut members: Option<BTreeSet<u64>> = None;
         if let Some(group) = self.groups.get(&id) {
@@ -472,7 +472,7 @@ impl StateMachineCmds for Membership {
             return Err(());
         }
     }
-    fn group_leader(&self, group_id: u64) -> Result<(Option<ClientMember>, u64), ()> {
+    fn group_leader(&self, group_id: u64) -> FutureResult<(Option<ClientMember>, u64), ()> {
         if let Some(group) = self.groups.get(&group_id) {
             Ok((match group.leader {
                 Some(id) => Some(self.compose_client_member(id)),
@@ -482,7 +482,7 @@ impl StateMachineCmds for Membership {
             Err(())
         }
     }
-    fn group_members(&self, group: u64, online_only: bool) -> Result<(Vec<ClientMember>, u64), ()> {
+    fn group_members(&self, group: u64, online_only: bool) -> FutureResult<(Vec<ClientMember>, u64), ()> {
         if let Some(group) = self.groups.get(&group) {
             Ok((group.members.iter()
                 .map(|id| self.compose_client_member(*id))
@@ -492,7 +492,7 @@ impl StateMachineCmds for Membership {
             Err(())
         }
     }
-    fn all_members(&self, online_only: bool) -> Result<(Vec<ClientMember>, u64), ()> {
+    fn all_members(&self, online_only: bool) -> FutureResult<(Vec<ClientMember>, u64), ()> {
         Ok((self.members.iter()
             .map(|(id, _)| self.compose_client_member(*id))
             .filter(|member| !online_only || member.online)

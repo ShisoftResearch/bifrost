@@ -2,6 +2,7 @@
 macro_rules! def_store_value {
     ($m: ident, $t: ty) => {
         pub mod $m {
+            use utils::FutureResult;
             use bifrost_hasher::hash_str;
             use $crate::raft::state_machine::StateMachineCtl;
             use $crate::raft::state_machine::callback::server::SMCallback;
@@ -18,16 +19,16 @@ macro_rules! def_store_value {
                 def sub on_changed() -> ($t, $t);
             }
             impl StateMachineCmds for Value {
-                fn set(&mut self, v: $t) -> Result<(),()> {
+                fn set(&mut self, v: $t) -> FutureResult<(),()> {
                     if let Some(ref callback) = self.callback {
                         let old = self.val.clone();
                         callback.notify(&commands::on_changed::new(), Ok((old, v.clone())));
                     }
                     self.val = v;
-                    Ok(())
+                    future::ok(())
                 }
-                fn get(&self) -> Result<$t, ()> {
-                    Ok(self.val.clone())
+                fn get(&self) -> FutureResult<$t, ()> {
+                    future::ok(self.val.clone())
                 }
             }
             impl StateMachineCtl for Value {

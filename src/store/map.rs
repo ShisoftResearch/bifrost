@@ -2,6 +2,7 @@
 macro_rules! def_store_hash_map {
     ($m: ident <$kt: ty, $vt: ty>) => {
         pub mod $m {
+            use utils::FutureResult;
             use $crate::raft::state_machine::StateMachineCtl;
             use $crate::raft::state_machine::callback::server::SMCallback;
             use $crate::raft::RaftService;
@@ -37,27 +38,27 @@ macro_rules! def_store_hash_map {
                 def sub on_key_removed(k: $kt) -> $vt;
             }
             impl StateMachineCmds for Map {
-                fn get(&self, k: $kt) -> Result<Option<$vt>, ()> {
-                    Ok(
+                fn get(&self, k: $kt) -> FutureResult<Option<$vt>, ()> {
+                    future::ok(
                         if let Some(v) = self.map.get(&k) {
                             Some(v.clone())
                         } else {None}
                     )
                 }
-                fn insert(&mut self, k: $kt, v: $vt) -> Result<Option<$vt>, ()> {
+                fn insert(&mut self, k: $kt, v: $vt) -> FutureResult<Option<$vt>, ()> {
                     if let Some(ref callback) = self.callback {
                         callback.notify(&commands::on_inserted::new(), Ok((k.clone(), v.clone())));
                         callback.notify(&commands::on_key_inserted::new(&k), Ok(v.clone()));
                     }
-                    Ok(self.map.insert(k, v))
+                    future::ok(self.map.insert(k, v))
                 }
-                fn insert_if_absent(&mut self, k: $kt, v: $vt) -> Result<$vt, ()> {
+                fn insert_if_absent(&mut self, k: $kt, v: $vt) -> FutureResult<$vt, ()> {
                     if let Some(v) = self.map.get(&k) {
                         return Ok(v.clone())
                     }
-                    self.insert(k, v.clone()); Ok(v)
+                    self.insert(k, v.clone()); future::ok(v)
                 }
-                fn remove(&mut self, k: $kt) -> Result<Option<$vt>, ()> {
+                fn remove(&mut self, k: $kt) -> FutureResult<Option<$vt>, ()> {
                     let res = self.map.remove(&k);
                     if let Some(ref callback) = self.callback {
                         if let Some(ref v) = res {
@@ -65,35 +66,35 @@ macro_rules! def_store_hash_map {
                             callback.notify(&commands::on_key_removed::new(&k), Ok(v.clone()));
                         }
                     }
-                    Ok(res)
+                    future::ok(res)
                 }
-                fn is_empty(&self) -> Result<bool, ()> {
-                    Ok(self.map.is_empty())
+                fn is_empty(&self) -> FutureResult<bool, ()> {
+                    future::ok(self.map.is_empty())
                 }
-                fn len(&self) -> Result<u64, ()> {
-                    Ok(self.map.len() as u64)
+                fn len(&self) -> FutureResult<u64, ()> {
+                    future::ok(self.map.len() as u64)
                 }
-                fn clear(&mut self) -> Result<(), ()> {
-                    Ok(self.map.clear())
+                fn clear(&mut self) -> FutureResult<(), ()> {
+                    future::ok(self.map.clear())
                 }
-                fn keys(&self) -> Result<Vec<$kt>, ()> {
-                    Ok(self.map.keys().cloned().collect())
+                fn keys(&self) -> FutureResult<Vec<$kt>, ()> {
+                    future::ok(self.map.keys().cloned().collect())
                 }
-                fn values(&self) -> Result<Vec<$vt>, ()> {
-                    Ok(self.map.values().cloned().collect())
+                fn values(&self) -> FutureResult<Vec<$vt>, ()> {
+                    future::ok(self.map.values().cloned().collect())
                 }
-                fn entries(&self) -> Result<Vec<($kt, $vt)>, ()> {
+                fn entries(&self) -> FutureResult<Vec<($kt, $vt)>, ()> {
                     let mut r = Vec::new();
                     for (k, v) in self.map.iter() {
                         r.push((k.clone(), v.clone()));
                     }
-                    Ok(r)
+                    future::ok(r)
                 }
-                fn clone(&self) -> Result<HashMap<$kt, $vt>, ()> {
-                    Ok(self.map.clone())
+                fn clone(&self) -> FutureResult<HashMap<$kt, $vt>, ()> {
+                    future::ok(self.map.clone())
                 }
-                fn contains_key(&self, k: $kt) -> Result<bool, ()> {
-                    Ok(self.map.contains_key(&k))
+                fn contains_key(&self, k: $kt) -> FutureResult<bool, ()> {
+                    future::ok(self.map.contains_key(&k))
                 }
             }
             impl StateMachineCtl for Map {
@@ -117,7 +118,7 @@ macro_rules! def_store_hash_map {
                 pub fn new_by_name(name: &String) -> Map {
                     Map::new(hash_str(name))
                 }
-                pub fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
+                pub fn init_callback(&mut self, raft_service: &Arc<Box<RaftService>>) {
                     self.callback = Some(SMCallback::new(self.id(), raft_service.clone()));
                 }
             }
