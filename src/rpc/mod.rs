@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::io;
 use std::time::Duration;
 use utils::future_parking_lot::{Mutex};
-use utils::future_parking_lot::RwLock;
+use parking_lot::RwLock;
 use std::thread;
 use tcp;
 use utils::time;
@@ -39,7 +39,9 @@ pub trait RPCService: Sync + Send {
 }
 
 pub struct Server {
-    services: Arc<RwLock<HashMap<u64, Arc<RPCService>>>>,
+    // we use traditional rwlock here instead of async one
+    // because operations on this hashmap should not impact performance
+    services: RwLock<HashMap<u64, Arc<RPCService>>>,
     pub address: String,
     pub server_id: u64
 }
@@ -84,7 +86,7 @@ fn decode_res(res: io::Result<Vec<u8>>) -> Result<Vec<u8>, RPCError> {
 impl Server {
     pub fn new(address: &String) -> Arc<Server> {
         Arc::new(Server {
-            services: Arc::new(RwLock::new(HashMap::new())),
+            services: RwLock::new(HashMap::new()),
             address: address.clone(),
             server_id: hash_str(address)
         })
@@ -124,8 +126,7 @@ impl Server {
         });
     }
 
-    pub fn register_service_async<T>(&self, service_id: u64,  service: Arc<T>)
-        -> impl Future<Item = (), Error = ()>
+    pub fn register_service<T>(&self, service_id: u64,  service: &Arc<T>)
         where T: RPCService + Sized + 'static
     {
         let service = service.clone();
@@ -136,11 +137,8 @@ impl Server {
             println!("SERVICE SHORTCUT DISABLED");
         }
         self.services
-            .clone()
-            .write_async()
-            .map(|mut svrs|
-                svrs.insert(service_id, service))
-            .map(|_| ())
+            .write()
+            .insert(service_id, service);
     }
 
     pub fn remove_service(&self, service_id: u64) {

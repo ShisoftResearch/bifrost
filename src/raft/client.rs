@@ -9,7 +9,8 @@ use raft::state_machine::configs::commands::{subscribe as conf_subscribe};
 use std::collections::{HashMap, BTreeMap, HashSet};
 use std::iter::FromIterator;
 use parking_lot::{RwLockWriteGuard};
-use utils::future_parking_lot::{RwLock};
+use utils::future_parking_lot::{
+    RwLock, AsyncRwLockWriteGuard, AsyncRwLockReadGuard};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::cmp::max;
@@ -56,8 +57,9 @@ pub struct RaftClient {
 }
 
 impl RaftClient {
-    pub fn new(servers: &Vec<String>, service_id: u64) -> Result<Arc<RaftClient>, ClientError> {
-        let client = RaftClient {
+    #[async]
+    pub fn new(servers: Vec<String>, service_id: u64) -> Result<Arc<RaftClient>, ClientError> {
+        let client = Arc::new(RaftClient {
             qry_meta: QryMeta {
                 pos: AtomicU64::new(rand::random::<u64>())
             },
@@ -69,34 +71,34 @@ impl RaftClient {
             last_log_id: AtomicU64::new(0),
             last_log_term: AtomicU64::new(0),
             service_id,
-        };
+        });
         let init = {
-            let mut members = client.members.write();
-            client.update_info(
-                &mut members,
-                &HashSet::from_iter(servers.iter().cloned())
-            )
+            await!(Self::update_info(
+                client.clone(),
+                HashSet::from_iter(servers.iter().cloned())
+            ))
         };
         match init {
-            Ok(_) => Ok(Arc::new(client)),
+            Ok(_) => Ok(client),
             Err(e) => Err(e)
         }
     }
-    #[async]
-    pub fn prepare_subscription(server: Arc<rpc::Server>) -> Result<(), ()> {
-        let mut callback = await!(CALLBACK.write_async())?;
+    pub fn prepare_subscription(server: Arc<rpc::Server>) {
+        let mut callback = CALLBACK.write()?;
         if callback.is_none() {
-            let sub_service = await!(SubscriptionService::initialize(server))?;
-            *callback = Some(sub_service.clone());
+            let sub_service = SubscriptionService::initialize(server);
+            *callback = Some(sub_service);
             return Ok(())
         } else {
             return Err(())
         }
     }
 
-    fn update_info(this: Arc<Self>, members: &mut RwLockWriteGuard<Members>, servers: &HashSet<String>)
+    #[async]
+    fn update_info(this: Arc<Self>, servers: HashSet<String>)
         -> Result<(), ClientError>
     {
+        let mut members = await!(this.members.write_async()).unwrap();
         let mut cluster_info = None;
         for server_addr in servers {
             let id = hash_str(&server_addr);
@@ -208,11 +210,13 @@ impl RaftClient {
     }
 
     #[async]
-    fn query(this: Arc<Self>, sm_id: u64, fn_id: u64, data: Vec<u8>, depth: usize) -> Result<ExecResult, ExecError> {
+    fn query(this: Arc<Self>, sm_id: u64, fn_id: u64, data: Vec<u8>, depth: usize)
+        -> Result<ExecResult, ExecError>
+    {
         let pos = this.qry_meta.pos.fetch_add(1, ORDERING);
         let mut num_members = 0;
         let res = {
-            let members = await!(this.members.read_async()).unwrap();
+            let members = this.members.read();
             let client = {
                 let members_count = members.clients.len();
                 if members_count < 1 {
@@ -329,34 +333,38 @@ impl RaftClient {
             None
         }
     }
-    pub fn current_leader_client(&self) -> Option<(u64, Client)> {
+    #[async]
+    pub fn current_leader_client(this: Arc<Self>)
+        -> Result<(u64, Client), ()>
+    {
         {
-            let leader_client = self.leader_client();
-            if leader_client.is_some() {
+            if this.leader_client().is_some() {
                 return leader_client
             }
         }
         {
-            let mut members = self.members.write();
             let mut members_addrs = HashSet::new();
-            for address in members.id_map.values() {
-                members_addrs.insert(address.clone());
-
+            {
+                let mut members = this.members.read();
+                for address in members.id_map.values() {
+                    members_addrs.insert(address.clone());
+                }
             }
-            self.update_info(&mut members, &members_addrs);
-            let leader_id = self.leader_id.load(ORDERING);
-            if let Some(client) = members.clients.get(&leader_id) {
-                Some((leader_id,  client.clone()))
-            } else {
-                None
+            await!(Self::update_info(this, members_addrs));
+            {
+                let mut members = this.members.read();
+                let leader_id = this.leader_id.load(ORDERING);
+                if let Some(client) = members.clients.get(&leader_id) {
+                    Ok((leader_id,  client.clone()))
+                } else {
+                    Err(())
+                }
             }
         }
     }
-    pub fn current_leader_rpc_client(&self) -> Option<Arc<rpc::RPCClient>> {
-        match self.current_leader_client() {
-            Some((_, client)) => Some(client.client.clone()),
-            None => None
-        }
+    #[async]
+    pub fn current_leader_rpc_client(this: Arc<Self>) -> Result<Arc<rpc::RPCClient>, ()> {
+        await!(self.current_leader_client()).map(|(_, c)| c)
     }
 }
 
