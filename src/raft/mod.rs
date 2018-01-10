@@ -1,8 +1,6 @@
 use rand;
 use rand::distributions::{IndependentSample, Range};
 use std::thread;
-use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
-use utils::future_parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeMap, HashMap};
 use std::collections::Bound::{Included, Unbounded};
 use std::cmp::{min, max};
@@ -18,6 +16,7 @@ use self::state_machine::configs::commands::{new_member_, del_member_, member_ad
 use self::client::RaftClient;
 use bifrost_hasher::hash_str;
 use utils::time::get_time;
+use utils::future_parking_lot::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, RwLock, Mutex};
 use threadpool::ThreadPool;
 use num_cpus;
 
@@ -33,9 +32,9 @@ def_bindings! {
     bind val IS_LEADER: bool = false;
 }
 
-pub trait RaftMsg<R>: Send + Sync {
-    fn encode(&self) -> (u64, OpType, &Vec<u8>);
-    fn decode_return(&self, data: &Vec<u8>) -> R;
+pub trait RaftMsg<R: Sized>: Send + Sync {
+    fn encode(&self) -> (u64, OpType, Vec<u8>);
+    fn decode_return(&self, data: Vec<u8>) -> R;
 }
 
 const CHECKER_MS: i64 = 10;
@@ -349,7 +348,7 @@ impl RaftServiceInner {
         let service = RaftService::new(opts);
         let server = Server::new(&address);
         Server::listen_and_resume(&server);
-        server.register_service_async(svr_id, &service).wait();
+        server.register_service(svr_id, &service).wait();
         (service.start(), service, server)
     }
     pub fn bootstrap(&self) {
@@ -360,28 +359,32 @@ impl RaftServiceInner {
         };
         self.become_leader(&mut meta, last_log_id);
     }
-    pub fn join(&self, servers: &Vec<String>)
-                -> Result<Result<(), ()>, ExecError> {
-        debug!("Trying to join cluster with id {}", self.id);
-        let client = RaftClient::new(servers, self.options.service_id);
+    #[async]
+    pub fn join(this: Arc<Self>, servers: Vec<String>)
+        -> Result<(), ExecError>
+    {
+        debug!("Trying to join cluster with id {}", this.id);
+        let client = await!(RaftClient::new(servers, self.options.service_id));
         if let Ok(client) = client {
-            let result = client.execute(
+            let result = await!(RaftClient::execute(
+                client,
                 CONFIG_SM_ID,
-                &new_member_::new(&self.options.address)
-            );
-            let members = client.execute(
+                box new_member_::new(&this.options.address)
+            ));
+            let members = await!(RaftClient::execute(
+                client,
                 CONFIG_SM_ID,
-                &member_address::new()
-            );
-            let mut meta = self.write_meta();
+                box member_address::new()
+            ));
+            let mut meta = await!(this.write_meta()).unwrap();
             if let Ok(Ok(members)) = members {
                 for member in members {
                     meta.state_machine.write().configs.new_member(member);
                 }
             }
-            self.reset_last_checked(&mut meta);
-            self.become_follower(&mut meta, 0, client.leader_id());
-            result
+            this.reset_last_checked(&mut meta);
+            this.become_follower(&mut meta, 0, client.leader_id());
+            result.map(|_| ())
         } else {
             Err(ExecError::CannotConstructClient)
         }
@@ -495,9 +498,9 @@ impl RaftServiceInner {
             self.insert_leader_follower_meta(leader_meta, last_log_id, member.id);
         }
     }
-    fn write_meta(&self) -> RwLockWriteGuard<RaftMeta> {
+    fn write_meta(&self) -> AsyncRwWriteGuard<RaftMeta> {
         //        let t = get_time();
-        let lock_mon = self.meta.write();
+        let lock_mon = self.meta.write_async();
         //        let acq_time = get_time() - t;
         //        println!("Meta write locked acquired for {}ms for {}, leader {}", acq_time, self.id, lock_mon.leader_id);
         lock_mon

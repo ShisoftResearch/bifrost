@@ -146,24 +146,28 @@ impl RaftClient {
         }
     }
 
-    pub fn execute<R>(&self, sm_id: u64, msg: &RaftMsg<R>) -> Result<R, ExecError> {
-        let (fn_id, op, req_data) = msg.encode();
-        let response = match op {
-            OpType::QUERY => {
-                self.query(sm_id, fn_id, &req_data, 0)
-            },
-            OpType::COMMAND | OpType::SUBSCRIBE => {
-                self.command(sm_id, fn_id, &req_data, 0)
-            },
-        };
-        match response {
-            Ok(data) => {
-                match data {
-                    Ok(data) => Ok(msg.decode_return(&data)),
-                    Err(e) => Err(e)
-                }
-            },
-            Err(e) => Err(e)
+    pub fn execute<R>(this: Arc<Self>, sm_id: u64, msg: Box<RaftMsg<R>>)
+        -> impl Future<Item = R, Error = ExecError>
+    {
+        async_block! {
+            let (fn_id, op, req_data) = msg.encode();
+            let response = match op {
+                OpType::QUERY => {
+                    await!(Self::query(this, sm_id, fn_id, req_data, 0))
+                },
+                OpType::COMMAND | OpType::SUBSCRIBE => {
+                    await!(Self::command(this, sm_id, fn_id, req_data, 0))
+                },
+            };
+            match response {
+                Ok(data) => {
+                    match data {
+                        Ok(data) => Ok(msg.decode_return(data)),
+                        Err(e) => Err(e)
+                    }
+                },
+                Err(e) => Err(e)
+            }
         }
     }
 
@@ -251,7 +255,8 @@ impl RaftClient {
         }
     }
 
-    fn command(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>, depth: usize) -> Result<ExecResult, ExecError> {
+    #[async]
+    fn command(this: Arc<Self>, sm_id: u64, fn_id: u64, data: Vec<u8>, depth: usize) -> Result<ExecResult, ExecError> {
         enum FailureAction {
             SwitchLeader,
             NotCommitted,
@@ -261,24 +266,24 @@ impl RaftClient {
         }
         let failure = {
             if depth > 0 {
-                let members = self.members.read();
+                let members = await!(this.members.read_async()).unwrap();
                 let num_members = members.clients.len();
                 if depth >= max(num_members, 5) {
                     return Err(ExecError::TooManyRetry)
                 };
             }
-            match self.current_leader_client() {
-                Some((leader_id, client)) => {
-                    match client.c_command(&self.gen_log_entry(sm_id, fn_id, data)).wait() {
+            match await!(Self::current_leader_client(this.clone())) {
+                Ok((leader_id, client)) => {
+                    match await!(client.c_command(&this.gen_log_entry(sm_id, fn_id, &data))) {
                         Ok(Ok(ClientCmdResponse::Success {
                                   data, last_log_term, last_log_id
                               })) => {
-                            swap_when_greater(&self.last_log_id, last_log_id);
-                            swap_when_greater(&self.last_log_term, last_log_term);
+                            swap_when_greater(&this.last_log_id, last_log_id);
+                            swap_when_greater(&this.last_log_term, last_log_term);
                             return Ok(data);
                         },
                         Ok(Ok(ClientCmdResponse::NotLeader(leader_id))) => {
-                            self.leader_id.store(leader_id, ORDERING);
+                            this.leader_id.store(leader_id, ORDERING);
                             FailureAction::NotLeader
                         },
                         Ok(Ok(ClientCmdResponse::NotCommitted)) => {
@@ -294,24 +299,24 @@ impl RaftClient {
                         }
                     }
                 },
-                None => FailureAction::UpdateInfo // need update members
+                Err(_) => FailureAction::UpdateInfo // need update members
             }
         }; //
         match failure {
             FailureAction::SwitchLeader => {
-                let members = self.members.read();
+                let members = await!(this.members.read_async()).unwrap();
                 let num_members = members.clients.len();
-                let pos = self.qry_meta.pos.load(ORDERING);
-                let leader_id = self.leader_id.load(ORDERING);
+                let pos = this.qry_meta.pos.load(ORDERING);
+                let leader_id = this.leader_id.load(ORDERING);
                 let index = members.clients.keys()
                     .nth(pos as usize % num_members)
                     .unwrap();
-                self.leader_id.compare_and_swap(leader_id, *index, ORDERING);
+                this.leader_id.compare_and_swap(leader_id, *index, ORDERING);
                 debug!("CLIENT: Switch leader");
             },
             _ => {}
         }
-        self.command(sm_id, fn_id, data, depth + 1)
+        await!(Self::command(this, sm_id, fn_id, data, depth + 1))
     }
 
     fn gen_log_entry(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>) -> LogEntry {
@@ -338,8 +343,8 @@ impl RaftClient {
         -> Result<(u64, Client), ()>
     {
         {
-            if this.leader_client().is_some() {
-                return leader_client
+            if let Some(leader_client) = this.leader_client() {
+                return Ok(leader_client)
             }
         }
         {
@@ -364,7 +369,7 @@ impl RaftClient {
     }
     #[async]
     pub fn current_leader_rpc_client(this: Arc<Self>) -> Result<Arc<rpc::RPCClient>, ()> {
-        await!(self.current_leader_client()).map(|(_, c)| c)
+        await!(Self::current_leader_client(this)).map(|(_, c)| { c.client.clone() })
     }
 }
 
