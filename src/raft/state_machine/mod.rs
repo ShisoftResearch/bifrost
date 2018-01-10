@@ -15,8 +15,8 @@ pub trait StateMachineCtl: Sync + Send + Any {
     fn id(&self) -> u64;
     fn snapshot(&self) -> Option<Vec<u8>>;
     fn recover(&mut self, data: Vec<u8>);
-    fn fn_dispatch_qry(&self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>>;
-    fn fn_dispatch_cmd(&mut self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>>;
+    fn fn_dispatch_qry(&self, fn_id: u64, data: Vec<u8>) -> Option<Vec<u8>>;
+    fn fn_dispatch_cmd(&mut self, fn_id: u64, data: Vec<u8>) -> Option<Vec<u8>>;
     fn op_type(&mut self, fn_id: u64) -> Option<OpType>;
 }
 

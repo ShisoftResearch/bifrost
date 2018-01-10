@@ -7,12 +7,18 @@ macro_rules! raft_return_type {
 }
 
 #[macro_export]
+macro_rules! raft_return_future_type {
+    ($out: ty, $error: ty) => {Box<Future<Item = $out, Error = $error>>};
+}
+
+
+#[macro_export]
 macro_rules! raft_trait_fn {
     (qry $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {
-        fn $fn_name(&self, $($arg:$in_),*) -> raft_return_type!($out, $error);
+        fn $fn_name(&self, $($arg:$in_),*) -> raft_return_future_type!($out, $error);
     };
     (cmd $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {
-        fn $fn_name(&mut self, $($arg:$in_),*) -> raft_return_type!($out, $error);
+        fn $fn_name(&mut self, $($arg:$in_),*) -> raft_return_future_type!($out, $error);
     };
     (sub $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {}
 }
@@ -24,7 +30,8 @@ macro_rules! raft_client_fn {
         -> Result<Result<u64, SubscriptionError>, ExecError>
         where F: Fn(raft_return_type!($out, $error)) + 'static + Send + Sync
         {
-            self.client.subscribe(
+            RaftClient::subscribe(
+                self.client.clone(),
                 self.sm_id,
                 $fn_name::new($($arg,)*),
                 f
@@ -33,8 +40,9 @@ macro_rules! raft_client_fn {
     };
     ($others:ident $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {
         pub fn $fn_name(&self, $($arg:$in_),*)
-        -> Result<raft_return_type!($out, $error), ExecError> {
-            self.client.execute(
+        -> impl Future<Item = raft_return_type!($out, $error), Error = ExecError> {
+            RaftClient::execute(
+                self.client.clone(),
                 self.sm_id,
                 &$fn_name::new($($arg,)*)
             )
@@ -52,7 +60,7 @@ macro_rules! raft_fn_op_type {
 #[macro_export]
 macro_rules! raft_dispatch_fn {
     ($fn_name:ident $s: ident $d: ident ( $( $arg:ident : $in_:ty ),* )) => {{
-        let decoded: ($($in_,)*) = $crate::utils::bincode::deserialize($d);
+        let decoded: ($($in_,)*) = $crate::utils::bincode::deserialize(&$d);
         let ($($arg,)*) = decoded;
         let f_result = $s.$fn_name($($arg),*);
         Some($crate::utils::bincode::serialize(&f_result))
@@ -78,8 +86,8 @@ macro_rules! raft_dispatch_qry {
 #[macro_export]
 macro_rules! raft_sm_complete {
     () => {
-        fn fn_dispatch_cmd(&mut self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {self.dispatch_cmd_(fn_id, data)}
-        fn fn_dispatch_qry(&self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {self.dispatch_qry_(fn_id, data)}
+        fn fn_dispatch_cmd(&mut self, fn_id: u64, data: Vec<u8>) -> Option<Vec<u8>> {self.dispatch_cmd_(fn_id, data)}
+        fn fn_dispatch_qry(&self, fn_id: u64, data: Vec<u8>) -> Option<Vec<u8>> {self.dispatch_qry_(fn_id, data)}
         fn op_type(&mut self, fn_id: u64) -> Option<$crate::raft::state_machine::OpType> {self.op_type_(fn_id)}
     };
 }
@@ -178,6 +186,7 @@ macro_rules! raft_state_machine {
             def $smt:ident $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty;
         )*
     ) => {
+        use futures::{Future, future};
         pub mod commands {
             use super::*;
             $(
@@ -186,15 +195,15 @@ macro_rules! raft_state_machine {
                     pub data: Vec<u8>
                 }
                 impl $crate::raft::RaftMsg<raft_return_type!($out, $error)> for $fn_name {
-                    fn encode(&self) -> (u64, $crate::raft::state_machine::OpType, &Vec<u8>) {
+                    fn encode(self) -> (u64, $crate::raft::state_machine::OpType, Vec<u8>) {
                         (
                             hash_ident!($fn_name) as u64,
                             raft_fn_op_type!($smt),
-                            &self.data
+                            self.data
                         )
                     }
-                    fn decode_return(&self, data: &Vec<u8>) -> raft_return_type!($out, $error) {
-                        $crate::utils::bincode::deserialize(data)
+                    fn decode_return(&self, data: Vec<u8>) -> raft_return_type!($out, $error) {
+                        $crate::utils::bincode::deserialize(&data)
                     }
                 }
                 impl $fn_name {
@@ -223,7 +232,7 @@ macro_rules! raft_state_machine {
                    }
                 }
            }
-           fn dispatch_cmd_(&mut self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {
+           fn dispatch_cmd_(&mut self, fn_id: u64, data: Vec<u8>) -> Option<Vec<u8>> {
                match fn_id as usize {
                    $(hash_ident!($fn_name) => {
                         raft_dispatch_cmd!($smt $fn_name self data( $( $arg : $in_ ),* ))
@@ -234,7 +243,7 @@ macro_rules! raft_state_machine {
                    }
                }
            }
-           fn dispatch_qry_(&self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {
+           fn dispatch_qry_(&self, fn_id: u64, data: Vec<u8>) -> Option<Vec<u8>> {
                match fn_id as usize {
                    $(hash_ident!($fn_name) => {
                         raft_dispatch_qry!($smt $fn_name self data( $( $arg : $in_ ),* ))

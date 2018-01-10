@@ -95,10 +95,10 @@ impl MasterStateMachine {
     pub fn commit_cmd(&mut self, entry: &LogEntry) -> ExecResult {
         match entry.sm_id {
             CONFIG_SM_ID => {
-                parse_output(self.configs.fn_dispatch_cmd(entry.fn_id, &entry.data))
+                parse_output(self.configs.fn_dispatch_cmd(entry.fn_id, entry.data))
             }
             _ => if let Some(sm) = self.subs.get_mut(&entry.sm_id) {
-                parse_output(sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data))
+                parse_output(sm.as_mut().fn_dispatch_cmd(entry.fn_id, entry.data))
             } else {
                 Err(ExecError::SmNotFound)
             }

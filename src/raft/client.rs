@@ -194,7 +194,7 @@ impl RaftClient {
             (fn_id, hash_bytes(pattern_data.as_slice()))
         };
         let wrapper_fn = move |data: Vec<u8>| {
-            f(msg.decode_return(&data))
+            f(msg.decode_return(data))
         };
         let key = (raft_sid, sm_id, fn_id, pattern_id);
         let mut subs_map = callback.subs.write();
