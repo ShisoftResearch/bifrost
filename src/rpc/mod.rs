@@ -152,7 +152,7 @@ impl Server {
 }
 
 pub struct RPCClient {
-    client: Mutex<tcp::client::Client>,
+    client: tcp::client::Client,
     pub server_id: u64,
     pub address: String
 }
@@ -165,11 +165,7 @@ impl RPCClient {
         -> impl Future<Item = Vec<u8>, Error = RPCError>
     {
         self.client
-            .lock_async()
-            .map_err(|_| io::Error::from(io::ErrorKind::Other))
-            .then(move |mut cr|
-                cr.map(|c|
-                    c.send_async(prepend_u64(svr_id, data))))
+            .send_async(prepend_u64(svr_id, data))
             .then(move |res|
                 future::result(decode_res(res)))
     }
@@ -178,7 +174,7 @@ impl RPCClient {
         let client = await!(tcp::client::Client::connect_async(addr.clone()))?;
         Ok(Arc::new(RPCClient {
             server_id: client.server_id,
-            client: Mutex::new(client),
+            client,
             address: addr
         }))
     }
