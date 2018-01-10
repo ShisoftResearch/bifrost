@@ -1,5 +1,6 @@
 use std::io;
 use std::time::Duration;
+use std::sync::Arc;
 
 use futures::{Future, future};
 
@@ -17,12 +18,14 @@ use bifrost_hasher::hash_str;
 use super::STANDALONE_ADDRESS;
 use DISABLE_SHORTCUT;
 
+use utils::future_parking_lot::Mutex;
+
 pub struct ClientCore {
     inner: ClientService<TcpStream, BytesClientProto>,
 }
 
 pub struct Client {
-    client: Option<Timeout<ClientCore>>,
+    client: Option<Arc<Mutex<Timeout<ClientCore>>>>,
     pub server_id: u64,
 }
 
@@ -62,13 +65,13 @@ impl Client {
             return box TcpClient::new(BytesClientProto)
                 .connect(&socket_address, &core.handle())
                 .map(|c| {
-                    Some(Timeout::new(
+                    Some(Arc::new(Mutex::new(Timeout::new(
                         ClientCore {
                             inner: c,
                         },
                         Timer::default(),
                         timeout
-                    ))
+                    ))))
                 })
                 .map(|client| {
                     Client {
@@ -90,7 +93,14 @@ impl Client {
         -> impl Future<Item = Vec<u8>, Error = io::Error>
     {
         if let Some(ref client) = self.client {
-            Box::new(client.call(msg))
+            box client
+                .clone()
+                .lock_async()
+                .map_err(|_| io::Error::from(io::ErrorKind::Other))
+                .and_then(|c|
+                    c.call(msg))
+                .map_err(|_|
+                    io::Error::from(io::ErrorKind::TimedOut))
         } else {
             shortcut::call(self.server_id, msg)
         }

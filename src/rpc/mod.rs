@@ -152,14 +152,14 @@ impl Server {
 }
 
 pub struct RPCClient {
-    client: tcp::client::Client,
+    client: Arc<tcp::client::Client>,
     pub server_id: u64,
     pub address: String
 }
 
 impl RPCClient {
     pub fn send(&self, svr_id: u64, data: Vec<u8>) -> Result<Vec<u8>, RPCError> {
-        decode_res(self.client.lock().send(prepend_u64(svr_id, data)))
+        decode_res(self.client.send(prepend_u64(svr_id, data)))
     }
     pub fn send_async(&self, svr_id: u64, data: Vec<u8>)
         -> impl Future<Item = Vec<u8>, Error = RPCError>
@@ -169,18 +169,19 @@ impl RPCClient {
             .then(move |res|
                 future::result(decode_res(res)))
     }
+
     #[async]
     pub fn new_async(addr: String) -> io::Result<Arc<RPCClient>> {
         let client = await!(tcp::client::Client::connect_async(addr.clone()))?;
         Ok(Arc::new(RPCClient {
             server_id: client.server_id,
-            client,
+            client: Arc::new(client),
             address: addr
         }))
     }
 
     pub fn with_timeout_async(addr: String, timeout: Duration)
-                              -> impl Future<Item = Arc<RPCClient>, Error = io::Error>
+        -> impl Future<Item = Arc<RPCClient>, Error = io::Error>
     {
         tcp::client::Client::connect_with_timeout_async(
             addr.clone(),
@@ -188,7 +189,7 @@ impl RPCClient {
         ).map(|client|
             Arc::new(RPCClient {
                 server_id: client.server_id,
-                client: Mutex::new(client),
+                client: Arc::new(client),
                 address: addr.clone()
             })
         )
@@ -207,16 +208,14 @@ impl ClientPool {
             .clone()
             .lock_async()
             .map_err(|_| io::Error::from(io::ErrorKind::Other))
-            .and_then(move |mut clients|
-                future::result(clients.get(&addr)
-                    .cloned()
-                    .ok_or(Err(())))
+            .and_then(move |mut clients| {
+                future::result(clients.get(&addr).cloned().ok_or(()))
                     .or_else(|_| RPCClient::new_async(addr)
                         .map(|client| {
                             clients.insert(addr, client.clone());
                             return client;
                         })
                     )
-            )
+            })
     }
 }
