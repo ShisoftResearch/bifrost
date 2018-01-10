@@ -208,11 +208,11 @@ impl RaftClient {
     }
 
     #[async]
-    fn query(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>, depth: usize) -> Result<ExecResult, ExecError> {
-        let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
+    fn query(this: Arc<Self>, sm_id: u64, fn_id: u64, data: Vec<u8>, depth: usize) -> Result<ExecResult, ExecError> {
+        let pos = this.qry_meta.pos.fetch_add(1, ORDERING);
         let mut num_members = 0;
         let res = {
-            let members = await!(self.members.read_async());
+            let members = await!(this.members.read_async()).unwrap();
             let client = {
                 let members_count = members.clients.len();
                 if members_count < 1 {
@@ -222,7 +222,7 @@ impl RaftClient {
                 }
             };
             num_members = members.clients.len();
-            await!(client.c_query(&self.gen_log_entry(sm_id, fn_id, data)))
+            await!(client.c_query(&this.gen_log_entry(sm_id, fn_id, &data)))
         };
         match res {
             Ok(Ok(res)) => {
@@ -231,14 +231,14 @@ impl RaftClient {
                         if depth >= num_members {
                             Err(ExecError::TooManyRetry)
                         } else {
-                            self.query(sm_id, fn_id, data, depth + 1)
+                            await!(Self::query(this.clone(), sm_id, fn_id, data, depth + 1))
                         }
                     },
                     ClientQryResponse::Success{
                         data, last_log_term, last_log_id
                     } => {
-                        swap_when_greater(&self.last_log_id, last_log_id);
-                        swap_when_greater(&self.last_log_term, last_log_term);
+                        swap_when_greater(&this.last_log_id, last_log_id);
+                        swap_when_greater(&this.last_log_term, last_log_term);
                         Ok(data)
                     },
                 }

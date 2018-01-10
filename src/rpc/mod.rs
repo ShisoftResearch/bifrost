@@ -39,7 +39,7 @@ pub trait RPCService: Sync + Send {
 }
 
 pub struct Server {
-    services: RwLock<HashMap<u64, Arc<RPCService>>>,
+    services: Arc<RwLock<HashMap<u64, Arc<RPCService>>>>,
     pub address: String,
     pub server_id: u64
 }
@@ -84,7 +84,7 @@ fn decode_res(res: io::Result<Vec<u8>>) -> Result<Vec<u8>, RPCError> {
 impl Server {
     pub fn new(address: &String) -> Arc<Server> {
         Arc::new(Server {
-            services: RwLock::new(HashMap::new()),
+            services: Arc::new(RwLock::new(HashMap::new())),
             address: address.clone(),
             server_id: hash_str(address)
         })
@@ -131,11 +131,13 @@ impl Server {
         let service = service.clone();
         if !DISABLE_SHORTCUT {
             let service_ptr = Arc::into_raw(service.clone()) as usize;
-            service.register_shortcut_service(service_ptr, this.server_id, service_id);
+            service.register_shortcut_service(service_ptr, self.server_id, service_id);
         } else {
             println!("SERVICE SHORTCUT DISABLED");
         }
-        this.services.write_async()
+        self.services
+            .clone()
+            .write_async()
             .map(|mut svrs|
                 svrs.insert(service_id, service))
             .map(|_| ())
@@ -164,12 +166,12 @@ impl RPCClient {
     {
         self.client
             .lock_async()
-            .map_err(|_| io::Error::from(io::error::ErrorKind::Other))
+            .map_err(|_| io::Error::from(io::ErrorKind::Other))
             .then(move |mut cr|
                 cr.map(|c|
-                    send_async(prepend_u64(svr_id, data))))
+                    c.send_async(prepend_u64(svr_id, data))))
             .then(move |res|
-                decode_res(res))
+                future::result(decode_res(res)))
     }
     #[async]
     pub fn new_async(addr: String) -> io::Result<Arc<RPCClient>> {

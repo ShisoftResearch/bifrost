@@ -349,7 +349,7 @@ impl RaftServiceInner {
         let service = RaftService::new(opts);
         let server = Server::new(&address);
         Server::listen_and_resume(&server);
-        server.register_service(, svr_id, &service);
+        server.register_service(svr_id, &service);
         (service.start(), service, server)
     }
     pub fn bootstrap(&self) {
