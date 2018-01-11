@@ -24,7 +24,7 @@ pub struct ClientCore {
 }
 
 pub struct Client {
-    client: Option<(Timeout<ClientCore>, Core)>,
+    client: Option<Timeout<ClientCore>>,
     pub server_id: u64,
 }
 
@@ -61,7 +61,7 @@ impl Client {
                         },
                         Timer::default(),
                         timeout)));
-                Some((core.run(future)?, core))
+                Some(core.run(future)?)
             }
         };
         Ok(Client {
@@ -73,15 +73,10 @@ impl Client {
         Client::connect_with_timeout(address, Duration::from_secs(5))
     }
     pub fn send(&mut self, msg: Vec<u8>) -> io::Result<Vec<u8>> {
-        if let Some((ref client, ref mut core)) = self.client {
-            let future = client.call(msg);
-            core.run(future)
-        } else {
-            shortcut::call(self.server_id, msg).wait()
-        }
+        self.send_async(msg).wait()
     }
     pub fn send_async(&mut self, msg: Vec<u8>) -> Box<ResFuture> {
-        if let Some((ref client, _)) = self.client {
+        if let Some(ref client) = self.client {
             Box::new(client.call(msg))
         } else {
             shortcut::call(self.server_id, msg)
