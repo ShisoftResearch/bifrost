@@ -20,6 +20,7 @@ pub struct MemberService {
     id: u64,
 }
 
+
 impl MemberService {
     pub fn new(server_address: &String, raft_client: &Arc<RaftClient>) -> Arc<MemberService> {
         let server_id = hash_str(server_address);
