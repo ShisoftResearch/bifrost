@@ -4,6 +4,7 @@ use raft::state_machine::master::ExecError;
 use bifrost_hasher::hash_str;
 use super::raft::client::SMClient;
 use super::DEFAULT_SERVICE_ID;
+use futures::Future;
 
 pub type WatchResult = Result<Result<u64, SubscriptionError>, ExecError>;
 
@@ -50,19 +51,29 @@ impl ObserverClient {
             sm_client: sm_client.clone()
         }
     }
-    pub fn new_group(&self, name: &String) -> Result<Result<u64, u64>, ExecError> {
+    pub fn new_group(&self, name: &String)
+        -> impl Future<Item = Result<u64, u64>, Error = ExecError>
+    {
         self.sm_client.new_group(name)
     }
-    pub fn del_group(&self, name: &String) -> Result<Result<(), ()>, ExecError> {
+    pub fn del_group(&self, name: &String)
+        -> impl Future<Item = Result<(), ()>, Error = ExecError>
+    {
         self.sm_client.del_group(&hash_str(name))
     }
-    pub fn group_leader(&self, group: &String) -> Result<Result<(Option<Member>, u64), ()>, ExecError> {
+    pub fn group_leader(&self, group: &String)
+        -> impl Future<Item = Result<(Option<Member>, u64), ()>, Error = ExecError>
+    {
         self.sm_client.group_leader(&hash_str(group))
     }
-    pub fn group_members(&self, group: &String, online_only: bool) -> Result<Result<(Vec<Member>, u64), ()>, ExecError> {
+    pub fn group_members(&self, group: &String, online_only: bool)
+        -> impl Future<Item = Result<(Vec<Member>, u64), ()>, Error = ExecError>
+    {
         self.sm_client.group_members(&hash_str(group), &online_only)
     }
-    pub fn all_members(&self, online_only: bool) -> Result<Result<(Vec<Member>, u64), ()>, ExecError> {
+    pub fn all_members(&self, online_only: bool)
+        -> impl Future<Item = Result<(Vec<Member>, u64), ()>, Error = ExecError>
+    {
         self.sm_client.all_members(&online_only)
     }
     pub fn on_group_member_offline<'a, F>(&self, f: F, group: &'a str) -> WatchResult

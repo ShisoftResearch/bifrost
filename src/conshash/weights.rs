@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use raft::state_machine::StateMachineCtl;
 use raft::RaftService;
-use utils::{bincode, FutureResult};
+use utils::{bincode, BoxFutureResult};
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_DHT_WEIGHTS) as u64;
 

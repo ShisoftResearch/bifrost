@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::{RwLock, RwLockWriteGuard};
+use parking_lot::{RwLockWriteGuard};
+use utils::future_parking_lot::RwLock;
 use serde;
 
 use bifrost_hasher::{hash_str, hash_bytes};
@@ -11,7 +12,9 @@ use membership::client::{ObserverClient as MembershipClient, Member, WatchResult
 use conshash::weights::DEFAULT_SERVICE_ID;
 use conshash::weights::client::{SMClient as WeightSMClient};
 use raft::client::{RaftClient};
+use utils::FutureResult;
 use utils::bincode::{serialize};
+use futures::prelude::*;
 use rand;
 
 pub mod weights;
@@ -30,6 +33,7 @@ pub enum InitTableError {
     NoWeightService,
     NoWeightGroup,
     NoWeightInfo,
+    RemoteError,
     Unknown,
 }
 
@@ -60,7 +64,7 @@ pub struct ConsistentHashing {
 }
 
 impl ConsistentHashing {
-    pub fn new<'a>(group: &'a str, raft_client: &Arc<RaftClient>) -> Result<Arc<ConsistentHashing>, CHError>  {
+    pub fn new<'a>(group: &'a str, raft_client: &Arc<RaftClient>) -> FutureResult<Arc<ConsistentHashing>, CHError>  {
         let membership = Arc::new(MembershipClient::new(raft_client));
         let ch = Arc::new(ConsistentHashing {
             tables: RwLock::new(LookupTables {
@@ -114,9 +118,8 @@ impl ConsistentHashing {
             },
         }
     }
-    pub fn init_table(&self) -> Result<(), InitTableError> {
-        let mut table = &mut self.tables.write();
-        self.init_table_(&mut table)
+    pub fn init_table(this: Arc<Self>) -> Result<(), InitTableError> {
+        Self::init_table_(this)
     }
     pub fn to_server_name(&self, server_id: Option<u64>) -> Option<String> {
         let lookup_table = self.tables.read();
@@ -173,10 +176,17 @@ impl ConsistentHashing {
         let lookup_table = self.tables.read();
         return lookup_table.nodes.len();
     }
-    pub fn set_weight(&self, server_name: &String, weight: u64) -> bool {
+    pub fn set_weight(&self, server_name: &String, weight: u64)
+        -> impl Future<Item = bool, Error = ()>
+    {
         let group_id = hash_str(&self.group_name);
         let server_id = hash_str(server_name);
-        if let Ok(Ok(_)) = self.weight_sm_client.set_weight(&group_id, &server_id, &weight) { true } else { false }
+        self.weight_sm_client
+            .set_weight(&group_id, &server_id, &weight)
+            .map(|r|
+                if let Ok(Ok(_)) = r
+                { true } else { false })
+            .map_err(|_| ())
     }
     pub fn watch_all_actions<F>(&self, f: F)
         where F: Fn(&Member, &Action, &LookupTables, &Vec<Node>) + 'static + Send + Sync {
@@ -250,7 +260,7 @@ impl ConsistentHashing {
                 Ok(Ok(None)) => Err(InitTableError::NoWeightGroup),
                 _ => Err(InitTableError::Unknown)
 
-            }
+                }
         } else {
             Err(InitTableError::GroupNotExisted)
         }
@@ -273,7 +283,7 @@ fn server_changed(ch: &Arc<ConsistentHashing>, member: Member, action: Action, v
             let ch_version = ch.version.load(Ordering::Relaxed);
             if ch_version >= version {return;}
             let old_nodes = lookup_table.nodes.clone();
-            ch.init_table_(&mut lookup_table);
+            ch::init_table_(ch);
             for watch in watchers.iter() {
                 watch(&member, &action, &*lookup_table, &old_nodes);
             }
