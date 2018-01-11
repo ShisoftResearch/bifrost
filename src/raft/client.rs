@@ -213,14 +213,13 @@ impl RaftClient {
         }
     }
 
-    #[async]
-    fn query(this: Arc<Self>, sm_id: u64, fn_id: u64, data: Vec<u8>, depth: usize)
-        -> Result<ExecResult, ExecError>
+    fn query(&self, sm_id: u64, fn_id: u64, data: Vec<u8>, depth: usize)
+        -> Future<Item = ExecResult, Error = ExecError>
     {
-        let pos = this.qry_meta.pos.fetch_add(1, ORDERING);
+        let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
         let mut num_members = 0;
         let res = {
-            let members = this.members.read();
+            let members = self.members.read();
             let client = {
                 let members_count = members.clients.len();
                 if members_count < 1 {
@@ -230,7 +229,7 @@ impl RaftClient {
                 }
             };
             num_members = members.clients.len();
-            await!(client.c_query(&this.gen_log_entry(sm_id, fn_id, &data)))
+            await!(client.c_query(&self.gen_log_entry(sm_id, fn_id, &data)))
         };
         match res {
             Ok(Ok(res)) => {
@@ -239,14 +238,14 @@ impl RaftClient {
                         if depth >= num_members {
                             Err(ExecError::TooManyRetry)
                         } else {
-                            await!(Self::query(this.clone(), sm_id, fn_id, data, depth + 1))
+                            await!(Self::query(self.clone(), sm_id, fn_id, data, depth + 1))
                         }
                     },
                     ClientQryResponse::Success{
                         data, last_log_term, last_log_id
                     } => {
-                        swap_when_greater(&this.last_log_id, last_log_id);
-                        swap_when_greater(&this.last_log_term, last_log_term);
+                        swap_when_greater(&self.last_log_id, last_log_id);
+                        swap_when_greater(&self.last_log_term, last_log_term);
                         Ok(data)
                     },
                 }
@@ -255,8 +254,9 @@ impl RaftClient {
         }
     }
 
-    #[async]
-    fn command(this: Arc<Self>, sm_id: u64, fn_id: u64, data: Vec<u8>, depth: usize) -> Result<ExecResult, ExecError> {
+    fn command(&self, sm_id: u64, fn_id: u64, data: Vec<u8>, depth: usize)
+        -> impl Future<Item = ExecResult, Error = ExecError>
+    {
         enum FailureAction {
             SwitchLeader,
             NotCommitted,
@@ -264,59 +264,61 @@ impl RaftClient {
             NotLeader,
             Retry,
         }
-        let failure = {
-            if depth > 0 {
-                let members = await!(this.members.read_async()).unwrap();
-                let num_members = members.clients.len();
-                if depth >= max(num_members, 5) {
-                    return Err(ExecError::TooManyRetry)
-                };
-            }
-            match await!(Self::current_leader_client(this.clone())) {
-                Ok((leader_id, client)) => {
-                    match await!(client.c_command(&this.gen_log_entry(sm_id, fn_id, &data))) {
-                        Ok(Ok(ClientCmdResponse::Success {
-                                  data, last_log_term, last_log_id
-                              })) => {
-                            swap_when_greater(&this.last_log_id, last_log_id);
-                            swap_when_greater(&this.last_log_term, last_log_term);
-                            return Ok(data);
-                        },
-                        Ok(Ok(ClientCmdResponse::NotLeader(leader_id))) => {
-                            this.leader_id.store(leader_id, ORDERING);
-                            FailureAction::NotLeader
-                        },
-                        Ok(Ok(ClientCmdResponse::NotCommitted)) => {
-                            FailureAction::NotCommitted
-                        },
-                        Err(e) => {
-                            debug!("CLIENT: E1 - {} - {:?}", leader_id, e);
-                            FailureAction::SwitchLeader // need switch server for leader
+        async_block! {
+            let failure = {
+                if depth > 0 {
+                    let members = await!(self.members.read_async()).unwrap();
+                    let num_members = members.clients.len();
+                    if depth >= max(num_members, 5) {
+                        return Err(ExecError::TooManyRetry)
+                    };
+                }
+                match await!(Self::current_leader_client(self.clone())) {
+                    Ok((leader_id, client)) => {
+                        match await!(client.c_command(&self.gen_log_entry(sm_id, fn_id, &data))) {
+                            Ok(Ok(ClientCmdResponse::Success {
+                                      data, last_log_term, last_log_id
+                                  })) => {
+                                swap_when_greater(&self.last_log_id, last_log_id);
+                                swap_when_greater(&self.last_log_term, last_log_term);
+                                return Ok(data);
+                            },
+                            Ok(Ok(ClientCmdResponse::NotLeader(leader_id))) => {
+                                self.leader_id.store(leader_id, ORDERING);
+                                FailureAction::NotLeader
+                            },
+                            Ok(Ok(ClientCmdResponse::NotCommitted)) => {
+                                FailureAction::NotCommitted
+                            },
+                            Err(e) => {
+                                debug!("CLIENT: E1 - {} - {:?}", leader_id, e);
+                                FailureAction::SwitchLeader // need switch server for leader
+                            }
+                            Ok(Err(e)) => {
+                                debug!("CLIENT: E2 - {} - {:?}", leader_id, e);
+                                FailureAction::SwitchLeader // need switch server for leader
+                            }
                         }
-                        Ok(Err(e)) => {
-                            debug!("CLIENT: E2 - {} - {:?}", leader_id, e);
-                            FailureAction::SwitchLeader // need switch server for leader
-                        }
-                    }
+                    },
+                    Err(_) => FailureAction::UpdateInfo // need update members
+                }
+            }; //
+            match failure {
+                FailureAction::SwitchLeader => {
+                    let members = await!(self.members.read_async()).unwrap();
+                    let num_members = members.clients.len();
+                    let pos = self.qry_meta.pos.load(ORDERING);
+                    let leader_id = self.leader_id.load(ORDERING);
+                    let index = members.clients.keys()
+                        .nth(pos as usize % num_members)
+                        .unwrap();
+                    self.leader_id.compare_and_swap(leader_id, *index, ORDERING);
+                    debug!("CLIENT: Switch leader");
                 },
-                Err(_) => FailureAction::UpdateInfo // need update members
+                _ => {}
             }
-        }; //
-        match failure {
-            FailureAction::SwitchLeader => {
-                let members = await!(this.members.read_async()).unwrap();
-                let num_members = members.clients.len();
-                let pos = this.qry_meta.pos.load(ORDERING);
-                let leader_id = this.leader_id.load(ORDERING);
-                let index = members.clients.keys()
-                    .nth(pos as usize % num_members)
-                    .unwrap();
-                this.leader_id.compare_and_swap(leader_id, *index, ORDERING);
-                debug!("CLIENT: Switch leader");
-            },
-            _ => {}
+            await!(self.command(sm_id, fn_id, data, depth + 1))
         }
-        await!(Self::command(this, sm_id, fn_id, data, depth + 1))
     }
 
     fn gen_log_entry(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>) -> LogEntry {
@@ -338,38 +340,44 @@ impl RaftClient {
             None
         }
     }
-    #[async]
-    pub fn current_leader_client(this: Arc<Self>)
-        -> Result<(u64, Client), ()>
+
+    pub fn current_leader_client(&self)
+        -> impl Future<Item = (u64, Client), Error = ()>
     {
         {
-            if let Some(leader_client) = this.leader_client() {
+            if let Some(leader_client) = self.leader_client() {
                 return Ok(leader_client)
             }
         }
         {
             let mut members_addrs = HashSet::new();
             {
-                let mut members = this.members.read();
+                let mut members = self.members.read();
                 for address in members.id_map.values() {
                     members_addrs.insert(address.clone());
                 }
             }
-            await!(Self::update_info(this, members_addrs));
-            {
-                let mut members = this.members.read();
-                let leader_id = this.leader_id.load(ORDERING);
-                if let Some(client) = members.clients.get(&leader_id) {
-                    Ok((leader_id,  client.clone()))
-                } else {
-                    Err(())
+            async_block! {
+                await!(Self::update_info(members_addrs));
+                {
+                    let mut members = self.members.read();
+                    let leader_id = self.leader_id.load(ORDERING);
+                    if let Some(client) = members.clients.get(&leader_id) {
+                        Ok((leader_id,  client.clone()))
+                    } else {
+                        Err(())
+                    }
                 }
             }
         }
     }
-    #[async]
-    pub fn current_leader_rpc_client(this: Arc<Self>) -> Result<Arc<rpc::RPCClient>, ()> {
-        await!(Self::current_leader_client(this)).map(|(_, c)| { c.client.clone() })
+
+    pub fn current_leader_rpc_client(&self)
+        -> impl Future<Item = Arc<rpc::RPCClient>, Error = ()>
+    {
+        async_block! {
+            await!(self.current_leader_client()).map(|(_, c)| { Ok(c.client.clone()) })
+        }
     }
 }
 
