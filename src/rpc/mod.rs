@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::io;
 use std::time::Duration;
-use parking_lot::{Mutex, RwLock};
+use utils::future_parking_lot::{Mutex, RwLock};
+use futures::prelude::*;
 use std::thread;
 use tcp;
 use utils::time;
@@ -43,7 +44,7 @@ pub struct Server {
 }
 
 pub struct ClientPool {
-    clients: Mutex<HashMap<String, Arc<RPCClient>>>
+    clients: Arc<Mutex<HashMap<String, Arc<RPCClient>>>>
 }
 
 fn encode_res(res: Result<Vec<u8>, RPCRequestError>) -> Vec<u8> {
@@ -155,43 +156,61 @@ impl RPCClient {
             .send_async(prepend_u64(svr_id, data))
             .then(move |res| decode_res(res)))
     }
-    pub fn new(addr: &String) -> io::Result<Arc<RPCClient>> {
-        let client = tcp::client::Client::connect(addr)?;
-        Ok(Arc::new(RPCClient {
-            server_id: client.server_id,
-            client: Mutex::new(client),
-            address: addr.clone()
-        }))
+    pub fn new_async(addr: String)
+        -> impl Future<Item = Arc<RPCClient>, Error = io::Error>
+    {
+        tcp::client::Client::connect_async(addr)
+            .map(|client| {
+                Arc::new(RPCClient {
+                    server_id: client.server_id,
+                    client: Mutex::new(client),
+                    address: addr
+                })
+            })
     }
-    pub fn with_timeout(addr: &String, timeout: Duration) -> io::Result<Arc<RPCClient>> {
-        let client = tcp::client::Client::connect_with_timeout(addr, timeout)?;
-        Ok(Arc::new(RPCClient {
-            server_id: client.server_id,
-            client: Mutex::new(client),
-            address: addr.clone()
-        }))
+
+    pub fn with_timeout(addr: String, timeout: Duration)
+        -> impl Future<Item = Arc<RPCClient>, Error = io::Error>
+    {
+        tcp::client::Client::connect_with_timeout_async(addr, timeout)
+            .map(|client| {
+                Arc::new(RPCClient {
+                    server_id: client.server_id,
+                    client: Mutex::new(client),
+                    address: addr
+                })
+            })
     }
 }
 
 impl ClientPool {
     pub fn new() -> ClientPool {
         ClientPool {
-            clients: Mutex::new(HashMap::new())
+            clients: Arc::new(Mutex::new(HashMap::new()))
         }
     }
 
-    pub fn get(&self, addr: &String) -> io::Result<Arc<RPCClient>> {
+    pub fn get(&self, addr: &String)
+        -> Box<Future<Item = Arc<RPCClient>, Error = io::Error>>
+    {
         let mut clients = self.clients.lock();
         if clients.contains_key(addr) {
-            Ok(clients.get(addr).unwrap().clone())
+            box future::ok(clients.get(addr).unwrap().clone())
         } else {
-            let client = RPCClient::new(addr);
-            if let Ok(client) = client {
-                clients.insert(addr.clone(), client.clone());
-                Ok(client)
-            } else {
-                Err(client.err().unwrap())
-            }
+            let addr = addr.clone();
+            box self.clients
+                .clone()
+                .lock_async()
+                .map_err(|_| io::Error::from(io::ErrorKind::Other))
+                .and_then(move |mut clients| {
+                    future::result(clients.get(&addr).cloned().ok_or(()))
+                        .or_else(|_| RPCClient::new_async(addr)
+                            .map(|client| {
+                                clients.insert(addr, client.clone());
+                                return client;
+                            })
+                        )
+                })
         }
     }
 }
