@@ -11,6 +11,8 @@ use super::super::{OpType};
 use super::super::super::RaftMsg;
 use super::*;
 
+use futures::Future;
+
 pub struct Subscriber {
     pub session_id: u64,
     pub client: Arc<AsyncServiceClient>
@@ -55,7 +57,7 @@ impl Subscriptions {
             self.subscribers.insert(suber_id, Subscriber {
                 session_id,
                 client: {
-                    if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(address) {
+                    if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(address).wait() {
                         AsyncServiceClient::new(sub_service_id, &client)
                     } else {
                         return Err(());

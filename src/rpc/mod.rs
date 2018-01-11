@@ -159,7 +159,7 @@ impl RPCClient {
     pub fn new_async(addr: String)
         -> impl Future<Item = Arc<RPCClient>, Error = io::Error>
     {
-        tcp::client::Client::connect_async(addr)
+        tcp::client::Client::connect_async(addr.clone())
             .map(|client| {
                 Arc::new(RPCClient {
                     server_id: client.server_id,
@@ -172,7 +172,7 @@ impl RPCClient {
     pub fn with_timeout(addr: String, timeout: Duration)
         -> impl Future<Item = Arc<RPCClient>, Error = io::Error>
     {
-        tcp::client::Client::connect_with_timeout_async(addr, timeout)
+        tcp::client::Client::connect_with_timeout_async(addr.clone(), timeout)
             .map(|client| {
                 Arc::new(RPCClient {
                     server_id: client.server_id,
@@ -198,19 +198,25 @@ impl ClientPool {
             box future::ok(clients.get(addr).unwrap().clone())
         } else {
             let addr = addr.clone();
-            box self.clients
-                .clone()
-                .lock_async()
-                .map_err(|_| io::Error::from(io::ErrorKind::Other))
-                .and_then(move |mut clients| {
-                    future::result(clients.get(&addr).cloned().ok_or(()))
-                        .or_else(|_| RPCClient::new_async(addr)
-                            .map(|client| {
-                                clients.insert(addr, client.clone());
-                                return client;
-                            })
-                        )
-                })
+            let clients2 = self.clients.clone();
+            Box::new(
+                async_block! {
+                    let clients3 = clients2.clone();
+                    let mut lock = await!(clients3.lock_async()).unwrap();
+                    match lock.get(&addr).cloned() {
+                        Some(client) => {
+                            Ok(client)
+                        },
+                        None => {
+                            let client = await!(RPCClient::new_async(addr.clone()));
+                            if let Ok(client) = client {
+                                lock.insert(addr, client.clone());
+                            }
+                            return client;
+                        }
+                    }
+                }
+            )
         }
     }
 }

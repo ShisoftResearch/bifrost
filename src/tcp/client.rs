@@ -25,7 +25,7 @@ pub struct ClientCore {
 }
 
 pub struct Client {
-    client: Option<Arc<Mutex<Timeout<ClientCore>>>>,
+    client: Option<Timeout<ClientCore>>,
     pub server_id: u64,
 }
 
@@ -64,16 +64,16 @@ impl Client {
             let socket_address = address.parse().unwrap();
             return box TcpClient::new(BytesClientProto)
                 .connect(&socket_address, &core.handle())
-                .map(|c| {
-                    Some(Arc::new(Mutex::new(Timeout::new(
+                .map(move |c| {
+                    Some(Timeout::new(
                         ClientCore {
                             inner: c,
                         },
                         Timer::default(),
                         timeout
-                    ))))
+                    ))
                 })
-                .map(|client| {
+                .map(move |client| {
                     Client {
                         client,
                         server_id,
@@ -89,18 +89,10 @@ impl Client {
     pub fn send(&self, msg: Vec<u8>) -> io::Result<Vec<u8>> {
         self.send_async(msg).wait()
     }
-    pub fn send_async(&self, msg: Vec<u8>)
-                      -> impl Future<Item = Vec<u8>, Error = io::Error>
+    pub fn send_async(&self, msg: Vec<u8>) -> impl Future<Item = Vec<u8>, Error = io::Error>
     {
         if let Some(ref client) = self.client {
-            box client
-                .clone()
-                .lock_async()
-                .map_err(|_| io::Error::from(io::ErrorKind::Other))
-                .and_then(|c|
-                    c.call(msg))
-                .map_err(|_|
-                    io::Error::from(io::ErrorKind::TimedOut))
+            Box::new(client.call(msg))
         } else {
             shortcut::call(self.server_id, msg)
         }
