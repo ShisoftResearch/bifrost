@@ -2,7 +2,7 @@
 macro_rules! def_store_number {
     ($m: ident, $t: ty) => {
         pub mod $m {
-            use utils::FutureResult;
+            use utils::BoxFutureResult;
             use raft::state_machine::StateMachineCtl;
             use bifrost_hasher::hash_str;
             use $crate::raft::state_machine::callback::server::SMCallback;
@@ -41,80 +41,80 @@ macro_rules! def_store_number {
                 def sub on_changed() -> ($t, $t);
             }
             impl StateMachineCmds for Number {
-                fn set(&mut self, n: $t) -> FutureResult<(),()> {
+                fn set(&mut self, n: $t) -> BoxFutureResult<(),()> {
                     let on = self.num;
                     self.num = n;
                     if let Some(ref callback) = self.callback {
                         callback.notify(&commands::on_changed::new(), Ok((on, n)));
                     }
-                    future::ok(())
+                    box future::ok(())
                 }
-                fn get(&self) -> FutureResult<$t, ()> {
-                    future::ok(self.num)
+                fn get(&self) -> BoxFutureResult<$t, ()> {
+                    box future::ok(self.num)
                 }
-                fn get_and_add(&mut self, n: $t) -> FutureResult<$t, ()> {
+                fn get_and_add(&mut self, n: $t) -> BoxFutureResult<$t, ()> {
                     let on = self.num;
                     self.set(on + n);
-                    future::ok(on)
+                    box future::ok(on)
                 }
-                fn add_and_get(&mut self, n: $t) -> FutureResult<$t, ()> {
+                fn add_and_get(&mut self, n: $t) -> BoxFutureResult<$t, ()> {
                     let on = self.num;
                     self.set(on + n);
-                    future::ok(self.num)
+                    box future::ok(self.num)
                 }
-                fn get_and_minus(&mut self, n: $t) -> FutureResult<$t, ()> {
+                fn get_and_minus(&mut self, n: $t) -> BoxFutureResult<$t, ()> {
                     let on = self.num;
                     self.set(on - n);
-                    future::ok(on)
+                    box future::ok(on)
                 }
-                fn minus_and_get(&mut self, n: $t) -> FutureResult<$t, ()> {
+                fn minus_and_get(&mut self, n: $t) -> BoxFutureResult<$t, ()> {
                     let on = self.num;
                     self.set(on - n);
-                    future::ok(self.num)
+                    box future::ok(self.num)
                 }
-                fn get_and_incr(&mut self) -> FutureResult<$t, ()> {
+                fn get_and_incr(&mut self) -> BoxFutureResult<$t, ()> {
                     self.get_and_add(1 as $t)
                 }
-                fn incr_and_get(&mut self) -> FutureResult<$t, ()> {
+                fn incr_and_get(&mut self) -> BoxFutureResult<$t, ()> {
                     self.add_and_get(1 as $t)
                 }
-                fn get_and_decr(&mut self) -> FutureResult<$t, ()> {
+                fn get_and_decr(&mut self) -> BoxFutureResult<$t, ()> {
                     self.get_and_minus(1 as $t)
                 }
-                fn decr_and_get(&mut self) -> FutureResult<$t, ()> {
+                fn decr_and_get(&mut self) -> BoxFutureResult<$t, ()> {
                     self.minus_and_get(1 as $t)
                 }
-                fn get_and_multiply(&mut self, n: $t) -> FutureResult<$t, ()> {
+                fn get_and_multiply(&mut self, n: $t) -> BoxFutureResult<$t, ()> {
                     let on = self.num;
                     self.set(on * n);
-                    future::ok(on)
+                    box future::ok(on)
                 }
-                fn multiply_and_get(&mut self, n: $t) -> FutureResult<$t, ()> {
+                fn multiply_and_get(&mut self, n: $t) -> BoxFutureResult<$t, ()> {
                     let on = self.num;
                     self.set(on * n);
-                    future::ok(self.num)
+                    box future::ok(self.num)
                 }
-                fn get_and_divide(&mut self, n: $t) -> FutureResult<$t, ()> {
+                fn get_and_divide(&mut self, n: $t) -> BoxFutureResult<$t, ()> {
                     let on = self.num;
                     self.set(on / n);
-                    future::ok(on)
+                    box future::ok(on)
                 }
-                fn divide_and_get(&mut self, n: $t) -> FutureResult<$t, ()> {
+                fn divide_and_get(&mut self, n: $t) -> BoxFutureResult<$t, ()> {
                     let on = self.num;
                     self.set(on / n);
-                    future::ok(self.num)
+                    box future::ok(self.num)
                 }
-                fn compare_and_swap(&mut self, original: $t, n: $t) -> FutureResult<$t, ()> {
+                fn compare_and_swap(&mut self, original: $t, n: $t) -> BoxFutureResult<$t, ()> {
                     let on = self.num;
                     if on == original {
                         self.set(n);
                     }
-                    future::ok(on)
+                    box future::ok(on)
                 }
-                fn swap(&mut self, n: $t) -> FutureResult<$t, ()> {
+                fn swap(&mut self, n: $t) -> BoxFutureResult<$t, ()> {
                     let on = self.num;
                     self.set(n);
-                    future::ok(on)
+                    box future::ok(on)
                 }
             }
             impl StateMachineCtl for Number {

@@ -15,22 +15,23 @@ pub struct Weights {
     pub groups: HashMap<u64, HashMap<u64, u64>>
 }
 impl StateMachineCmds for Weights {
-    fn set_weight(&mut self, group: u64, id: u64, weight: u64) -> FutureResult<(), ()> {
+    fn set_weight(&mut self, group: u64, id: u64, weight: u64) -> BoxFutureResult<(), ()> {
         *self.groups
-             .entry(group)
-             .or_insert_with(|| HashMap::new())
-             .entry(id)
-             .or_insert_with(|| 0) = weight;
-        future::ok(())
+            .entry(group)
+            .or_insert_with(|| HashMap::new())
+            .entry(id)
+            .or_insert_with(|| 0)
+            = weight;
+        box future::ok(())
     }
-    fn get_weights(&self, group: u64) -> FutureResult<Option<HashMap<u64, u64>>, ()> {
-        future::ok(match self.groups.get(&group) {
+    fn get_weights(&self, group: u64) -> BoxFutureResult<Option<HashMap<u64, u64>>, ()> {
+        box future::ok(match self.groups.get(&group) {
             Some(m) => Some(m.clone()),
             None => None
         })
     }
-    fn get_weight(&self, group: u64, id: u64) -> FutureResult<Option<u64>, ()> {
-        future::ok(match self.groups.get(&group) {
+    fn get_weight(&self, group: u64, id: u64) -> BoxFutureResult<Option<u64>, ()> {
+        box future::ok(match self.groups.get(&group) {
             Some(m) => match m.get(&id) {
                 Some(w) => Some(*w),
                 None => None

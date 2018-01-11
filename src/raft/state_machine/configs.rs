@@ -7,7 +7,7 @@ use bifrost_hasher::hash_str;
 use std::sync::Arc;
 use parking_lot::{RwLock};
 use std::collections::{HashMap, HashSet};
-use utils::bincode;
+use utils::{bincode, BoxFutureResult};
 
 pub const CONFIG_SM_ID: u64 = 1;
 
@@ -41,37 +41,40 @@ raft_state_machine! {
 }
 
 impl StateMachineCmds for Configures {
-    fn new_member_(&mut self, address: String) -> Result<(), ()> {
+    fn new_member_(&mut self, address: String) -> BoxFutureResult<(), ()> {
         let addr = address.clone();
         let id = hash_str(&addr);
         if !self.members.contains_key(&id) {
-            match rpc::DEFAULT_CLIENT_POOL.get(address.clone()).wait() {
-                Ok(client) => {
+            rpc::DEFAULT_CLIENT_POOL
+                .get(address.clone())
+                .map(|client| {
                     self.members.insert(id, RaftMember {
                         rpc: AsyncServiceClient::new(self.service_id, &client),
                         address,
                         id,
                     });
                     return Ok(());
-                },
-                Err(_) => {}
-            }
+                })
+                .map_err(|_| ())
+        } else {
+            future::err(())
         }
-        Err(())
     }
-    fn del_member_(&mut self, address: String) -> Result<(),()> {
+    fn del_member_(&mut self, address: String) -> BoxFutureResult<(),()> {
         let hash = hash_str(&address);
         self.members.remove(&hash);
-        Ok(())
+        future::ok(())
     }
-    fn member_address(&self) -> Result<Vec<String>,()> {
+    fn member_address(&self) -> BoxFutureResult<Vec<String>,()> {
         let mut members = Vec::with_capacity(self.members.len());
         for (_, member) in self.members.iter() {
             members.push(member.address.clone());
         }
-        Ok(members)
+        future::ok(members)
     }
-    fn subscribe(&mut self, key: SubKey, address: String, session_id: u64) -> Result<u64, ()> {
+    fn subscribe(&mut self, key: SubKey, address: String, session_id: u64)
+        -> BoxFutureResult<u64, ()>
+    {
         let mut subs = self.subscriptions.write();
         subs.subscribe(key, &address, session_id)
     }

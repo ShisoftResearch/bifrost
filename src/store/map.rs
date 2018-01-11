@@ -2,7 +2,7 @@
 macro_rules! def_store_hash_map {
     ($m: ident <$kt: ty, $vt: ty>) => {
         pub mod $m {
-            use utils::FutureResult;
+            use utils::BoxFutureResult;
             use $crate::raft::state_machine::StateMachineCtl;
             use $crate::raft::state_machine::callback::server::SMCallback;
             use $crate::raft::RaftService;
@@ -38,27 +38,27 @@ macro_rules! def_store_hash_map {
                 def sub on_key_removed(k: $kt) -> $vt;
             }
             impl StateMachineCmds for Map {
-                fn get(&self, k: $kt) -> FutureResult<Option<$vt>, ()> {
-                    future::ok(
+                fn get(&self, k: $kt) -> BoxFutureResult<Option<$vt>, ()> {
+                    box future::ok(
                         if let Some(v) = self.map.get(&k) {
                             Some(v.clone())
                         } else {None}
                     )
                 }
-                fn insert(&mut self, k: $kt, v: $vt) -> FutureResult<Option<$vt>, ()> {
+                fn insert(&mut self, k: $kt, v: $vt) -> BoxFutureResult<Option<$vt>, ()> {
                     if let Some(ref callback) = self.callback {
                         callback.notify(&commands::on_inserted::new(), Ok((k.clone(), v.clone())));
                         callback.notify(&commands::on_key_inserted::new(&k), Ok(v.clone()));
                     }
-                    future::ok(self.map.insert(k, v))
+                    box future::ok(self.map.insert(k, v))
                 }
-                fn insert_if_absent(&mut self, k: $kt, v: $vt) -> FutureResult<$vt, ()> {
+                fn insert_if_absent(&mut self, k: $kt, v: $vt) -> BoxFutureResult<$vt, ()> {
                     if let Some(v) = self.map.get(&k) {
                         return Ok(v.clone())
                     }
-                    self.insert(k, v.clone()); future::ok(v)
+                    box self.insert(k, v.clone()); future::ok(v)
                 }
-                fn remove(&mut self, k: $kt) -> FutureResult<Option<$vt>, ()> {
+                fn remove(&mut self, k: $kt) -> BoxFutureResult<Option<$vt>, ()> {
                     let res = self.map.remove(&k);
                     if let Some(ref callback) = self.callback {
                         if let Some(ref v) = res {
@@ -66,35 +66,35 @@ macro_rules! def_store_hash_map {
                             callback.notify(&commands::on_key_removed::new(&k), Ok(v.clone()));
                         }
                     }
-                    future::ok(res)
+                    box future::ok(res)
                 }
-                fn is_empty(&self) -> FutureResult<bool, ()> {
-                    future::ok(self.map.is_empty())
+                fn is_empty(&self) -> BoxFutureResult<bool, ()> {
+                    box future::ok(self.map.is_empty())
                 }
-                fn len(&self) -> FutureResult<u64, ()> {
-                    future::ok(self.map.len() as u64)
+                fn len(&self) -> BoxFutureResult<u64, ()> {
+                    box future::ok(self.map.len() as u64)
                 }
-                fn clear(&mut self) -> FutureResult<(), ()> {
-                    future::ok(self.map.clear())
+                fn clear(&mut self) -> BoxFutureResult<(), ()> {
+                    box future::ok(self.map.clear())
                 }
-                fn keys(&self) -> FutureResult<Vec<$kt>, ()> {
-                    future::ok(self.map.keys().cloned().collect())
+                fn keys(&self) -> BoxFutureResult<Vec<$kt>, ()> {
+                    box future::ok(self.map.keys().cloned().collect())
                 }
-                fn values(&self) -> FutureResult<Vec<$vt>, ()> {
-                    future::ok(self.map.values().cloned().collect())
+                fn values(&self) -> BoxFutureResult<Vec<$vt>, ()> {
+                    box future::ok(self.map.values().cloned().collect())
                 }
-                fn entries(&self) -> FutureResult<Vec<($kt, $vt)>, ()> {
+                fn entries(&self) -> BoxFutureResult<Vec<($kt, $vt)>, ()> {
                     let mut r = Vec::new();
                     for (k, v) in self.map.iter() {
                         r.push((k.clone(), v.clone()));
                     }
-                    future::ok(r)
+                    box future::ok(r)
                 }
-                fn clone(&self) -> FutureResult<HashMap<$kt, $vt>, ()> {
-                    future::ok(self.map.clone())
+                fn clone(&self) -> BoxFutureResult<HashMap<$kt, $vt>, ()> {
+                    box future::ok(self.map.clone())
                 }
-                fn contains_key(&self, k: $kt) -> FutureResult<bool, ()> {
-                    future::ok(self.map.contains_key(&k))
+                fn contains_key(&self, k: $kt) -> BoxFutureResult<bool, ()> {
+                    box future::ok(self.map.contains_key(&k))
                 }
             }
             impl StateMachineCtl for Map {

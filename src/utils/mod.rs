@@ -8,4 +8,6 @@ pub mod future_parking_lot;
 
 use futures::Future;
 
-pub type FutureResult<V, E> = Box<Future<Item = V, Error = E>>;
+
+pub type FutureResult<V, E> = Future<Item = V, Error = E>;
+pub type BoxFutureResult<V, E> = Box<FutureResult<V, E>>;
