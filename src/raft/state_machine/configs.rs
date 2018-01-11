@@ -8,7 +8,6 @@ use std::sync::Arc;
 use parking_lot::{RwLock};
 use std::collections::{HashMap, HashSet};
 use utils::bincode;
-use futures::Future;
 
 pub const CONFIG_SM_ID: u64 = 1;
 

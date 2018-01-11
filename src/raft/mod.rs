@@ -13,10 +13,13 @@ use self::state_machine::master::{
     ExecError, SubStateMachine};
 use self::state_machine::configs::{CONFIG_SM_ID, RaftMember};
 use self::state_machine::configs::commands::{new_member_, del_member_, member_address};
+use parking_lot::{RwLockWriteGuard, RwLockReadGuard};
 use self::client::RaftClient;
 use bifrost_hasher::hash_str;
 use utils::time::get_time;
-use utils::future_parking_lot::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, RwLock, Mutex};
+use utils::future_parking_lot::{
+    AsyncRwLockReadGuard, AsyncRwLockWriteGuard,
+    RwLock, Mutex};
 use threadpool::ThreadPool;
 use num_cpus;
 
@@ -364,7 +367,7 @@ impl RaftServiceInner {
         -> Result<(), ExecError>
     {
         debug!("Trying to join cluster with id {}", this.id);
-        let client = await!(RaftClient::new(servers, self.options.service_id));
+        let client = await!(RaftClient::new(servers, this.options.service_id));
         if let Ok(client) = client {
             let result = await!(RaftClient::execute(
                 client,
@@ -498,7 +501,7 @@ impl RaftServiceInner {
             self.insert_leader_follower_meta(leader_meta, last_log_id, member.id);
         }
     }
-    fn write_meta(&self) -> AsyncRwWriteGuard<RaftMeta> {
+    fn write_meta(&self) -> AsyncRwLockWriteGuard<RaftMeta> {
         //        let t = get_time();
         let lock_mon = self.meta.write_async();
         //        let acq_time = get_time() - t;

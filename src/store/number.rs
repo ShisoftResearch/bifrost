@@ -84,7 +84,7 @@ macro_rules! def_store_number {
                 fn decr_and_get(&mut self) -> FutureResult<$t, ()> {
                     self.minus_and_get(1 as $t)
                 }
-                fn get_and_multiply(&mut self, n: $t) -> FutureResultt<$t, ()> {
+                fn get_and_multiply(&mut self, n: $t) -> FutureResult<$t, ()> {
                     let on = self.num;
                     self.set(on * n);
                     future::ok(on)
