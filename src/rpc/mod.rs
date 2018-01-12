@@ -199,24 +199,40 @@ impl ClientPool {
         } else {
             let addr = addr.clone();
             let clients2 = self.clients.clone();
-            Box::new(
-                async_block! {
-                    let clients3 = clients2.clone();
-                    let mut lock = await!(clients3.lock_async()).unwrap();
-                    match lock.get(&addr).cloned() {
+            let future = clients2
+                .lock_async()
+                .map_err(|_| io::Error::from(io::ErrorKind::Other))
+                .and_then(|mut clients|{
+                    match clients.get(&addr).cloned() {
                         Some(client) => {
-                            Ok(client)
+                            future::ok(client)
                         },
                         None => {
-                            let client = await!(RPCClient::new_async(addr.clone()));
-                            if let Ok(client) = client {
-                                lock.insert(addr, client.clone());
-                            }
-                            return client;
+                            RPCClient::new_async(addr.clone())
+                                .map(|client| {
+                                    clients.insert(addr, client.clone());
+                                    return client.clone()
+                                })
                         }
                     }
-                }
-            )
+                });
+//                async_block! {
+//                    let mut lock = await!(clients2.lock_async()).unwrap();
+//                    let arrd = addr.clone();
+//                    match lock.get(&addr).cloned() {
+//                        Some(client) => {
+//                            Ok(client)
+//                        },
+//                        None => {
+//                            let client = await!(RPCClient::new_async(addr.clone()));
+//                            if let Ok(ref client) = client {
+//                                lock.insert(addr, client.clone());
+//                            }
+//                            return client.map(|r| r.clone());
+//                        }
+//                    }
+//                };
+            box future
         }
     }
 }
