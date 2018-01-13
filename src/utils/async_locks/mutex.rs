@@ -1,14 +1,14 @@
 // a simple spin lock based async mutex
 
-use parking_lot::{Mutex as PlMutex};
 use futures::{Future, Async, Poll};
 use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU8, Ordering};
+use backtrace::Backtrace;
 
 #[derive(Clone)]
-pub struct Mutex<T>{
+pub struct Mutex<T: ?Sized>{
     inner: Arc<MutexInner<T>>
 }
 
@@ -27,11 +27,11 @@ unsafe impl<T: Send> Sync for Mutex<T> {}
 unsafe impl<T: Send> Send for MutexInner<T> {}
 unsafe impl<T: Send> Sync for MutexInner<T> {}
 
-pub struct AsyncMutexGuard<T> {
-    mutex: Arc<MutexInner<T>>,
+pub struct AsyncMutexGuard<T: ?Sized> {
+    mutex: Arc<MutexInner<T>>
 }
 
-pub struct MutexGuard<T> {
+pub struct MutexGuard<T: ?Sized> {
     mutex: Arc<MutexInner<T>>
 }
 
@@ -41,30 +41,34 @@ impl RawMutex {
             state: AtomicU8::new(0)
         }
     }
+    #[inline]
     pub fn try_lock(&self) -> bool {
-        let success = self.state.compare_exchange_weak(
-            0, 1, Ordering::Acquire, Ordering::Relaxed
-        ).is_ok();
-        println!("raw locking {}", success);
+        let bt = Backtrace::new();
+        let success = self.state.compare_and_swap(
+            0, 1, Ordering::SeqCst
+        ) == 0;
+        // println!("raw locking {}", success);
         return success;
     }
+    #[inline]
     pub fn unlock(&self) -> bool {
-        let success = self.state.compare_exchange_weak(
-            1, 0, Ordering::Acquire, Ordering::Relaxed
-        ).is_ok();
-        println!("raw unlocking {}", success);
+        let success = self.state.compare_and_swap(
+            1, 0, Ordering::SeqCst
+        ) == 1;
+        // println!("raw unlocking {}", success);
         return success
     }
 }
 
-impl <T> Future for AsyncMutexGuard <T> {
+impl <T: ?Sized> Future for AsyncMutexGuard <T> {
     type Item = MutexGuard<T>;
     type Error = ();
 
+    #[inline]
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        println!("pulling");
+        // println!("pulling");
         if self.mutex.raw.try_lock() {
-            println!("locking");
+            // println!("locking");
             Ok(Async::Ready(MutexGuard {
                 mutex: self.mutex.clone()
             }))
@@ -75,7 +79,7 @@ impl <T> Future for AsyncMutexGuard <T> {
 }
 
 impl <T> Mutex <T> {
-    pub fn new(val: T) -> Mutex<T> {
+    pub fn new(val: T) -> Mutex<T>  {
         Mutex {
             inner: Arc::new(MutexInner {
                 raw: RawMutex::new(),
@@ -88,6 +92,7 @@ impl <T> Mutex <T> {
             mutex: self.inner.clone()
         }
     }
+    #[inline]
     pub fn lock(&self) -> MutexGuard<T> {
         self.lock_async().wait().unwrap()
     }
@@ -108,8 +113,10 @@ impl <T> DerefMut for MutexGuard<T> {
     }
 }
 
-impl <T> Drop for MutexGuard<T> {
+impl <T: ?Sized> Drop for MutexGuard<T> {
+    #[inline]
     fn drop(&mut self) {
-        println!("ulocking {}", self.mutex.raw.unlock());
+        let success = self.mutex.raw.unlock();
+        // println!("drop ulocking {}", success);
     }
 }
