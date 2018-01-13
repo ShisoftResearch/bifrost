@@ -47,7 +47,7 @@ impl StateMachineCmds for Configures {
         let addr = address.clone();
         let id = hash_str(&addr);
         if !self.members.contains_key(&id) {
-            match rpc::DEFAULT_CLIENT_POOL.get(&address).wait() {
+            match rpc::DEFAULT_CLIENT_POOL.get(&address) {
                 Ok(client) => {
                     self.members.insert(id, RaftMember {
                         rpc: AsyncServiceClient::new(self.service_id, &client),

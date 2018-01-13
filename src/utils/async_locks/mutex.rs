@@ -103,7 +103,7 @@ impl <T> Mutex <T> {
             mutex: self.inner.clone()
         }
     }
-    fn lock(&self) -> MutexGuard<T> {
+    pub fn lock(&self) -> MutexGuard<T> {
         self.inner.raw.lock();
         MutexGuard {
             mutex: self.inner.clone()

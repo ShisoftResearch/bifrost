@@ -57,7 +57,7 @@ impl Subscriptions {
             self.subscribers.insert(suber_id, Subscriber {
                 session_id,
                 client: {
-                    if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(address).wait() {
+                    if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(address) {
                         AsyncServiceClient::new(sub_service_id, &client)
                     } else {
                         return Err(());

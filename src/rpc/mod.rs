@@ -190,7 +190,7 @@ impl ClientPool {
         }
     }
 
-    pub fn get(&self, addr: &String)
+    pub fn get_async(&self, addr: &String)
         -> impl Future<Item = Arc<RPCClient>, Error = io::Error>
     {
         let addr = addr.clone();
@@ -200,15 +200,34 @@ impl ClientPool {
             .and_then(|mut clients|
                 -> Box<Future<Item = Arc<RPCClient>, Error = io::Error>> {
                 if clients.contains_key(&addr) {
-                    box future::ok(clients.get(&addr).unwrap().clone())
+                    let client = clients.get(&addr).unwrap().clone();
+                    drop(clients);
+                    box future::ok(client)
                 } else {
                     box RPCClient::new_async(addr.clone())
                         .map(move |client| {
                             clients.insert(addr.clone(), client.clone());
+                            drop(clients);
                             return client.clone()
                         })
                 }
             })
+
+    }
+
+    pub fn get(&self, addr: &String) -> Result<Arc<RPCClient>, io::Error>
+    {
+        let mut clients = self.clients.lock();
+        if clients.contains_key(addr) {
+            let client = clients.get(addr).unwrap().clone();
+            Ok(client)
+        } else {
+            println!("getting client: {}", addr);
+            let client = RPCClient::new_async(addr.clone()).wait()?;
+            clients.insert(addr.clone(), client.clone());
+            println!("done getting client: {}", addr);
+            return Ok(client.clone())
+        }
 
     }
 }
