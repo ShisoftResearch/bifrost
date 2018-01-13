@@ -1,8 +1,8 @@
 use rand;
 use rand::distributions::{IndependentSample, Range};
 use std::thread;
-use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
-use utils::async_locks::{Mutex, RwLock};
+use parking_lot::{Mutex, RwLockReadGuard, RwLockWriteGuard};
+use utils::async_locks::{RwLock};
 use std::collections::{BTreeMap, HashMap};
 use std::collections::Bound::{Included, Unbounded};
 use std::cmp::{min, max};

@@ -148,13 +148,13 @@ pub struct RPCClient {
 }
 
 impl RPCClient {
-    pub fn send(&self, svr_id: u64, data: Vec<u8>) -> Result<Vec<u8>, RPCError> {
-        decode_res(self.client.lock().send(prepend_u64(svr_id, data)))
-    }
-    pub fn send_async(&self, svr_id: u64, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = RPCError>> {
-        Box::new(self.client.lock()
-            .send_async(prepend_u64(svr_id, data))
-            .then(move |res| decode_res(res)))
+    pub fn send_async(&self, svr_id: u64, data: Vec<u8>) -> impl Future<Item = Vec<u8>, Error = RPCError> {
+        self.client
+            .lock_async()
+            .map_err(|_| io::Error::from(io::ErrorKind::Other))
+            .and_then(move |client|
+                client.send_async(prepend_u64(svr_id, data)))
+            .then(move |res| decode_res(res))
     }
     pub fn new_async(addr: String)
                      -> impl Future<Item = Arc<RPCClient>, Error = io::Error>
@@ -191,27 +191,24 @@ impl ClientPool {
     }
 
     pub fn get(&self, addr: &String)
-               -> Box<Future<Item = Arc<RPCClient>, Error = io::Error>>
+        -> impl Future<Item = Arc<RPCClient>, Error = io::Error>
     {
-        let mut clients = self.clients.lock();
-        if clients.contains_key(addr) {
-            box future::ok(clients.get(addr).unwrap().clone())
-        } else {
-            let addr = addr.clone();
-            let clients2 = self.clients.clone();
-            return box
-                clients2.lock_async()
-                .map_err(|_| io::Error::from(io::ErrorKind::Other))
-                .and_then(|mut clients|{
-                    future::result(clients.get(&addr).cloned().ok_or(()))
-                        .or_else(move |_| {
-                            RPCClient::new_async(addr.clone())
-                                .map(move |client| {
-                                    clients.insert(addr, client.clone());
-                                    return client.clone()
-                                })
+        let addr = addr.clone();
+        self.clients
+            .lock_async()
+            .map_err(|_| io::Error::from(io::ErrorKind::Other))
+            .and_then(|mut clients|
+                -> Box<Future<Item = Arc<RPCClient>, Error = io::Error>> {
+                if clients.contains_key(&addr) {
+                    box future::ok(clients.get(&addr).unwrap().clone())
+                } else {
+                    box RPCClient::new_async(addr.clone())
+                        .map(move |client| {
+                            clients.insert(addr.clone(), client.clone());
+                            return client.clone()
                         })
-                });
-        }
+                }
+            })
+
     }
 }
