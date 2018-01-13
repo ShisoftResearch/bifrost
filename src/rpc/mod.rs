@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::io;
 use std::time::Duration;
-use utils::future_parking_lot::{Mutex, RwLock};
+use utils::async_locks::{Mutex, RwLock};
 use futures::prelude::*;
 use std::thread;
 use tcp;
@@ -199,8 +199,8 @@ impl ClientPool {
         } else {
             let addr = addr.clone();
             let clients2 = self.clients.clone();
-            return
-                Mutex::lock_ref_async(clients2)
+            return box
+                clients2.lock_async()
                 .map_err(|_| io::Error::from(io::ErrorKind::Other))
                 .and_then(|mut clients|{
                     future::result(clients.get(&addr).cloned().ok_or(()))

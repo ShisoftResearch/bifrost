@@ -18,7 +18,7 @@ use bifrost_hasher::hash_str;
 use super::STANDALONE_ADDRESS;
 use DISABLE_SHORTCUT;
 
-use utils::future_parking_lot::Mutex;
+use utils::async_locks::Mutex;
 
 pub struct ClientCore {
     inner: ClientService<TcpStream, BytesClientProto>,

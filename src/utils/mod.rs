@@ -4,4 +4,4 @@ pub mod u8vec;
 pub mod bindings;
 pub mod math;
 pub mod bincode;
-pub mod future_parking_lot;
+pub mod async_locks;
