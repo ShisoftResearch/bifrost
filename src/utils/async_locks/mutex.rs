@@ -1,6 +1,6 @@
 // a simple spin lock based async mutex
 
-use futures::{Future, Async, Poll};
+use futures::{Future, future, Async, Poll};
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Weak};
 use std::cell::UnsafeCell;
@@ -74,8 +74,6 @@ impl RawMutex {
 impl <T: ?Sized> Future for AsyncMutexGuard <T> {
     type Item = MutexGuard<T>;
     type Error = ();
-
-    #[inline(always)]
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         // println!("pulling");
         if self.mutex.raw.try_lock() {
@@ -98,7 +96,9 @@ impl <T> Mutex <T> {
             })
         }
     }
-    pub fn lock_async(&self) -> AsyncMutexGuard<T> {
+    pub fn lock_async(&self)
+        -> impl Future<Item = MutexGuard<T>, Error = ()>
+    {
         AsyncMutexGuard {
             mutex: self.inner.clone()
         }
