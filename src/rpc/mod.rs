@@ -122,7 +122,7 @@ impl Server {
         });
     }
     pub fn register_service<T>(&self, service_id: u64,  service: &Arc<T>)
-    where T: RPCService + Sized + 'static{
+        where T: RPCService + Sized + 'static{
         let service = service.clone();
         if !DISABLE_SHORTCUT {
             let service_ptr = Arc::into_raw(service.clone()) as usize;
@@ -157,7 +157,7 @@ impl RPCClient {
             .then(move |res| decode_res(res)))
     }
     pub fn new_async(addr: String)
-        -> impl Future<Item = Arc<RPCClient>, Error = io::Error>
+                     -> impl Future<Item = Arc<RPCClient>, Error = io::Error>
     {
         tcp::client::Client::connect_async(addr.clone())
             .map(|client| {
@@ -170,7 +170,7 @@ impl RPCClient {
     }
 
     pub fn with_timeout(addr: String, timeout: Duration)
-        -> impl Future<Item = Arc<RPCClient>, Error = io::Error>
+                        -> impl Future<Item = Arc<RPCClient>, Error = io::Error>
     {
         tcp::client::Client::connect_with_timeout_async(addr.clone(), timeout)
             .map(|client| {
@@ -191,7 +191,7 @@ impl ClientPool {
     }
 
     pub fn get(&self, addr: &String)
-        -> Box<Future<Item = Arc<RPCClient>, Error = io::Error>>
+               -> Box<Future<Item = Arc<RPCClient>, Error = io::Error>>
     {
         let mut clients = self.clients.lock();
         if clients.contains_key(addr) {
@@ -199,24 +199,19 @@ impl ClientPool {
         } else {
             let addr = addr.clone();
             let clients2 = self.clients.clone();
-            Box::new(
-                async_block! {
-                    let clients3 = clients2.clone();
-                    let mut lock = await!(clients3.lock_async()).unwrap();
-                    match lock.get(&addr).cloned() {
-                        Some(client) => {
-                            Ok(client)
-                        },
-                        None => {
-                            let client = await!(RPCClient::new_async(addr.clone()));
-                            if let Ok(client) = client {
-                                lock.insert(addr, client.clone());
-                            }
-                            return client;
-                        }
-                    }
-                }
-            )
+            return
+                Mutex::lock_ref_async(clients2)
+                .map_err(|_| io::Error::from(io::ErrorKind::Other))
+                .and_then(|mut clients|{
+                    future::result(clients.get(&addr).cloned().ok_or(()))
+                        .or_else(move |_| {
+                            RPCClient::new_async(addr.clone())
+                                .map(move |client| {
+                                    clients.insert(addr, client.clone());
+                                    return client.clone()
+                                })
+                        })
+                });
         }
     }
 }
