@@ -148,7 +148,7 @@ pub struct RPCClient {
 }
 
 impl RPCClient {
-    pub fn send_async(&self, svr_id: u64, data: Vec<u8>) -> impl Future<Item = Vec<u8>, Error = RPCError> {
+    pub fn send_async(&self, svr_id: u64, data: Vec<u8>) -> impl Future<Item = Vec<u8>, Error = RPCError> {;
         self.client
             .lock_async()
             .map_err(|_| io::Error::from(io::ErrorKind::Other))
@@ -156,8 +156,7 @@ impl RPCClient {
                 client.send_async(prepend_u64(svr_id, data)))
             .then(move |res| decode_res(res))
     }
-    pub fn new_async(addr: String)
-                     -> impl Future<Item = Arc<RPCClient>, Error = io::Error>
+    pub fn new_async(addr: String) -> impl Future<Item = Arc<RPCClient>, Error = io::Error>
     {
         tcp::client::Client::connect_async(addr.clone())
             .map(|client| {
@@ -201,13 +200,11 @@ impl ClientPool {
                 -> Box<Future<Item = Arc<RPCClient>, Error = io::Error>> {
                 if clients.contains_key(&addr) {
                     let client = clients.get(&addr).unwrap().clone();
-                    drop(clients);
                     box future::ok(client)
                 } else {
                     box RPCClient::new_async(addr.clone())
                         .map(move |client| {
                             clients.insert(addr.clone(), client.clone());
-                            drop(clients);
                             return client.clone()
                         })
                 }
@@ -222,10 +219,8 @@ impl ClientPool {
             let client = clients.get(addr).unwrap().clone();
             Ok(client)
         } else {
-            println!("getting client: {}", addr);
             let client = RPCClient::new_async(addr.clone()).wait()?;
             clients.insert(addr.clone(), client.clone());
-            println!("done getting client: {}", addr);
             return Ok(client.clone())
         }
 

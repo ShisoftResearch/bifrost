@@ -66,6 +66,7 @@ impl RawMutex {
             true, false, Ordering::Relaxed
         );
         let success = prev_val == true;
+        assert!(success);
         //println!("raw unlocking {}", prev_val);
         return success
     }
