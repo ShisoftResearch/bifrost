@@ -68,7 +68,7 @@ impl Client {
                         },
                         Timer::default(),
                         timeout)));
-                Some(core.run(future)?)
+                Some(core.run(future)?) // this is required, or client won't receive response
             }
         };
         Ok(Client {
