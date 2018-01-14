@@ -93,9 +93,6 @@ impl Client {
             Client::connect_with_timeout(&address, Duration::from_secs(5))
         })
     }
-    pub fn send(&self, msg: Vec<u8>) -> io::Result<Vec<u8>> {
-        self.send_async(msg).wait()
-    }
     pub fn send_async(&self, msg: Vec<u8>) -> Box<ResFuture> {
         if let Some(ref client) = self.client {
             box client.call(msg)
