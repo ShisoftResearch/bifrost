@@ -1,5 +1,3 @@
-use parking_lot;
-
 pub mod mutex;
 pub mod rwlock;
 
