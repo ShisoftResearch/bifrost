@@ -25,7 +25,7 @@ pub struct ClientCore {
 }
 
 pub struct Client {
-    client: Option<(Timeout<ClientCore>, Core)>,
+    client: Option<Timeout<ClientCore>>,
     pub server_id: u64,
 }
 
@@ -65,13 +65,13 @@ impl Client {
             return box TcpClient::new(BytesClientProto)
                 .connect(&socket_address, &core.handle())
                 .map(move |c| {
-                    Some((Timeout::new(
+                    Some(Timeout::new(
                         ClientCore {
                             inner: c,
                         },
                         Timer::default(),
                         timeout
-                    ), core))
+                    ))
                 })
                 .map(move |client| {
                     Client {
@@ -86,17 +86,9 @@ impl Client {
     {
         Client::connect_with_timeout_async(address, Duration::from_secs(5))
     }
-    pub fn send(&mut self, msg: Vec<u8>) -> io::Result<Vec<u8>> {
-        let future = self.send_async(msg);
-        if let Some((_,ref mut core)) = self.client {
-            core.run(future)
-        } else {
-            future.wait()
-        }
-    }
     pub fn send_async(&self, msg: Vec<u8>) -> impl Future<Item = Vec<u8>, Error = io::Error>
     {
-        if let Some((ref client, _)) = self.client {
+        if let Some(ref client) = self.client {
             box client.call(msg)
         } else {
             shortcut::call(self.server_id, msg)
