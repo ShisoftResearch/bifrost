@@ -97,8 +97,7 @@ impl <T> Mutex <T> {
             })
         }
     }
-    pub fn lock_async(&self)
-        -> impl Future<Item = MutexGuard<T>, Error = ()>
+    pub fn lock_async(&self) -> AsyncMutexGuard<T>
     {
         AsyncMutexGuard {
             mutex: self.inner.clone()
