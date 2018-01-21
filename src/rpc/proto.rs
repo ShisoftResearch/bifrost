@@ -117,8 +117,6 @@ macro_rules! service {
         use std;
         use std::time::Duration;
         use std::sync::Arc;
-        use std::io;
-        use $crate::rpc::*;
         use $crate::utils::u8vec::*;
         use futures::{Future, future};
 
