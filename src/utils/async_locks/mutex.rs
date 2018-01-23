@@ -111,6 +111,12 @@ impl <T> Mutex <T> {
     }
 }
 
+impl <T> MutexGuard<T> {
+    fn mutate(&self) -> &mut T {
+        unsafe { &mut *self.mutex.data.get() }
+    }
+}
+
 impl <T> Deref for MutexGuard<T> {
     type Target = T;
     #[inline]
@@ -122,7 +128,7 @@ impl <T> Deref for MutexGuard<T> {
 impl <T> DerefMut for MutexGuard<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut T {
-        unsafe { &mut *self.mutex.data.get() }
+        self.mutate()
     }
 }
 
