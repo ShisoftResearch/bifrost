@@ -40,6 +40,7 @@ raft_state_machine! {
     def qry member_address() -> Vec<String>;
 
     def cmd subscribe(key: SubKey, address: String, session_id: u64) -> u64;
+    def cmd unsubscribe(sub_id: u64);
 }
 
 impl StateMachineCmds for Configures {
@@ -76,6 +77,11 @@ impl StateMachineCmds for Configures {
     fn subscribe(&mut self, key: SubKey, address: String, session_id: u64) -> Result<u64, ()> {
         let mut subs = self.subscriptions.write();
         subs.subscribe(key, &address, session_id)
+    }
+    fn unsubscribe(&mut self, sub_id: u64) -> Result<(), ()> {
+        let mut subs = self.subscriptions.write();
+        subs.remove_subscription(sub_id);
+        Ok(())
     }
 }
 

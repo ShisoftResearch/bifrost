@@ -4,8 +4,9 @@ use raft::{
 use raft::state_machine::OpType;
 use raft::state_machine::master::{ExecResult, ExecError};
 use raft::state_machine::callback::client::SubscriptionService;
+use raft::state_machine::callback::SubKey;
 use raft::state_machine::configs::CONFIG_SM_ID;
-use raft::state_machine::configs::commands::{subscribe as conf_subscribe};
+use raft::state_machine::configs::commands::{subscribe as conf_subscribe, unsubscribe as conf_unsubscribe};
 use std::collections::{HashMap, BTreeMap, HashSet};
 use std::iter::FromIterator;
 use parking_lot::{RwLock, RwLockWriteGuard};
@@ -35,6 +36,7 @@ pub enum ClientError {
 pub enum SubscriptionError {
     RemoteError,
     SubServiceNotSet,
+    CannotFindSubId
 }
 
 struct QryMeta {
@@ -166,7 +168,14 @@ impl RaftClient {
         let callback = CALLBACK.read();
         callback.is_some()
     }
-
+    fn get_sub_key<M, R>(&self, sm_id: u64, msg: &M) -> SubKey where M: RaftMsg<R> + 'static {
+        let raft_sid = self.service_id;
+        let (fn_id, pattern_id) = {
+            let (fn_id, _, pattern_data) = msg.encode();
+            (fn_id, hash_bytes(pattern_data.as_slice()))
+        };
+        return (raft_sid, sm_id, fn_id, pattern_id);
+    }
     pub fn subscribe
     <M, R, F>
     (&self, sm_id: u64, msg: M, f: F) -> Result<Result<u64, SubscriptionError>, ExecError>
@@ -179,31 +188,62 @@ impl RaftClient {
             return Ok(Err(SubscriptionError::SubServiceNotSet))
         }
         let callback = callback.clone().unwrap();
-        let raft_sid = self.service_id;
-        let (fn_id, pattern_id) = {
-            let (fn_id, _, pattern_data) = msg.encode();
-            (fn_id, hash_bytes(pattern_data.as_slice()))
-        };
+        let key = self.get_sub_key(sm_id, &msg);
         let wrapper_fn = move |data: Vec<u8>| {
             f(msg.decode_return(&data))
         };
-        let key = (raft_sid, sm_id, fn_id, pattern_id);
         let mut subs_map = callback.subs.write();
         let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
-        subs_lst.push(Box::new(wrapper_fn));
         let cluster_subs = self.execute(
             CONFIG_SM_ID,
             &conf_subscribe::new(&key, &callback.server_address, &callback.session_id)
         );
         match cluster_subs {
-            Ok(sub_result) => match sub_result {
-                Ok(sub_id) => Ok(Ok(sub_id)),
-                Err(_) => Ok(Err(SubscriptionError::RemoteError))
+            Ok(Ok(sub_id)) => {
+                subs_lst.push((Box::new(wrapper_fn), sub_id));
+                Ok(Ok(sub_id))
             },
+            Ok(Err(_)) => Ok(Err(SubscriptionError::RemoteError)),
             Err(e) => Err(e)
         }
     }
-
+    pub fn unsubscribe<M, R>(&self, sm_id: u64, msg: M, sub_id: u64)
+        -> Result<Result<(), SubscriptionError>, ExecError>
+        where M: RaftMsg<R> + 'static
+    {
+        let callback = CALLBACK.read();
+        if callback.is_none() {
+            debug!("Subscription service not set: {:?}", Backtrace::new());
+            return Ok(Err(SubscriptionError::SubServiceNotSet))
+        }
+        let callback = callback.clone().unwrap();
+        let key = self.get_sub_key(sm_id, &msg);
+        let mut subs_map = callback.subs.write();
+        let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
+        let unsub = self.execute(
+            CONFIG_SM_ID,
+            &conf_unsubscribe::new(&sub_id)
+        );
+        match unsub{
+            Ok(Ok(_)) => {
+                let mut sub_index = 0;
+                for i in 0..subs_lst.len() {
+                   if subs_lst[i].1 == sub_id {
+                       sub_index = i;
+                       break;
+                   }
+                }
+                if subs_lst[sub_index].1 == sub_id {
+                    subs_lst.remove(sub_index);
+                    Ok(Ok(()))
+                } else {
+                    Ok(Err(SubscriptionError::CannotFindSubId))
+                }
+            },
+            Ok(Err(_)) => Ok(Err(SubscriptionError::RemoteError)),
+            Err(e) => Err(e)
+        }
+    }
     fn query(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>, depth: usize) -> Result<ExecResult, ExecError> {
         let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
         let mut num_members = 0;
