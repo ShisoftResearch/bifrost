@@ -3,7 +3,7 @@ use serde;
 
 pub fn serialize<T>(obj: &T) -> Vec<u8>
     where T: serde::Serialize {
-    match bincode::serialize(obj, bincode::Infinite) {
+    match bincode::serialize(obj) {
         Ok(data) => data,
         Err(e) => {panic!("Cannot serialize: {:?}", e)}
     }
