@@ -233,7 +233,7 @@ impl RaftClient {
                        break;
                    }
                 }
-                if subs_lst[sub_index].1 == sub_id {
+                if subs_lst.len() > 0 && subs_lst[sub_index].1 == sub_id {
                     subs_lst.remove(sub_index);
                     Ok(Ok(()))
                 } else {
