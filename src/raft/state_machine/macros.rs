@@ -21,7 +21,7 @@ macro_rules! raft_trait_fn {
 macro_rules! raft_client_fn {
     (sub $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {
         pub fn $fn_name<F>(&self, f: F, $($arg:$in_),* )
-        -> Result<Result<u64, SubscriptionError>, ExecError>
+        -> impl Future<Item = Result<u64, SubscriptionError>, Error = ExecError>
         where F: Fn(raft_return_type!($out, $error)) + 'static + Send + Sync
         {
             self.client.subscribe(
@@ -33,10 +33,10 @@ macro_rules! raft_client_fn {
     };
     ($others:ident $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {
         pub fn $fn_name(&self, $($arg:$in_),*)
-        -> Result<raft_return_type!($out, $error), ExecError> {
+        -> impl Future<Item = raft_return_type!($out, $error), Error = ExecError> {
             self.client.execute(
                 self.sm_id,
-                &$fn_name::new($($arg,)*)
+                $fn_name::new($($arg,)*)
             )
         }
     };
@@ -186,11 +186,11 @@ macro_rules! raft_state_machine {
                     pub data: Vec<u8>
                 }
                 impl $crate::raft::RaftMsg<raft_return_type!($out, $error)> for $fn_name {
-                    fn encode(&self) -> (u64, $crate::raft::state_machine::OpType, &Vec<u8>) {
+                    fn encode(&self) -> (u64, $crate::raft::state_machine::OpType, Vec<u8>) {
                         (
                             hash_ident!($fn_name) as u64,
                             raft_fn_op_type!($smt),
-                            &self.data
+                            self.data
                         )
                     }
                     fn decode_return(&self, data: &Vec<u8>) -> raft_return_type!($out, $error) {
@@ -248,8 +248,10 @@ macro_rules! raft_state_machine {
         }
         pub mod client {
             use std::sync::Arc;
+            use futures::prelude::*;
             use $crate::raft::state_machine::master::ExecError;
             use $crate::raft::client::{RaftClient, SubscriptionError};
+
             use self::commands::*;
             use super::*;
 
