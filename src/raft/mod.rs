@@ -377,7 +377,7 @@ impl RaftService {
             Err(ExecError::CannotConstructClient)
         }
     }
-        pub fn leave(&self) -> bool {
+    pub fn leave(&self) -> bool {
         let servers = self.cluster_info().members.iter()
             .map(|&(_, ref address)|{
                 address.clone()

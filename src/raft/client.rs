@@ -4,6 +4,7 @@ use raft::{
 use raft::state_machine::OpType;
 use raft::state_machine::master::{ExecResult, ExecError};
 use raft::state_machine::callback::client::SubscriptionService;
+use raft::state_machine::callback::SubKey;
 use raft::state_machine::configs::CONFIG_SM_ID;
 use raft::state_machine::configs::commands::{subscribe as conf_subscribe, unsubscribe as conf_unsubscribe};
 use std::collections::{HashMap, BTreeMap, HashSet};
@@ -84,9 +85,10 @@ impl RaftClient {
 
     pub fn subscribe
     <M, R, F>
-    (&self: Arc<Self>, sm_id: u64, msg: M, f: F)
+    (&self, sm_id: u64, msg: M, f: F)
         -> impl Future<Item = Result<u64, SubscriptionError>, Error = ExecError>
         where M: RaftMsg<R> + 'static,
+              R: 'static,
               F: Fn(R) + 'static + Send + Sync
     {
         RaftClientInner::subscribe(self.inner.clone(), sm_id, msg, f)
@@ -94,7 +96,7 @@ impl RaftClient {
 
     pub fn unsubscribe<M, R>(&self, sm_id: u64, msg: M, sub_id: u64)
         -> impl Future<Item = Result<(), SubscriptionError>, Error = ExecError>
-        where M: RaftMsg<R> + 'static
+        where M: RaftMsg<R> + 'static, R: 'static
     {
         RaftClientInner::unsubscribe(self.inner.clone(), sm_id, msg, sub_id)
     }
@@ -242,6 +244,7 @@ impl RaftClientInner {
     <M, R, F>
     (this: Arc<Self>, sm_id: u64, msg: M, f: F) -> Result<Result<u64, SubscriptionError>, ExecError>
         where M: RaftMsg<R> + 'static,
+              R: 'static,
               F: Fn(R) + 'static + Send + Sync
     {
         let callback = CALLBACK.read();
@@ -274,7 +277,7 @@ impl RaftClientInner {
     #[async]
     pub fn unsubscribe<M, R>(this: Arc<Self>, sm_id: u64, msg: M, sub_id: u64)
         -> Result<Result<(), SubscriptionError>, ExecError>
-        where M: RaftMsg<R> + 'static
+        where M: RaftMsg<R> + 'static, R: 'static
     {
         let callback = CALLBACK.read();
         if callback.is_none() {
@@ -299,7 +302,7 @@ impl RaftClientInner {
                         break;
                     }
                 }
-                if subs_lst[sub_index].1 == sub_id {
+                if subs_lst.len() > 0 && subs_lst[sub_index].1 == sub_id {
                     subs_lst.remove(sub_index);
                     Ok(Ok(()))
                 } else {
@@ -374,7 +377,7 @@ impl RaftClientInner {
             }
             match await!(Self::current_leader_client(this.clone())) {
                 Ok((leader_id, client)) => {
-                    match await!(client.c_command(&self.gen_log_entry(sm_id, fn_id, data))) {
+                    match await!(client.c_command(&this.gen_log_entry(sm_id, fn_id, &data))) {
                         Ok(Ok(ClientCmdResponse::Success {
                                   data, last_log_term, last_log_id
                               })) => {
