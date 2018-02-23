@@ -7,12 +7,15 @@ use parking_lot::{RwLock, RwLockWriteGuard};
 use serde;
 
 use bifrost_hasher::{hash_str, hash_bytes};
-use membership::client::{ObserverClient as MembershipClient, Member, WatchResult};
+use membership::client::{ObserverClient as MembershipClient, Member};
 use conshash::weights::DEFAULT_SERVICE_ID;
 use conshash::weights::client::{SMClient as WeightSMClient};
-use raft::client::{RaftClient};
+use raft::client::{RaftClient, SubscriptionError};
+use raft::state_machine::master::ExecError;
 use utils::bincode::{serialize};
 use rand;
+
+use futures::prelude::*;
 
 pub mod weights;
 
@@ -35,7 +38,7 @@ pub enum InitTableError {
 
 #[derive(Debug)]
 pub enum CHError {
-    WatchError(WatchResult),
+    WatchError(Result<Result<u64, SubscriptionError>, ExecError>),
     InitTableError(InitTableError),
 }
 
@@ -77,28 +80,28 @@ impl ConsistentHashing {
             let ch = ch.clone();
             let res = membership.on_group_member_joined(move |r| {
                 if let Ok((member, version)) = r { server_joined(&ch, member, version); }
-            }, group);
+            }, group).wait();
             if let Ok(Ok(_)) = res {} else {return Err(CHError::WatchError(res));}
         }
         {
             let ch = ch.clone();
             let res = membership.on_group_member_online(move |r| {
                 if let Ok((member, version)) = r { server_joined(&ch, member, version); }
-            }, group);
+            }, group).wait();
             if let Ok(Ok(_)) = res {} else {return Err(CHError::WatchError(res));}
         }
         {
             let ch = ch.clone();
             let res = membership.on_group_member_left(move |r| {
                 if let Ok((member, version)) = r { server_left(&ch, member, version); }
-            }, group);
+            }, group).wait();
             if let Ok(Ok(_)) = res {} else {return Err(CHError::WatchError(res));}
         }
         {
             let ch = ch.clone();
             let res = membership.on_group_member_offline(move |r| {
                 if let Ok((member, version)) = r { server_left(&ch, member, version); }
-            }, group);
+            }, group).wait();
             if let Ok(Ok(_)) = res {} else {return Err(CHError::WatchError(res));}
         }
         Ok(ch)
@@ -173,10 +176,11 @@ impl ConsistentHashing {
         let lookup_table = self.tables.read();
         return lookup_table.nodes.len();
     }
-    pub fn set_weight(&self, server_name: &String, weight: u64) -> bool {
+    pub fn set_weight(&self, server_name: &String, weight: u64) -> impl Future<Item = bool, Error = ExecError> {
         let group_id = hash_str(&self.group_name);
         let server_id = hash_str(server_name);
-        if let Ok(Ok(_)) = self.weight_sm_client.set_weight(&group_id, &server_id, &weight) { true } else { false }
+        self.weight_sm_client.set_weight(&group_id, &server_id, &weight)
+            .map(|res| if let Ok(_) = res { true } else { false })
     }
     pub fn watch_all_actions<F>(&self, f: F)
         where F: Fn(&Member, &Action, &LookupTables, &Vec<Node>) + 'static + Send + Sync {
@@ -209,9 +213,9 @@ impl ConsistentHashing {
     }
 
     fn init_table_(&self, lookup_table: &mut RwLockWriteGuard<LookupTables>) -> Result<(), InitTableError> {
-        if let Ok(Ok((members, version))) = self.membership.group_members(&self.group_name, true) {
+        if let Ok(Ok((members, version))) = self.membership.group_members(&self.group_name, true).wait() {
             let group_id = hash_str(&self.group_name);
-            match self.weight_sm_client.get_weights(&group_id) {
+            match self.weight_sm_client.get_weights(&group_id).wait() {
                 Ok(Ok(Some(weights))) =>  {
                     if let Some(min_weight) = weights.values().min() {
                         lookup_table.nodes.clear(); // refresh nodes

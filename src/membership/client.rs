@@ -7,8 +7,6 @@ use super::DEFAULT_SERVICE_ID;
 
 use futures::prelude::*;
 
-pub type WatchResult = impl Future<Item = Result<u64, SubscriptionError>, Error = ExecError>;
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Member {
     pub id: u64,
@@ -67,40 +65,40 @@ impl ObserverClient {
     pub fn all_members(&self, online_only: bool) -> impl Future<Item = Result<(Vec<Member>, u64), ()>, Error = ExecError> {
         self.sm_client.all_members(&online_only)
     }
-    pub fn on_group_member_offline<'a, F>(&self, f: F, group: &'a str) -> WatchResult
+    pub fn on_group_member_offline<'a, F>(&self, f: F, group: &'a str) -> impl Future<Item = Result<u64, SubscriptionError>, Error = ExecError>
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_group_member_offline(f, &hash_str(group))
     }
-    pub fn on_any_member_offline<F>(&self, f: F) -> WatchResult
+    pub fn on_any_member_offline<F>(&self, f: F) -> impl Future<Item = Result<u64, SubscriptionError>, Error = ExecError>
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_any_member_offline(f)
     }
-    pub fn on_group_member_online<'a, F>(&self, f: F, group: &'a str) -> WatchResult
+    pub fn on_group_member_online<'a, F>(&self, f: F, group: &'a str) -> impl Future<Item = Result<u64, SubscriptionError>, Error = ExecError>
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_group_member_online(f, &hash_str(group))
     }
-    pub fn on_any_member_online<F>(&self, f: F) -> WatchResult
+    pub fn on_any_member_online<F>(&self, f: F) -> impl Future<Item = Result<u64, SubscriptionError>, Error = ExecError>
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_any_member_online(f)
     }
-    pub fn on_group_member_joined<'a, F>(&self, f: F, group: &'a str) -> WatchResult
+    pub fn on_group_member_joined<'a, F>(&self, f: F, group: &'a str) -> impl Future<Item = Result<u64, SubscriptionError>, Error = ExecError>
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_group_member_joined(f, &hash_str(group))
     }
-    pub fn on_any_member_joined<F>(&self, f: F) -> WatchResult
+    pub fn on_any_member_joined<F>(&self, f: F) -> impl Future<Item = Result<u64, SubscriptionError>, Error = ExecError>
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_any_member_joined(f)
     }
-    pub fn on_group_member_left<'a, F>(&self, f: F, group: &'a str) -> WatchResult
+    pub fn on_group_member_left<'a, F>(&self, f: F, group: &'a str) -> impl Future<Item = Result<u64, SubscriptionError>, Error = ExecError>
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_group_member_left(f, &hash_str(group))
     }
-    pub fn on_any_member_left<F>(&self, f: F) -> WatchResult
+    pub fn on_any_member_left<F>(&self, f: F) -> impl Future<Item = Result<u64, SubscriptionError>, Error = ExecError>
         where F: Fn(Result<(Member, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_any_member_left(f)
     }
     pub fn on_group_leader_changed<F>(&self, f: F, group: &String)
-        -> WatchResult
+        -> impl Future<Item = Result<u64, SubscriptionError>, Error = ExecError>
         where F: Fn(Result<(Option<Member>, Option<Member>, u64), ()>)  + 'static + Send + Sync {
         self.sm_client.on_group_leader_changed(f, &hash_str(group))
     }
