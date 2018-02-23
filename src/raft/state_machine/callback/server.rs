@@ -133,9 +133,9 @@ impl SMCallback {
         }
     }
 
-    pub fn notify<R>(&self, msg: &RaftMsg<R>, data: R)
+    pub fn notify<M, R>(&self, msg: M, data: R)
         -> Result<(usize, Vec<NotifyError>, Vec<Result<Result<(), ()>, rpc::RPCError>>), NotifyError>
-        where R: serde::Serialize + Send + Sync + Clone + Any + 'static
+        where R: serde::Serialize + Send + Sync + Clone + Any + 'static, M: RaftMsg<R> + 'static
     {
         if !IS_LEADER.get() {return Err(NotifyError::IsNotLeader);}
         let (fn_id, op_type, pattern_data) = msg.encode();
@@ -218,8 +218,9 @@ impl SMCallback {
     }
 }
 
-pub fn notify<R, F>(callback: &Option<SMCallback>, msg: &RaftMsg<R>, data: F)
+pub fn notify<M, R, F>(callback: &Option<SMCallback>, msg: M, data: F)
     where F: Fn() -> R,
+          M: RaftMsg<R> + 'static,
           R: serde::Serialize + Send + Sync + Clone + Any + 'static
 {
     if let Some(ref callback) = *callback {

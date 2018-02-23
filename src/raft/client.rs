@@ -217,7 +217,7 @@ impl RaftClientInner {
         match response {
             Ok(data) => {
                 match data {
-                    Ok(data) => Ok(msg.decode_return(&data)),
+                    Ok(data) => Ok(M::decode_return(&data)),
                     Err(e) => Err(e)
                 }
             },
@@ -255,7 +255,7 @@ impl RaftClientInner {
         let callback = callback.clone().unwrap();
         let key = this.get_sub_key(sm_id, &msg);
         let wrapper_fn = move |data: Vec<u8>| {
-            f(msg.decode_return(&data))
+            f(M::decode_return(&data))
         };
         let mut subs_map = callback.subs.write();
         let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
@@ -321,8 +321,9 @@ impl RaftClientInner {
         let pos = this.qry_meta.pos.fetch_add(1, ORDERING);
         let mut num_members = 0;
         let res = {
-            let members = this.members.read();
             let client = {
+                let members = this.members.read();
+                num_members = members.clients.len();
                 let members_count = members.clients.len();
                 if members_count < 1 {
                     return Err(ExecError::ServersUnreachable)
@@ -330,7 +331,6 @@ impl RaftClientInner {
                     members.clients.values().nth(pos as usize % members_count).unwrap()
                 }
             };
-            num_members = members.clients.len();
             await!(client.c_query(&this.gen_log_entry(sm_id, fn_id, &data)))
         };
         match res {

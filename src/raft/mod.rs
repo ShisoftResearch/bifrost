@@ -33,8 +33,8 @@ def_bindings! {
 }
 
 pub trait RaftMsg<R>: Send + Sync {
-    fn encode(&self) -> (u64, OpType, Vec<u8>);
-    fn decode_return(&self, data: &Vec<u8>) -> R;
+    fn encode(self) -> (u64, OpType, Vec<u8>);
+    fn decode_return(data: &Vec<u8>) -> R;
 }
 
 const CHECKER_MS: i64 = 10;

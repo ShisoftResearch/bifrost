@@ -186,14 +186,14 @@ macro_rules! raft_state_machine {
                     pub data: Vec<u8>
                 }
                 impl $crate::raft::RaftMsg<raft_return_type!($out, $error)> for $fn_name {
-                    fn encode(&self) -> (u64, $crate::raft::state_machine::OpType, Vec<u8>) {
+                    fn encode(self) -> (u64, $crate::raft::state_machine::OpType, Vec<u8>) {
                         (
                             hash_ident!($fn_name) as u64,
                             raft_fn_op_type!($smt),
                             self.data
                         )
                     }
-                    fn decode_return(&self, data: &Vec<u8>) -> raft_return_type!($out, $error) {
+                    fn decode_return(data: &Vec<u8>) -> raft_return_type!($out, $error) {
                         $crate::utils::bincode::deserialize(data)
                     }
                 }
