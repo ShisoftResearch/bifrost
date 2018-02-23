@@ -229,7 +229,7 @@ impl RaftClientInner {
         let callback = CALLBACK.read();
         callback.is_some()
     }
-    fn get_sub_key<M, R>(&self, sm_id: u64, msg: &M)
+    fn get_sub_key<M, R>(&self, sm_id: u64, msg: M)
         -> SubKey where M: RaftMsg<R> + 'static, R: 'static
     {
         let raft_sid = self.service_id;
@@ -253,7 +253,7 @@ impl RaftClientInner {
             return Ok(Err(SubscriptionError::SubServiceNotSet))
         }
         let callback = callback.clone().unwrap();
-        let key = this.get_sub_key(sm_id, &msg);
+        let key = this.get_sub_key(sm_id, msg);
         let wrapper_fn = move |data: Vec<u8>| {
             f(M::decode_return(&data))
         };
@@ -280,38 +280,42 @@ impl RaftClientInner {
         where M: RaftMsg<R> + 'static, R: 'static
     {
         let callback = CALLBACK.read();
-        if callback.is_none() {
-            debug!("Subscription service not set: {:?}", Backtrace::new());
-            return Ok(Err(SubscriptionError::SubServiceNotSet))
-        }
-        let callback = callback.clone().unwrap();
-        let key = this.get_sub_key(sm_id, &msg);
-        let unsub = await!(Self::execute(
-            this.clone(),
-            CONFIG_SM_ID,
-            conf_unsubscribe::new(&sub_id)
-        ));
-        match unsub{
-            Ok(Ok(_)) => {
-                let mut subs_map = callback.subs.write();
-                let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
-                let mut sub_index = 0;
-                for i in 0..subs_lst.len() {
-                    if subs_lst[i].1 == sub_id {
-                        sub_index = i;
-                        break;
-                    }
-                }
-                if subs_lst.len() > 0 && subs_lst[sub_index].1 == sub_id {
-                    subs_lst.remove(sub_index);
-                    Ok(Ok(()))
-                } else {
-                    Ok(Err(SubscriptionError::CannotFindSubId))
+        match *callback {
+            Some(ref callback) => {
+                let key = this.get_sub_key(sm_id, msg);
+                let unsub = await!(Self::execute(
+                        this.clone(),
+                        CONFIG_SM_ID,
+                        conf_unsubscribe::new(&sub_id)
+                    ));
+                match unsub{
+                    Ok(Ok(_)) => {
+                        let mut subs_map = callback.subs.write();
+                        let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
+                        let mut sub_index = 0;
+                        for i in 0..subs_lst.len() {
+                            if subs_lst[i].1 == sub_id {
+                                sub_index = i;
+                                break;
+                            }
+                        }
+                        if subs_lst.len() > 0 && subs_lst[sub_index].1 == sub_id {
+                            subs_lst.remove(sub_index);
+                            Ok(Ok(()))
+                        } else {
+                            Ok(Err(SubscriptionError::CannotFindSubId))
+                        }
+                    },
+                    Ok(Err(_)) => Ok(Err(SubscriptionError::RemoteError)),
+                    Err(e) => Err(e)
                 }
             },
-            Ok(Err(_)) => Ok(Err(SubscriptionError::RemoteError)),
-            Err(e) => Err(e)
+            None => {
+                debug!("Subscription service not set: {:?}", Backtrace::new());
+                return Ok(Err(SubscriptionError::SubServiceNotSet))
+            }
         }
+
     }
 
     #[async(boxed)]

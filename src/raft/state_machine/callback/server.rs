@@ -188,7 +188,7 @@ impl SMCallback {
             }
         }
     }
-    pub fn internal_subscribe<R, F, M>(&self, msg: &M, trigger: F) -> Result<(), NotifyError>
+    pub fn internal_subscribe<R, F, M>(&self, msg: M, trigger: F) -> Result<(), NotifyError>
         where M: RaftMsg<R>,
               F: Fn(&R) + Sync + Send + 'static,
               R: 'static
