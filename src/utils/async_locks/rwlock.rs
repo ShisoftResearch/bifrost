@@ -1,39 +1,75 @@
-use parking_lot;
 use futures::{Future, Async, Poll};
-use std::ops::{Deref};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::UnsafeCell;
+use std::ops::{Deref, DerefMut};
 
-pub struct RwLock<T> {
-    inner: parking_lot::RwLock<T>
+#[derive(Clone)]
+pub struct RwLock<T: ?Sized> {
+    inner: Arc<RwLockInner<T>>
 }
 
-pub struct AsyncRwLockReadGuard<'a, T: 'a> {
-    outer: &'a RwLock<T>
+struct RwLockInner<T: ?Sized> {
+    raw: RwLockRaw,
+    data: UnsafeCell<T>
 }
 
-pub struct AsyncRwLockWriteGuard<'a, T: 'a> {
-    outer: &'a RwLock<T>
+struct RwLockRaw {
+    state: AtomicUsize
 }
 
-impl <'a, T> Future for AsyncRwLockReadGuard<'a ,T> {
-    type Item = parking_lot::RwLockReadGuard<'a, T>;
+#[derive(Clone)]
+pub struct AsyncRwLockReadGuard<T: ?Sized> {
+    lock: Arc<RwLockInner<T>>
+}
+
+#[derive(Clone)]
+pub struct AsyncRwLockWriteGuard<T: ?Sized> {
+    lock: Arc<RwLockInner<T>>
+}
+
+#[derive(Clone)]
+pub struct RwLockReadGuard<T: ?Sized> {
+    lock: Arc<RwLockInner<T>>
+}
+
+#[derive(Clone)]
+pub struct RwLockWriteGuard<T: ?Sized> {
+    lock: Arc<RwLockInner<T>>
+}
+
+unsafe impl<T: Send> Send for RwLock<T> {}
+unsafe impl<T: Send> Sync for RwLock<T> {}
+
+unsafe impl<T: Send> Send for RwLockInner<T> {}
+unsafe impl<T: Send> Sync for RwLockInner<T> {}
+
+impl <T: ?Sized> Future for AsyncRwLockReadGuard<T> {
+    type Item = RwLockReadGuard<T>;
     type Error = ();
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        match self.outer.inner.try_read() {
-            Some(guard) => Ok(Async::Ready(guard)),
-            None => Ok(Async::NotReady)
+        if self.lock.raw.try_read() {
+            Ok(Async::Ready(RwLockReadGuard {
+                lock: self.lock.clone()
+            }))
+        } else {
+            Ok(Async::NotReady)
         }
     }
 }
 
-impl <'a, T> Future for AsyncRwLockWriteGuard<'a ,T> {
-    type Item = parking_lot::RwLockWriteGuard<'a, T>;
+impl <T> Future for AsyncRwLockWriteGuard<T> {
+    type Item = RwLockWriteGuard<T>;
     type Error = ();
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        match self.outer.inner.try_write() {
-            Some(guard) => Ok(Async::Ready(guard)),
-            None => Ok(Async::NotReady)
+        if self.lock.raw.try_write() {
+            Ok(Async::Ready(RwLockWriteGuard {
+                lock: self.lock.clone()
+            }))
+        } else {
+            Ok(Async::NotReady)
         }
     }
 }
@@ -46,20 +82,95 @@ impl <T> RwLock <T> {
     }
     pub fn read_async(&self) -> AsyncRwLockReadGuard<T> {
         AsyncRwLockReadGuard {
-            outer: self
+            lock: self.inner.clone()
         }
     }
     pub fn write_async(&self) -> AsyncRwLockWriteGuard<T> {
         AsyncRwLockWriteGuard {
-            outer: self
+            lock: self.inner.clone()
+        }
+    }
+    pub fn read(&self) -> RwLockReadGuard<T> {
+        self.read_async().wait().unwrap()
+    }
+    pub fn write(&self) -> RwLockWriteGuard<T> {
+        self.write_async().wait().unwrap()
+    }
+}
+
+impl <T> RwLockInner<T> {
+
+}
+
+impl RwLockRaw {
+    fn try_read(&self) -> bool  {
+        let lc = self.state.load(Ordering::Relaxed);
+        if lc == 1 {
+            // write locked
+            return false;
+        } else {
+            let next_count = if lc == 0 { 2 } else { lc + 1 };
+            return self.raw.state.compare_and_swap(lc, next_count, Ordering::Relaxed) == lc;
+        }
+    }
+    fn try_write(&self) -> bool {
+        self.state.compare_and_swap(0, 1, Ordering::Relaxed) == 0
+    }
+    fn unlock_read(&self) {
+        let lc = self.state.load(Ordering::Relaxed);
+        if lc < 2 {
+            // illegal state
+            warn!("WRONG STATE FOR RWLOCK");
+        } else {
+            let next_count = if lc == 2 { 0 } else { lc - 1 };
+            self.raw.state.compare_and_swap(lc, next_count, Ordering::Relaxed) == lc;
+        }
+    }
+    fn unlock_write(&self) {
+        self.state.compare_and_swap(1, 0, Ordering::Relaxed);
+    }
+}
+
+impl <T> Deref for RwLockReadGuard<T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        unsafe {
+            &*self.lock.data.get()
         }
     }
 }
 
-impl <T> Deref for RwLock<T> {
-    type Target = parking_lot::RwLock<T>;
+impl <T> Deref for RwLockWriteGuard<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        #[inline]
+        unsafe {
+            &*self.lock.data.get()
+        }
+    }
+}
+
+impl <T> DerefMut for RwLockWriteGuard<T> {
     #[inline]
-    fn deref(&self) -> &parking_lot::RwLock<T> {
-        &self.inner
+    fn deref_mut(&mut self) -> &mut T {
+        unsafe {
+            &mut *self.lock.data.get()
+        }
+    }
+}
+
+impl <T: ?Sized> Drop for RwLockReadGuard<T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.lock.raw.unlock_read()
+    }
+}
+
+impl <T: ?Sized> Drop for RwLockWriteGuard<T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.lock.raw.unlock_write()
     }
 }

@@ -9,7 +9,7 @@ use raft::state_machine::configs::CONFIG_SM_ID;
 use raft::state_machine::configs::commands::{subscribe as conf_subscribe, unsubscribe as conf_unsubscribe};
 use std::collections::{HashMap, BTreeMap, HashSet};
 use std::iter::FromIterator;
-use parking_lot::{RwLock, RwLockWriteGuard};
+use utils::async_locks::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::cmp::max;
@@ -314,45 +314,42 @@ impl RaftClientInner {
         }
     }
 
-    #[async]
+    #[async(boxed)]
     fn query(this: Arc<Self>, sm_id: u64, fn_id: u64, data: Vec<u8>, depth: usize)
         -> Result<ExecResult, ExecError>
     {
         let pos = this.qry_meta.pos.fetch_add(1, ORDERING);
-        let mut num_members = 0;
-        let res = {
-            let client = {
-                let members = this.members.read();
-                num_members = members.clients.len();
-                let members_count = members.clients.len();
-                if members_count < 1 {
-                    return Err(ExecError::ServersUnreachable)
-                } else {
-                    members.clients.values().nth(pos as usize % members_count).unwrap()
-                }
+        let members = await!(this.members.read_async()).unwrap();
+        let num_members = members.clients.len();
+        if num_members >= 1 {
+            let res = {;
+                await!(
+                    members.clients.values().nth(pos as usize % num_members).unwrap()
+                    .c_query(&this.gen_log_entry(sm_id, fn_id, &data)))
             };
-            await!(client.c_query(&this.gen_log_entry(sm_id, fn_id, &data)))
-        };
-        match res {
-            Ok(Ok(res)) => {
-                match res {
-                    ClientQryResponse::LeftBehind => {
-                        if depth >= num_members {
-                            Err(ExecError::TooManyRetry)
-                        } else {
-                            await!(Self::query(this.clone(), sm_id, fn_id, data, depth + 1))
-                        }
-                    },
-                    ClientQryResponse::Success{
-                        data, last_log_term, last_log_id
-                    } => {
-                        swap_when_greater(&this.last_log_id, last_log_id);
-                        swap_when_greater(&this.last_log_term, last_log_term);
-                        Ok(data)
-                    },
-                }
-            },
-            _ => Err(ExecError::Unknown)
+            match res {
+                Ok(Ok(res)) => {
+                    match res {
+                        ClientQryResponse::LeftBehind => {
+                            if depth >= num_members {
+                                Err(ExecError::TooManyRetry)
+                            } else {
+                                await!(Self::query(this.clone(), sm_id, fn_id, data, depth + 1))
+                            }
+                        },
+                        ClientQryResponse::Success{
+                            data, last_log_term, last_log_id
+                        } => {
+                            swap_when_greater(&this.last_log_id, last_log_id);
+                            swap_when_greater(&this.last_log_term, last_log_term);
+                            Ok(data)
+                        },
+                    }
+                },
+                _ => Err(ExecError::Unknown)
+            }
+        } else {
+            Err(ExecError::ServersUnreachable)
         }
     }
 
