@@ -78,7 +78,7 @@ impl <T> Future for AsyncRwLockWriteGuard<T> {
 impl <T> RwLock <T> {
     pub fn new(val: T) -> RwLock<T> {
         RwLock {
-            inner: parking_lot::RwLock::new(val)
+            inner: RwLockInner::new(val)
         }
     }
     pub fn read_async(&self) -> AsyncRwLockReadGuard<T> {
@@ -100,10 +100,20 @@ impl <T> RwLock <T> {
 }
 
 impl <T> RwLockInner<T> {
-
+    pub fn new(val: T) -> Arc<RwLockInner<T>> {
+        Arc::new(RwLockInner {
+            raw: RwLockRaw::new(),
+            data: UnsafeCell::new(val)
+        })
+    }
 }
 
 impl RwLockRaw {
+    fn new() -> RwLockRaw {
+        RwLockRaw {
+          state: AtomicUsize::new(0)
+        }
+    }
     fn try_read(&self) -> bool  {
         let lc = self.state.load(Ordering::Relaxed);
         if lc == 1 {

@@ -2,7 +2,9 @@ pub mod mutex;
 pub mod rwlock;
 
 pub use self::mutex::{Mutex, AsyncMutexGuard, MutexGuard};
-pub use self::rwlock::{RwLock, AsyncRwLockWriteGuard, AsyncRwLockReadGuard};
+pub use self::rwlock::{RwLock,
+                       AsyncRwLockWriteGuard, AsyncRwLockReadGuard,
+                       RwLockReadGuard, RwLockWriteGuard};
 
 /// Called while spinning (name borrowed from Linux). Can be implemented to call
 /// a platform-specific method of lightening CPU load in spinlocks.
