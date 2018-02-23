@@ -358,12 +358,12 @@ impl RaftService {
         if let Ok(client) = client {
             let result = client.execute(
                 CONFIG_SM_ID,
-                &new_member_::new(&self.options.address)
-            );
+                new_member_::new(&self.options.address)
+            ).wait();
             let members = client.execute(
                 CONFIG_SM_ID,
-                &member_address::new()
-            );
+                member_address::new()
+            ).wait();
             let mut meta = self.write_meta();
             if let Ok(Ok(members)) = members {
                 for member in members {
@@ -385,8 +385,8 @@ impl RaftService {
         if let Ok(client) = RaftClient::new(&servers, self.options.service_id) {
             client.execute(
                 CONFIG_SM_ID,
-                &del_member_::new(&self.options.address)
-            );
+                del_member_::new(&self.options.address)
+            ).wait();
         } else {
             return false
         }
