@@ -1,4 +1,5 @@
 use futures::{Future, Async, Poll};
+use super::cpu_relax;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::cell::UnsafeCell;
@@ -110,20 +111,26 @@ impl RwLockRaw {
             return false;
         } else {
             let next_count = if lc == 0 { 2 } else { lc + 1 };
-            return self.raw.state.compare_and_swap(lc, next_count, Ordering::Relaxed) == lc;
+            return self.state.compare_and_swap(lc, next_count, Ordering::Relaxed) == lc;
         }
     }
     fn try_write(&self) -> bool {
         self.state.compare_and_swap(0, 1, Ordering::Relaxed) == 0
     }
     fn unlock_read(&self) {
-        let lc = self.state.load(Ordering::Relaxed);
-        if lc < 2 {
-            // illegal state
-            warn!("WRONG STATE FOR RWLOCK");
-        } else {
-            let next_count = if lc == 2 { 0 } else { lc - 1 };
-            self.raw.state.compare_and_swap(lc, next_count, Ordering::Relaxed) == lc;
+        loop {
+            let lc = self.state.load(Ordering::Relaxed);
+            if lc < 2 {
+                // illegal state
+                warn!("WRONG STATE FOR RWLOCK");
+            } else {
+                let next_count = if lc == 2 { 0 } else { lc - 1 };
+                if self.state.compare_and_swap(lc, next_count, Ordering::Relaxed) == lc {
+                    return;
+                } else {
+                    cpu_relax();
+                }
+            }
         }
     }
     fn unlock_write(&self) {
