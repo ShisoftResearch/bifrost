@@ -75,7 +75,7 @@ impl RaftClient {
     }
 
     pub fn execute<R, M>(&self, sm_id: u64, msg: M)
-        -> impl Future<Item = R, Error = ExecError>
+        -> Box<Future<Item = R, Error = ExecError>>
         where R: 'static, M: RaftMsg<R> + 'static
     {
         RaftClientInner::execute(self.inner.clone(), sm_id, msg)
@@ -88,7 +88,7 @@ impl RaftClient {
     pub fn subscribe
     <M, R, F>
     (&self, sm_id: u64, msg: M, f: F)
-        -> impl Future<Item = Result<u64, SubscriptionError>, Error = ExecError>
+        -> Box<Future<Item = Result<u64, SubscriptionError>, Error = ExecError>>
         where M: RaftMsg<R> + 'static,
               R: 'static,
               F: Fn(R) + 'static + Send + Sync
@@ -97,7 +97,7 @@ impl RaftClient {
     }
 
     pub fn unsubscribe<M, R>(&self, sm_id: u64, msg: M, sub_id: u64)
-        -> impl Future<Item = Result<(), SubscriptionError>, Error = ExecError>
+        -> Box<Future<Item = Result<(), SubscriptionError>, Error = ExecError>>
         where M: RaftMsg<R> + 'static, R: 'static
     {
         RaftClientInner::unsubscribe(self.inner.clone(), sm_id, msg, sub_id)
@@ -150,7 +150,7 @@ impl RaftClientInner {
         }
     }
 
-    #[async]
+    #[async(boxed)]
     fn cluster_info(this: Arc<Self>, servers: HashSet<String>)
         -> Result<(Option<ClientClusterInfo>, RwLockWriteGuard<Members>), ()>
     {
@@ -175,7 +175,7 @@ impl RaftClientInner {
         return Ok((None, members));
     }
 
-    #[async]
+    #[async(boxed)]
     fn update_info(this: Arc<Self>, servers: HashSet<String>)
         -> Result<(), ClientError>
     {
@@ -209,7 +209,7 @@ impl RaftClientInner {
         }
     }
 
-    #[async]
+    #[async(boxed)]
     pub fn execute<R, M>(this: Arc<Self>, sm_id: u64, msg: M)
         -> Result<R, ExecError>
         where R: 'static, M: RaftMsg<R> + 'static
@@ -257,7 +257,7 @@ impl RaftClientInner {
             Some(c) => Ok(c)
         }
     }
-    #[async]
+    #[async(boxed)]
     pub fn subscribe
     <M, R, F>
     (this: Arc<Self>, sm_id: u64, msg: M, f: F) -> Result<Result<u64, SubscriptionError>, ExecError>
@@ -289,7 +289,7 @@ impl RaftClientInner {
         }
     }
 
-    #[async]
+    #[async(boxed)]
     pub fn unsubscribe<M, R>(this: Arc<Self>, sm_id: u64, msg: M, sub_id: u64)
         -> Result<Result<(), SubscriptionError>, ExecError>
         where M: RaftMsg<R> + 'static, R: 'static
@@ -371,7 +371,7 @@ impl RaftClientInner {
         }
     }
 
-    #[async]
+    #[async(boxed)]
     fn command(this: Arc<Self>, sm_id: u64, fn_id: u64, data: Vec<u8>, depth: usize)
         -> Result<ExecResult, ExecError>
     {
@@ -456,7 +456,7 @@ impl RaftClientInner {
             None
         }
     }
-    #[async]
+    #[async(boxed)]
     fn current_leader_client(this: Arc<Self>) -> Result<(u64, Client), ()> {
         {
             let leader_client = this.leader_client();
