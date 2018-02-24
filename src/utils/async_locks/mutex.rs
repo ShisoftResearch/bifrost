@@ -113,6 +113,7 @@ impl <T> Mutex <T> {
 }
 
 impl <T> MutexGuard<T> {
+    #[inline]
     pub fn mutate(&self) -> &mut T {
         unsafe { &mut *self.mutex.data.get() }
     }

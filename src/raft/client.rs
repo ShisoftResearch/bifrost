@@ -13,11 +13,13 @@ use utils::async_locks::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::cmp::max;
+use std::clone::Clone;
 use bifrost_hasher::{hash_str, hash_bytes};
 use rand;
 use rpc;
 use backtrace::Backtrace;
 use futures::prelude::*;
+use super::*;
 
 const ORDERING: Ordering = Ordering::Relaxed;
 pub type Client = Arc<AsyncServiceClient>;
@@ -149,33 +151,40 @@ impl RaftClientInner {
     }
 
     #[async]
-   fn update_info(this: Arc<Self>, servers: HashSet<String>)
-        -> Result<(), ClientError>
+    fn cluster_info(this: Arc<Self>, servers: HashSet<String>)
+        -> Result<(Option<ClientClusterInfo>, RwLockWriteGuard<Members>), ()>
     {
-        let mut cluster_info = None;
-        let mut members = this.members.write();
+        let members = await!(this.members.write_async()).unwrap();
         for server_addr in servers {
             let id = hash_str(&server_addr);
             if !members.clients.contains_key(&id) {
                 match rpc::DEFAULT_CLIENT_POOL.get(&server_addr) {
                     Ok(client) => {
+                        let members = members.mutate();
                         members.clients.insert(id, AsyncServiceClient::new(this.service_id, &client));
                     },
                     Err(_) => {continue;}
                 }
             }
-            let client = members.clients.get(&id).unwrap();
-            if let Ok(Ok(info)) = await!(client.c_server_cluster_info()) {
+            if let Ok(Ok(info)) = await!(members.clients.get(&id).unwrap().c_server_cluster_info()) {
                 if info.leader_id != 0 {
-                    cluster_info = Some(info);
-                    break;
+                    return Ok((Some(info), members));
                 }
             }
         }
+        return Ok((None, members));
+    }
+
+    #[async]
+    fn update_info(this: Arc<Self>, servers: HashSet<String>)
+        -> Result<(), ClientError>
+    {
+        let (cluster_info, members) = await!(Self::cluster_info(this.clone(), servers)).unwrap();
         match cluster_info {
             Some(info) => {
                 let remote_members = info.members;
                 let mut remote_ids = HashSet::with_capacity(remote_members.len());
+                let mut members = members.mutate();
                 members.id_map.clear();
                 for (id, addr) in remote_members {
                     members.id_map.insert(id, addr);
@@ -226,8 +235,7 @@ impl RaftClientInner {
     }
 
     pub fn can_callback() -> bool {
-        let callback = CALLBACK.read();
-        callback.is_some()
+        CALLBACK.read().is_some()
     }
     fn get_sub_key<M, R>(&self, sm_id: u64, msg: M)
         -> SubKey where M: RaftMsg<R> + 'static, R: 'static
@@ -240,6 +248,16 @@ impl RaftClientInner {
         return (raft_sid, sm_id, fn_id, pattern_id);
     }
     #[async]
+    pub fn get_callback(this: Arc<Self>) -> Result<Arc<SubscriptionService>, SubscriptionError> {
+        match (*await!(CALLBACK.read_async()).unwrap()).clone() {
+            None => {
+                debug!("Subscription service not set: {:?}", Backtrace::new());
+                Err(SubscriptionError::SubServiceNotSet)
+            },
+            Some(c) => Ok(c)
+        }
+    }
+    #[async]
     pub fn subscribe
     <M, R, F>
     (this: Arc<Self>, sm_id: u64, msg: M, f: F) -> Result<Result<u64, SubscriptionError>, ExecError>
@@ -247,18 +265,13 @@ impl RaftClientInner {
               R: 'static,
               F: Fn(R) + 'static + Send + Sync
     {
-        let callback = CALLBACK.read();
-        if callback.is_none() {
-            debug!("Subscription service not set: {:?}", Backtrace::new());
-            return Ok(Err(SubscriptionError::SubServiceNotSet))
-        }
-        let callback = callback.clone().unwrap();
+        let callback = match await!(Self::get_callback(this.clone())) {
+            Ok(c) => c, Err(e) => return Ok(Err(e))
+        };
         let key = this.get_sub_key(sm_id, msg);
         let wrapper_fn = move |data: Vec<u8>| {
             f(M::decode_return(&data))
         };
-        let mut subs_map = callback.subs.write();
-        let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
         let cluster_subs = await!(Self::execute(
             this.clone(),
             CONFIG_SM_ID,
@@ -266,6 +279,8 @@ impl RaftClientInner {
         ));
         match cluster_subs {
             Ok(Ok(sub_id)) => {
+                let mut subs_map = callback.subs.write();
+                let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
                 subs_lst.push((Box::new(wrapper_fn), sub_id));
                 Ok(Ok(sub_id))
             },
@@ -279,9 +294,8 @@ impl RaftClientInner {
         -> Result<Result<(), SubscriptionError>, ExecError>
         where M: RaftMsg<R> + 'static, R: 'static
     {
-        let callback = CALLBACK.read();
-        match *callback {
-            Some(ref callback) => {
+        match await!(Self::get_callback(this.clone())) {
+            Ok(callback) => {
                 let key = this.get_sub_key(sm_id, msg);
                 let unsub = await!(Self::execute(
                         this.clone(),
@@ -310,9 +324,9 @@ impl RaftClientInner {
                     Err(e) => Err(e)
                 }
             },
-            None => {
+            Err(e) => {
                 debug!("Subscription service not set: {:?}", Backtrace::new());
-                return Ok(Err(SubscriptionError::SubServiceNotSet))
+                return Ok(Err(e))
             }
         }
 

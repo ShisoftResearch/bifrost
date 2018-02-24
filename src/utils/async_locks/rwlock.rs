@@ -172,9 +172,15 @@ impl <T> Deref for RwLockWriteGuard<T> {
 impl <T> DerefMut for RwLockWriteGuard<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut T {
-        unsafe {
-            &mut *self.lock.data.get()
-        }
+        self.mutate()
+    }
+}
+
+
+impl <T> RwLockWriteGuard<T> {
+    #[inline]
+    pub fn mutate(&self) -> &mut T {
+        unsafe { &mut *self.lock.data.get() }
     }
 }
 
