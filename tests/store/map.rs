@@ -7,6 +7,7 @@ use bifrost::rpc::*;
 
 use std::collections::{HashSet, HashMap};
 use std::iter::FromIterator;
+use futures::prelude::*;
 
 use raft::wait;
 
@@ -75,41 +76,41 @@ fn hash_map(){
             assert_eq!(&String::from("v2"), &value);
         }
     }, &sk2);
-    assert!(sm_client.is_empty().unwrap().unwrap());
-    sm_client.insert(&sk1, &sv1).unwrap().unwrap();
-    sm_client.insert(&sk2, &sv2).unwrap().unwrap();
-    assert!(!sm_client.is_empty().unwrap().unwrap());
+    assert!(sm_client.is_empty().wait().unwrap().unwrap());
+    sm_client.insert(&sk1, &sv1).wait().unwrap().unwrap();
+    sm_client.insert(&sk2, &sv2).wait().unwrap().unwrap();
+    assert!(!sm_client.is_empty().wait().unwrap().unwrap());
 
-    assert_eq!(sm_client.len().unwrap().unwrap(), 2);
-    assert_eq!(sm_client.get(&sk1).unwrap().unwrap().unwrap(), sv1);
-    assert_eq!(sm_client.get(&sk2).unwrap().unwrap().unwrap(), sv2);
+    assert_eq!(sm_client.len().wait().unwrap().unwrap(), 2);
+    assert_eq!(sm_client.get(&sk1).wait().unwrap().unwrap().unwrap(), sv1);
+    assert_eq!(sm_client.get(&sk2).wait().unwrap().unwrap().unwrap(), sv2);
 
-    sm_client.insert_if_absent(&sk2, &String::from("kv2")).unwrap().unwrap();
-    assert_eq!(sm_client.len().unwrap().unwrap(), 2);
-    assert_eq!(sm_client.get(&sk2).unwrap().unwrap().unwrap(), sv2);
+    sm_client.insert_if_absent(&sk2, &String::from("kv2")).wait().unwrap().unwrap();
+    assert_eq!(sm_client.len().wait().unwrap().unwrap(), 2);
+    assert_eq!(sm_client.get(&sk2).wait().unwrap().unwrap().unwrap(), sv2);
 
-    assert_eq!(sm_client.remove(&sk2).unwrap().unwrap().unwrap(), sv2);
-    assert_eq!(sm_client.len().unwrap().unwrap(), 1);
-    assert!(sm_client.get(&sk2).unwrap().unwrap().is_none());
+    assert_eq!(sm_client.remove(&sk2).wait().unwrap().unwrap().unwrap(), sv2);
+    assert_eq!(sm_client.len().wait().unwrap().unwrap(), 1);
+    assert!(sm_client.get(&sk2).wait().unwrap().unwrap().is_none());
 
-    sm_client.clear().unwrap().unwrap();
-    assert_eq!(sm_client.len().unwrap().unwrap(), 0);
+    sm_client.clear().wait().unwrap().unwrap();
+    assert_eq!(sm_client.len().wait().unwrap().unwrap(), 0);
 
-    sm_client.insert(&sk1, &sv1).unwrap().unwrap();
-    sm_client.insert(&sk2, &sv2).unwrap().unwrap();
-    sm_client.insert(&sk3, &sv3).unwrap().unwrap();
-    sm_client.insert(&sk4, &sv4).unwrap().unwrap();
-    assert_eq!(sm_client.len().unwrap().unwrap(),  4);
+    sm_client.insert(&sk1, &sv1).wait().unwrap().unwrap();
+    sm_client.insert(&sk2, &sv2).wait().unwrap().unwrap();
+    sm_client.insert(&sk3, &sv3).wait().unwrap().unwrap();
+    sm_client.insert(&sk4, &sv4).wait().unwrap().unwrap();
+    assert_eq!(sm_client.len().wait().unwrap().unwrap(),  4);
 
-    let remote_keys = sm_client.keys().unwrap().unwrap();
+    let remote_keys = sm_client.keys().wait().unwrap().unwrap();
     let remote_keys_set = HashSet::<String>::from_iter(remote_keys.iter().cloned());
     assert_eq!(remote_keys_set.len(), 4);
 
-    let remote_values = sm_client.values().unwrap().unwrap();
+    let remote_values = sm_client.values().wait().unwrap().unwrap();
     let remote_values_set = HashSet::<String>::from_iter(remote_values.iter().cloned());
     assert_eq!(remote_values_set.len(), 4);
 
-    let remote_entries = sm_client.entries().unwrap().unwrap();
+    let remote_entries = sm_client.entries().wait().unwrap().unwrap();
     let remote_entries_set = HashSet::<(String, String)>::from_iter(remote_entries.iter().cloned());
     assert_eq!(remote_entries_set.len(), 4);
 
@@ -133,12 +134,12 @@ fn hash_map(){
     expected_hashmap.insert(sk2.clone(), sv2.clone());
     expected_hashmap.insert(sk3.clone(), sv3.clone());
     expected_hashmap.insert(sk4.clone(), sv4.clone());
-    assert_eq!(expected_hashmap, sm_client.clone().unwrap().unwrap());
+    assert_eq!(expected_hashmap, sm_client.clone().wait().unwrap().unwrap());
 
-    assert!(sm_client.contains_key(&sk1).unwrap().unwrap());
-    assert!(sm_client.contains_key(&sk2).unwrap().unwrap());
-    assert!(sm_client.contains_key(&sk3).unwrap().unwrap());
-    assert!(sm_client.contains_key(&sk4).unwrap().unwrap());
+    assert!(sm_client.contains_key(&sk1).wait().unwrap().unwrap());
+    assert!(sm_client.contains_key(&sk2).wait().unwrap().unwrap());
+    assert!(sm_client.contains_key(&sk3).wait().unwrap().unwrap());
+    assert!(sm_client.contains_key(&sk4).wait().unwrap().unwrap());
 
     wait();
 }

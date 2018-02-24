@@ -11,6 +11,7 @@ use super::wait;
 use std::thread;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use futures::prelude::*;
 
 pub struct Trigger {
     count: u64,
@@ -25,16 +26,16 @@ raft_state_machine! {
 impl StateMachineCmds for Trigger {
     fn trigger(&mut self) -> Result<(), ()> {
         self.count += 1;
-        self.callback.notify(&commands::on_trigged::new(), Ok(self.count));
+        self.callback.notify(commands::on_trigged::new(), Ok(self.count));
         Ok(())
     }
 }
 
 impl StateMachineCtl for Trigger {
     raft_sm_complete!();
+    fn id(&self) -> u64 {10}
     fn snapshot(&self) -> Option<Vec<u8>> { None }
     fn recover(&mut self, data: Vec<u8>) {}
-    fn id(&self) -> u64 {10}
 }
 
 #[test]
@@ -73,13 +74,13 @@ fn dummy() {
         counter_clone.fetch_add(1, Ordering::Relaxed);
         sumer_clone.fetch_add(res.unwrap() as usize, Ordering::Relaxed);
         println!("CALLBACK TRIGGERED {}", res.unwrap());
-    }).unwrap();
+    }).wait().unwrap();
 
     for i in 0..loops {
         let sm_client = sm_client.clone();
         expected_sum += i + 1;
         thread::spawn(move || {
-            sm_client.trigger().unwrap();
+            sm_client.trigger().wait().unwrap();
         });
     }
 

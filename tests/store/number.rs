@@ -15,6 +15,7 @@ mod u32 {
     use bifrost::store::number::U32::client::SMClient;
     use bifrost::rpc::Server;
     use bifrost::raft::state_machine::callback::client::SubscriptionService;
+    use futures::prelude::*;
 
     #[test]
     fn test(){
@@ -47,25 +48,25 @@ mod u32 {
            }
         });
 
-        assert_eq!(sm_client.get().unwrap().unwrap(), 0);
-        sm_client.set(&1).unwrap().unwrap();
-        assert_eq!(sm_client.get().unwrap().unwrap(), 1);
-        assert_eq!(sm_client.get_and_add(&2).unwrap().unwrap(), 1);
-        assert_eq!(sm_client.add_and_get(&3).unwrap().unwrap(), 6);
-        assert_eq!(sm_client.get_and_minus(&4).unwrap().unwrap(), 6);
-        assert_eq!(sm_client.minus_and_get(&2).unwrap().unwrap(), 0);
-        assert_eq!(sm_client.get_and_incr().unwrap().unwrap(), 0);
-        assert_eq!(sm_client.incr_and_get().unwrap().unwrap(), 2);
-        assert_eq!(sm_client.get_and_multiply(&2).unwrap().unwrap(), 2);
-        assert_eq!(sm_client.multiply_and_get(&2).unwrap().unwrap(), 8);
-        assert_eq!(sm_client.get_and_divide(&2).unwrap().unwrap(), 8);
-        assert_eq!(sm_client.divide_and_get(&4).unwrap().unwrap(), 1);
-        assert_eq!(sm_client.swap(&5).unwrap().unwrap(), 1);
-        assert_eq!(sm_client.get().unwrap().unwrap(), 5);
-        assert_eq!(sm_client.compare_and_swap(&1, &10).unwrap().unwrap(), 5);
-        assert_eq!(sm_client.get().unwrap().unwrap(), 5);
-        assert_eq!(sm_client.compare_and_swap(&5 ,&11).unwrap().unwrap(), 5);
-        assert_eq!(sm_client.get().unwrap().unwrap(), 11);
+        assert_eq!(sm_client.get().wait().unwrap().unwrap(), 0);
+        sm_client.set(&1).wait().unwrap().unwrap();
+        assert_eq!(sm_client.get().wait().unwrap().unwrap(), 1);
+        assert_eq!(sm_client.get_and_add(&2).wait().unwrap().unwrap(), 1);
+        assert_eq!(sm_client.add_and_get(&3).wait().unwrap().unwrap(), 6);
+        assert_eq!(sm_client.get_and_minus(&4).wait().unwrap().unwrap(), 6);
+        assert_eq!(sm_client.minus_and_get(&2).wait().unwrap().unwrap(), 0);
+        assert_eq!(sm_client.get_and_incr().wait().unwrap().unwrap(), 0);
+        assert_eq!(sm_client.incr_and_get().wait().unwrap().unwrap(), 2);
+        assert_eq!(sm_client.get_and_multiply(&2).wait().unwrap().unwrap(), 2);
+        assert_eq!(sm_client.multiply_and_get(&2).wait().unwrap().unwrap(), 8);
+        assert_eq!(sm_client.get_and_divide(&2).wait().unwrap().unwrap(), 8);
+        assert_eq!(sm_client.divide_and_get(&4).wait().unwrap().unwrap(), 1);
+        assert_eq!(sm_client.swap(&5).wait().unwrap().unwrap(), 1);
+        assert_eq!(sm_client.get().wait().unwrap().unwrap(), 5);
+        assert_eq!(sm_client.compare_and_swap(&1, &10).wait().unwrap().unwrap(), 5);
+        assert_eq!(sm_client.get().wait().unwrap().unwrap(), 5);
+        assert_eq!(sm_client.compare_and_swap(&5 ,&11).wait().unwrap().unwrap(), 5);
+        assert_eq!(sm_client.get().wait().unwrap().unwrap(), 11);
     }
 }
 
@@ -85,6 +86,7 @@ mod f64 {
     };
     use bifrost::rpc::Server;
     use bifrost::store::number::F64::client::SMClient;
+    use futures::prelude::*;
 
     #[test]
     fn test(){
@@ -109,24 +111,24 @@ mod f64 {
         let client = RaftClient::new(&vec!(addr), DEFAULT_SERVICE_ID).unwrap();
         let sm_client = SMClient::new(sm_id, &client);
 
-        assert_eq!(sm_client.get().unwrap().unwrap(), 0.0);
-        sm_client.set(&1.0).unwrap().unwrap();
-        assert_eq!(sm_client.get().unwrap().unwrap(), 1.0);
-        assert_eq!(sm_client.get_and_add(&2.0).unwrap().unwrap(), 1.0);
-        assert_eq!(sm_client.add_and_get(&3.0).unwrap().unwrap(), 6.0);
-        assert_eq!(sm_client.get_and_minus(&4.0).unwrap().unwrap(), 6.0);
-        assert_eq!(sm_client.minus_and_get(&2.0).unwrap().unwrap(), 0.0);
-        assert_eq!(sm_client.get_and_incr().unwrap().unwrap(), 0.0);
-        assert_eq!(sm_client.incr_and_get().unwrap().unwrap(), 2.0);
-        assert_eq!(sm_client.get_and_multiply(&2.0).unwrap().unwrap(), 2.0);
-        assert_eq!(sm_client.multiply_and_get(&2.0).unwrap().unwrap(), 8.0);
-        assert_eq!(sm_client.get_and_divide(&2.0).unwrap().unwrap(), 8.0);
-        assert_eq!(sm_client.divide_and_get(&4.0).unwrap().unwrap(), 1.0);
-        assert_eq!(sm_client.swap(&5.0).unwrap().unwrap(), 1.0);
-        assert_eq!(sm_client.get().unwrap().unwrap(), 5.0);
-        assert_eq!(sm_client.compare_and_swap(&1.0, &10.0).unwrap().unwrap(), 5.0);
-        assert_eq!(sm_client.get().unwrap().unwrap(), 5.0);
-        assert_eq!(sm_client.compare_and_swap(&5.0 ,&11.0).unwrap().unwrap(), 5.0);
-        assert_eq!(sm_client.get().unwrap().unwrap(), 11.0);
+        assert_eq!(sm_client.get().wait().unwrap().unwrap(), 0.0);
+        sm_client.set(&1.0).wait().unwrap().unwrap();
+        assert_eq!(sm_client.get().wait().unwrap().unwrap(), 1.0);
+        assert_eq!(sm_client.get_and_add(&2.0).wait().unwrap().unwrap(), 1.0);
+        assert_eq!(sm_client.add_and_get(&3.0).wait().unwrap().unwrap(), 6.0);
+        assert_eq!(sm_client.get_and_minus(&4.0).wait().unwrap().unwrap(), 6.0);
+        assert_eq!(sm_client.minus_and_get(&2.0).wait().unwrap().unwrap(), 0.0);
+        assert_eq!(sm_client.get_and_incr().wait().unwrap().unwrap(), 0.0);
+        assert_eq!(sm_client.incr_and_get().wait().unwrap().unwrap(), 2.0);
+        assert_eq!(sm_client.get_and_multiply(&2.0).wait().unwrap().unwrap(), 2.0);
+        assert_eq!(sm_client.multiply_and_get(&2.0).wait().unwrap().unwrap(), 8.0);
+        assert_eq!(sm_client.get_and_divide(&2.0).wait().unwrap().unwrap(), 8.0);
+        assert_eq!(sm_client.divide_and_get(&4.0).wait().unwrap().unwrap(), 1.0);
+        assert_eq!(sm_client.swap(&5.0).wait().unwrap().unwrap(), 1.0);
+        assert_eq!(sm_client.get().wait().unwrap().unwrap(), 5.0);
+        assert_eq!(sm_client.compare_and_swap(&1.0, &10.0).wait().unwrap().unwrap(), 5.0);
+        assert_eq!(sm_client.get().wait().unwrap().unwrap(), 5.0);
+        assert_eq!(sm_client.compare_and_swap(&5.0 ,&11.0).wait().unwrap().unwrap(), 5.0);
+        assert_eq!(sm_client.get().wait().unwrap().unwrap(), 11.0);
     }
 }

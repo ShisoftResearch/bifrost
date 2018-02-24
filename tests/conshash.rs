@@ -11,6 +11,7 @@ use bifrost::conshash::weights::Weights;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::HashMap;
+use futures::prelude::*;
 
 use raft::wait;
 
@@ -42,9 +43,9 @@ fn primary() {
 
     RaftClient::prepare_subscription(&server);
 
-    client.new_group(&group_1).unwrap().unwrap();
-    client.new_group(&group_2).unwrap().unwrap();
-    client.new_group(&group_3).unwrap().unwrap();
+    client.new_group(&group_1).wait().unwrap().unwrap();
+    client.new_group(&group_2).wait().unwrap().unwrap();
+    client.new_group(&group_3).wait().unwrap().unwrap();
 
     let member1_raft_client = RaftClient::new(&vec!(addr.clone()), 0).unwrap();
     let member1_svr = MemberService::new(&server_1, &member1_raft_client);
@@ -55,14 +56,14 @@ fn primary() {
     let member3_raft_client = RaftClient::new(&vec!(addr.clone()), 0).unwrap();
     let member3_svr = MemberService::new(&server_3, &member3_raft_client);
 
-    member1_svr.join_group(&group_1).unwrap().unwrap();
-    member2_svr.join_group(&group_1).unwrap().unwrap();
-    member3_svr.join_group(&group_1).unwrap().unwrap();
+    member1_svr.join_group(&group_1).wait().unwrap().unwrap();
+    member2_svr.join_group(&group_1).wait().unwrap().unwrap();
+    member3_svr.join_group(&group_1).wait().unwrap().unwrap();
 
-    member1_svr.join_group(&group_2).unwrap().unwrap();
-    member2_svr.join_group(&group_2).unwrap().unwrap();
+    member1_svr.join_group(&group_2).wait().unwrap().unwrap();
+    member2_svr.join_group(&group_2).wait().unwrap().unwrap();
 
-    member1_svr.join_group(&group_3).unwrap().unwrap();
+    member1_svr.join_group(&group_3).wait().unwrap().unwrap();
 
     let weight_service = Weights::new(&raft_service);
 
@@ -135,7 +136,7 @@ fn primary() {
     }
     assert_eq!(ch_3_mapping.get(&server_1).unwrap(), &30000);
 
-    member1_svr.leave().unwrap().unwrap();
+    member1_svr.leave().wait().unwrap().unwrap();
     wait();
     let mut ch_1_mapping: HashMap<String, u64> = HashMap::new();
     for i in 0..30000 {
