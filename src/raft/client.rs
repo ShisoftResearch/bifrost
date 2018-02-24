@@ -247,7 +247,7 @@ impl RaftClientInner {
         };
         return (raft_sid, sm_id, fn_id, pattern_id);
     }
-    #[async]
+    #[async(boxed)]
     pub fn get_callback(this: Arc<Self>) -> Result<Arc<SubscriptionService>, SubscriptionError> {
         match (*await!(CALLBACK.read_async()).unwrap()).clone() {
             None => {

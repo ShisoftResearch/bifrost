@@ -5,7 +5,6 @@
 #![feature(integer_atomics)]
 #![feature(proc_macro)]
 #![feature(fnbox)]
-#![feature(conservative_impl_trait)]
 
 #![feature(proc_macro, conservative_impl_trait, generators)]
 #![feature(box_syntax)]

@@ -3,6 +3,7 @@
 
 #![feature(proc_macro)]
 #![feature(box_syntax)]
+#![feature(conservative_impl_trait)]
 
 #[macro_use]
 extern crate bifrost;
