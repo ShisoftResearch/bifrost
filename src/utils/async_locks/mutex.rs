@@ -62,14 +62,10 @@ impl RawMutex {
         }
     }
 
-    fn unlock(&self) -> bool {
-        let prev_val = self.state.compare_and_swap(
+    fn unlock(&self) {
+        assert!(self.state.compare_and_swap(
             true, false, Ordering::Relaxed
-        );
-        let success = prev_val == true;
-        assert!(success);
-        //println!("raw unlocking {}", prev_val);
-        return success
+        ))
     }
 }
 
@@ -137,8 +133,7 @@ impl <T> DerefMut for MutexGuard<T> {
 impl <T: ?Sized> Drop for MutexGuard<T> {
     #[inline]
     fn drop(&mut self) {
-        let success = self.mutex.raw.unlock();
-        // println!("drop ulocking {}", success);
+        self.mutex.raw.unlock();
     }
 }
 

@@ -92,10 +92,20 @@ impl <T> RwLock <T> {
         }
     }
     pub fn read(&self) -> RwLockReadGuard<T> {
-        self.read_async().wait().unwrap()
+        while !self.inner.raw.try_read() {
+            cpu_relax()
+        }
+        RwLockReadGuard {
+            lock: self.inner.clone()
+        }
     }
     pub fn write(&self) -> RwLockWriteGuard<T> {
-        self.write_async().wait().unwrap()
+        while !self.inner.raw.try_write() {
+            cpu_relax()
+        }
+        RwLockWriteGuard {
+            lock: self.inner.clone()
+        }
     }
 }
 
@@ -130,21 +140,17 @@ impl RwLockRaw {
     fn unlock_read(&self) {
         loop {
             let lc = self.state.load(Ordering::Relaxed);
-            if lc < 2 {
-                // illegal state
-                warn!("WRONG STATE FOR RWLOCK");
+            let next_count = if lc == 2 { 0 } else { lc - 1 };
+            assert!(lc > 1);
+            if self.state.compare_and_swap(lc, next_count, Ordering::Relaxed) == lc {
+                return;
             } else {
-                let next_count = if lc == 2 { 0 } else { lc - 1 };
-                if self.state.compare_and_swap(lc, next_count, Ordering::Relaxed) == lc {
-                    return;
-                } else {
-                    cpu_relax();
-                }
+                cpu_relax();
             }
         }
     }
     fn unlock_write(&self) {
-        self.state.compare_and_swap(1, 0, Ordering::Relaxed);
+        assert_eq!(self.state.compare_and_swap(1, 0, Ordering::Relaxed), 1);
     }
 }
 
@@ -195,5 +201,120 @@ impl <T: ?Sized> Drop for RwLockWriteGuard<T> {
     #[inline]
     fn drop(&mut self) {
         self.lock.raw.unlock_write()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate rand;
+    use self::rand::Rng;
+    use std::sync::mpsc::channel;
+    use std::thread;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use super::*;
+
+    #[derive(Eq, PartialEq, Debug)]
+    struct NonCopy(i32);
+
+    #[test]
+    fn smoke() {
+        let l = RwLock::new(());
+        drop(l.read());
+        drop(l.write());
+        drop((l.read(), l.read()));
+        drop(l.write());
+    }
+
+    #[test]
+    fn frob() {
+        const N: u32 = 10;
+        const M: u32 = 1000;
+
+        let r = Arc::new(RwLock::new(()));
+
+        let (tx, rx) = channel::<()>();
+        for _ in 0..N {
+            let tx = tx.clone();
+            let r = r.clone();
+            thread::spawn(move || {
+                let mut rng = rand::thread_rng();
+                for _ in 0..M {
+                    if rng.gen_weighted_bool(N) {
+                        drop(r.write());
+                    } else {
+                        drop(r.read());
+                    }
+                }
+                drop(tx);
+            });
+        }
+        drop(tx);
+        let _ = rx.recv();
+    }
+
+    #[test]
+    fn test_rw_arc_no_poison_wr() {
+        let arc = Arc::new(RwLock::new(1));
+        let arc2 = arc.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            let _lock = arc2.write();
+            panic!();
+        });
+        let lock = arc.read();
+        assert_eq!(*lock, 1);
+    }
+
+    #[test]
+    fn test_rw_arc_no_poison_ww() {
+        let arc = Arc::new(RwLock::new(1));
+        let arc2 = arc.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            let _lock = arc2.write();
+            panic!();
+        });
+        let lock = arc.write();
+        assert_eq!(*lock, 1);
+    }
+
+    #[test]
+    fn test_rw_arc() {
+        let arc = Arc::new(RwLock::new(0));
+        let arc2 = arc.clone();
+        let (tx, rx) = channel();
+
+        thread::spawn(move || {
+            let mut lock = arc2.write();
+            for _ in 0..10 {
+                let tmp = *lock;
+                *lock = -1;
+                thread::yield_now();
+                *lock = tmp + 1;
+            }
+            tx.send(()).unwrap();
+        });
+
+        // Readers try to catch the writer in the act
+        let mut children = Vec::new();
+        for _ in 0..5 {
+            let arc3 = arc.clone();
+            children.push(thread::spawn(move || {
+                let lock = arc3.read();
+                assert!(*lock >= 0);
+            }));
+        }
+
+        // Wait for children to pass their asserts
+        for r in children {
+            assert!(r.join().is_ok());
+        }
+
+        // Wait for writer to finish
+        rx.recv().unwrap();
+        let lock = arc.read();
+        assert_eq!(*lock, 10);
     }
 }
