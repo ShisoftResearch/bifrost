@@ -69,6 +69,7 @@ impl HeartbeatService {
 }
 dispatch_rpc_service_functions!(HeartbeatService);
 
+#[derive(Debug)]
 struct Member {
     pub id: u64,
     pub address: String,

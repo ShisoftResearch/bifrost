@@ -37,7 +37,7 @@ impl MemberService {
             closed: AtomicBool::new(false),
             id: server_id,
         });
-        sm_client.join(&server_address);
+        sm_client.join(&server_address).wait();
         let service_clone = service.clone();
         thread::spawn(move || {
             while !service_clone.closed.load(Ordering::Relaxed) {

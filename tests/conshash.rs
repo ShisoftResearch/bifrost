@@ -71,14 +71,14 @@ fn primary() {
     let ch2 = ConsistentHashing::new(&group_2, &wild_raft_client).unwrap();
     let ch3 = ConsistentHashing::new(&group_3, &wild_raft_client).unwrap();
 
-    ch1.set_weight(&server_1, 1);
-    ch1.set_weight(&server_2, 2);
-    ch1.set_weight(&server_3, 3);
+    ch1.set_weight(&server_1, 1).wait().unwrap();
+    ch1.set_weight(&server_2, 2).wait().unwrap();
+    ch1.set_weight(&server_3, 3).wait().unwrap();
 
-    ch2.set_weight(&server_1, 1);
-    ch2.set_weight(&server_2, 1);
+    ch2.set_weight(&server_1, 1).wait().unwrap();
+    ch2.set_weight(&server_2, 1).wait().unwrap();
 
-    ch3.set_weight(&server_1, 1);
+    ch3.set_weight(&server_1, 1).wait().unwrap();
 
     ch1.init_table().unwrap();
     ch2.init_table().unwrap();
@@ -87,21 +87,18 @@ fn primary() {
     let ch1_server_node_changes_count = Arc::new(AtomicUsize::new(0));
     let ch1_server_node_changes_count_clone = Arc::new(AtomicUsize::new(0)).clone();
     ch1.watch_server_nodes_range_changed(&server_2, move |r| {
-        println!("---------------->");
         ch1_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
     });
 
     let ch2_server_node_changes_count = Arc::new(AtomicUsize::new(0));
     let ch2_server_node_changes_count_clone = Arc::new(AtomicUsize::new(0)).clone();
     ch2.watch_server_nodes_range_changed(&server_2, move |r| {
-        println!("---------------->");
         ch2_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
     });
 
     let ch3_server_node_changes_count = Arc::new(AtomicUsize::new(0));
     let ch3_server_node_changes_count_clone = Arc::new(AtomicUsize::new(0)).clone();
     ch3.watch_server_nodes_range_changed(&server_2, move |r| {
-        println!("---------------->");
         ch3_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
     });
 
