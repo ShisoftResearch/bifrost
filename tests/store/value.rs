@@ -4,6 +4,7 @@ use bifrost::store::value::string;
 use bifrost::store::value::string::client::SMClient;
 use bifrost::rpc::Server;
 use bifrost::raft::state_machine::callback::client::SubscriptionService;
+use futures::prelude::*;
 
 #[test]
 fn string(){
@@ -41,12 +42,12 @@ fn string(){
 //        }
 //    }).unwrap().unwrap();
     assert_eq!(
-        &sm_client.get().unwrap().unwrap(),
+        &sm_client.get().wait().unwrap().unwrap(),
         &original_string
     );
-    sm_client.set(&altered_string).unwrap().unwrap();
+    sm_client.set(&altered_string).wait().unwrap().unwrap();
     assert_eq!(
-        &sm_client.get().unwrap().unwrap(),
+        &sm_client.get().wait().unwrap().unwrap(),
         &altered_string
     );
 }

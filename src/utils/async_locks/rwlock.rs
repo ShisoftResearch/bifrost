@@ -1,39 +1,76 @@
-use parking_lot;
 use futures::{Future, Async, Poll};
-use std::ops::{Deref};
+use super::cpu_relax;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::UnsafeCell;
+use std::ops::{Deref, DerefMut};
 
-pub struct RwLock<T> {
-    inner: parking_lot::RwLock<T>
+#[derive(Clone)]
+pub struct RwLock<T: ?Sized> {
+    inner: Arc<RwLockInner<T>>
 }
 
-pub struct AsyncRwLockReadGuard<'a, T: 'a> {
-    outer: &'a RwLock<T>
+struct RwLockInner<T: ?Sized> {
+    raw: RwLockRaw,
+    data: UnsafeCell<T>
 }
 
-pub struct AsyncRwLockWriteGuard<'a, T: 'a> {
-    outer: &'a RwLock<T>
+struct RwLockRaw {
+    state: AtomicUsize
 }
 
-impl <'a, T> Future for AsyncRwLockReadGuard<'a ,T> {
-    type Item = parking_lot::RwLockReadGuard<'a, T>;
+#[derive(Clone)]
+pub struct AsyncRwLockReadGuard<T: ?Sized> {
+    lock: Arc<RwLockInner<T>>
+}
+
+#[derive(Clone)]
+pub struct AsyncRwLockWriteGuard<T: ?Sized> {
+    lock: Arc<RwLockInner<T>>
+}
+
+#[derive(Clone)]
+pub struct RwLockReadGuard<T: ?Sized> {
+    lock: Arc<RwLockInner<T>>
+}
+
+#[derive(Clone)]
+pub struct RwLockWriteGuard<T: ?Sized> {
+    lock: Arc<RwLockInner<T>>
+}
+
+unsafe impl<T: Send> Send for RwLock<T> {}
+unsafe impl<T: Send> Sync for RwLock<T> {}
+
+unsafe impl<T: Send> Send for RwLockInner<T> {}
+unsafe impl<T: Send> Sync for RwLockInner<T> {}
+
+impl <T: ?Sized> Future for AsyncRwLockReadGuard<T> {
+    type Item = RwLockReadGuard<T>;
     type Error = ();
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        match self.outer.inner.try_read() {
-            Some(guard) => Ok(Async::Ready(guard)),
-            None => Ok(Async::NotReady)
+        if self.lock.raw.try_read() {
+            Ok(Async::Ready(RwLockReadGuard {
+                lock: self.lock.clone()
+            }))
+        } else {
+            Ok(Async::NotReady)
         }
     }
 }
 
-impl <'a, T> Future for AsyncRwLockWriteGuard<'a ,T> {
-    type Item = parking_lot::RwLockWriteGuard<'a, T>;
+impl <T> Future for AsyncRwLockWriteGuard<T> {
+    type Item = RwLockWriteGuard<T>;
     type Error = ();
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        match self.outer.inner.try_write() {
-            Some(guard) => Ok(Async::Ready(guard)),
-            None => Ok(Async::NotReady)
+        if self.lock.raw.try_write() {
+            Ok(Async::Ready(RwLockWriteGuard {
+                lock: self.lock.clone()
+            }))
+        } else {
+            Ok(Async::NotReady)
         }
     }
 }
@@ -41,25 +78,243 @@ impl <'a, T> Future for AsyncRwLockWriteGuard<'a ,T> {
 impl <T> RwLock <T> {
     pub fn new(val: T) -> RwLock<T> {
         RwLock {
-            inner: parking_lot::RwLock::new(val)
+            inner: RwLockInner::new(val)
         }
     }
     pub fn read_async(&self) -> AsyncRwLockReadGuard<T> {
         AsyncRwLockReadGuard {
-            outer: self
+            lock: self.inner.clone()
         }
     }
     pub fn write_async(&self) -> AsyncRwLockWriteGuard<T> {
         AsyncRwLockWriteGuard {
-            outer: self
+            lock: self.inner.clone()
+        }
+    }
+    pub fn read(&self) -> RwLockReadGuard<T> {
+        while !self.inner.raw.try_read() {
+            cpu_relax()
+        }
+        RwLockReadGuard {
+            lock: self.inner.clone()
+        }
+    }
+    pub fn write(&self) -> RwLockWriteGuard<T> {
+        while !self.inner.raw.try_write() {
+            cpu_relax()
+        }
+        RwLockWriteGuard {
+            lock: self.inner.clone()
         }
     }
 }
 
-impl <T> Deref for RwLock<T> {
-    type Target = parking_lot::RwLock<T>;
+impl <T> RwLockInner<T> {
+    pub fn new(val: T) -> Arc<RwLockInner<T>> {
+        Arc::new(RwLockInner {
+            raw: RwLockRaw::new(),
+            data: UnsafeCell::new(val)
+        })
+    }
+}
+
+impl RwLockRaw {
+    fn new() -> RwLockRaw {
+        RwLockRaw {
+          state: AtomicUsize::new(0)
+        }
+    }
+    fn try_read(&self) -> bool  {
+        let lc = self.state.load(Ordering::Relaxed);
+        if lc == 1 {
+            // write locked
+            return false;
+        } else {
+            let next_count = if lc == 0 { 2 } else { lc + 1 };
+            return self.state.compare_and_swap(lc, next_count, Ordering::Relaxed) == lc;
+        }
+    }
+    fn try_write(&self) -> bool {
+        self.state.compare_and_swap(0, 1, Ordering::Relaxed) == 0
+    }
+    fn unlock_read(&self) {
+        loop {
+            let lc = self.state.load(Ordering::Relaxed);
+            let next_count = if lc == 2 { 0 } else { lc - 1 };
+            assert!(lc > 1);
+            if self.state.compare_and_swap(lc, next_count, Ordering::Relaxed) == lc {
+                return;
+            } else {
+                cpu_relax();
+            }
+        }
+    }
+    fn unlock_write(&self) {
+        assert_eq!(self.state.compare_and_swap(1, 0, Ordering::Relaxed), 1);
+    }
+}
+
+impl <T> Deref for RwLockReadGuard<T> {
+    type Target = T;
     #[inline]
-    fn deref(&self) -> &parking_lot::RwLock<T> {
-        &self.inner
+    fn deref(&self) -> &Self::Target {
+        unsafe {
+            &*self.lock.data.get()
+        }
+    }
+}
+
+impl <T> Deref for RwLockWriteGuard<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        #[inline]
+        unsafe {
+            &*self.lock.data.get()
+        }
+    }
+}
+
+impl <T> DerefMut for RwLockWriteGuard<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        self.mutate()
+    }
+}
+
+
+impl <T> RwLockWriteGuard<T> {
+    #[inline]
+    pub fn mutate(&self) -> &mut T {
+        unsafe { &mut *self.lock.data.get() }
+    }
+}
+
+impl <T: ?Sized> Drop for RwLockReadGuard<T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.lock.raw.unlock_read()
+    }
+}
+
+impl <T: ?Sized> Drop for RwLockWriteGuard<T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.lock.raw.unlock_write()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate rand;
+    use self::rand::Rng;
+    use std::sync::mpsc::channel;
+    use std::thread;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use super::*;
+
+    #[derive(Eq, PartialEq, Debug)]
+    struct NonCopy(i32);
+
+    #[test]
+    fn smoke() {
+        let l = RwLock::new(());
+        drop(l.read());
+        drop(l.write());
+        drop((l.read(), l.read()));
+        drop(l.write());
+    }
+
+    #[test]
+    fn frob() {
+        const N: u32 = 10;
+        const M: u32 = 1000;
+
+        let r = Arc::new(RwLock::new(()));
+
+        let (tx, rx) = channel::<()>();
+        for _ in 0..N {
+            let tx = tx.clone();
+            let r = r.clone();
+            thread::spawn(move || {
+                let mut rng = rand::thread_rng();
+                for _ in 0..M {
+                    if rng.gen_weighted_bool(N) {
+                        drop(r.write());
+                    } else {
+                        drop(r.read());
+                    }
+                }
+                drop(tx);
+            });
+        }
+        drop(tx);
+        let _ = rx.recv();
+    }
+
+    #[test]
+    fn test_rw_arc_no_poison_wr() {
+        let arc = Arc::new(RwLock::new(1));
+        let arc2 = arc.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            let _lock = arc2.write();
+            panic!();
+        });
+        let lock = arc.read();
+        assert_eq!(*lock, 1);
+    }
+
+    #[test]
+    fn test_rw_arc_no_poison_ww() {
+        let arc = Arc::new(RwLock::new(1));
+        let arc2 = arc.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            let _lock = arc2.write();
+            panic!();
+        });
+        let lock = arc.write();
+        assert_eq!(*lock, 1);
+    }
+
+    #[test]
+    fn test_rw_arc() {
+        let arc = Arc::new(RwLock::new(0));
+        let arc2 = arc.clone();
+        let (tx, rx) = channel();
+
+        thread::spawn(move || {
+            let mut lock = arc2.write();
+            for _ in 0..10 {
+                let tmp = *lock;
+                *lock = -1;
+                thread::yield_now();
+                *lock = tmp + 1;
+            }
+            tx.send(()).unwrap();
+        });
+
+        // Readers try to catch the writer in the act
+        let mut children = Vec::new();
+        for _ in 0..5 {
+            let arc3 = arc.clone();
+            children.push(thread::spawn(move || {
+                let lock = arc3.read();
+                assert!(*lock >= 0);
+            }));
+        }
+
+        // Wait for children to pass their asserts
+        for r in children {
+            assert!(r.join().is_ok());
+        }
+
+        // Wait for writer to finish
+        rx.recv().unwrap();
+        let lock = arc.read();
+        assert_eq!(*lock, 10);
     }
 }

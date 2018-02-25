@@ -41,13 +41,13 @@ impl StateMachineCmds for Weights {
 }
 impl StateMachineCtl for Weights {
     raft_sm_complete!();
+    fn id(&self) -> u64 {DEFAULT_SERVICE_ID}
     fn snapshot(&self) -> Option<Vec<u8>> {
         Some(bincode::serialize(&self.groups))
     }
     fn recover(&mut self, data: Vec<u8>) {
         self.groups = bincode::deserialize(&data);
     }
-    fn id(&self) -> u64 {DEFAULT_SERVICE_ID}
 }
 impl Weights {
     pub fn new(raft_service: &Arc<RaftService>) {

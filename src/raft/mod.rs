@@ -1,8 +1,7 @@
 use rand;
 use rand::distributions::{IndependentSample, Range};
 use std::thread;
-use parking_lot::{Mutex, RwLockReadGuard, RwLockWriteGuard};
-use utils::async_locks::{RwLock};
+use utils::async_locks::{RwLock, Mutex, RwLockReadGuard, RwLockWriteGuard};
 use std::collections::{BTreeMap, HashMap};
 use std::collections::Bound::{Included, Unbounded};
 use std::cmp::{min, max};
@@ -33,8 +32,8 @@ def_bindings! {
 }
 
 pub trait RaftMsg<R>: Send + Sync {
-    fn encode(&self) -> (u64, OpType, &Vec<u8>);
-    fn decode_return(&self, data: &Vec<u8>) -> R;
+    fn encode(self) -> (u64, OpType, Vec<u8>);
+    fn decode_return(data: &Vec<u8>) -> R;
 }
 
 const CHECKER_MS: i64 = 10;
@@ -358,12 +357,12 @@ impl RaftService {
         if let Ok(client) = client {
             let result = client.execute(
                 CONFIG_SM_ID,
-                &new_member_::new(&self.options.address)
-            );
+                new_member_::new(&self.options.address)
+            ).wait();
             let members = client.execute(
                 CONFIG_SM_ID,
-                &member_address::new()
-            );
+                member_address::new()
+            ).wait();
             let mut meta = self.write_meta();
             if let Ok(Ok(members)) = members {
                 for member in members {
@@ -377,7 +376,7 @@ impl RaftService {
             Err(ExecError::CannotConstructClient)
         }
     }
-        pub fn leave(&self) -> bool {
+    pub fn leave(&self) -> bool {
         let servers = self.cluster_info().members.iter()
             .map(|&(_, ref address)|{
                 address.clone()
@@ -385,8 +384,8 @@ impl RaftService {
         if let Ok(client) = RaftClient::new(&servers, self.options.service_id) {
             client.execute(
                 CONFIG_SM_ID,
-                &del_member_::new(&self.options.address)
-            );
+                del_member_::new(&self.options.address)
+            ).wait();
         } else {
             return false
         }

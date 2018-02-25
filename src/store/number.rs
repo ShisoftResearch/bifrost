@@ -44,7 +44,7 @@ macro_rules! def_store_number {
                     let on = self.num;
                     self.num = n;
                     if let Some(ref callback) = self.callback {
-                        callback.notify(&commands::on_changed::new(), Ok((on, n)));
+                        callback.notify(commands::on_changed::new(), Ok((on, n)));
                     }
                     Ok(())
                 }

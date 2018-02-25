@@ -1,5 +1,6 @@
 // a simple spin lock based async mutex
 
+use super::cpu_relax;
 use futures::{Future, future, Async, Poll};
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Weak};
@@ -61,14 +62,10 @@ impl RawMutex {
         }
     }
 
-    fn unlock(&self) -> bool {
-        let prev_val = self.state.compare_and_swap(
+    fn unlock(&self) {
+        assert!(self.state.compare_and_swap(
             true, false, Ordering::Relaxed
-        );
-        let success = prev_val == true;
-        assert!(success);
-        //println!("raw unlocking {}", prev_val);
-        return success
+        ))
     }
 }
 
@@ -112,6 +109,7 @@ impl <T> Mutex <T> {
 }
 
 impl <T> MutexGuard<T> {
+    #[inline]
     pub fn mutate(&self) -> &mut T {
         unsafe { &mut *self.mutex.data.get() }
     }
@@ -135,24 +133,8 @@ impl <T> DerefMut for MutexGuard<T> {
 impl <T: ?Sized> Drop for MutexGuard<T> {
     #[inline]
     fn drop(&mut self) {
-        let success = self.mutex.raw.unlock();
-        // println!("drop ulocking {}", success);
+        self.mutex.raw.unlock();
     }
-}
-
-/// Called while spinning (name borrowed from Linux). Can be implemented to call
-/// a platform-specific method of lightening CPU load in spinlocks.
-#[cfg(all(feature = "asm", any(target_arch = "x86", target_arch = "x86_64")))]
-#[inline(always)]
-pub fn cpu_relax() {
-    // This instruction is meant for usage in spinlock loops
-    // (see Intel x86 manual, III, 4.2)
-    unsafe { asm!("pause" :::: "volatile"); }
-}
-
-#[cfg(any(not(feature = "asm"), not(any(target_arch = "x86", target_arch = "x86_64"))))]
-#[inline(always)]
-pub fn cpu_relax() {
 }
 
 mod tests {

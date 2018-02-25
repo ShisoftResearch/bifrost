@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::{thread, time};
 use bifrost_hasher::hash_str;
 
+use futures::prelude::*;
+
 static PING_INTERVAL: u64 = 100;
 
 pub struct MemberService {
@@ -35,12 +37,12 @@ impl MemberService {
             closed: AtomicBool::new(false),
             id: server_id,
         });
-        sm_client.join(&server_address);
+        sm_client.join(&server_address).wait();
         let service_clone = service.clone();
         thread::spawn(move || {
             while !service_clone.closed.load(Ordering::Relaxed) {
-                let rpc_client = service_clone.raft_client.current_leader_rpc_client();
-                if let Some(rpc_client) = rpc_client {
+                let rpc_client = service_clone.raft_client.current_leader_rpc_client().wait();
+                if let Ok(rpc_client) = rpc_client {
                     let heartbeat_client = AsyncServiceClient::new(DEFAULT_SERVICE_ID, &rpc_client);
                     heartbeat_client.ping(&service_clone.id);
                 }
@@ -52,14 +54,14 @@ impl MemberService {
     pub fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
     }
-    pub fn leave(&self) -> Result<Result<(), ()>, ExecError>{
+    pub fn leave(&self) -> impl Future<Item = Result<(), ()>, Error = ExecError>{
         self.close();
         self.sm_client.leave(&self.id)
     }
-    pub fn join_group(&self, group: &String) -> Result<Result<(), ()>, ExecError> {
+    pub fn join_group(&self, group: &String) -> impl Future<Item = Result<(), ()>, Error = ExecError> {
         self.member_client.join_group(group)
     }
-    pub fn leave_group(&self, group: &String) -> Result<Result<(), ()>, ExecError> {
+    pub fn leave_group(&self, group: &String) -> impl Future<Item = Result<(), ()>, Error = ExecError> {
         self.member_client.leave_group(group)
     }
     pub fn client(&self) -> ObserverClient {
