@@ -23,6 +23,7 @@ use super::*;
 
 const ORDERING: Ordering = Ordering::Relaxed;
 pub type Client = Arc<AsyncServiceClient>;
+pub type SubscriptionReceipt = (SubKey, u64);
 
 lazy_static! {
     pub static ref CALLBACK: RwLock<Option<Arc<SubscriptionService>>> = RwLock::new(None);
@@ -88,7 +89,7 @@ impl RaftClient {
     pub fn subscribe
     <M, R, F>
     (&self, sm_id: u64, msg: M, f: F)
-        -> Box<Future<Item = Result<u64, SubscriptionError>, Error = ExecError>>
+        -> Box<Future<Item = Result<SubscriptionReceipt, SubscriptionError>, Error = ExecError>>
         where M: RaftMsg<R> + 'static,
               R: 'static,
               F: Fn(R) + 'static + Send + Sync
@@ -260,7 +261,8 @@ impl RaftClientInner {
     #[async(boxed)]
     pub fn subscribe
     <M, R, F>
-    (this: Arc<Self>, sm_id: u64, msg: M, f: F) -> Result<Result<u64, SubscriptionError>, ExecError>
+    (this: Arc<Self>, sm_id: u64, msg: M, f: F)
+        -> Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>
         where M: RaftMsg<R> + 'static,
               R: 'static,
               F: Fn(R) + 'static + Send + Sync
@@ -282,7 +284,7 @@ impl RaftClientInner {
                 let mut subs_map = callback.subs.write();
                 let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
                 subs_lst.push((Box::new(wrapper_fn), sub_id));
-                Ok(Ok(sub_id))
+                Ok(Ok((key, sub_id)))
             },
             Ok(Err(_)) => Ok(Err(SubscriptionError::RemoteError)),
             Err(e) => Err(e)

@@ -10,7 +10,7 @@ use bifrost_hasher::{hash_str, hash_bytes};
 use membership::client::{ObserverClient as MembershipClient, Member};
 use conshash::weights::DEFAULT_SERVICE_ID;
 use conshash::weights::client::{SMClient as WeightSMClient};
-use raft::client::{RaftClient, SubscriptionError};
+use raft::client::{RaftClient, SubscriptionError, SubscriptionReceipt};
 use raft::state_machine::master::ExecError;
 use utils::bincode::{serialize};
 use rand;
@@ -38,7 +38,7 @@ pub enum InitTableError {
 
 #[derive(Debug)]
 pub enum CHError {
-    WatchError(Result<Result<u64, SubscriptionError>, ExecError>),
+    WatchError(Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>),
     InitTableError(InitTableError),
 }
 
