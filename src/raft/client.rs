@@ -97,11 +97,10 @@ impl RaftClient {
         RaftClientInner::subscribe(self.inner.clone(), sm_id, msg, f)
     }
 
-    pub fn unsubscribe<M, R>(&self, sm_id: u64, msg: M, sub_id: u64)
+    pub fn unsubscribe(&self, receipt: SubscriptionReceipt)
         -> Box<Future<Item = Result<(), SubscriptionError>, Error = ExecError>>
-        where M: RaftMsg<R> + 'static, R: 'static
     {
-        RaftClientInner::unsubscribe(self.inner.clone(), sm_id, msg, sub_id)
+        RaftClientInner::unsubscribe(self.inner.clone(), receipt)
     }
 
     pub fn leader_id(&self) -> u64 {
@@ -292,13 +291,12 @@ impl RaftClientInner {
     }
 
     #[async(boxed)]
-    pub fn unsubscribe<M, R>(this: Arc<Self>, sm_id: u64, msg: M, sub_id: u64)
+    pub fn unsubscribe(this: Arc<Self>, receipt: SubscriptionReceipt)
         -> Result<Result<(), SubscriptionError>, ExecError>
-        where M: RaftMsg<R> + 'static, R: 'static
     {
         match await!(Self::get_callback(this.clone())) {
             Ok(callback) => {
-                let key = this.get_sub_key(sm_id, msg);
+                let (key, sub_id) = receipt;
                 let unsub = await!(Self::execute(
                         this.clone(),
                         CONFIG_SM_ID,
