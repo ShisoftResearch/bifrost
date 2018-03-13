@@ -133,7 +133,7 @@ impl SMCallback {
         }
     }
 
-    pub fn notify<M, R>(&self, msg: M, data: R)
+    pub fn notify<M, R>(&self, msg: M, message: R)
         -> Result<(usize, Vec<NotifyError>, Vec<Result<Result<(), ()>, rpc::RPCError>>), NotifyError>
         where R: serde::Serialize + Send + Sync + Clone + Any + 'static, M: RaftMsg<R> + 'static
     {
@@ -151,16 +151,16 @@ impl SMCallback {
                 debug!("Looking for: {:?}", &key);
                 if let Some(internal_subs) = internal_subs.get(&pattern_id) {
                     for is in internal_subs {
-                        (is.action)(&data)
+                        (is.action)(&message)
                     }
                 }
                 if let Some(sub_ids) = svr_subs.subscriptions.get(&key) {
-                    let data = bincode::serialize(&data);
                     let sub_result: Vec<_> = sub_ids.iter().map(|sub_id| {
                         if let Some(subscriber_id) = svr_subs.sub_suber.get(&sub_id) {
                             if let Some(subscriber) = svr_subs.subscribers.get(&subscriber_id) {
+                                let data = bincode::serialize(&message);
                                 let client = &subscriber.client;
-                                Ok(client.notify(&key, &data))
+                                Ok(client.notify(key, data))
                             } else {
                                 Err(NotifyError::CannotFindSubscriber)
                             }

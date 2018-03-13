@@ -343,7 +343,7 @@ impl RaftClientInner {
             let res = {;
                 await!(
                     members.clients.values().nth(pos as usize % num_members).unwrap()
-                    .c_query(&this.gen_log_entry(sm_id, fn_id, &data)))
+                    .c_query(this.gen_log_entry(sm_id, fn_id, &data)))
             };
             match res {
                 Ok(Ok(res)) => {
@@ -392,7 +392,7 @@ impl RaftClientInner {
             }
             match await!(Self::current_leader_client(this.clone())) {
                 Ok((leader_id, client)) => {
-                    match await!(client.c_command(&this.gen_log_entry(sm_id, fn_id, &data))) {
+                    match await!(client.c_command(this.gen_log_entry(sm_id, fn_id, &data))) {
                         Ok(Ok(ClientCmdResponse::Success {
                                   data, last_log_term, last_log_id
                               })) => {

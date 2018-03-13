@@ -165,10 +165,12 @@ macro_rules! service {
            $(
                 #[allow(non_camel_case_types)]
                 $(#[$attr])*
-                pub fn $fn_name(&self, $($arg:&$in_),*) -> Box<Future<Item = std::result::Result<$out, $error>, Error = RPCError>> {
+                /// Judgement: Use data ownership transfer instead of borrowing.
+                /// Some applications highly depend on RPC shortcut to achieve performance advantages.
+                /// Cloning for shortcut will significantly increase overhead. Eg. Hivemind immutable storage
+                pub fn $fn_name(&self, $($arg:$in_),*) -> Box<Future<Item = std::result::Result<$out, $error>, Error = RPCError>> {
                     if let Some(ref local) = get_local(self.server_id, self.service_id) {
-                        let local = local.clone();
-                        Box::new(future::finished(local.$fn_name($($arg.clone()),*).wait()))
+                        Box::new(future::finished(local.$fn_name($($arg),*).wait()))
                     } else {
                         let req_data = ($($arg,)*);
                         let req_data_bytes = $crate::utils::bincode::serialize(&req_data);
