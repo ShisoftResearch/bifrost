@@ -12,7 +12,8 @@ raft_state_machine! {
     def qry get_weight(group: u64, id: u64) -> Option<u64>;
 }
 pub struct Weights {
-    pub groups: HashMap<u64, HashMap<u64, u64>>
+    pub groups: HashMap<u64, HashMap<u64, u64>>,
+    pub id: u64
 }
 impl StateMachineCmds for Weights {
     fn set_weight(&mut self, group: u64, id: u64, weight: u64) -> Result<(), ()> {
@@ -41,7 +42,7 @@ impl StateMachineCmds for Weights {
 }
 impl StateMachineCtl for Weights {
     raft_sm_complete!();
-    fn id(&self) -> u64 {DEFAULT_SERVICE_ID}
+    fn id(&self) -> u64 { self.id }
     fn snapshot(&self) -> Option<Vec<u8>> {
         Some(bincode::serialize(&self.groups))
     }
@@ -50,9 +51,10 @@ impl StateMachineCtl for Weights {
     }
 }
 impl Weights {
-    pub fn new(raft_service: &Arc<RaftService>) {
+    pub fn new_with_id(id: u64, raft_service: &Arc<RaftService>) {
         raft_service.register_state_machine(Box::new(Weights {
-            groups: HashMap::new()
+            groups: HashMap::new(), id
         }))
     }
+    pub fn new(raft_service: &Arc<RaftService>) { Self::new_with_id(DEFAULT_SERVICE_ID, raft_service) }
 }

@@ -38,6 +38,7 @@ impl StateMachineCmds for MasterStateMachine {}
 
 impl StateMachineCtl for MasterStateMachine {
     raft_sm_complete!();
+    fn id(&self) -> u64 {0}
     fn snapshot(&self) -> Option<Vec<u8>> {
         let mut sms: SnapshotDataItems = Vec::with_capacity(self.subs.len());
         for (sm_id, smc) in self.subs.iter() {
@@ -60,7 +61,6 @@ impl StateMachineCtl for MasterStateMachine {
             }
         }
     }
-    fn id(&self) -> u64 {0}
 }
 
 fn parse_output(r: Option<Vec<u8>>) -> ExecResult {
