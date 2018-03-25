@@ -30,7 +30,7 @@ pub enum Action {
 #[derive(Debug)]
 pub enum InitTableError {
     GroupNotExisted,
-    NoWeightService,
+    NoWeightService(ExecError),
     NoWeightGroup,
     NoWeightInfo,
     Unknown,
@@ -253,7 +253,7 @@ impl ConsistentHashing {
                         Err(InitTableError::NoWeightInfo)
                     }
                 },
-                Err(_) => Err(InitTableError::NoWeightService),
+                Err(e) => Err(InitTableError::NoWeightService(e)),
                 Ok(Ok(None)) => Err(InitTableError::NoWeightGroup),
                 _ => Err(InitTableError::Unknown)
 
