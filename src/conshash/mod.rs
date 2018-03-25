@@ -110,7 +110,10 @@ impl ConsistentHashing {
         Self::new_with_id(DEFAULT_SERVICE_ID, group, raft_client)
     }
     pub fn new_client<'a>(group: &'a str, raft_client: &Arc<RaftClient>) -> Result<Arc<ConsistentHashing>, CHError> {
-        match ConsistentHashing::new(group, raft_client) {
+        Self::new_client_with_id(DEFAULT_SERVICE_ID, group, raft_client)
+    }
+    pub fn new_client_with_id<'a>(id: u64, group: &'a str, raft_client: &Arc<RaftClient>) -> Result<Arc<ConsistentHashing>, CHError> {
+        match ConsistentHashing::new_with_id(id, group, raft_client) {
             Err(e) => Err(e),
             Ok(ch) => {
                 match ch.init_table() {
