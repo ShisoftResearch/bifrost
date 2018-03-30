@@ -156,6 +156,7 @@ impl RwLockRaw {
 
 impl <T> Deref for RwLockReadGuard<T> {
     type Target = T;
+
     #[inline]
     fn deref(&self) -> &Self::Target {
         unsafe {
@@ -167,8 +168,8 @@ impl <T> Deref for RwLockReadGuard<T> {
 impl <T> Deref for RwLockWriteGuard<T> {
     type Target = T;
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
-        #[inline]
         unsafe {
             &*self.lock.data.get()
         }
