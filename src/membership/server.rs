@@ -16,11 +16,11 @@ use membership::client::{Group as ClientGroup, Member as ClientMember};
 use futures::prelude::*;
 use futures::future;
 
-static MAX_TIMEOUT: i64 = 1000; //5 secs for 500ms heartbeat
+static MAX_TIMEOUT: u64 = 1000; //5 secs for 500ms heartbeat
 
 struct HBStatus {
     online: bool,
-    last_updated: i64,
+    last_updated: u64,
 }
 
 pub struct HeartbeatService {

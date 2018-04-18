@@ -1,11 +1,12 @@
-use time;
-use std::time::Duration;
+use std::time::{SystemTime, Duration, UNIX_EPOCH};
 
-pub fn get_time() -> i64 {
+pub fn get_time() -> u64 {
     //Get current time
-    let current_time = time::get_time();
+    let start = SystemTime::now();
+    let since_the_epoch = start.duration_since(UNIX_EPOCH)
+        .expect("Time went backwards");
     //Calculate milliseconds
-    (current_time.sec as i64 * 1000) + (current_time.nsec as i64 / 1000 / 1000)
+    since_the_epoch.as_secs() * 1000 + since_the_epoch.subsec_nanos() as u64 / 1_000_000
 }
 
 pub fn duration_to_ms(duration: Duration) -> u64 {

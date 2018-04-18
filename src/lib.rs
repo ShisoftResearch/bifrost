@@ -29,17 +29,13 @@ pub mod vector_clock;
 
 extern crate byteorder;
 
-extern crate tokio_core;
+extern crate tokio;
 extern crate tokio_io;
-extern crate tokio_service;
-extern crate tokio_proto;
-extern crate tokio_timer;
-extern crate tokio_middleware;
 extern crate futures_await as futures;
 extern crate futures_cpupool;
 extern crate parking_lot;
-extern crate thread_id;
 
+extern crate bytes;
 extern crate bincode;
 extern crate serde;
 #[macro_use]
@@ -50,13 +46,11 @@ extern crate log;
 extern crate env_logger;
 
 extern crate rand;
-extern crate time;
 extern crate threadpool;
 extern crate num_cpus;
 
 #[macro_use]
 extern crate lazy_static;
-extern crate backtrace;
 
 extern crate bifrost_plugins;
 extern crate bifrost_hasher;

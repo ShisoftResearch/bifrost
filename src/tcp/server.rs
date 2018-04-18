@@ -2,77 +2,100 @@ use std::io::{self};
 use std::sync::Arc;
 use std::net::SocketAddr;
 
-use tokio_proto::TcpServer;
-use tokio_service::{Service, NewService};
+use tokio;
+use tokio::net::TcpListener;
+use tokio::prelude::*;
+use tokio_io::codec::length_delimited::{FramedRead, FramedWrite};
 use futures::{future, Future};
+use bytes::BytesMut;
 
-use tcp::proto::BytesServerProto;
 use tcp::shortcut;
 use super::STANDALONE_ADDRESS;
+use tokio::net::TcpStream;
 
-pub struct ServerCallback {
-    closure: Box<Fn(Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = io::Error>>>
+pub struct Server {}
+pub type CallBack = Box<Fn(BytesMut) -> Box<Future<Item = BytesMut, Error = io::Error>>>;
+
+struct DataStreamer<W: AsyncWrite, R: AsyncRead> {
+    bw: FramedWrite<W>,
+    br: FramedRead<R>
 }
 
-impl ServerCallback {
-    pub fn new<F: 'static>(f: F) -> ServerCallback
-        where F: Fn(Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = io::Error>>
-    {
-        ServerCallback {
-            closure: Box::new(f)
+struct Receiving {
+    inner: Box<Future<Item = (), Error = ()>>
+}
+
+impl Future for Receiving {
+    type Item = ();
+    type Error = ();
+
+    fn poll(&mut self) -> Result<Async<<Self as Future>::Item>, <Self as Future>::Error> {
+        self.inner.poll()
+    }
+}
+
+unsafe impl Sync for Receiving {}
+unsafe impl Send for Receiving {}
+
+fn receive(tcp: TcpStream, callback: Arc<CallBack>)
+    -> Receiving
+{
+    let (reader, writer) = tcp.split();
+    let bytes_reader = FramedRead::new(reader);
+    let bytes_writer = FramedWrite::new(writer);
+    Receiving {
+        inner: box bytes_reader
+            .for_each(|bytes| {
+                callback(bytes)
+                    .and_then(|result_bytes| {
+                        bytes_writer.send(result_bytes)
+                    })
+                    .map(|_| ())
+            })
+            .map_err(|e| error!("{:?}", e))
+    }
+}
+
+struct Service {
+    inner: Box<Future<Item = (), Error = ()>>
+}
+
+impl Service {
+    pub fn new(listener: TcpListener) -> Service {
+        Service {
+            inner: box tcp
+                .incoming()
+                .map_err(|e| error!("{:?}", e))
+                .for_each(|tcp| {
+                    tokio::spawn(receive(tcp, callback_ref.to_owned()))
+                })
         }
     }
-    pub fn call(&self, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = io::Error>> {
-        (self.closure)(data)
+}
+
+impl Future for Service {
+    type Item = ();
+    type Error = ();
+
+    fn poll(&mut self) -> Result<Async<<Self as Future>::Item>, <Self as Future>::Error> {
+        self.inner.poll()
     }
 }
 
-unsafe impl Send for ServerCallback {}
-unsafe impl Sync for ServerCallback {}
-
-pub struct Server {
-    callback: Arc<ServerCallback>
-}
-
-pub struct NewServer {
-    callback: Arc<ServerCallback>
-}
-
-impl Service for Server {
-    type Request = Vec<u8>;
-    type Response = Vec<u8>;
-    type Error = io::Error;
-    type Future = Box<Future<Item = Vec<u8>, Error = io::Error>>;
-
-    fn call(&self, req: Self::Request) -> Self::Future {
-        self.callback.call(req)
-    }
-}
-
-impl NewService for NewServer {
-
-    type Request = Vec<u8>;
-    type Response = Vec<u8>;
-    type Error = io::Error;
-    type Instance = Server;
-
-    fn new_service(&self) -> io::Result<Self::Instance> {
-        Ok(Server{
-          callback: self.callback.clone()
-        })
-    }
-}
+unsafe impl Sync for Service {}
+unsafe impl Send for Service {}
 
 impl Server {
-    pub fn new(addr: &String, callback: ServerCallback) {
+    pub fn new(
+        addr: &String,
+        callback: CallBack)
+    {
         let callback_ref = Arc::new(callback);
         shortcut::register_server(addr, &callback_ref);
-        let new_server = NewServer {
-            callback: callback_ref
-        };
         if !addr.eq(&STANDALONE_ADDRESS) {
             let socket_addr: SocketAddr = addr.parse().unwrap();
-            TcpServer::new(BytesServerProto, socket_addr).serve(new_server);
+            let tcp = TcpListener::bind(&socket_addr).unwrap();
+            tokio::run(Service::new(tcp));
         }
     }
 }

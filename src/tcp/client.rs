@@ -4,17 +4,19 @@ use std::sync::Arc;
 
 use futures::{Future, future};
 use futures_cpupool::CpuPool;
+use futures::prelude::*;
 use num_cpus;
 
-use tokio_service::Service;
-use tokio_core::net::TcpStream;
-use tokio_core::reactor::Core;
-use tokio_proto::TcpClient;
-use tokio_proto::multiplex::{ClientService};
-use tokio_middleware::Timeout;
-use tokio_timer::Timer;
+use tokio;
+use tokio::prelude::*;
+use tokio::reactor::Reactor;
+use tokio::net::TcpStream;
+use tokio::timer::Deadline;
+use bytes::BytesMut;
 
-use tcp::proto::BytesClientProto;
+// Use length delimited frames
+use tokio_io::codec::length_delimited;
+
 use tcp::shortcut;
 use bifrost_hasher::hash_str;
 use super::STANDALONE_ADDRESS;
@@ -27,29 +29,18 @@ lazy_static! {
 }
 
 pub struct ClientCore {
-    inner: ClientService<TcpStream, BytesClientProto>,
+    inner: length_delimited::FramedWrite<TcpStream, BytesMut>,
 }
 
 pub struct Client {
-    client: Option<Timeout<ClientCore>>,
+    client: Option<ClientCore>,
     pub server_id: u64,
 }
 
-impl Service for ClientCore {
-
-    type Request = Vec<u8>;
-    type Response = Vec<u8>;
-    type Error = io::Error;
-    // Again for simplicity, we are just going to box a future
-    type Future = Box<Future<Item = Self::Response, Error = io::Error>>;
-
-    fn call(&self, req: Self::Request) -> Self::Future {
-        Box::new(self.inner.call(req))
-    }
-}
-
 impl Client {
-    pub fn connect_with_timeout (address: &String, timeout: Duration) -> io::Result<Client> {
+    pub fn connect_with_timeout (address: &String, timeout: Duration)
+        -> impl Future<Item = Client, Error = io::Error>
+    {
         let server_id = hash_str(address);
         let client = {
             if !DISABLE_SHORTCUT && shortcut::is_local(server_id) {
@@ -58,17 +49,16 @@ impl Client {
                 if address.eq(&STANDALONE_ADDRESS) {
                     return Err(io::Error::new(io::ErrorKind::Other, "STANDALONE server is not found"))
                 }
-                let mut core = Core::new()?;
                 let socket_address = address.parse().unwrap();
-                let future = Box::new(TcpClient::new(BytesClientProto)
-                    .connect(&socket_address, &core.handle())
-                    .map(|c| Timeout::new(
+                let socket = TcpStream::connect(socket_address);
+                let future = socket
+                    .map(|socket| {
+                        let transport = length_delimited::FramedWrite::new(socket);
                         ClientCore {
-                            inner: c,
-                        },
-                        Timer::default(),
-                        timeout)));
-                Some(core.run(future)?) // this is required, or client won't receive response
+                            inner: transport
+                        }
+                    });
+                Some(tokio::spawn(future).unwrap()) // this is required, or client won't receive response
             }
         };
         Ok(Client {
@@ -95,7 +85,7 @@ impl Client {
     }
     pub fn send_async(&self, msg: Vec<u8>) -> Box<ResFuture> {
         if let Some(ref client) = self.client {
-            box client.call(msg)
+            box client.inner.send(msg)
         } else {
             shortcut::call(self.server_id, msg)
         }

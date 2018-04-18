@@ -1,22 +1,23 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use parking_lot::RwLock;
-use thread_id;
+use std::thread;
+use std::thread::ThreadId;
 
 pub struct Binding<T> where T: Clone {
     default: T,
-    thread_vals: RwLock<HashMap<usize, T>>
+    thread_vals: RwLock<HashMap<ThreadId, T>>
 }
 
 impl <T> Binding <T> where T: Clone {
     pub fn new(default: T) -> Binding<T> {
         Binding {
-            default: default,
+            default,
             thread_vals: RwLock::new(HashMap::new())
         }
     }
     pub fn get(&self) -> T {
-        let tid = thread_id::get();
+        let tid = thread::current().id();
         let thread_map = self.thread_vals.read();
         match thread_map.get(&tid) {
             Some(v) => v.clone(),
@@ -24,12 +25,12 @@ impl <T> Binding <T> where T: Clone {
         }
     }
     pub fn set(&self, val: T) {
-        let tid = thread_id::get();
+        let tid = thread::current().id();
         let mut thread_map = self.thread_vals.write();
         thread_map.insert(tid, val);
     }
     pub fn del(&self) {
-        let tid = thread_id::get();
+        let tid = thread::current().id();
         let mut thread_map = self.thread_vals.write();
         thread_map.remove(&tid);
     }

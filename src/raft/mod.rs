@@ -36,7 +36,7 @@ pub trait RaftMsg<R>: Send + Sync {
     fn decode_return(data: &Vec<u8>) -> R;
 }
 
-const CHECKER_MS: i64 = 10;
+const CHECKER_MS: u64 = 10;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LogEntry {
@@ -94,13 +94,13 @@ service! {
     rpc c_put_offline() -> bool;
 }
 
-fn gen_rand(lower: i64, higher: i64) -> i64 {
+fn gen_rand(lower: u64, higher: u64) -> u64 {
     let between = Range::new(lower, higher);
     let mut rng = rand::thread_rng();
     between.ind_sample(&mut rng) + 1
 }
 
-fn gen_timeout() -> i64 {
+fn gen_timeout() -> u64 {
     gen_rand(200, 500)
 }
 
@@ -110,7 +110,7 @@ struct FollowerStatus {
 }
 
 pub struct LeaderMeta {
-    last_updated: i64,
+    last_updated: u64,
     followers: HashMap<u64, Arc<Mutex<FollowerStatus>>>
 }
 
@@ -134,8 +134,8 @@ pub enum Membership {
 pub struct RaftMeta {
     term: u64,
     vote_for: Option<u64>,
-    timeout: i64,
-    last_checked: i64,
+    timeout: u64,
+    last_checked: u64,
     membership: Membership,
     logs: Arc<RwLock<LogsMap>>,
     state_machine: RwLock<MasterStateMachine>,
@@ -692,7 +692,7 @@ impl RaftService {
                 if let Membership::Leader(ref leader_meta) = meta.membership{
                     let mut leader_meta = leader_meta.write();
                     let mut updated_followers = 0;
-                    let mut timeout = 2000 as i64; // assume client timeout is more than 2s　(5 by default)
+                    let mut timeout = 2000; // assume client timeout is more than 2s　(5 by default)
                     for _ in 0..members {
                         if timeout <= 0 {break;}
                         if let Ok(last_matched_id) = rx.recv_timeout(Duration::from_millis(timeout as u64)) { // adaptive
