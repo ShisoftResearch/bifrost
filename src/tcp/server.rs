@@ -12,6 +12,7 @@ use bytes::BytesMut;
 use tcp::shortcut;
 use super::STANDALONE_ADDRESS;
 use tokio::net::TcpStream;
+use byteorder::LittleEndian;
 
 pub struct Server {}
 pub struct ServerCallback {
@@ -59,10 +60,13 @@ fn receive(tcp: TcpStream, callback: Arc<ServerCallback>)
     let bytes_writer = FramedWrite::new(writer);
     Receiving {
         inner: box bytes_reader
-            .for_each(|bytes| {
+            .for_each(|mut bytes| {
+                let msg_header = bytes.split_to(4);
                 callback.call(bytes)
-                    .and_then(|result_bytes| {
-                        bytes_writer.send(result_bytes)
+                    .and_then(move |result_bytes| {
+                        let mut msg_bytes = msg_header;
+                        msg_bytes.unsplit(result_bytes);
+                        bytes_writer.send(msg_bytes)
                     })
                     .map(|_| ())
             })
