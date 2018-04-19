@@ -17,7 +17,6 @@ use std::clone::Clone;
 use bifrost_hasher::{hash_str, hash_bytes};
 use rand;
 use rpc;
-use backtrace::Backtrace;
 use futures::prelude::*;
 use super::*;
 

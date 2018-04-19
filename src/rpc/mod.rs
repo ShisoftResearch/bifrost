@@ -9,7 +9,6 @@ use utils::async_locks::{Mutex, RwLock};
 use futures::prelude::*;
 use std::thread;
 use tcp;
-use utils::time;
 use utils::u8vec::*;
 use futures::{Future, future};
 use bifrost_hasher::hash_str;

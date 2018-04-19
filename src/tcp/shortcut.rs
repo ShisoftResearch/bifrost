@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap};
 use std::sync::Arc;
-use std::io::{Error, ErrorKind, Result};
+use std::io::{Error, ErrorKind};
 use bifrost_hasher::hash_str;
 use parking_lot::RwLock;
 use tcp::server::ServerCallback;
 use futures::{future, Future};
+use bytes::BytesMut;
 
 lazy_static! {
     pub static ref TCP_CALLBACKS: RwLock<BTreeMap<u64, Arc<ServerCallback>>> = RwLock::new(BTreeMap::new());
@@ -16,7 +17,7 @@ pub fn register_server(server_address: &String, callback: &Arc<ServerCallback>) 
     servers_cbs.insert(server_id, callback.clone());
 }
 
-pub fn call(server_id: u64, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = Error>> {
+pub fn call(server_id: u64, data: BytesMut) -> Box<Future<Item = BytesMut, Error = Error>> {
     let callback = {
         let server_cbs = TCP_CALLBACKS.read();
         match server_cbs.get(&server_id) {

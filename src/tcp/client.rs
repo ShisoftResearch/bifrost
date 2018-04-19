@@ -15,21 +15,45 @@ use tokio::timer::Deadline;
 use bytes::BytesMut;
 
 // Use length delimited frames
-use tokio_io::codec::length_delimited;
+use tokio_io::codec::length_delimited::{FramedRead, FramedWrite};
 
 use tcp::shortcut;
 use bifrost_hasher::hash_str;
 use super::STANDALONE_ADDRESS;
 use DISABLE_SHORTCUT;
+use tokio_io::io::{WriteHalf, ReadHalf};
+use utils::async_locks::Mutex;
 
-pub type ResFuture = Future<Item = Vec<u8>, Error = io::Error>;
+pub type ResFuture = Future<Item = BytesMut, Error = io::Error>;
 
 lazy_static! {
     pub static ref CONNECTING_POOL: CpuPool = CpuPool::new(10 * num_cpus::get());
 }
 
-pub struct ClientCore {
-    inner: length_delimited::FramedWrite<TcpStream, BytesMut>,
+
+struct ClientCore {
+    bw: FramedWrite<WriteHalf<TcpStream>>,
+    br: Arc<Mutex<FramedRead<ReadHalf<TcpStream>>>>
+}
+
+impl ClientCore {
+    fn new(socket: TcpStream) -> ClientCore {
+        let (read, write) = socket.split();
+        let reader = FramedRead::new(read);
+        let writer = FramedWrite::new(write);
+        ClientCore {
+            bw: writer, br: Arc::new(Mutex::new(reader))
+        }
+    }
+    fn send(&self, data: BytesMut) -> impl Future<Item = BytesMut, Error = io::Error> {
+        let reader_lock = self.br.clone();
+        self.bw
+            .send(data)
+            .and_then(move |_|
+                reader_lock.lock_async()
+                    .map_err(|_| io::Error::new(io::ErrorKind::Other, ""))
+                    .then(|dr| dr))
+    }
 }
 
 pub struct Client {
@@ -53,10 +77,7 @@ impl Client {
                 let socket = TcpStream::connect(socket_address);
                 let future = socket
                     .map(|socket| {
-                        let transport = length_delimited::FramedWrite::new(socket);
-                        ClientCore {
-                            inner: transport
-                        }
+                        ClientCore::new(socket)
                     });
                 Some(tokio::spawn(future).unwrap()) // this is required, or client won't receive response
             }
@@ -83,9 +104,9 @@ impl Client {
             Client::connect_with_timeout(&address, Duration::from_secs(5))
         })
     }
-    pub fn send_async(&self, msg: Vec<u8>) -> Box<ResFuture> {
+    pub fn send_async(&self, msg: BytesMut) -> Box<ResFuture> {
         if let Some(ref client) = self.client {
-            box client.inner.send(msg)
+            box client.send(msg)
         } else {
             shortcut::call(self.server_id, msg)
         }
