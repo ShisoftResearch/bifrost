@@ -33,6 +33,7 @@ extern crate tokio;
 extern crate tokio_io;
 extern crate futures_await as futures;
 extern crate futures_cpupool;
+extern crate futures_channel;
 extern crate parking_lot;
 
 extern crate bytes;

@@ -1,17 +1,18 @@
 use std::io;
 use std::time::Duration;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::collections::BTreeMap;
 
 use futures::{Future, future};
+use futures_channel::oneshot;
 use futures_cpupool::CpuPool;
 use futures::prelude::*;
 use num_cpus;
 
 use tokio;
 use tokio::prelude::*;
-use tokio::reactor::Reactor;
 use tokio::net::TcpStream;
-use tokio::timer::Deadline;
 use bytes::BytesMut;
 
 // Use length delimited frames
@@ -23,6 +24,7 @@ use super::STANDALONE_ADDRESS;
 use DISABLE_SHORTCUT;
 use tokio_io::io::{WriteHalf, ReadHalf};
 use utils::async_locks::Mutex;
+use byteorder::{LittleEndian, ByteOrder};
 
 pub type ResFuture = Future<Item = BytesMut, Error = io::Error>;
 
@@ -33,7 +35,9 @@ lazy_static! {
 
 struct ClientCore {
     bw: FramedWrite<WriteHalf<TcpStream>>,
-    br: Arc<Mutex<FramedRead<ReadHalf<TcpStream>>>>
+    br: Arc<Mutex<FramedRead<ReadHalf<TcpStream>>>>,
+    msg_id_counter: AtomicU32,
+    awaiting_msgs: Mutex<BTreeMap<u32, oneshot::Sender<BytesMut>>>
 }
 
 impl ClientCore {
@@ -42,17 +46,25 @@ impl ClientCore {
         let reader = FramedRead::new(read);
         let writer = FramedWrite::new(write);
         ClientCore {
-            bw: writer, br: Arc::new(Mutex::new(reader))
+            bw: writer, br: Arc::new(Mutex::new(reader)),
+            msg_id_counter: AtomicU32::new(0),
+            awaiting_msgs: Mutex::new(BTreeMap::new())
         }
     }
     fn send(&self, data: BytesMut) -> impl Future<Item = BytesMut, Error = io::Error> {
         let reader_lock = self.br.clone();
+        let mut msg = BytesMut::with_capacity(4 + data.len());
+        let mut msg_id_bytes = [0u8; 4];
+        let msg_id = self.msg_id_counter.fetch_add(1, Ordering::Relaxed);
+        LittleEndian::write_u32(&mut msg_id_bytes, msg_id);
+        msg.extend_from_slice(&msg_id_bytes);
+        msg.extend_from_slice(&data);
+        let (msg_res_send, msg_res_receive) = oneshot::channel::<BytesMut>();
         self.bw
-            .send(data)
-            .and_then(move |_|
-                reader_lock.lock_async()
-                    .map_err(|_| io::Error::new(io::ErrorKind::Other, ""))
-                    .then(|dr| dr))
+            .send(msg)
+            .and_then(|_|
+                msg_res_receive.map_err(|_| io::Error::new(
+                    io::ErrorKind::ConnectionAborted, "Canceled")))
     }
 }
 
