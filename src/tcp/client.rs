@@ -3,11 +3,9 @@ use std::time::Duration;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::collections::BTreeMap;
-
-use futures::{Future, future};
-use futures_channel::oneshot;
-use futures_cpupool::CpuPool;
-use futures::prelude::*;
+    
+use futures::channel::oneshot;
+use futures::CpuPool;
 use num_cpus;
 
 use tokio;
@@ -60,11 +58,16 @@ impl ClientCore {
         msg.extend_from_slice(&msg_id_bytes);
         msg.extend_from_slice(&data);
         let (msg_res_send, msg_res_receive) = oneshot::channel::<BytesMut>();
-        self.bw
-            .send(msg)
+        self.awaiting_msgs.lock_async()
+            .map(|mut msgs_map| {
+                msgs_map.insert(msg_id, msg_res_send);
+            })
+            .map_err(|_| unreachable!())
             .and_then(|_|
-                msg_res_receive.map_err(|_| io::Error::new(
-                    io::ErrorKind::ConnectionAborted, "Canceled")))
+                self.bw.send(msg))
+            .and_then(|_|
+                msg_res_receive.map_err(|_|
+                    io::Error::new(io::ErrorKind::ConnectionAborted, "Canceled")))
     }
 }
 
