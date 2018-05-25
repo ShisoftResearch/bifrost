@@ -6,7 +6,6 @@ use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Weak};
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, Ordering};
-use backtrace::Backtrace;
 
 #[derive(Clone)]
 pub struct Mutex<T: ?Sized>{

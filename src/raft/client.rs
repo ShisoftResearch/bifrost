@@ -17,7 +17,6 @@ use std::clone::Clone;
 use bifrost_hasher::{hash_str, hash_bytes};
 use rand;
 use rpc;
-use backtrace::Backtrace;
 use futures::prelude::*;
 use super::*;
 
@@ -251,7 +250,7 @@ impl RaftClientInner {
     pub fn get_callback(this: Arc<Self>) -> Result<Arc<SubscriptionService>, SubscriptionError> {
         match (*await!(CALLBACK.read_async()).unwrap()).clone() {
             None => {
-                debug!("Subscription service not set: {:?}", Backtrace::new());
+                debug!("Subscription service not set");
                 Err(SubscriptionError::SubServiceNotSet)
             },
             Some(c) => Ok(c)
@@ -325,7 +324,7 @@ impl RaftClientInner {
                 }
             },
             Err(e) => {
-                debug!("Subscription service not set: {:?}", Backtrace::new());
+                debug!("Subscription service not set");
                 return Ok(Err(e))
             }
         }
