@@ -50,7 +50,6 @@ extern crate log;
 extern crate env_logger;
 
 extern crate rand;
-extern crate time;
 extern crate threadpool;
 extern crate num_cpus;
 
