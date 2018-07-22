@@ -130,8 +130,9 @@ fn primary() {
     assert_eq!(member1_svr.client().group_members(&group_3, true).wait().unwrap().unwrap().0.len(), 1);
 
     member1_svr.close(); // close only end the heartbeat thread
+
     wait();
-    wait();
+
     assert_eq!(member1_svr.client().all_members(false).wait().unwrap().unwrap().0.len(), 3);
     assert_eq!(member1_svr.client().all_members(true).wait().unwrap().unwrap().0.len(), 2);
 
@@ -165,7 +166,7 @@ fn primary() {
     assert_eq!(any_member_online_count.load(Ordering::Relaxed), 0); // no server online from offline
     assert_eq!(group_leader_changed_count.load(Ordering::Relaxed), 3); // 1 for None -> server1, 2 for server 1 -> server 2, 3 for server 2 -> server 3
     assert_eq!(group_member_joined_count.load(Ordering::Relaxed), 3);
-    assert_eq!(group_member_left_count.load(Ordering::Relaxed), 2);
+    assert_eq!(group_member_left_count.load(Ordering::Relaxed), 1);
     assert_eq!(group_member_online_count.load(Ordering::Relaxed), 0);
     assert_eq!(group_member_offline_count.load(Ordering::Relaxed), 1);
 }

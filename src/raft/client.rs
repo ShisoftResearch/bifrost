@@ -17,7 +17,7 @@ use std::clone::Clone;
 use bifrost_hasher::{hash_str, hash_bytes};
 use rand;
 use rpc;
-use futures::prelude::*;
+use futures::prelude::{async, await};
 use super::*;
 
 const ORDERING: Ordering = Ordering::Relaxed;
