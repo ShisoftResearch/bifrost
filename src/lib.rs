@@ -6,7 +6,7 @@
 #![feature(proc_macro)]
 #![feature(fnbox)]
 
-#![feature(proc_macro, conservative_impl_trait, generators)]
+#![feature(conservative_impl_trait, generators)]
 #![feature(box_syntax)]
 #![feature(use_extern_macros)]
 
