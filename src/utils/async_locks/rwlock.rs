@@ -29,14 +29,22 @@ pub struct AsyncRwLockWriteGuard<T: ?Sized> {
     lock: Arc<RwLockInner<T>>
 }
 
-#[derive(Clone)]
-pub struct RwLockReadGuard<T: ?Sized> {
+struct RwLockReadGuardInner<T: ?Sized> {
+    lock: Arc<RwLockInner<T>>
+}
+
+struct RwLockWriteGuardInner<T: ?Sized> {
     lock: Arc<RwLockInner<T>>
 }
 
 #[derive(Clone)]
+pub struct RwLockReadGuard<T: ?Sized> {
+    inner: Arc<RwLockReadGuardInner<T>>
+}
+
+#[derive(Clone)]
 pub struct RwLockWriteGuard<T: ?Sized> {
-    lock: Arc<RwLockInner<T>>
+    inner: Arc<RwLockWriteGuardInner<T>>
 }
 
 unsafe impl<T: Send> Send for RwLock<T> {}
@@ -51,9 +59,7 @@ impl <T: ?Sized> Future for AsyncRwLockReadGuard<T> {
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         if self.lock.raw.try_read() {
-            Ok(Async::Ready(RwLockReadGuard {
-                lock: self.lock.clone()
-            }))
+            Ok(Async::Ready(RwLockReadGuard::new(&self.lock)))
         } else {
             Ok(Async::NotReady)
         }
@@ -66,9 +72,7 @@ impl <T> Future for AsyncRwLockWriteGuard<T> {
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         if self.lock.raw.try_write() {
-            Ok(Async::Ready(RwLockWriteGuard {
-                lock: self.lock.clone()
-            }))
+            Ok(Async::Ready(RwLockWriteGuard::new(&self.lock)))
         } else {
             Ok(Async::NotReady)
         }
@@ -95,17 +99,13 @@ impl <T> RwLock <T> {
         while !self.inner.raw.try_read() {
             cpu_relax()
         }
-        RwLockReadGuard {
-            lock: self.inner.clone()
-        }
+        RwLockReadGuard::new(&self.inner)
     }
     pub fn write(&self) -> RwLockWriteGuard<T> {
         while !self.inner.raw.try_write() {
             cpu_relax()
         }
-        RwLockWriteGuard {
-            lock: self.inner.clone()
-        }
+        RwLockWriteGuard::new(&self.inner)
     }
 }
 
@@ -140,8 +140,8 @@ impl RwLockRaw {
     fn unlock_read(&self) {
         loop {
             let lc = self.state.load(Ordering::Relaxed);
-            let next_count = if lc == 2 { 0 } else { lc - 1 };
             assert!(lc > 1);
+            let next_count = if lc == 2 { 0 } else { lc - 1 };
             if self.state.compare_and_swap(lc, next_count, Ordering::Relaxed) == lc {
                 return;
             } else {
@@ -154,7 +154,27 @@ impl RwLockRaw {
     }
 }
 
-impl <T> Deref for RwLockReadGuard<T> {
+impl <T: ?Sized>  RwLockReadGuard<T> {
+    fn new(raw: &Arc<RwLockInner<T>>) -> RwLockReadGuard<T> {
+        RwLockReadGuard {
+            inner: Arc::new(RwLockReadGuardInner {
+                lock: raw.clone(),
+            })
+        }
+    }
+}
+
+impl <T>  RwLockWriteGuard<T> {
+    fn new(raw: &Arc<RwLockInner<T>>) -> RwLockWriteGuard<T> {
+        RwLockWriteGuard {
+            inner: Arc::new(RwLockWriteGuardInner {
+                lock: raw.clone(),
+            })
+        }
+    }
+}
+
+impl <T> Deref for RwLockReadGuardInner<T> {
     type Target = T;
 
     #[inline]
@@ -162,6 +182,62 @@ impl <T> Deref for RwLockReadGuard<T> {
         unsafe {
             &*self.lock.data.get()
         }
+    }
+}
+
+impl <T> Deref for RwLockWriteGuardInner<T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        unsafe {
+            &*self.lock.data.get()
+        }
+    }
+}
+
+impl <T> DerefMut for RwLockWriteGuardInner<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        self.mutate()
+    }
+}
+
+
+impl <T> RwLockWriteGuardInner<T> {
+    #[inline]
+    pub fn mutate(&self) -> &mut T {
+        unsafe { &mut *self.lock.data.get() }
+    }
+}
+
+impl <T> RwLockWriteGuard<T> {
+    #[inline]
+    pub fn mutate(&self) -> &mut T {
+        self.inner.mutate()
+    }
+}
+
+impl <T: ?Sized> Drop for RwLockReadGuardInner<T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.lock.raw.unlock_read()
+    }
+}
+
+impl <T: ?Sized> Drop for RwLockWriteGuardInner<T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.lock.raw.unlock_write()
+    }
+}
+
+impl <T> Deref for RwLockReadGuard<T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &*self.inner
     }
 }
 
@@ -170,38 +246,14 @@ impl <T> Deref for RwLockWriteGuard<T> {
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        unsafe {
-            &*self.lock.data.get()
-        }
+        &*self.inner
     }
 }
 
 impl <T> DerefMut for RwLockWriteGuard<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut T {
-        self.mutate()
-    }
-}
-
-
-impl <T> RwLockWriteGuard<T> {
-    #[inline]
-    pub fn mutate(&self) -> &mut T {
-        unsafe { &mut *self.lock.data.get() }
-    }
-}
-
-impl <T: ?Sized> Drop for RwLockReadGuard<T> {
-    #[inline]
-    fn drop(&mut self) {
-        self.lock.raw.unlock_read()
-    }
-}
-
-impl <T: ?Sized> Drop for RwLockWriteGuard<T> {
-    #[inline]
-    fn drop(&mut self) {
-        self.lock.raw.unlock_write()
+        self.inner.mutate()
     }
 }
 
@@ -317,5 +369,20 @@ mod tests {
         rx.recv().unwrap();
         let lock = arc.read();
         assert_eq!(*lock, 10);
+    }
+
+    #[test]
+    fn clone_guard() {
+        let lock = RwLock::new(0);
+        {
+            let guard1 = lock.read();
+            let guard2 = guard1.clone();
+        }
+        {
+            let mut guard3 = lock.write();
+            *guard3 = 3;
+        }
+        let guard4 = lock.read();
+        assert_eq!(*guard4, 3);
     }
 }
