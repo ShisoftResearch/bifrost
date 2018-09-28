@@ -16,10 +16,10 @@ use utils::bincode::{serialize};
 use rand;
 
 use futures::prelude::*;
+use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 pub mod weights;
-
-pub static DEFAULT_NODE_LIST_SIZE: f64 = 2048f64;
 
 #[derive(Debug)]
 pub enum Action {
@@ -42,14 +42,8 @@ pub enum CHError {
     InitTableError(InitTableError),
 }
 
-#[derive(Clone)]
-struct Node {
-    start: u64,
-    server: u64,
-}
-
 struct LookupTables {
-    nodes: Vec<Node>,
+    nodes: Vec<u64>,
     addrs: HashMap<u64, String>
 }
 
@@ -58,12 +52,12 @@ pub struct ConsistentHashing {
     membership: Arc<MembershipClient>,
     weight_sm_client: WeightSMClient,
     group_name: String,
-    watchers: RwLock<Vec<Box<Fn(&Member, &Action, &LookupTables, &Vec<Node>) + Send + Sync>>>,
+    watchers: RwLock<Vec<Box<Fn(&Member, &Action, &LookupTables, &Vec<u64>) + Send + Sync>>>,
     version: AtomicU64
 }
 
 impl ConsistentHashing {
-    pub fn new_with_id<'a>(id: u64, group: &'a str, raft_client: &Arc<RaftClient>) -> Result<Arc<ConsistentHashing>, CHError> {
+    pub fn new_with_id(id: u64, group: &str, raft_client: &Arc<RaftClient>) -> Result<Arc<ConsistentHashing>, CHError> {
         let membership = Arc::new(MembershipClient::new(raft_client));
         let ch = Arc::new(ConsistentHashing {
             tables: RwLock::new(LookupTables {
@@ -106,13 +100,13 @@ impl ConsistentHashing {
         }
         Ok(ch)
     }
-    pub fn new<'a>(group: &'a str, raft_client: &Arc<RaftClient>) -> Result<Arc<ConsistentHashing>, CHError> {
+    pub fn new(group: &str, raft_client: &Arc<RaftClient>) -> Result<Arc<ConsistentHashing>, CHError> {
         Self::new_with_id(DEFAULT_SERVICE_ID, group, raft_client)
     }
-    pub fn new_client<'a>(group: &'a str, raft_client: &Arc<RaftClient>) -> Result<Arc<ConsistentHashing>, CHError> {
+    pub fn new_client(group: &str, raft_client: &Arc<RaftClient>) -> Result<Arc<ConsistentHashing>, CHError> {
         Self::new_client_with_id(DEFAULT_SERVICE_ID, group, raft_client)
     }
-    pub fn new_client_with_id<'a>(id: u64, group: &'a str, raft_client: &Arc<RaftClient>) -> Result<Arc<ConsistentHashing>, CHError> {
+    pub fn new_client_with_id(id: u64, group: &str, raft_client: &Arc<RaftClient>) -> Result<Arc<ConsistentHashing>, CHError> {
         match ConsistentHashing::new_with_id(id, group, raft_client) {
             Err(e) => Err(e),
             Ok(ch) => {
@@ -137,27 +131,21 @@ impl ConsistentHashing {
     pub fn get_server_id(&self, hash: u64) -> Option<u64> {
         let lookup_table = self.tables.read();
         let nodes = &lookup_table.nodes;
-        let len = nodes.len();
-        if len == 0 {return None;}
-        let first_node = nodes.first().unwrap();
-        let last_node = nodes.last().unwrap();
-        if hash < first_node.start {return Some(first_node.server)}
-        if hash >= last_node.start {return Some(last_node.server)}
-        let mut low = 0;
-        let mut high = len - 1;
-        while low <= high {
-            let mid = low + (high - low) / 2;
-            let curr_node = &nodes[mid];
-            let next_node = &nodes[mid + 1];
-            if hash >= curr_node.start && hash < next_node.start {
-                return Some(curr_node.server);
-            } else if hash < curr_node.start {
-                high = mid - 1;
-            } else {
-                low = mid + 1;
-            }
+        let slot_count = nodes.len();
+        if slot_count == 0 {return None;}
+        nodes.get(self.jump_hash(slot_count, hash)).cloned()
+    }
+    pub fn jump_hash(&self, slot_count: usize, hash: u64) -> usize {
+        let mut b: i64 = -1;
+        let mut j: i64 = 0;
+        let mut h = hash;
+        while j < (slot_count as i64) {
+            b = j;
+            h = h.wrapping_mul(2862933555777941757).wrapping_add(1);
+            j = (((b.wrapping_add(1)) as f64) * ((1i64 << 31) as f64) /
+                (((h >> 33).wrapping_add(1)) as f64)) as i64;
         }
-        None
+        b as usize
     }
     pub fn get_server(&self, hash: u64) -> Option<String> {
         self.to_server_name(self.get_server_id(hash))
@@ -189,43 +177,44 @@ impl ConsistentHashing {
             .map(|res| if let Ok(_) = res { true } else { false })
     }
     pub fn watch_all_actions<F>(&self, f: F)
-        where F: Fn(&Member, &Action, &LookupTables, &Vec<Node>) + 'static + Send + Sync {
+        where F: Fn(&Member, &Action, &LookupTables, &Vec<u64>) + 'static + Send + Sync {
         let mut watchers = self.watchers.write();
         watchers.push(Box::new(f));
     }
     pub fn watch_server_nodes_range_changed<F>(&self, server: &String, f: F)
         // return ranges [...,...)
-        where F: Fn(Vec<(u64, u64)>) + 'static + Send + Sync {
+        where F: Fn((usize, u32)) + 'static + Send + Sync {
         let server_id = hash_str(server);
         let wrapper = move |
             _: &Member,_: &Action,
-            lookup_table: &LookupTables, _: &Vec<Node>| {
+            lookup_table: &LookupTables, _: &Vec<u64>| {
             let nodes = &lookup_table.nodes;
             let node_len = nodes.len();
-            let mut ranges: Vec<(u64, u64)> = Vec::new();
+            let mut weight = 0;
+            let mut start = None;
             for ni in 0..node_len {
-                let node = &nodes[ni];
-                if node.server == server_id {
-                    ranges.push((node.start, if ni == node_len - 1 {
-                        std::u64::MAX
-                    } else {
-                        nodes[ni + 1].start
-                    }));
+                let node = nodes[ni];
+                if node == server_id {
+                    weight += 1;
+                    if start.is_none() { start = Some(ni) }
                 }
             }
-            if !ranges.is_empty() {f(ranges);}
+            if start.is_some() {
+                f((start.unwrap(), weight));
+            } else {
+                warn!("No node exists for watch");
+            }
         };
         self.watch_all_actions(wrapper);
     }
 
     fn init_table_(&self, lookup_table: &mut RwLockWriteGuard<LookupTables>) -> Result<(), InitTableError> {
-        if let Ok(Ok((members, version))) = self.membership.group_members(&self.group_name, true).wait() {
+        if let Ok(Ok((mut members, version))) = self.membership.group_members(&self.group_name, true).wait() {
             let group_id = hash_str(&self.group_name);
             match self.weight_sm_client.get_weights(&group_id).wait() {
                 Ok(Ok(Some(weights))) =>  {
                     if let Some(min_weight) = weights.values().min() {
-                        lookup_table.nodes.clear(); // refresh nodes
-                        let mut factors: HashMap<u64, f64> = HashMap::new();
+                        let mut factors: BTreeMap<u64, u32> = BTreeMap::new();
                         let min_weight = *min_weight as f64;
                         for member in members.iter() {
                             let k = member.id;
@@ -233,23 +222,18 @@ impl ConsistentHashing {
                                 Some(w) => *w as f64,
                                 None => min_weight,
                             };
-                            factors.insert(k, w / min_weight);
+                            factors.insert(k, (w / min_weight) as u32);
                         }
-                        let factor_sum: f64 = factors.values().sum();
-                        let nodes_size = if factor_sum > DEFAULT_NODE_LIST_SIZE {factor_sum} else {DEFAULT_NODE_LIST_SIZE};
-                        let factor_scale = nodes_size / factor_sum;
-                        for member in members.iter() {lookup_table.addrs.insert(member.id, member.address.clone());}
-                        for (k, f) in factors.iter() {
-                            let weight = (*f * factor_scale) as u64;
+                        let factor_sum: u32 = factors.values().sum();
+                        lookup_table.nodes = Vec::with_capacity(factor_sum as usize);
+                        for member in members.iter() {
+                            lookup_table.addrs.insert(member.id, member.address.clone());
+                        }
+                        for (server_id, weight) in factors.into_iter() {
                             for i in 0..weight {
-                                let node_key = format!("{}_{}", k, i);
-                                let hash = hash_str(&node_key);
-                                lookup_table.nodes.push(Node{
-                                    start: hash, server: *k
-                                });
+                                lookup_table.nodes.push(server_id);
                             }
                         };
-                        lookup_table.nodes.sort_by(|n1, n2| n1.start.cmp(&n2.start));
                         self.version.store(version, Ordering::Relaxed);
                         Ok(())
                     } else {
