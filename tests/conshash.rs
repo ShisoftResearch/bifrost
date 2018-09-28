@@ -141,8 +141,8 @@ fn primary() {
         let server = ch1.get_server_by_string(&k).unwrap();
         *ch_1_mapping.entry(server.clone()).or_insert(0) += 1;
     }
-    assert_eq!(ch_1_mapping.get(&server_2).unwrap(), &11849);
-    assert_eq!(ch_1_mapping.get(&server_3).unwrap(), &18151);
+    assert_eq!(ch_1_mapping.get(&server_2).unwrap(), &11932);
+    assert_eq!(ch_1_mapping.get(&server_3).unwrap(), &18068);
 
     let mut ch_2_mapping: HashMap<String, u64> = HashMap::new();
     for i in 0..30000 {
