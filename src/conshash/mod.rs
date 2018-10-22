@@ -133,7 +133,9 @@ impl ConsistentHashing {
         let nodes = &lookup_table.nodes;
         let slot_count = nodes.len();
         if slot_count == 0 {return None;}
-        nodes.get(self.jump_hash(slot_count, hash)).cloned()
+        let result = nodes.get(self.jump_hash(slot_count, hash));
+        debug!("Hash {} have been point to {:?}", hash, result);
+        result.cloned()
     }
     pub fn jump_hash(&self, slot_count: usize, hash: u64) -> usize {
         let mut b: i64 = -1;
@@ -145,6 +147,7 @@ impl ConsistentHashing {
             j = (((b.wrapping_add(1)) as f64) * ((1i64 << 31) as f64) /
                 (((h >> 33).wrapping_add(1)) as f64)) as i64;
         }
+        debug!("Jump hash point to index {} for {}, with slots {}", b, hash, slot_count);
         b as usize
     }
     pub fn get_server(&self, hash: u64) -> Option<String> {
