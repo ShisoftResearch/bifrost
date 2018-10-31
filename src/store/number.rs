@@ -2,11 +2,11 @@
 macro_rules! def_store_number {
     ($m: ident, $t: ty) => {
         pub mod $m {
-            use raft::state_machine::StateMachineCtl;
             use bifrost_hasher::hash_str;
+            use raft::state_machine::StateMachineCtl;
+            use std::sync::Arc;
             use $crate::raft::state_machine::callback::server::SMCallback;
             use $crate::raft::RaftService;
-            use std::sync::{Arc};
             pub struct Number {
                 pub num: $t,
                 pub id: u64,
@@ -40,7 +40,7 @@ macro_rules! def_store_number {
                 def sub on_changed() -> ($t, $t);
             }
             impl StateMachineCmds for Number {
-                fn set(&mut self, n: $t) -> Result<(),()> {
+                fn set(&mut self, n: $t) -> Result<(), ()> {
                     let on = self.num;
                     self.num = n;
                     if let Some(ref callback) = self.callback {
@@ -124,7 +124,9 @@ macro_rules! def_store_number {
                 fn recover(&mut self, data: Vec<u8>) {
                     self.num = $crate::utils::bincode::deserialize(&data);
                 }
-                fn id(&self) -> u64 {self.id}
+                fn id(&self) -> u64 {
+                    self.id
+                }
             }
             impl Number {
                 pub fn new(id: u64, val: $t) -> Number {

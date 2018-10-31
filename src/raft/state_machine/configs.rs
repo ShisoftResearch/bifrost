@@ -1,12 +1,12 @@
+use super::callback::server::Subscriptions;
+use super::callback::SubKey;
+use super::*;
+use bifrost_hasher::hash_str;
+use parking_lot::RwLock;
 use raft::AsyncServiceClient;
 use rpc;
-use super::*;
-use super::callback::SubKey;
-use super::callback::server::Subscriptions;
-use bifrost_hasher::hash_str;
-use std::sync::Arc;
-use parking_lot::{RwLock};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use utils::bincode;
 
 use futures::Future;
@@ -50,24 +50,27 @@ impl StateMachineCmds for Configures {
         if !self.members.contains_key(&id) {
             match rpc::DEFAULT_CLIENT_POOL.get(&address) {
                 Ok(client) => {
-                    self.members.insert(id, RaftMember {
-                        rpc: AsyncServiceClient::new(self.service_id, &client),
-                        address,
+                    self.members.insert(
                         id,
-                    });
+                        RaftMember {
+                            rpc: AsyncServiceClient::new(self.service_id, &client),
+                            address,
+                            id,
+                        },
+                    );
                     return Ok(());
-                },
+                }
                 Err(_) => {}
             }
         }
         Err(())
     }
-    fn del_member_(&mut self, address: String) -> Result<(),()> {
+    fn del_member_(&mut self, address: String) -> Result<(), ()> {
         let hash = hash_str(&address);
         self.members.remove(&hash);
         Ok(())
     }
-    fn member_address(&self) -> Result<Vec<String>,()> {
+    fn member_address(&self) -> Result<Vec<String>, ()> {
         let mut members = Vec::with_capacity(self.members.len());
         for (_, member) in self.members.iter() {
             members.push(member.address.clone());
@@ -88,7 +91,7 @@ impl StateMachineCmds for Configures {
 impl StateMachineCtl for Configures {
     raft_sm_complete!();
     fn snapshot(&self) -> Option<Vec<u8>> {
-        let mut snapshot = ConfigSnapshot{
+        let mut snapshot = ConfigSnapshot {
             members: HashSet::with_capacity(self.members.len()),
         };
         for (_, member) in self.members.iter() {
@@ -97,10 +100,12 @@ impl StateMachineCtl for Configures {
         Some(bincode::serialize(&snapshot))
     }
     fn recover(&mut self, data: Vec<u8>) {
-        let snapshot:ConfigSnapshot = bincode::deserialize(&data);
+        let snapshot: ConfigSnapshot = bincode::deserialize(&data);
         self.recover_members(&snapshot.members)
     }
-    fn id(&self) -> u64 {CONFIG_SM_ID}
+    fn id(&self) -> u64 {
+        CONFIG_SM_ID
+    }
 }
 
 impl Configures {
@@ -108,10 +113,10 @@ impl Configures {
         Configures {
             members: HashMap::new(),
             service_id,
-            subscriptions: Arc::new(RwLock::new(Subscriptions::new()))
+            subscriptions: Arc::new(RwLock::new(Subscriptions::new())),
         }
     }
-    fn recover_members (&mut self, snapshot: &MemberConfigSnapshot) {
+    fn recover_members(&mut self, snapshot: &MemberConfigSnapshot) {
         let mut curr_members: MemberConfigSnapshot = HashSet::with_capacity(self.members.len());
         for (_, member) in self.members.iter() {
             curr_members.insert(member.address.clone());
@@ -125,10 +130,10 @@ impl Configures {
             self.new_member(addr.clone());
         }
     }
-    pub fn new_member(&mut self, address: String) -> Result<(),()> {
+    pub fn new_member(&mut self, address: String) -> Result<(), ()> {
         self.new_member_(address)
     }
-    pub fn del_member(&mut self, address: String) -> Result<(),()> {
+    pub fn del_member(&mut self, address: String) -> Result<(), ()> {
         self.del_member_(address)
     }
     pub fn member_existed(&self, id: u64) -> bool {

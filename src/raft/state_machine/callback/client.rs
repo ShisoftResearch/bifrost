@@ -1,17 +1,17 @@
+use super::*;
+use futures::future;
+use futures::prelude::*;
+use parking_lot::RwLock;
+use rpc::Server;
 use std::boxed::FnBox;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
-use super::*;
-use rpc::Server;
 use utils::time::get_time;
-use futures::prelude::*;
-use futures::future;
 
 pub struct SubscriptionService {
     pub subs: RwLock<HashMap<SubKey, Vec<(Box<Fn(Vec<u8>) + Send + Sync>, u64)>>>,
     pub server_address: String,
-    pub session_id: u64
+    pub session_id: u64,
 }
 
 impl Service for SubscriptionService {
@@ -32,7 +32,7 @@ impl SubscriptionService {
         let service = Arc::new(SubscriptionService {
             subs: RwLock::new(HashMap::new()),
             server_address: server.address().clone(),
-            session_id: get_time() as u64
+            session_id: get_time() as u64,
         });
         server.register_service(DEFAULT_SERVICE_ID, &service);
         return service;

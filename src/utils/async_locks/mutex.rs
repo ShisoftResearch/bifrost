@@ -1,24 +1,24 @@
 // a simple spin lock based async mutex
 
 use super::cpu_relax;
-use futures::{Future, future, Async, Poll};
-use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Weak};
+use futures::{future, Async, Future, Poll};
 use std::cell::UnsafeCell;
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 
 #[derive(Clone)]
-pub struct Mutex<T: ?Sized>{
-    inner: Arc<MutexInner<T>>
+pub struct Mutex<T: ?Sized> {
+    inner: Arc<MutexInner<T>>,
 }
 
 struct MutexInner<T: ?Sized> {
     raw: RawMutex,
-    data: UnsafeCell<T>
+    data: UnsafeCell<T>,
 }
 
 struct RawMutex {
-    state: AtomicBool
+    state: AtomicBool,
 }
 
 unsafe impl<T: Send> Send for Mutex<T> {}
@@ -28,33 +28,29 @@ unsafe impl<T: Send> Send for MutexInner<T> {}
 unsafe impl<T: Send> Sync for MutexInner<T> {}
 
 pub struct AsyncMutexGuard<T: ?Sized> {
-    mutex: Arc<MutexInner<T>>
+    mutex: Arc<MutexInner<T>>,
 }
 
 pub struct MutexGuard<T: ?Sized> {
-    mutex: Arc<MutexInner<T>>
+    mutex: Arc<MutexInner<T>>,
 }
 
 impl RawMutex {
     fn new() -> RawMutex {
         RawMutex {
-            state: AtomicBool::new(false)
+            state: AtomicBool::new(false),
         }
     }
 
     fn try_lock(&self) -> bool {
-        let prev_val = self.state.compare_and_swap(
-            false, true, Ordering::Relaxed
-        );
+        let prev_val = self.state.compare_and_swap(false, true, Ordering::Relaxed);
         let success = prev_val == false;
         //println!("raw locking {}", prev_val);
         return success;
     }
 
     fn lock(&self) {
-        while self.state.compare_and_swap(
-            false, true, Ordering::Relaxed
-        ) {
+        while self.state.compare_and_swap(false, true, Ordering::Relaxed) {
             while self.state.load(Ordering::Relaxed) {
                 cpu_relax();
             }
@@ -62,13 +58,11 @@ impl RawMutex {
     }
 
     fn unlock(&self) {
-        assert!(self.state.compare_and_swap(
-            true, false, Ordering::Relaxed
-        ))
+        assert!(self.state.compare_and_swap(true, false, Ordering::Relaxed))
     }
 }
 
-impl <T: ?Sized> Future for AsyncMutexGuard <T> {
+impl<T: ?Sized> Future for AsyncMutexGuard<T> {
     type Item = MutexGuard<T>;
     type Error = ();
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
@@ -76,7 +70,7 @@ impl <T: ?Sized> Future for AsyncMutexGuard <T> {
         if self.mutex.raw.try_lock() {
             // println!("locking");
             Ok(Async::Ready(MutexGuard {
-                mutex: self.mutex.clone()
+                mutex: self.mutex.clone(),
             }))
         } else {
             Ok(Async::NotReady)
@@ -84,37 +78,36 @@ impl <T: ?Sized> Future for AsyncMutexGuard <T> {
     }
 }
 
-impl <T> Mutex <T> {
-    pub fn new(val: T) -> Mutex<T>  {
+impl<T> Mutex<T> {
+    pub fn new(val: T) -> Mutex<T> {
         Mutex {
             inner: Arc::new(MutexInner {
                 raw: RawMutex::new(),
-                data: UnsafeCell::new(val)
-            })
+                data: UnsafeCell::new(val),
+            }),
         }
     }
-    pub fn lock_async(&self) -> AsyncMutexGuard<T>
-    {
+    pub fn lock_async(&self) -> AsyncMutexGuard<T> {
         AsyncMutexGuard {
-            mutex: self.inner.clone()
+            mutex: self.inner.clone(),
         }
     }
     pub fn lock(&self) -> MutexGuard<T> {
         self.inner.raw.lock();
         MutexGuard {
-            mutex: self.inner.clone()
+            mutex: self.inner.clone(),
         }
     }
 }
 
-impl <T> MutexGuard<T> {
+impl<T> MutexGuard<T> {
     #[inline]
     pub fn mutate(&self) -> &mut T {
         unsafe { &mut *self.mutex.data.get() }
     }
 }
 
-impl <T> Deref for MutexGuard<T> {
+impl<T> Deref for MutexGuard<T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &T {
@@ -122,14 +115,14 @@ impl <T> Deref for MutexGuard<T> {
     }
 }
 
-impl <T> DerefMut for MutexGuard<T> {
+impl<T> DerefMut for MutexGuard<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut T {
         self.mutate()
     }
 }
 
-impl <T: ?Sized> Drop for MutexGuard<T> {
+impl<T: ?Sized> Drop for MutexGuard<T> {
     #[inline]
     fn drop(&mut self) {
         self.mutex.raw.unlock();
@@ -141,24 +134,30 @@ mod tests {
     #[derive(Eq, PartialEq, Debug)]
     struct NonCopy(i32);
 
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::channel;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
-    use std::collections::HashMap;
-    use super::*;
 
     #[test]
     fn basic() {
         let map: HashMap<i32, i32> = HashMap::new();
         let mutex = Mutex::new(map);
-        mutex.lock_async()
+        mutex
+            .lock_async()
             .map(|mut m| {
                 m.insert(1, 2);
                 m.insert(2, 3)
-            }).wait().unwrap();
-        mutex.lock_async().map(|m|
-            assert_eq!(m.get(&1).unwrap(), &2)).wait().unwrap();
+            })
+            .wait()
+            .unwrap();
+        mutex
+            .lock_async()
+            .map(|m| assert_eq!(m.get(&1).unwrap(), &2))
+            .wait()
+            .unwrap();
         assert_eq!(*mutex.lock().get(&1).unwrap(), 2);
         assert_eq!(*mutex.lock().get(&2).unwrap(), 3);
     }
@@ -185,7 +184,6 @@ mod tests {
         });
         rx.recv().unwrap();
     }
-
 
     #[test]
     fn test_mutexguard_send() {

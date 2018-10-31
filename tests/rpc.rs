@@ -1,9 +1,9 @@
 use bifrost::rpc::*;
-use std::sync::Arc;
-use std::sync::mpsc::channel;
 use byteorder::{ByteOrder, LittleEndian};
-use std::thread;
+use std::sync::mpsc::channel;
+use std::sync::Arc;
 use std::sync::Mutex;
+use std::thread;
 use std::time::Duration;
 mod simple_service {
 
@@ -27,7 +27,7 @@ mod simple_service {
     dispatch_rpc_service_functions!(HelloServer);
 
     #[test]
-    fn simple_rpc () {
+    fn simple_rpc() {
         let addr = String::from("127.0.0.1:1300");
         {
             let addr = addr.clone();
@@ -55,13 +55,13 @@ mod struct_service {
     #[derive(Serialize, Deserialize, Debug, Clone)]
     pub struct Greeting {
         name: String,
-        time: u32
+        time: u32,
     }
 
     #[derive(Serialize, Deserialize, Debug)]
     pub struct Respond {
         text: String,
-        owner: u32
+        owner: u32,
     }
 
     service! {
@@ -74,14 +74,14 @@ mod struct_service {
         fn hello(&self, gret: Greeting) -> Box<Future<Item = Respond, Error = ()>> {
             box future::ok(Respond {
                 text: format!("Hello, {}. It is {} now!", gret.name, gret.time),
-                owner: 42
+                owner: 42,
             })
         }
     }
     dispatch_rpc_service_functions!(HelloServer);
 
     #[test]
-    fn struct_rpc () {
+    fn struct_rpc() {
         let addr = String::from("127.0.0.1:1400");
         {
             let addr = addr.clone();
@@ -94,7 +94,7 @@ mod struct_service {
         let service_client = AsyncServiceClient::new(0, &client);
         let response = service_client.hello(&Greeting {
             name: String::from("Jack"),
-            time: 12
+            time: 12,
         });
         let res = response.wait().unwrap().unwrap();
         let greeting_str = res.text;
@@ -112,7 +112,7 @@ mod multi_server {
     }
 
     struct IdServer {
-        id: u64
+        id: u64,
     }
     impl Service for IdServer {
         fn query_server_id(&self) -> Box<Future<Item = u64, Error = ()>> {
@@ -122,20 +122,20 @@ mod multi_server {
     dispatch_rpc_service_functions!(IdServer);
 
     #[test]
-    fn multi_server_rpc () {
-        let addrs = vec!(
+    fn multi_server_rpc() {
+        let addrs = vec![
             String::from("127.0.0.1:1500"),
             String::from("127.0.0.1:1600"),
             String::from("127.0.0.1:1700"),
             String::from("127.0.0.1:1800"),
-        );
+        ];
         let mut id = 0;
         for addr in &addrs {
             {
                 let addr = addr.clone();
-                thread::spawn(move|| {
+                thread::spawn(move || {
                     let server = Server::new(&addr); // 0 is service id
-                    server.register_service(id, &Arc::new(IdServer {id: id}));
+                    server.register_service(id, &Arc::new(IdServer { id: id }));
                     Server::listen(&server);
                 });
                 id += 1;

@@ -1,20 +1,20 @@
-use utils::time;
 use super::heartbeat_rpc::*;
 use super::raft::*;
 use super::*;
-use raft::{RaftService, LogEntry, RaftMsg, Service as raft_svr_trait};
+use bifrost_hasher::hash_str;
+use futures::future;
+use futures::prelude::*;
+use membership::client::{Group as ClientGroup, Member as ClientMember};
+use parking_lot::RwLock;
+use raft::state_machine::callback::server::{notify as cb_notify, SMCallback};
 use raft::state_machine::StateMachineCtl;
-use raft::state_machine::callback::server::{SMCallback, notify as cb_notify};
+use raft::{LogEntry, RaftMsg, RaftService, Service as raft_svr_trait};
 use rpc::Server;
-use parking_lot::{RwLock};
-use std::collections::{HashMap, HashSet, BTreeSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::{thread, time as std_time};
-use bifrost_hasher::hash_str;
-use membership::client::{Group as ClientGroup, Member as ClientMember};
-use futures::prelude::*;
-use futures::future;
+use utils::time;
 
 static MAX_TIMEOUT: i64 = 1000; //5 secs for 500ms heartbeat
 
@@ -48,16 +48,16 @@ impl HeartbeatService {
     fn update_raft(&self, online: &Vec<u64>, offline: &Vec<u64>) {
         let log = commands::hb_online_changed::new(online, offline);
         let (fn_id, _, data) = log.encode();
-        self.raft_service.c_command(
-            LogEntry {
-                id: 0,
-                term: 0,
-                sm_id: DEFAULT_SERVICE_ID,
-                fn_id,
-                data
-            });
+        self.raft_service.c_command(LogEntry {
+            id: 0,
+            term: 0,
+            sm_id: DEFAULT_SERVICE_ID,
+            fn_id,
+            data,
+        });
     }
-    fn transfer_leadership(&self) { //update timestamp for every alive server
+    fn transfer_leadership(&self) {
+        //update timestamp for every alive server
         let mut stat_map = self.status.write();
         let current_time = time::get_time();
         for stat in stat_map.values_mut() {
@@ -109,8 +109,12 @@ impl Membership {
             while !service_clone.closed.load(Ordering::Relaxed) {
                 let is_leader = service_clone.raft_service.is_leader();
                 let was_leader = service_clone.was_leader.load(Ordering::Relaxed);
-                if !was_leader && is_leader {service_clone.transfer_leadership()}
-                if was_leader != is_leader {service_clone.was_leader.store(is_leader, Ordering::Relaxed);}
+                if !was_leader && is_leader {
+                    service_clone.transfer_leadership()
+                }
+                if was_leader != is_leader {
+                    service_clone.was_leader.store(is_leader, Ordering::Relaxed);
+                }
                 if is_leader {
                     let current_time = time::get_time();
                     let mut outdated_members: Vec<u64> = Vec::new();
@@ -133,7 +137,6 @@ impl Membership {
                             let mut status = status_map.get_mut(&id).unwrap();
                             status.online = *alive;
                         }
-
                     }
                     if backedin_members.len() + outdated_members.len() > 0 {
                         service_clone.update_raft(&backedin_members, &outdated_members);
@@ -157,8 +160,9 @@ impl Membership {
         let member = self.members.get(&id).unwrap();
         let stat_map = self.heartbeat.status.read();
         ClientMember {
-            id, address: member.address.clone(),
-            online: stat_map.get(&id).unwrap().online
+            id,
+            address: member.address.clone(),
+            online: stat_map.get(&id).unwrap().online,
         }
     }
     fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
@@ -170,14 +174,14 @@ impl Membership {
         cb_notify(
             &self.callback,
             commands::on_any_member_online::new(),
-            || Ok((client_member.clone(), version))
+            || Ok((client_member.clone(), version)),
         );
         if let Some(ref member) = self.members.get(&id) {
             for group in &member.groups {
                 cb_notify(
                     &self.callback,
                     commands::on_group_member_online::new(group),
-                    || Ok((client_member.clone(), version))
+                    || Ok((client_member.clone(), version)),
                 );
             }
         }
@@ -188,14 +192,14 @@ impl Membership {
         cb_notify(
             &self.callback,
             commands::on_any_member_offline::new(),
-            || Ok((client_member.clone(), version))
+            || Ok((client_member.clone(), version)),
         );
         if let Some(ref member) = self.members.get(&id) {
             for group in &member.groups {
                 cb_notify(
                     &self.callback,
                     commands::on_group_member_offline::new(group),
-                    || Ok((client_member.clone(), version))
+                    || Ok((client_member.clone(), version)),
                 );
             }
         }
@@ -203,11 +207,9 @@ impl Membership {
     fn notify_for_member_left(&self, id: u64) {
         let client_member = self.compose_client_member(id);
         let version = self.version;
-        cb_notify(
-            &self.callback,
-            commands::on_any_member_left::new(),
-            || Ok((client_member.clone(), version))
-        );
+        cb_notify(&self.callback, commands::on_any_member_left::new(), || {
+            Ok((client_member.clone(), version))
+        });
         if let Some(ref member) = self.members.get(&id) {
             for group in &member.groups {
                 self.notify_for_group_member_left(*group, &client_member)
@@ -218,7 +220,7 @@ impl Membership {
         cb_notify(
             &self.callback,
             commands::on_group_member_left::new(&group),
-            || Ok((member.clone(), self.version))
+            || Ok((member.clone(), self.version)),
         );
     }
     fn leave_group_(&mut self, group_id: u64, id: u64, need_notify: bool) -> Result<(), ()> {
@@ -254,7 +256,7 @@ impl Membership {
             for member in group.members.iter() {
                 if let Some(member_stat) = stat_map.get(&member) {
                     if member_stat.online {
-                        return Ok(Some(*member))
+                        return Ok(Some(*member));
                     }
                 }
             }
@@ -267,20 +269,24 @@ impl Membership {
         let mut old: Option<u64> = None;
         let mut changed = false;
         if let Some(mut group) = self.groups.get_mut(&group_id) {
-            old =  group.leader;
+            old = group.leader;
             if old != new {
                 group.leader = new;
                 changed = true;
             }
         }
         if changed {
-            let convert = |id_opt| if let Some(id_opt) = id_opt {
-                Some(self.compose_client_member(id_opt))
-            } else {None};
+            let convert = |id_opt| {
+                if let Some(id_opt) = id_opt {
+                    Some(self.compose_client_member(id_opt))
+                } else {
+                    None
+                }
+            };
             cb_notify(
                 &self.callback,
                 commands::on_group_leader_changed::new(&group_id),
-                || Ok(( convert(old), convert(new), self.version))
+                || Ok((convert(old), convert(new), self.version)),
             );
             Ok(())
         } else {
@@ -364,13 +370,14 @@ impl StateMachineCmds for Membership {
                 let current_time = time::get_time();
                 let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
                     online: true,
-                    last_updated: current_time
+                    last_updated: current_time,
                 });
                 stat.online = true;
                 stat.last_updated = current_time;
                 joined = true;
                 Member {
-                    id, address: address.clone(),
+                    id,
+                    address: address.clone(),
                     groups: HashSet::new(),
                 }
             });
@@ -379,7 +386,7 @@ impl StateMachineCmds for Membership {
             cb_notify(
                 &self.callback,
                 commands::on_any_member_joined::new(),
-                || Ok((self.compose_client_member(id), self.version))
+                || Ok((self.compose_client_member(id), self.version)),
             );
             Ok(id)
         } else {
@@ -387,9 +394,11 @@ impl StateMachineCmds for Membership {
         }
     }
     fn leave(&mut self, id: u64) -> Result<(), ()> {
-        if !self.members.contains_key(&id) {return Err(())};
+        if !self.members.contains_key(&id) {
+            return Err(());
+        };
         self.version += 1;
-        let mut groups:Vec<u64> = Vec::new();
+        let mut groups: Vec<u64> = Vec::new();
         if let Some(member) = self.members.get(&id) {
             for group in &member.groups {
                 groups.push(*group);
@@ -413,7 +422,9 @@ impl StateMachineCmds for Membership {
         let group_id = hash_str(&group_name);
         self.version += 1;
         let mut success = false;
-        if !self.groups.contains_key(&group_id) {self.new_group(group_name);} // create group if not exists
+        if !self.groups.contains_key(&group_id) {
+            self.new_group(group_name);
+        } // create group if not exists
         if let Some(ref mut group) = self.groups.get_mut(&group_id) {
             if let Some(ref mut member) = self.members.get_mut(&id) {
                 group.members.insert(id);
@@ -425,7 +436,7 @@ impl StateMachineCmds for Membership {
             cb_notify(
                 &self.callback,
                 commands::on_group_member_joined::new(&group_id),
-                || Ok((self.compose_client_member(id), self.version))
+                || Ok((self.compose_client_member(id), self.version)),
             );
             self.group_leader_candidate_available(group_id, id);
             return Ok(());
@@ -444,9 +455,10 @@ impl StateMachineCmds for Membership {
         self.groups.entry(id).or_insert_with(|| {
             inserted = true;
             MemberGroup {
-                name, id,
+                name,
+                id,
                 members: BTreeSet::new(),
-                leader: None
+                leader: None,
             }
         });
         if inserted {
@@ -468,36 +480,48 @@ impl StateMachineCmds for Membership {
                 }
             }
             self.groups.remove(&id);
-            return Ok(())
+            return Ok(());
         } else {
             return Err(());
         }
     }
     fn group_leader(&self, group_id: u64) -> Result<(Option<ClientMember>, u64), ()> {
         if let Some(group) = self.groups.get(&group_id) {
-            Ok((match group.leader {
-                Some(id) => Some(self.compose_client_member(id)),
-                None => None
-            }, self.version))
+            Ok((
+                match group.leader {
+                    Some(id) => Some(self.compose_client_member(id)),
+                    None => None,
+                },
+                self.version,
+            ))
         } else {
             Err(())
         }
     }
     fn group_members(&self, group: u64, online_only: bool) -> Result<(Vec<ClientMember>, u64), ()> {
         if let Some(group) = self.groups.get(&group) {
-            Ok((group.members.iter()
-                .map(|id| self.compose_client_member(*id))
-                .filter(|member| !online_only || member.online)
-                .collect(), self.version))
+            Ok((
+                group
+                    .members
+                    .iter()
+                    .map(|id| self.compose_client_member(*id))
+                    .filter(|member| !online_only || member.online)
+                    .collect(),
+                self.version,
+            ))
         } else {
             Err(())
         }
     }
     fn all_members(&self, online_only: bool) -> Result<(Vec<ClientMember>, u64), ()> {
-        Ok((self.members.iter()
-            .map(|(id, _)| self.compose_client_member(*id))
-            .filter(|member| !online_only || member.online)
-            .collect(), self.version))
+        Ok((
+            self.members
+                .iter()
+                .map(|(id, _)| self.compose_client_member(*id))
+                .filter(|member| !online_only || member.online)
+                .collect(),
+            self.version,
+        ))
     }
 }
 impl StateMachineCtl for Membership {
@@ -509,5 +533,7 @@ impl StateMachineCtl for Membership {
     fn recover(&mut self, data: Vec<u8>) {
         //self.map = deserialize!(&data);
     }
-    fn id(&self) -> u64 {DEFAULT_SERVICE_ID}
+    fn id(&self) -> u64 {
+        DEFAULT_SERVICE_ID
+    }
 }

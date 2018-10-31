@@ -1,17 +1,17 @@
-use bifrost::rpc::*;
-use bifrost::raft::*;
+use bifrost::conshash::weights::Weights;
+use bifrost::conshash::{CHError, ConsistentHashing};
+use bifrost::membership::client::ObserverClient;
+use bifrost::membership::member::MemberService;
+use bifrost::membership::server::Membership;
 use bifrost::raft::client::RaftClient;
 use bifrost::raft::state_machine::callback::client::SubscriptionService;
-use bifrost::membership::server::Membership;
-use bifrost::membership::member::MemberService;
-use bifrost::membership::client::ObserverClient;
-use bifrost::conshash::{ConsistentHashing, CHError};
-use bifrost::conshash::weights::Weights;
+use bifrost::raft::*;
+use bifrost::rpc::*;
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::collections::HashMap;
 use futures::prelude::*;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use raft::wait;
 
@@ -38,7 +38,7 @@ fn primary() {
     let server_2 = String::from("server2");
     let server_3 = String::from("server3");
 
-    let wild_raft_client = RaftClient::new(&vec!(addr.clone()), 0).unwrap();
+    let wild_raft_client = RaftClient::new(&vec![addr.clone()], 0).unwrap();
     let client = ObserverClient::new(&wild_raft_client);
 
     RaftClient::prepare_subscription(&server);
@@ -47,13 +47,13 @@ fn primary() {
     client.new_group(&group_2).wait().unwrap().unwrap();
     client.new_group(&group_3).wait().unwrap().unwrap();
 
-    let member1_raft_client = RaftClient::new(&vec!(addr.clone()), 0).unwrap();
+    let member1_raft_client = RaftClient::new(&vec![addr.clone()], 0).unwrap();
     let member1_svr = MemberService::new(&server_1, &member1_raft_client);
 
-    let member2_raft_client = RaftClient::new(&vec!(addr.clone()), 0).unwrap();
+    let member2_raft_client = RaftClient::new(&vec![addr.clone()], 0).unwrap();
     let member2_svr = MemberService::new(&server_2, &member2_raft_client);
 
-    let member3_raft_client = RaftClient::new(&vec!(addr.clone()), 0).unwrap();
+    let member3_raft_client = RaftClient::new(&vec![addr.clone()], 0).unwrap();
     let member3_svr = MemberService::new(&server_3, &member3_raft_client);
 
     member1_svr.join_group(&group_1).wait().unwrap().unwrap();
@@ -157,9 +157,9 @@ fn primary() {
         assert!(ch3.get_server_by_string(&k).is_none()); // no member
     }
 
-//    wait();
-//    wait();
-//    assert_eq!(ch1_server_node_changes_count.load(Ordering::Relaxed), 1);
-//    assert_eq!(ch2_server_node_changes_count.load(Ordering::Relaxed), 1);
-//    assert_eq!(ch3_server_node_changes_count.load(Ordering::Relaxed), 0);
+    //    wait();
+    //    wait();
+    //    assert_eq!(ch1_server_node_changes_count.load(Ordering::Relaxed), 1);
+    //    assert_eq!(ch2_server_node_changes_count.load(Ordering::Relaxed), 1);
+    //    assert_eq!(ch3_server_node_changes_count.load(Ordering::Relaxed), 0);
 }

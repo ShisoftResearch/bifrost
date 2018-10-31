@@ -109,10 +109,12 @@ impl Server {
     }
     pub fn listen_and_resume(server: &Arc<Server>) {
         let server = server.clone();
-        thread::spawn(move || {
-            let server = server;
-            Server::listen(&server);
-        });
+        thread::Builder::new()
+            .name(format!("RPC Server - {}", server.address))
+            .spawn(move || {
+                let server = server;
+                Server::listen(&server);
+            });
     }
     pub fn register_service<T>(&self, service_id: u64, service: &Arc<T>)
     where
@@ -201,7 +203,8 @@ impl ClientPool {
     }
 
     pub fn get_by_id<F>(&self, server_id: u64, addr_fn: F) -> Result<Arc<RPCClient>, io::Error>
-        where F: FnOnce(u64) -> String
+    where
+        F: FnOnce(u64) -> String,
     {
         let mut clients = self.clients.lock();
         if clients.contains_key(&server_id) {

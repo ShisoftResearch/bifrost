@@ -1,7 +1,7 @@
+use self::configs::{Configures, RaftMember, CONFIG_SM_ID};
 use super::super::*;
 use super::*;
 use std::collections::HashMap;
-use self::configs::{Configures, RaftMember, CONFIG_SM_ID};
 use utils::bincode;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -27,18 +27,20 @@ pub type SubStateMachine = Box<StateMachineCtl>;
 pub type SnapshotDataItem = (u64, Vec<u8>);
 pub type SnapshotDataItems = Vec<SnapshotDataItem>;
 
-raft_state_machine! {}
+raft_state_machine!{}
 
 pub struct MasterStateMachine {
     subs: HashMap<u64, SubStateMachine>,
-    pub configs: Configures
+    pub configs: Configures,
 }
 
 impl StateMachineCmds for MasterStateMachine {}
 
 impl StateMachineCtl for MasterStateMachine {
     raft_sm_complete!();
-    fn id(&self) -> u64 {0}
+    fn id(&self) -> u64 {
+        0
+    }
     fn snapshot(&self) -> Option<Vec<u8>> {
         let mut sms: SnapshotDataItems = Vec::with_capacity(self.subs.len());
         for (sm_id, smc) in self.subs.iter() {
@@ -75,15 +77,19 @@ impl MasterStateMachine {
     pub fn new(service_id: u64) -> MasterStateMachine {
         let mut msm = MasterStateMachine {
             subs: HashMap::new(),
-            configs: Configures::new(service_id)
+            configs: Configures::new(service_id),
         };
         msm
     }
 
     pub fn register(&mut self, smc: SubStateMachine) -> RegisterResult {
         let id = smc.id();
-        if id < 2 {return RegisterResult::RESERVED}
-        if self.subs.contains_key(&id) {return RegisterResult::EXISTED};
+        if id < 2 {
+            return RegisterResult::RESERVED;
+        }
+        if self.subs.contains_key(&id) {
+            return RegisterResult::EXISTED;
+        };
         self.subs.insert(id, smc);
         RegisterResult::OK
     }
@@ -94,25 +100,25 @@ impl MasterStateMachine {
 
     pub fn commit_cmd(&mut self, entry: &LogEntry) -> ExecResult {
         match entry.sm_id {
-            CONFIG_SM_ID => {
-                parse_output(self.configs.fn_dispatch_cmd(entry.fn_id, &entry.data))
-            }
-            _ => if let Some(sm) = self.subs.get_mut(&entry.sm_id) {
-                parse_output(sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data))
-            } else {
-                Err(ExecError::SmNotFound)
+            CONFIG_SM_ID => parse_output(self.configs.fn_dispatch_cmd(entry.fn_id, &entry.data)),
+            _ => {
+                if let Some(sm) = self.subs.get_mut(&entry.sm_id) {
+                    parse_output(sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data))
+                } else {
+                    Err(ExecError::SmNotFound)
+                }
             }
         }
     }
     pub fn exec_qry(&self, entry: &LogEntry) -> ExecResult {
         match entry.sm_id {
-            CONFIG_SM_ID => {
-                parse_output(self.configs.fn_dispatch_qry(entry.fn_id, &entry.data))
-            }
-            _ => if let Some(sm) = self.subs.get(&entry.sm_id) {
-                parse_output(sm.fn_dispatch_qry(entry.fn_id, &entry.data))
-            } else {
-                Err(ExecError::SmNotFound)
+            CONFIG_SM_ID => parse_output(self.configs.fn_dispatch_qry(entry.fn_id, &entry.data)),
+            _ => {
+                if let Some(sm) = self.subs.get(&entry.sm_id) {
+                    parse_output(sm.fn_dispatch_qry(entry.fn_id, &entry.data))
+                } else {
+                    Err(ExecError::SmNotFound)
+                }
             }
         }
     }
@@ -120,4 +126,3 @@ impl MasterStateMachine {
         self.subs.clear()
     }
 }
-

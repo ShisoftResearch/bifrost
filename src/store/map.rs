@@ -2,17 +2,17 @@
 macro_rules! def_store_hash_map {
     ($m: ident <$kt: ty, $vt: ty>) => {
         pub mod $m {
-            use $crate::raft::state_machine::StateMachineCtl;
-            use $crate::raft::state_machine::callback::server::SMCallback;
-            use $crate::raft::RaftService;
+            use super::*;
             use bifrost_hasher::hash_str;
             use std::collections::HashMap;
-            use std::sync::{Arc};
-            use super::*;
+            use std::sync::Arc;
+            use $crate::raft::state_machine::callback::server::SMCallback;
+            use $crate::raft::state_machine::StateMachineCtl;
+            use $crate::raft::RaftService;
             pub struct Map {
                 map: HashMap<$kt, $vt>,
                 callback: Option<SMCallback>,
-                pub id: u64
+                pub id: u64,
             }
             raft_state_machine! {
                 def qry get(k: $kt) -> Option<$vt>;
@@ -38,11 +38,11 @@ macro_rules! def_store_hash_map {
             }
             impl StateMachineCmds for Map {
                 fn get(&self, k: $kt) -> Result<Option<$vt>, ()> {
-                    Ok(
-                        if let Some(v) = self.map.get(&k) {
-                            Some(v.clone())
-                        } else {None}
-                    )
+                    Ok(if let Some(v) = self.map.get(&k) {
+                        Some(v.clone())
+                    } else {
+                        None
+                    })
                 }
                 fn insert(&mut self, k: $kt, v: $vt) -> Result<Option<$vt>, ()> {
                     if let Some(ref callback) = self.callback {
@@ -53,15 +53,17 @@ macro_rules! def_store_hash_map {
                 }
                 fn insert_if_absent(&mut self, k: $kt, v: $vt) -> Result<$vt, ()> {
                     if let Some(v) = self.map.get(&k) {
-                        return Ok(v.clone())
+                        return Ok(v.clone());
                     }
-                    self.insert(k, v.clone()); Ok(v)
+                    self.insert(k, v.clone());
+                    Ok(v)
                 }
                 fn remove(&mut self, k: $kt) -> Result<Option<$vt>, ()> {
                     let res = self.map.remove(&k);
                     if let Some(ref callback) = self.callback {
                         if let Some(ref v) = res {
-                            callback.notify(commands::on_removed::new(), Ok((k.clone(), v.clone())));
+                            callback
+                                .notify(commands::on_removed::new(), Ok((k.clone(), v.clone())));
                             callback.notify(commands::on_key_removed::new(&k), Ok(v.clone()));
                         }
                     }
@@ -104,7 +106,9 @@ macro_rules! def_store_hash_map {
                 fn recover(&mut self, data: Vec<u8>) {
                     self.map = $crate::utils::bincode::deserialize(&data);
                 }
-                fn id(&self) -> u64 {self.id}
+                fn id(&self) -> u64 {
+                    self.id
+                }
             }
             impl Map {
                 pub fn new(id: u64) -> Map {

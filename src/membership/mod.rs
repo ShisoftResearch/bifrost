@@ -1,9 +1,9 @@
 pub mod client;
-pub mod server;
 pub mod member;
+pub mod server;
 
-use membership::client::{Member as ClientMember};
 use futures::prelude::*;
+use membership::client::Member as ClientMember;
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_MEMBERSHIP_SERVICE) as u64;
 
@@ -37,4 +37,3 @@ mod heartbeat_rpc {
         rpc ping(id: u64);
     }
 }
-

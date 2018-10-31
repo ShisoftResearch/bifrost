@@ -1,6 +1,5 @@
 #![feature(plugin)]
 #![plugin(bifrost_plugins)]
-
 #![feature(proc_macro)]
 #![feature(box_syntax)]
 #![feature(conservative_impl_trait)]
@@ -8,8 +7,8 @@
 #[macro_use]
 extern crate bifrost;
 extern crate bifrost_hasher;
-extern crate byteorder;
 extern crate bincode;
+extern crate byteorder;
 extern crate futures_await as futures;
 #[macro_use]
 extern crate serde_derive;
@@ -22,19 +21,18 @@ extern crate parking_lot;
 extern crate log;
 extern crate env_logger;
 
-#[cfg(disable_shortcut)]
-
-mod rpc;
-mod raft;
-mod store;
-mod membership;
-mod utils;
 mod conshash;
+mod membership;
+mod raft;
+#[cfg(disable_shortcut)]
+mod rpc;
+mod store;
+mod utils;
 mod vector_clock;
 
 mod mutex {
+    use std::collections::HashMap;
     use std::sync::Mutex;
-    use std::collections::{HashMap};
 
     #[test]
     fn mutable() {
@@ -49,23 +47,22 @@ mod mutex {
         }
     }
 
-
-//    #[test]
-//    fn reentering_lock() { //FAIL
-//        let l = Mutex::new(false);
-//        {
-//            println!("Locking A");
-//            let a = l.lock().unwrap();
-//            println!("Locked A");
-//            {
-//                println!("Locking B");
-//                let b = l.lock().unwrap();
-//                println!("Locked B");
-//            }
-//            println!("Unlocked B");
-//        }
-//        println!("Unlocked A");
-//    }
+    //    #[test]
+    //    fn reentering_lock() { //FAIL
+    //        let l = Mutex::new(false);
+    //        {
+    //            println!("Locking A");
+    //            let a = l.lock().unwrap();
+    //            println!("Locked A");
+    //            {
+    //                println!("Locking B");
+    //                let b = l.lock().unwrap();
+    //                println!("Locked B");
+    //            }
+    //            println!("Unlocked B");
+    //        }
+    //        println!("Unlocked A");
+    //    }
 }
 
 mod hasher {

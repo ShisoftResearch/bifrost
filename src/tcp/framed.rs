@@ -1,11 +1,10 @@
-use tokio_core::io::{Io, Codec, EasyBuf, Framed};
-use std::{io, str};
 use byteorder::{ByteOrder, LittleEndian};
+use std::{io, str};
+use tokio_core::io::{Codec, EasyBuf, Framed, Io};
 
 pub struct BytesCodec;
 
 impl Codec for BytesCodec {
-
     type In = (u64, Vec<u8>);
     type Out = (u64, Vec<u8>);
 
@@ -17,7 +16,7 @@ impl Codec for BytesCodec {
             if buf_len as u64 >= 8 * 2 + len {
                 buf.drain_to(16);
                 let data = Vec::from(buf.drain_to(len as usize).as_slice());
-                return Ok(Some((mid, data)))
+                return Ok(Some((mid, data)));
             }
         }
         return Ok(None);

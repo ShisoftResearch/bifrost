@@ -44,9 +44,15 @@ macro_rules! raft_client_fn {
 
 #[macro_export]
 macro_rules! raft_fn_op_type {
-    (qry) => {$crate::raft::state_machine::OpType::QUERY};
-    (cmd) => {$crate::raft::state_machine::OpType::COMMAND};
-    (sub) => {$crate::raft::state_machine::OpType::SUBSCRIBE};
+    (qry) => {
+        $crate::raft::state_machine::OpType::QUERY
+    };
+    (cmd) => {
+        $crate::raft::state_machine::OpType::COMMAND
+    };
+    (sub) => {
+        $crate::raft::state_machine::OpType::SUBSCRIBE
+    };
 }
 
 #[macro_export]

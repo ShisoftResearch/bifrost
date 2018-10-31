@@ -1,55 +1,55 @@
-use std::collections::{BTreeMap};
-use std::cmp::Ordering;
-use parking_lot::RwLock;
 use bifrost_hasher::hash_str;
+use parking_lot::RwLock;
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub enum Relation {
     Equal,
     Before,
     After,
-    Concurrent
+    Concurrent,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Hash, Eq)]
 pub struct VectorClock<S: Ord + Eq + Copy> {
-    map: BTreeMap<S, u64>
+    map: BTreeMap<S, u64>,
 }
 
-impl <S: Eq + Copy + Ord> PartialOrd for VectorClock<S> {
+impl<S: Eq + Copy + Ord> PartialOrd for VectorClock<S> {
     fn partial_cmp(&self, other: &VectorClock<S>) -> Option<Ordering> {
         let rel = self.relation(other);
         match rel {
             Relation::Before => Some(Ordering::Less),
             Relation::After => Some(Ordering::Greater),
             Relation::Equal => Some(Ordering::Equal),
-            Relation::Concurrent => None
+            Relation::Concurrent => None,
         }
     }
 }
 
-impl <S: Eq + Copy + Ord> Ord for VectorClock<S> {
+impl<S: Eq + Copy + Ord> Ord for VectorClock<S> {
     fn cmp(&self, other: &Self) -> Ordering {
         let rel = self.relation(other);
         match rel {
             Relation::Before => Ordering::Less,
             Relation::After => Ordering::Greater,
-            _ => Ordering::Equal // not justified, but sufficient for BTreeSet data structure
+            _ => Ordering::Equal, // not justified, but sufficient for BTreeSet data structure
         }
     }
 }
 
-impl <S: Eq + Copy + Ord> PartialEq for VectorClock<S> {
+impl<S: Eq + Copy + Ord> PartialEq for VectorClock<S> {
     fn eq(&self, other: &VectorClock<S>) -> bool {
         let rel = self.relation(other);
         rel == Relation::Equal
     }
 }
 
-impl <S: Ord + Eq + Copy>VectorClock<S> {
+impl<S: Ord + Eq + Copy> VectorClock<S> {
     pub fn new() -> VectorClock<S> {
         VectorClock {
-            map: BTreeMap::new()
+            map: BTreeMap::new(),
         }
     }
 
@@ -62,12 +62,16 @@ impl <S: Ord + Eq + Copy>VectorClock<S> {
         let mut a_lt_b = false;
         for (server, ai) in self.map.iter() {
             let bi = *clock_b.map.get(server).unwrap_or(&0);
-            if *ai > bi {return false;}
+            if *ai > bi {
+                return false;
+            }
             a_lt_b = a_lt_b || *ai < bi;
         }
         for (server, bi) in clock_b.map.iter() {
             let ai = *self.map.get(server).unwrap_or(&0);
-            if ai > *bi {return false;}
+            if ai > *bi {
+                return false;
+            }
             a_lt_b = a_lt_b || ai < *bi;
         }
         return a_lt_b;
@@ -75,18 +79,21 @@ impl <S: Ord + Eq + Copy>VectorClock<S> {
     pub fn equals(&self, clock_b: &VectorClock<S>) -> bool {
         let b_keys: Vec<_> = clock_b.map.keys().collect();
         let self_keys: Vec<_> = self.map.keys().collect();
-        if  b_keys != self_keys {
+        if b_keys != self_keys {
             return false;
         }
         for (server, ac) in self.map.iter() {
             let bc: u64 = {
                 match clock_b.map.get(server) {
-                    Some(v) => *v, None => {
+                    Some(v) => *v,
+                    None => {
                         return false;
                     }
                 }
             };
-            if *ac != bc {return false;}
+            if *ac != bc {
+                return false;
+            }
         }
         return true;
     }
@@ -106,7 +113,9 @@ impl <S: Ord + Eq + Copy>VectorClock<S> {
         // merge_with is used to update counter for other servers (also learn from it)
         for (server, bc) in clock_b.map.iter() {
             let mut ba = self.map.entry(*server).or_insert(0);
-            if *ba < *bc {*ba = *bc}
+            if *ba < *bc {
+                *ba = *bc
+            }
         }
     }
     pub fn learn_from(&mut self, clock_b: &VectorClock<S>) {
@@ -119,14 +128,14 @@ impl <S: Ord + Eq + Copy>VectorClock<S> {
 
 pub struct ServerVectorClock {
     server: u64,
-    clock: RwLock<VectorClock<u64>>
+    clock: RwLock<VectorClock<u64>>,
 }
 
 impl ServerVectorClock {
     pub fn new(server_address: &String) -> ServerVectorClock {
         ServerVectorClock {
             server: hash_str(server_address),
-            clock: RwLock::new(VectorClock::new())
+            clock: RwLock::new(VectorClock::new()),
         }
     }
     pub fn inc(&self) -> StandardVectorClock {

@@ -3,10 +3,10 @@ macro_rules! def_store_value {
     ($m: ident, $t: ty) => {
         pub mod $m {
             use bifrost_hasher::hash_str;
-            use $crate::raft::state_machine::StateMachineCtl;
+            use std::sync::Arc;
             use $crate::raft::state_machine::callback::server::SMCallback;
+            use $crate::raft::state_machine::StateMachineCtl;
             use $crate::raft::RaftService;
-            use std::sync::{Arc};
             pub struct Value {
                 pub val: $t,
                 pub id: u64,
@@ -18,7 +18,7 @@ macro_rules! def_store_value {
                 def sub on_changed() -> ($t, $t);
             }
             impl StateMachineCmds for Value {
-                fn set(&mut self, v: $t) -> Result<(),()> {
+                fn set(&mut self, v: $t) -> Result<(), ()> {
                     if let Some(ref callback) = self.callback {
                         let old = self.val.clone();
                         callback.notify(commands::on_changed::new(), Ok((old, v.clone())));
@@ -38,7 +38,9 @@ macro_rules! def_store_value {
                 fn recover(&mut self, data: Vec<u8>) {
                     self.val = $crate::utils::bincode::deserialize(&data);
                 }
-                fn id(&self) -> u64 {self.id}
+                fn id(&self) -> u64 {
+                    self.id
+                }
             }
             impl Value {
                 pub fn new(id: u64, val: $t) -> Value {

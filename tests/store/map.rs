@@ -1,21 +1,21 @@
-use bifrost::raft::*;
-use bifrost::raft::state_machine::callback::client::SubscriptionService;
 use bifrost::raft::client::RaftClient;
+use bifrost::raft::state_machine::callback::client::SubscriptionService;
+use bifrost::raft::*;
+use bifrost::rpc::*;
 use bifrost::store::map::string_string_hashmap;
 use bifrost::store::map::string_string_hashmap::client::SMClient;
-use bifrost::rpc::*;
 
-use std::collections::{HashSet, HashMap};
-use std::iter::FromIterator;
 use futures::prelude::*;
+use std::collections::{HashMap, HashSet};
+use std::iter::FromIterator;
 
 use raft::wait;
 
 #[test]
-fn hash_map(){
+fn hash_map() {
     let addr = String::from("127.0.0.1:2013");
     let mut map_sm = string_string_hashmap::Map::new_by_name(&String::from("test"));
-    let raft_service = RaftService::new(Options{
+    let raft_service = RaftService::new(Options {
         storage: Storage::Default(),
         address: addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
@@ -29,7 +29,7 @@ fn hash_map(){
     raft_service.register_state_machine(Box::new(map_sm));
     raft_service.bootstrap();
 
-    let raft_client = RaftClient::new(&vec!(addr), DEFAULT_SERVICE_ID).unwrap();
+    let raft_client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID).unwrap();
     let sm_client = SMClient::new(sm_id, &raft_client);
     RaftClient::prepare_subscription(&server);
 
@@ -64,18 +64,24 @@ fn hash_map(){
             assert_eq!(removed_stash.get(&key).unwrap(), &value);
         }
     });
-    sm_client.on_key_inserted(|res| {
-        if let Ok(value) = res {
-            println!("GOT K1 CALLBACK {:?}", value);
-            assert_eq!(&String::from("v1"), &value);
-        }
-    }, &sk1);
-    sm_client.on_key_removed(|res| {
-        if let Ok(value) = res {
-            println!("GOT K2 CALLBACK {:?}", value);
-            assert_eq!(&String::from("v2"), &value);
-        }
-    }, &sk2);
+    sm_client.on_key_inserted(
+        |res| {
+            if let Ok(value) = res {
+                println!("GOT K1 CALLBACK {:?}", value);
+                assert_eq!(&String::from("v1"), &value);
+            }
+        },
+        &sk1,
+    );
+    sm_client.on_key_removed(
+        |res| {
+            if let Ok(value) = res {
+                println!("GOT K2 CALLBACK {:?}", value);
+                assert_eq!(&String::from("v2"), &value);
+            }
+        },
+        &sk2,
+    );
     assert!(sm_client.is_empty().wait().unwrap().unwrap());
     sm_client.insert(&sk1, &sv1).wait().unwrap().unwrap();
     sm_client.insert(&sk2, &sv2).wait().unwrap().unwrap();
@@ -85,11 +91,18 @@ fn hash_map(){
     assert_eq!(sm_client.get(&sk1).wait().unwrap().unwrap().unwrap(), sv1);
     assert_eq!(sm_client.get(&sk2).wait().unwrap().unwrap().unwrap(), sv2);
 
-    sm_client.insert_if_absent(&sk2, &String::from("kv2")).wait().unwrap().unwrap();
+    sm_client
+        .insert_if_absent(&sk2, &String::from("kv2"))
+        .wait()
+        .unwrap()
+        .unwrap();
     assert_eq!(sm_client.len().wait().unwrap().unwrap(), 2);
     assert_eq!(sm_client.get(&sk2).wait().unwrap().unwrap().unwrap(), sv2);
 
-    assert_eq!(sm_client.remove(&sk2).wait().unwrap().unwrap().unwrap(), sv2);
+    assert_eq!(
+        sm_client.remove(&sk2).wait().unwrap().unwrap().unwrap(),
+        sv2
+    );
     assert_eq!(sm_client.len().wait().unwrap().unwrap(), 1);
     assert!(sm_client.get(&sk2).wait().unwrap().unwrap().is_none());
 
@@ -100,7 +113,7 @@ fn hash_map(){
     sm_client.insert(&sk2, &sv2).wait().unwrap().unwrap();
     sm_client.insert(&sk3, &sv3).wait().unwrap().unwrap();
     sm_client.insert(&sk4, &sv4).wait().unwrap().unwrap();
-    assert_eq!(sm_client.len().wait().unwrap().unwrap(),  4);
+    assert_eq!(sm_client.len().wait().unwrap().unwrap(), 4);
 
     let remote_keys = sm_client.keys().wait().unwrap().unwrap();
     let remote_keys_set = HashSet::<String>::from_iter(remote_keys.iter().cloned());
@@ -114,20 +127,30 @@ fn hash_map(){
     let remote_entries_set = HashSet::<(String, String)>::from_iter(remote_entries.iter().cloned());
     assert_eq!(remote_entries_set.len(), 4);
 
-    let expected_keys: HashSet<_> = [
-        sk1.clone(), sk2.clone(), sk3.clone(), sk4.clone()
-    ].iter().cloned().collect();
-    let expected_values: HashSet<_> = [
-        sv1.clone(), sv2.clone(), sv3.clone(), sv4.clone()
-    ].iter().cloned().collect();
+    let expected_keys: HashSet<_> = [sk1.clone(), sk2.clone(), sk3.clone(), sk4.clone()]
+        .iter()
+        .cloned()
+        .collect();
+    let expected_values: HashSet<_> = [sv1.clone(), sv2.clone(), sv3.clone(), sv4.clone()]
+        .iter()
+        .cloned()
+        .collect();
     let expected_entries: HashSet<_> = [
-        (sk1.clone(), sv1.clone()), (sk2.clone(), sv2.clone()),
-        (sk3.clone(), sv3.clone()), (sk4.clone(), sv4.clone())
-    ].iter().cloned().collect();
+        (sk1.clone(), sv1.clone()),
+        (sk2.clone(), sv2.clone()),
+        (sk3.clone(), sv3.clone()),
+        (sk4.clone(), sv4.clone()),
+    ]
+    .iter()
+    .cloned()
+    .collect();
 
     assert_eq!(remote_keys_set.intersection(&expected_keys).count(), 4);
     assert_eq!(remote_values_set.intersection(&expected_values).count(), 4);
-    assert_eq!(remote_entries_set.intersection(&expected_entries).count(), 4);
+    assert_eq!(
+        remote_entries_set.intersection(&expected_entries).count(),
+        4
+    );
 
     let mut expected_hashmap = HashMap::new();
     expected_hashmap.insert(sk1.clone(), sv1.clone());

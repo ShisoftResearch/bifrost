@@ -1,11 +1,11 @@
-use bifrost::raft::*;
+use super::wait;
 use bifrost::raft::state_machine::master::ExecError;
+use bifrost::raft::*;
 use bifrost::rpc::Server;
 use std::fs::File;
-use super::wait;
 
 #[test]
-fn startup(){
+fn startup() {
     let (success, _, _) = RaftService::new_server(Options {
         storage: Storage::Default(),
         address: String::from("127.0.0.1:2000"),
@@ -15,7 +15,7 @@ fn startup(){
 }
 
 #[test]
-fn server_membership(){
+fn server_membership() {
     let s1_addr = String::from("127.0.0.1:2001");
     let s2_addr = String::from("127.0.0.1:2002");
     let s3_addr = String::from("127.0.0.1:2003");
@@ -39,7 +39,7 @@ fn server_membership(){
     server2.register_service(DEFAULT_SERVICE_ID, &service2);
     Server::listen_and_resume(&server2);
     assert!(RaftService::start(&service2));
-    let join_result = service2.join(&vec!(s1_addr.clone()));
+    let join_result = service2.join(&vec![s1_addr.clone()]);
     match join_result {
         Err(ExecError::ServersUnreachable) => panic!("Server unreachable"),
         Err(ExecError::CannotConstructClient) => panic!("Cannot Construct Client"),
@@ -58,10 +58,7 @@ fn server_membership(){
     server3.register_service(DEFAULT_SERVICE_ID, &service3);
     Server::listen_and_resume(&server3);
     assert!(RaftService::start(&service3));
-    let join_result = service3.join(&vec!(
-        s1_addr.clone(),
-        s2_addr.clone(),
-    ));
+    let join_result = service3.join(&vec![s1_addr.clone(), s2_addr.clone()]);
     join_result.unwrap();
     assert_eq!(service1.num_members(), 3);
     assert_eq!(service3.num_members(), 3);
@@ -85,7 +82,7 @@ fn server_membership(){
 }
 
 #[test]
-fn log_replication(){
+fn log_replication() {
     let s1_addr = String::from("127.0.0.1:2004");
     let s2_addr = String::from("127.0.0.1:2005");
     let s3_addr = String::from("127.0.0.1:2006");
@@ -117,55 +114,43 @@ fn log_replication(){
         service_id: DEFAULT_SERVICE_ID,
     });
 
-
     let server1 = Server::new(&s1_addr);
     server1.register_service(DEFAULT_SERVICE_ID, &service1);
-    Server::listen_and_resume(&server1, );
+    Server::listen_and_resume(&server1);
     assert!(RaftService::start(&service1));
     service1.bootstrap();
-
 
     let server2 = Server::new(&s2_addr);
     server2.register_service(DEFAULT_SERVICE_ID, &service2);
     Server::listen_and_resume(&server2);
     assert!(RaftService::start(&service2));
-    let join_result = service2.join(&vec!(
-        s1_addr.clone(),
-        s2_addr.clone(),
-    ));
+    let join_result = service2.join(&vec![s1_addr.clone(), s2_addr.clone()]);
     join_result.unwrap();
 
     let server3 = Server::new(&s3_addr);
     server3.register_service(DEFAULT_SERVICE_ID, &service3);
     Server::listen_and_resume(&server3);
     assert!(RaftService::start(&service3));
-    let join_result = service3.join(&vec!(
-        s1_addr.clone(),
-        s2_addr.clone(),
-    ));
+    let join_result = service3.join(&vec![s1_addr.clone(), s2_addr.clone()]);
     join_result.unwrap();
 
     let server4 = Server::new(&s4_addr);
     server4.register_service(DEFAULT_SERVICE_ID, &service4);
     Server::listen_and_resume(&server4);
     assert!(RaftService::start(&service4));
-    let join_result = service4.join(&vec!(
-        s1_addr.clone(),
-        s2_addr.clone(),
-        s3_addr.clone(),
-    ));
+    let join_result = service4.join(&vec![s1_addr.clone(), s2_addr.clone(), s3_addr.clone()]);
     join_result.unwrap();
 
     let server5 = Server::new(&s5_addr);
     server5.register_service(DEFAULT_SERVICE_ID, &service5);
     Server::listen_and_resume(&server5);
     assert!(RaftService::start(&service5));
-    let join_result = service5.join(&vec!(
+    let join_result = service5.join(&vec![
         s1_addr.clone(),
         s2_addr.clone(),
         s3_addr.clone(),
         s4_addr.clone(),
-    ));
+    ]);
     join_result.unwrap();
 
     wait(); // wait for membership replication to take effect

@@ -1,25 +1,26 @@
-use std::io::{self};
-use std::sync::Arc;
+use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
-use tokio_proto::TcpServer;
-use tokio_service::{Service, NewService};
 use futures::{future, Future};
+use tokio_proto::TcpServer;
+use tokio_service::{NewService, Service};
 
+use super::STANDALONE_ADDRESS;
 use tcp::proto::BytesServerProto;
 use tcp::shortcut;
-use super::STANDALONE_ADDRESS;
 
 pub struct ServerCallback {
-    closure: Box<Fn(Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = io::Error>>>
+    closure: Box<Fn(Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = io::Error>>>,
 }
 
 impl ServerCallback {
     pub fn new<F: 'static>(f: F) -> ServerCallback
-        where F: Fn(Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = io::Error>>
+    where
+        F: Fn(Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = io::Error>>,
     {
         ServerCallback {
-            closure: Box::new(f)
+            closure: Box::new(f),
         }
     }
     pub fn call(&self, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = io::Error>> {
@@ -31,11 +32,11 @@ unsafe impl Send for ServerCallback {}
 unsafe impl Sync for ServerCallback {}
 
 pub struct Server {
-    callback: Arc<ServerCallback>
+    callback: Arc<ServerCallback>,
 }
 
 pub struct NewServer {
-    callback: Arc<ServerCallback>
+    callback: Arc<ServerCallback>,
 }
 
 impl Service for Server {
@@ -50,15 +51,14 @@ impl Service for Server {
 }
 
 impl NewService for NewServer {
-
     type Request = Vec<u8>;
     type Response = Vec<u8>;
     type Error = io::Error;
     type Instance = Server;
 
     fn new_service(&self) -> io::Result<Self::Instance> {
-        Ok(Server{
-          callback: self.callback.clone()
+        Ok(Server {
+            callback: self.callback.clone(),
         })
     }
 }
@@ -68,7 +68,7 @@ impl Server {
         let callback_ref = Arc::new(callback);
         shortcut::register_server(addr, &callback_ref);
         let new_server = NewServer {
-            callback: callback_ref
+            callback: callback_ref,
         };
         if !addr.eq(&STANDALONE_ADDRESS) {
             let socket_addr: SocketAddr = addr.parse().unwrap();

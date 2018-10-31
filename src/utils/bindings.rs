@@ -1,18 +1,24 @@
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use thread_id;
 
-pub struct Binding<T> where T: Clone {
+pub struct Binding<T>
+where
+    T: Clone,
+{
     default: T,
-    thread_vals: RwLock<HashMap<usize, T>>
+    thread_vals: RwLock<HashMap<usize, T>>,
 }
 
-impl <T> Binding <T> where T: Clone {
+impl<T> Binding<T>
+where
+    T: Clone,
+{
     pub fn new(default: T) -> Binding<T> {
         Binding {
             default: default,
-            thread_vals: RwLock::new(HashMap::new())
+            thread_vals: RwLock::new(HashMap::new()),
         }
     }
     pub fn get(&self) -> T {
@@ -20,7 +26,7 @@ impl <T> Binding <T> where T: Clone {
         let thread_map = self.thread_vals.read();
         match thread_map.get(&tid) {
             Some(v) => v.clone(),
-            None => self.default.clone()
+            None => self.default.clone(),
         }
     }
     pub fn set(&self, val: T) {
@@ -36,12 +42,12 @@ impl <T> Binding <T> where T: Clone {
 }
 
 pub struct RefBinding<T> {
-    bind: Binding<Arc<T>>
+    bind: Binding<Arc<T>>,
 }
-impl <T> RefBinding <T> {
+impl<T> RefBinding<T> {
     pub fn new(default: T) -> RefBinding<T> {
         RefBinding {
-            bind: Binding::new(Arc::new(default))
+            bind: Binding::new(Arc::new(default)),
         }
     }
     pub fn get(&self) -> Arc<T> {
@@ -54,7 +60,6 @@ impl <T> RefBinding <T> {
         self.bind.del()
     }
 }
-
 
 #[macro_export]
 macro_rules! def_bindings {
@@ -123,7 +128,6 @@ macro_rules! with_bindings {
         }
     };
 }
-
 
 #[cfg(test)]
 mod struct_test {

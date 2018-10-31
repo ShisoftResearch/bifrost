@@ -1,13 +1,13 @@
-use raft::client::RaftClient;
-use raft::state_machine::master::ExecError;
-use super::DEFAULT_SERVICE_ID;
+use super::client::{MemberClient, ObserverClient};
 use super::heartbeat_rpc::*;
 use super::raft::client::SMClient;
-use super::client::{MemberClient, ObserverClient as ObserverClient};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::{thread, time};
+use super::DEFAULT_SERVICE_ID;
 use bifrost_hasher::hash_str;
+use raft::client::RaftClient;
+use raft::state_machine::master::ExecError;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::{thread, time};
 
 use futures::prelude::*;
 
@@ -30,7 +30,7 @@ impl MemberService {
             sm_client: sm_client.clone(),
             member_client: MemberClient {
                 id: server_id,
-                sm_client: sm_client.clone()
+                sm_client: sm_client.clone(),
             },
             raft_client: raft_client.clone(),
             address: server_address.clone(),
@@ -54,14 +54,20 @@ impl MemberService {
     pub fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
     }
-    pub fn leave(&self) -> impl Future<Item = Result<(), ()>, Error = ExecError>{
+    pub fn leave(&self) -> impl Future<Item = Result<(), ()>, Error = ExecError> {
         self.close();
         self.sm_client.leave(&self.id)
     }
-    pub fn join_group(&self, group: &String) -> impl Future<Item = Result<(), ()>, Error = ExecError> {
+    pub fn join_group(
+        &self,
+        group: &String,
+    ) -> impl Future<Item = Result<(), ()>, Error = ExecError> {
         self.member_client.join_group(group)
     }
-    pub fn leave_group(&self, group: &String) -> impl Future<Item = Result<(), ()>, Error = ExecError> {
+    pub fn leave_group(
+        &self,
+        group: &String,
+    ) -> impl Future<Item = Result<(), ()>, Error = ExecError> {
         self.member_client.leave_group(group)
     }
     pub fn client(&self) -> ObserverClient {
@@ -77,4 +83,3 @@ impl Drop for MemberService {
         self.leave();
     }
 }
-

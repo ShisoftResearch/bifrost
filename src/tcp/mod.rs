@@ -1,9 +1,9 @@
 use bifrost_hasher::hash_str;
 
-pub mod framed;
-pub mod server;
-pub mod proto;
 pub mod client;
+pub mod framed;
+pub mod proto;
+pub mod server;
 pub mod shortcut;
 
 pub static STANDALONE_ADDRESS: &'static str = "STANDALONE";

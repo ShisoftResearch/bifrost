@@ -1,3 +1,3 @@
-pub mod value;
-pub mod number;
 pub mod map;
+pub mod number;
+pub mod value;

@@ -1,8 +1,8 @@
-use std::str;
 use std::io::{self, ErrorKind, Write};
+use std::str;
 
-use tokio_proto::multiplex::{ServerProto, ClientProto};
-use tokio_core::io::{Io, Framed};
+use tokio_core::io::{Framed, Io};
+use tokio_proto::multiplex::{ClientProto, ServerProto};
 
 use tcp::framed::BytesCodec;
 

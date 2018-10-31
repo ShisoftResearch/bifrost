@@ -1,3 +1,3 @@
-mod value;
-mod number;
 mod map;
+mod number;
+mod value;
