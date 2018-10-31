@@ -207,7 +207,7 @@ impl ClientPool {
         }
     }
 
-    fn get_by_id_async<F>(
+    pub fn get_by_id_async<F>(
         &self,
         server_id: u64,
         addr_fn: F,
