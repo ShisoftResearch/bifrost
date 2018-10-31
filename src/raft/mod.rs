@@ -28,8 +28,9 @@ pub mod client;
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_RAFT_DEFAULT_SERVICE) as u64;
 
 lazy_static! {
-    static ref RAFT_WORKER_POOL: Arc<Mutex<ThreadPool>> = Arc::new(Mutex::new(ThreadPool::new(max(num_cpus::get(), 10))));
+    static ref RAFT_WORKER_POOL: Arc<Mutex<ThreadPool>> = Arc::new(Mutex::new(ThreadPool::new_with_name("Raft Workers".to_string(), max(num_cpus::get(), 10))));
 }
+
 
 def_bindings! {
     bind val IS_LEADER: bool = false;
