@@ -189,9 +189,9 @@ impl ClientPool {
         &self,
         addr: &String,
     ) -> impl Future<Item = Arc<RPCClient>, Error = io::Error> {
-        let addr = addr.clone();
-        let server_id = hash_str(&addr);
-        self.get_by_id_async(server_id, |_| addr)
+        let addr_clone = addr.clone();
+        let server_id = hash_str(addr);
+        self.get_by_id_async(server_id, move |_| addr_clone)
     }
 
     pub fn get(&self, addr: &String) -> Result<Arc<RPCClient>, io::Error> {
@@ -213,7 +213,7 @@ impl ClientPool {
         addr_fn: F,
     ) -> impl Future<Item = Arc<RPCClient>, Error = io::Error>
     where
-        F: Fn(u64) -> String,
+        F: FnOnce(u64) -> String,
     {
         self.clients
             .lock_async()
