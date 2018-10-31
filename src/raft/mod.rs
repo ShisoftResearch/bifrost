@@ -27,6 +27,10 @@ pub mod client;
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_RAFT_DEFAULT_SERVICE) as u64;
 
+lazy_static! {
+    static ref RAFT_WORKER_POOL: Arc<Mutex<ThreadPool>> = Arc::new(Mutex::new(ThreadPool::new(max(num_cpus::get(), 10))));
+}
+
 def_bindings! {
     bind val IS_LEADER: bool = false;
 }
@@ -142,7 +146,7 @@ pub struct RaftMeta {
     commit_index: u64,
     last_applied: u64,
     leader_id: u64,
-    workers: Mutex<ThreadPool>,
+    workers: Arc<Mutex<ThreadPool>>,
 }
 
 #[derive(Clone)]
@@ -250,9 +254,7 @@ impl RaftService {
                     commit_index: 0,
                     last_applied: 0,
                     leader_id: 0,
-                    workers: Mutex::new(ThreadPool::new(
-                        max(num_cpus::get(), 10)
-                    )),
+                    workers: (*RAFT_WORKER_POOL).clone(),
                 }
             ),
             id: server_id,
