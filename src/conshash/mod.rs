@@ -121,12 +121,15 @@ impl ConsistentHashing {
         let mut table = &mut self.tables.write();
         self.init_table_(&mut table)
     }
-    pub fn to_server_name(&self, server_id: Option<u64>) -> Option<String> {
+    pub fn to_server_name(&self, server_id: u64) -> String {
         let lookup_table = self.tables.read();
-        match server_id {
-            Some(id) => Some(lookup_table.addrs.get(&id).unwrap().clone()),
-            None => None
-        }
+        lookup_table.addrs.get(&server_id).unwrap().clone()
+    }
+    pub fn to_server_name_option(&self, server_id: Option<u64>) -> Option<String> {
+        server_id.map(|id| {
+            let lookup_table = self.tables.read();
+            lookup_table.addrs.get(&id).unwrap().clone()
+        })
     }
     pub fn get_server_id(&self, hash: u64) -> Option<u64> {
         let lookup_table = self.tables.read();
@@ -151,7 +154,7 @@ impl ConsistentHashing {
         b as usize
     }
     pub fn get_server(&self, hash: u64) -> Option<String> {
-        self.to_server_name(self.get_server_id(hash))
+        self.to_server_name_option(self.get_server_id(hash))
     }
     pub fn get_server_by_string(&self, string: &String) -> Option<String> {
         self.get_server(hash_str(string))

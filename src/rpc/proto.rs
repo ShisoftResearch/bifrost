@@ -4,15 +4,23 @@ use bincode;
 macro_rules! dispatch_rpc_service_functions {
     ($s:ty) => {
         impl $crate::rpc::RPCService for $s {
-            fn dispatch(&self, data: Vec<u8>)
-                -> Box<Future<Item = Vec<u8>, Error = $crate::rpc::RPCRequestError>>
-                where Self: Sized
+            fn dispatch(
+                &self,
+                data: Vec<u8>,
+            ) -> Box<Future<Item = Vec<u8>, Error = $crate::rpc::RPCRequestError>>
+            where
+                Self: Sized,
             {
                 self.inner_dispatch(data)
             }
-            fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64) {
+            fn register_shortcut_service(
+                &self,
+                service_ptr: usize,
+                server_id: u64,
+                service_id: u64,
+            ) {
                 let mut cbs = RPC_SVRS.write();
-                let service = unsafe {Arc::from_raw(service_ptr as *const $s)};
+                let service = unsafe { Arc::from_raw(service_ptr as *const $s) };
                 cbs.insert((server_id, service_id), service);
             }
         }
@@ -215,7 +223,7 @@ mod struct_test {
         b: u32,
         d: u64,
         e: String,
-        f: f32
+        f: f32,
     }
 
     service! {
