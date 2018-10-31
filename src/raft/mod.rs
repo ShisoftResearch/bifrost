@@ -251,7 +251,7 @@ impl RaftService {
                     last_applied: 0,
                     leader_id: 0,
                     workers: Mutex::new(ThreadPool::new(
-                        max(num_cpus::get() * 5, 10)
+                        max(num_cpus::get(), 10)
                     )),
                 }
             ),
