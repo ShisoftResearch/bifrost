@@ -195,13 +195,20 @@ impl ClientPool {
     }
 
     pub fn get(&self, addr: &String) -> Result<Arc<RPCClient>, io::Error> {
-        let server_id = hash_str(&addr);
+        let addr_clone = addr.clone();
+        let server_id = hash_str(addr);
+        self.get_by_id(server_id, move |_| addr_clone)
+    }
+
+    pub fn get_by_id<F>(&self, server_id: u64, addr_fn: F) -> Result<Arc<RPCClient>, io::Error>
+        where F: FnOnce(u64) -> String
+    {
         let mut clients = self.clients.lock();
         if clients.contains_key(&server_id) {
             let client = clients.get(&server_id).unwrap().clone();
             Ok(client)
         } else {
-            let client = RPCClient::new_async(addr.clone()).wait()?;
+            let client = RPCClient::new_async(addr_fn(server_id)).wait()?;
             clients.insert(server_id, client.clone());
             return Ok(client.clone());
         }
