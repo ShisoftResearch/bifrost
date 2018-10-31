@@ -39,16 +39,19 @@ impl MemberService {
         });
         sm_client.join(&server_address).wait();
         let service_clone = service.clone();
-        thread::spawn(move || {
-            while !service_clone.closed.load(Ordering::Relaxed) {
-                let rpc_client = service_clone.raft_client.current_leader_rpc_client().wait();
-                if let Ok(rpc_client) = rpc_client {
-                    let heartbeat_client = AsyncServiceClient::new(DEFAULT_SERVICE_ID, &rpc_client);
-                    heartbeat_client.ping(service_clone.id);
+        thread::Builder::new()
+            .name("Member service heartbeat".to_string())
+            .spawn(move || {
+                while !service_clone.closed.load(Ordering::Relaxed) {
+                    let rpc_client = service_clone.raft_client.current_leader_rpc_client().wait();
+                    if let Ok(rpc_client) = rpc_client {
+                        let heartbeat_client =
+                            AsyncServiceClient::new(DEFAULT_SERVICE_ID, &rpc_client);
+                        heartbeat_client.ping(service_clone.id);
+                    }
+                    thread::sleep(time::Duration::from_millis(PING_INTERVAL))
                 }
-                thread::sleep(time::Duration::from_millis(PING_INTERVAL))
-            }
-        });
+            });
         return service;
     }
     pub fn close(&self) {

@@ -343,18 +343,23 @@ fn server_changed(ch: &Arc<ConsistentHashing>, member: Member, action: Action, v
     let ch_version = ch.version.load(Ordering::Relaxed);
     if ch_version < version {
         let ch = ch.clone();
-        thread::spawn(move || {
-            let mut lookup_table = ch.tables.write();
-            let watchers = ch.watchers.read();
-            let ch_version = ch.version.load(Ordering::Relaxed);
-            if ch_version >= version {
-                return;
-            }
-            let old_nodes = lookup_table.nodes.clone();
-            ch.init_table_(&mut lookup_table);
-            for watch in watchers.iter() {
-                watch(&member, &action, &*lookup_table, &old_nodes);
-            }
-        });
+        thread::Builder::new()
+            .name(format!(
+                "Conshash member changes update - {}",
+                member.address
+            ))
+            .spawn(move || {
+                let mut lookup_table = ch.tables.write();
+                let watchers = ch.watchers.read();
+                let ch_version = ch.version.load(Ordering::Relaxed);
+                if ch_version >= version {
+                    return;
+                }
+                let old_nodes = lookup_table.nodes.clone();
+                ch.init_table_(&mut lookup_table);
+                for watch in watchers.iter() {
+                    watch(&member, &action, &*lookup_table, &old_nodes);
+                }
+            });
     }
 }

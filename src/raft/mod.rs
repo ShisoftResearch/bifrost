@@ -279,51 +279,53 @@ impl RaftService {
             }
         }
         let checker_ref = server.clone();
-        thread::spawn(move || {
-            let server = checker_ref;
-            loop {
-                let start_time = get_time();
-                let expected_ends = start_time + CHECKER_MS;
-                {
-                    let mut meta = server.meta.write(); //WARNING: Reentering not supported
-                    let action = match meta.membership {
-                        Membership::Leader(_) => CheckerAction::SendHeartbeat,
-                        Membership::Follower | Membership::Candidate => {
-                            let current_time = get_time();
-                            let timeout_time = meta.timeout + meta.last_checked;
-                            let timeout_elapsed = current_time - timeout_time;
-                            if meta.vote_for == None && timeout_elapsed > 0 {
-                                // TODO: in my test sometimes timeout_elapsed may go 1 for no reason, require investigation
-                                //Timeout, require election
-                                //debug!("TIMEOUT!!! GOING TO CANDIDATE!!! {}, {}", server_id, timeout_elapsed);
-                                CheckerAction::BecomeCandidate
-                            } else {
-                                CheckerAction::None
+        thread::Builder::new()
+            .name("Raft service daemon".to_string())
+            .spawn(move || {
+                let server = checker_ref;
+                loop {
+                    let start_time = get_time();
+                    let expected_ends = start_time + CHECKER_MS;
+                    {
+                        let mut meta = server.meta.write(); //WARNING: Reentering not supported
+                        let action = match meta.membership {
+                            Membership::Leader(_) => CheckerAction::SendHeartbeat,
+                            Membership::Follower | Membership::Candidate => {
+                                let current_time = get_time();
+                                let timeout_time = meta.timeout + meta.last_checked;
+                                let timeout_elapsed = current_time - timeout_time;
+                                if meta.vote_for == None && timeout_elapsed > 0 {
+                                    // TODO: in my test sometimes timeout_elapsed may go 1 for no reason, require investigation
+                                    //Timeout, require election
+                                    //debug!("TIMEOUT!!! GOING TO CANDIDATE!!! {}, {}", server_id, timeout_elapsed);
+                                    CheckerAction::BecomeCandidate
+                                } else {
+                                    CheckerAction::None
+                                }
                             }
+                            Membership::Offline => CheckerAction::ExitLoop,
+                            Membership::Undefined => CheckerAction::None,
+                        };
+                        match action {
+                            CheckerAction::SendHeartbeat => {
+                                server.send_followers_heartbeat(&mut meta, None);
+                            }
+                            CheckerAction::BecomeCandidate => {
+                                RaftService::become_candidate(server.clone(), &mut meta);
+                            }
+                            CheckerAction::ExitLoop => {
+                                break;
+                            }
+                            CheckerAction::None => {}
                         }
-                        Membership::Offline => CheckerAction::ExitLoop,
-                        Membership::Undefined => CheckerAction::None,
-                    };
-                    match action {
-                        CheckerAction::SendHeartbeat => {
-                            server.send_followers_heartbeat(&mut meta, None);
-                        }
-                        CheckerAction::BecomeCandidate => {
-                            RaftService::become_candidate(server.clone(), &mut meta);
-                        }
-                        CheckerAction::ExitLoop => {
-                            break;
-                        }
-                        CheckerAction::None => {}
+                    }
+                    let end_time = get_time();
+                    let time_to_sleep = expected_ends - end_time - 1;
+                    if time_to_sleep > 0 {
+                        thread::sleep(Duration::from_millis(time_to_sleep as u64));
                     }
                 }
-                let end_time = get_time();
-                let time_to_sleep = expected_ends - end_time - 1;
-                if time_to_sleep > 0 {
-                    thread::sleep(Duration::from_millis(time_to_sleep as u64));
-                }
-            }
-        });
+            });
         {
             let mut meta = server.meta.write();
             meta.last_checked = get_time();

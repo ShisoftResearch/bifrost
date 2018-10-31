@@ -105,46 +105,51 @@ impl Membership {
             was_leader: AtomicBool::new(false),
         });
         let service_clone = service.clone();
-        thread::spawn(move || {
-            while !service_clone.closed.load(Ordering::Relaxed) {
-                let is_leader = service_clone.raft_service.is_leader();
-                let was_leader = service_clone.was_leader.load(Ordering::Relaxed);
-                if !was_leader && is_leader {
-                    service_clone.transfer_leadership()
-                }
-                if was_leader != is_leader {
-                    service_clone.was_leader.store(is_leader, Ordering::Relaxed);
-                }
-                if is_leader {
-                    let current_time = time::get_time();
-                    let mut outdated_members: Vec<u64> = Vec::new();
-                    let mut backedin_members: Vec<u64> = Vec::new();
-                    {
-                        let mut status_map = service_clone.status.write();
-                        let mut members_to_update: HashMap<u64, bool> = HashMap::new();
-                        for (id, status) in status_map.iter() {
-                            let alive = (current_time - status.last_updated) < MAX_TIMEOUT;
-                            if status.online && !alive {
-                                outdated_members.push(*id);
-                                members_to_update.insert(*id, alive);
+        thread::Builder::new()
+            .name("Membership daemon".to_string())
+            .spawn(move || {
+                while !service_clone.closed.load(Ordering::Relaxed) {
+                    let is_leader = service_clone.raft_service.is_leader();
+                    let was_leader = service_clone.was_leader.load(Ordering::Relaxed);
+                    if !was_leader && is_leader {
+                        service_clone.transfer_leadership()
+                    }
+                    if was_leader != is_leader {
+                        service_clone.was_leader.store(is_leader, Ordering::Relaxed);
+                    }
+                    if is_leader {
+                        let current_time = time::get_time();
+                        let mut outdated_members: Vec<u64> = Vec::new();
+                        let mut backedin_members: Vec<u64> = Vec::new();
+                        {
+                            let mut status_map = service_clone.status.write();
+                            let mut members_to_update: HashMap<
+                                u64,
+                                bool,
+                            > = HashMap::new();
+                            for (id, status) in status_map.iter() {
+                                let alive = (current_time - status.last_updated) < MAX_TIMEOUT;
+                                if status.online && !alive {
+                                    outdated_members.push(*id);
+                                    members_to_update.insert(*id, alive);
+                                }
+                                if !status.online && alive {
+                                    backedin_members.push(*id);
+                                    members_to_update.insert(*id, alive);
+                                }
                             }
-                            if !status.online && alive {
-                                backedin_members.push(*id);
-                                members_to_update.insert(*id, alive);
+                            for (id, alive) in members_to_update.iter() {
+                                let mut status = status_map.get_mut(&id).unwrap();
+                                status.online = *alive;
                             }
                         }
-                        for (id, alive) in members_to_update.iter() {
-                            let mut status = status_map.get_mut(&id).unwrap();
-                            status.online = *alive;
+                        if backedin_members.len() + outdated_members.len() > 0 {
+                            service_clone.update_raft(&backedin_members, &outdated_members);
                         }
                     }
-                    if backedin_members.len() + outdated_members.len() > 0 {
-                        service_clone.update_raft(&backedin_members, &outdated_members);
-                    }
+                    thread::sleep(std_time::Duration::from_secs(1));
                 }
-                thread::sleep(std_time::Duration::from_secs(1));
-            }
-        });
+            });
         let mut membership_service = Membership {
             heartbeat: service.clone(),
             groups: HashMap::new(),
