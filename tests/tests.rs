@@ -20,11 +20,11 @@ extern crate parking_lot;
 #[macro_use]
 extern crate log;
 extern crate env_logger;
+extern crate tokio_service;
 
 mod conshash;
 mod membership;
 mod raft;
-#[cfg(disable_shortcut)]
 mod rpc;
 mod store;
 mod utils;

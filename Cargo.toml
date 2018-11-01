@@ -6,9 +6,6 @@ authors = ["Hao Shi <shisoftgenius@gmail.com>"]
 [lib]
 name = "bifrost"
 
-[[test]]
-name = "tests"
-
 [dependencies]
 bincode = "*"
 byteorder = "1"
@@ -38,3 +35,4 @@ tokio-timer = "0.1"
 tokio-middleware = { git = "https://github.com/tokio-rs/tokio-middleware" }
 
 [dev-dependencies]
+rayon = "1.0"
