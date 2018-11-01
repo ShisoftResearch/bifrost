@@ -18,6 +18,7 @@ use utils::bincode::serialize;
 use futures::prelude::*;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use tokio_core::reactor::Core;
 
 pub mod weights;
 
@@ -74,9 +75,10 @@ impl ConsistentHashing {
             watchers: RwLock::new(Vec::new()),
             version: AtomicU64::new(0),
         });
+        let mut core = Core::new().unwrap();
         {
             let ch = ch.clone();
-            let res = membership
+            let res_fut = membership
                 .on_group_member_joined(
                     move |r| {
                         if let Ok((member, version)) = r {
@@ -84,8 +86,8 @@ impl ConsistentHashing {
                         }
                     },
                     group,
-                )
-                .wait();
+                );
+            let res = core.run(res_fut);
             if let Ok(Ok(_)) = res {
             } else {
                 return Err(CHError::WatchError(res));
@@ -93,7 +95,7 @@ impl ConsistentHashing {
         }
         {
             let ch = ch.clone();
-            let res = membership
+            let res_fut = membership
                 .on_group_member_online(
                     move |r| {
                         if let Ok((member, version)) = r {
@@ -101,8 +103,8 @@ impl ConsistentHashing {
                         }
                     },
                     group,
-                )
-                .wait();
+                );
+            let res = core.run(res_fut);
             if let Ok(Ok(_)) = res {
             } else {
                 return Err(CHError::WatchError(res));
@@ -110,7 +112,7 @@ impl ConsistentHashing {
         }
         {
             let ch = ch.clone();
-            let res = membership
+            let res_fut = membership
                 .on_group_member_left(
                     move |r| {
                         if let Ok((member, version)) = r {
@@ -118,8 +120,8 @@ impl ConsistentHashing {
                         }
                     },
                     group,
-                )
-                .wait();
+                );
+            let res = core.run(res_fut);
             if let Ok(Ok(_)) = res {
             } else {
                 return Err(CHError::WatchError(res));
@@ -127,7 +129,7 @@ impl ConsistentHashing {
         }
         {
             let ch = ch.clone();
-            let res = membership
+            let res_fut = membership
                 .on_group_member_offline(
                     move |r| {
                         if let Ok((member, version)) = r {
@@ -135,8 +137,8 @@ impl ConsistentHashing {
                         }
                     },
                     group,
-                )
-                .wait();
+                );
+            let res = core.run(res_fut);
             if let Ok(Ok(_)) = res {
             } else {
                 return Err(CHError::WatchError(res));
