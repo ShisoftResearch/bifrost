@@ -165,6 +165,7 @@ mod parallel {
     use self::rayon::prelude::*;
     use super::struct_service::*;
     use super::*;
+    use bifrost_hasher::hash_str;
 
     #[test]
     pub fn lots_of_reqs() {
@@ -176,12 +177,28 @@ mod parallel {
             Server::listen_and_resume(&server);
         }
         thread::sleep(Duration::from_millis(1000));
-        let client = RPCClient::new_async(addr).wait().unwrap();
+        let client = RPCClient::new_async(addr.clone()).wait().unwrap();
         let service_client = AsyncServiceClient::new(0, &client);
 
         println!("Testing parallel RPC reqs");
 
         (0..1000).collect::<Vec<_>>().into_par_iter().for_each(|i| {
+            let response = service_client.hello(Greeting {
+                name: String::from("John"),
+                time: i,
+            });
+            let res = response.wait().unwrap().unwrap();
+            let greeting_str = res.text;
+            println!("SERVER RESPONDED: {}", greeting_str);
+            assert_eq!(greeting_str, format!("Hello, John. It is {} now!", i));
+            assert_eq!(42, res.owner);
+        });
+
+        // test pool
+        let server_id = hash_str(&addr);
+        (0..1000).collect::<Vec<_>>().into_par_iter().for_each(|i| {
+            let client = DEFAULT_CLIENT_POOL.get_by_id(server_id, |_| (&addr).clone()).unwrap();
+            let service_client = AsyncServiceClient::new(0, &client);
             let response = service_client.hello(Greeting {
                 name: String::from("John"),
                 time: i,
