@@ -4,15 +4,30 @@ use std::cell::UnsafeCell;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use futures::task;
 
 #[derive(Clone)]
-pub struct RwLock<T: ?Sized> {
+pub struct RwLock<T: Sized> {
     inner: Arc<RwLockInner<T>>,
 }
 
-struct RwLockInner<T: ?Sized> {
+struct RwLockInner<T: Sized> {
     raw: RwLockRaw,
     data: UnsafeCell<T>,
+    tasks: ::parking_lot::Mutex<Vec<task::Task>>,
+}
+
+impl <T> RwLockInner <T> {
+    fn notify_all(&self) {
+        let mut tasks = self.tasks.lock();
+        for t in &*tasks {
+            t.notify();
+        }
+        tasks.clear();
+    }
+    fn add_task(&self, task: task::Task) {
+        self.tasks.lock().push(task)
+    }
 }
 
 struct RwLockRaw {
@@ -20,30 +35,30 @@ struct RwLockRaw {
 }
 
 #[derive(Clone)]
-pub struct AsyncRwLockReadGuard<T: ?Sized> {
+pub struct AsyncRwLockReadGuard<T: Sized> {
     lock: Arc<RwLockInner<T>>,
 }
 
 #[derive(Clone)]
-pub struct AsyncRwLockWriteGuard<T: ?Sized> {
+pub struct AsyncRwLockWriteGuard<T: Sized> {
     lock: Arc<RwLockInner<T>>,
 }
 
-struct RwLockReadGuardInner<T: ?Sized> {
+struct RwLockReadGuardInner<T: Sized> {
     lock: Arc<RwLockInner<T>>,
 }
 
-struct RwLockWriteGuardInner<T: ?Sized> {
+struct RwLockWriteGuardInner<T: Sized> {
     lock: Arc<RwLockInner<T>>,
 }
 
 #[derive(Clone)]
-pub struct RwLockReadGuard<T: ?Sized> {
+pub struct RwLockReadGuard<T: Sized> {
     inner: Arc<RwLockReadGuardInner<T>>,
 }
 
 #[derive(Clone)]
-pub struct RwLockWriteGuard<T: ?Sized> {
+pub struct RwLockWriteGuard<T: Sized> {
     inner: Arc<RwLockWriteGuardInner<T>>,
 }
 
@@ -53,11 +68,13 @@ unsafe impl<T: Send> Sync for RwLock<T> {}
 unsafe impl<T: Send> Send for RwLockInner<T> {}
 unsafe impl<T: Send> Sync for RwLockInner<T> {}
 
-impl<T: ?Sized> Future for AsyncRwLockReadGuard<T> {
+impl<T: Sized> Future for AsyncRwLockReadGuard<T> {
     type Item = RwLockReadGuard<T>;
     type Error = ();
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        self.lock.add_task(task::current());
+        self.lock.notify_all();
         if self.lock.raw.try_read() {
             Ok(Async::Ready(RwLockReadGuard::new(&self.lock)))
         } else {
@@ -71,6 +88,8 @@ impl<T> Future for AsyncRwLockWriteGuard<T> {
     type Error = ();
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        self.lock.add_task(task::current());
+        self.lock.notify_all();
         if self.lock.raw.try_write() {
             Ok(Async::Ready(RwLockWriteGuard::new(&self.lock)))
         } else {
@@ -114,6 +133,7 @@ impl<T> RwLockInner<T> {
         Arc::new(RwLockInner {
             raw: RwLockRaw::new(),
             data: UnsafeCell::new(val),
+            tasks: ::parking_lot::Mutex::new(Vec::new())
         })
     }
 }
@@ -161,7 +181,7 @@ impl RwLockRaw {
     }
 }
 
-impl<T: ?Sized> RwLockReadGuard<T> {
+impl<T: Sized> RwLockReadGuard<T> {
     fn new(raw: &Arc<RwLockInner<T>>) -> RwLockReadGuard<T> {
         RwLockReadGuard {
             inner: Arc::new(RwLockReadGuardInner { lock: raw.clone() }),
@@ -216,14 +236,14 @@ impl<T> RwLockWriteGuard<T> {
     }
 }
 
-impl<T: ?Sized> Drop for RwLockReadGuardInner<T> {
+impl<T> Drop for RwLockReadGuardInner<T> {
     #[inline]
     fn drop(&mut self) {
         self.lock.raw.unlock_read()
     }
 }
 
-impl<T: ?Sized> Drop for RwLockWriteGuardInner<T> {
+impl<T> Drop for RwLockWriteGuardInner<T> {
     #[inline]
     fn drop(&mut self) {
         self.lock.raw.unlock_write()
