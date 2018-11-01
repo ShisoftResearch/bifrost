@@ -74,7 +74,6 @@ impl<T: Sized> Future for AsyncRwLockReadGuard<T> {
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         self.lock.add_task(task::current());
-        self.lock.notify_all();
         if self.lock.raw.try_read() {
             Ok(Async::Ready(RwLockReadGuard::new(&self.lock)))
         } else {
@@ -89,7 +88,6 @@ impl<T> Future for AsyncRwLockWriteGuard<T> {
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         self.lock.add_task(task::current());
-        self.lock.notify_all();
         if self.lock.raw.try_write() {
             Ok(Async::Ready(RwLockWriteGuard::new(&self.lock)))
         } else {
@@ -239,14 +237,16 @@ impl<T> RwLockWriteGuard<T> {
 impl<T> Drop for RwLockReadGuardInner<T> {
     #[inline]
     fn drop(&mut self) {
-        self.lock.raw.unlock_read()
+        self.lock.raw.unlock_read();
+        self.lock.notify_all();
     }
 }
 
 impl<T> Drop for RwLockWriteGuardInner<T> {
     #[inline]
     fn drop(&mut self) {
-        self.lock.raw.unlock_write()
+        self.lock.raw.unlock_write();
+        self.lock.notify_all();
     }
 }
 

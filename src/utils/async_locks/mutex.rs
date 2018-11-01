@@ -85,7 +85,6 @@ impl<T: Sized> Future for AsyncMutexGuard<T> {
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         // println!("pulling");
         self.mutex.add_task(task::current());
-        self.mutex.notify_all();
         if self.mutex.raw.try_lock() {
             // println!("locking");
             Ok(Async::Ready(MutexGuard {
@@ -146,6 +145,7 @@ impl<T: Sized> Drop for MutexGuard<T> {
     #[inline]
     fn drop(&mut self) {
         self.mutex.raw.unlock();
+        self.mutex.notify_all();
     }
 }
 
