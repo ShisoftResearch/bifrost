@@ -6,6 +6,9 @@ authors = ["Hao Shi <shisoftgenius@gmail.com>"]
 [lib]
 name = "bifrost"
 
+[[test]]
+name = "tests"
+
 [dependencies]
 bincode = "*"
 byteorder = "1"
