@@ -1,11 +1,11 @@
 use bifrost::rpc::*;
 use byteorder::{ByteOrder, LittleEndian};
+use futures::prelude::*;
 use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
-use futures::prelude::*;
 
 pub mod simple_service {
 
@@ -161,10 +161,10 @@ mod multi_server {
 mod parallel {
 
     extern crate rayon;
-    use self::rayon::prelude::*;
     use self::rayon::iter::IntoParallelIterator;
-    use super::*;
+    use self::rayon::prelude::*;
     use super::struct_service::*;
+    use super::*;
 
     #[test]
     pub fn lots_of_reqs() {
@@ -181,19 +181,16 @@ mod parallel {
 
         println!("Testing parallel RPC reqs");
 
-        (0..1000)
-            .collect::<Vec<_>>()
-            .into_par_iter()
-            .for_each(|i| {
-                let response = service_client.hello(Greeting {
-                    name: String::from("John"),
-                    time: i,
-                });
-                let res = response.wait().unwrap().unwrap();
-                let greeting_str = res.text;
-                println!("SERVER RESPONDED: {}", greeting_str);
-                assert_eq!(greeting_str, format!("Hello, John. It is {} now!", i));
-                assert_eq!(42, res.owner);
+        (0..1000).collect::<Vec<_>>().into_par_iter().for_each(|i| {
+            let response = service_client.hello(Greeting {
+                name: String::from("John"),
+                time: i,
             });
+            let res = response.wait().unwrap().unwrap();
+            let greeting_str = res.text;
+            println!("SERVER RESPONDED: {}", greeting_str);
+            assert_eq!(greeting_str, format!("Hello, John. It is {} now!", i));
+            assert_eq!(42, res.owner);
+        });
     }
 }
