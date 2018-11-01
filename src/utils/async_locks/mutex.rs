@@ -84,13 +84,13 @@ impl<T: Sized> Future for AsyncMutexGuard<T> {
     type Error = ();
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         // println!("pulling");
-        self.mutex.add_task(task::current());
         if self.mutex.raw.try_lock() {
             // println!("locking");
             Ok(Async::Ready(MutexGuard {
                 mutex: self.mutex.clone(),
             }))
         } else {
+            self.mutex.add_task(task::current());
             Ok(Async::NotReady)
         }
     }
