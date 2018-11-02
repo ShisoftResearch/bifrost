@@ -14,20 +14,6 @@ pub struct RwLock<T: Sized> {
 struct RwLockInner<T: Sized> {
     raw: RwLockRaw,
     data: UnsafeCell<T>,
-    tasks: ::parking_lot::Mutex<Vec<task::Task>>,
-}
-
-impl <T> RwLockInner <T> {
-    fn notify_all(&self) {
-        let mut tasks = self.tasks.lock();
-        for t in &*tasks {
-            t.notify();
-        }
-        tasks.clear();
-    }
-    fn add_task(&self, task: task::Task) {
-        self.tasks.lock().push(task)
-    }
 }
 
 struct RwLockRaw {
@@ -73,12 +59,10 @@ impl<T: Sized> Future for AsyncRwLockReadGuard<T> {
     type Error = ();
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        self.lock.add_task(task::current());
         if self.lock.raw.try_read() {
-            self.lock.notify_all();
             Ok(Async::Ready(RwLockReadGuard::new(&self.lock)))
         } else {
-            self.lock.add_task(task::current());
+            task::current().notify();
             Ok(Async::NotReady)
         }
     }
@@ -89,12 +73,10 @@ impl<T> Future for AsyncRwLockWriteGuard<T> {
     type Error = ();
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        self.lock.add_task(task::current());
         if self.lock.raw.try_write() {
-            self.lock.notify_all();
             Ok(Async::Ready(RwLockWriteGuard::new(&self.lock)))
         } else {
-            self.lock.add_task(task::current());
+            task::current().notify();
             Ok(Async::NotReady)
         }
     }
@@ -134,8 +116,7 @@ impl<T> RwLockInner<T> {
     pub fn new(val: T) -> Arc<RwLockInner<T>> {
         Arc::new(RwLockInner {
             raw: RwLockRaw::new(),
-            data: UnsafeCell::new(val),
-            tasks: ::parking_lot::Mutex::new(Vec::new())
+            data: UnsafeCell::new(val)
         })
     }
 }
@@ -242,7 +223,6 @@ impl<T> Drop for RwLockReadGuardInner<T> {
     #[inline]
     fn drop(&mut self) {
         self.lock.raw.unlock_read();
-        self.lock.notify_all();
     }
 }
 
@@ -250,7 +230,6 @@ impl<T> Drop for RwLockWriteGuardInner<T> {
     #[inline]
     fn drop(&mut self) {
         self.lock.raw.unlock_write();
-        self.lock.notify_all();
     }
 }
 

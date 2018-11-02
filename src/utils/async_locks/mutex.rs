@@ -18,7 +18,6 @@ pub struct Mutex<T: Sized> {
 struct MutexInner<T: Sized> {
     raw: RawMutex,
     data: UnsafeCell<T>,
-    tasks: ::parking_lot::Mutex<Vec<task::Task>>,
 }
 
 struct RawMutex {
@@ -31,22 +30,8 @@ unsafe impl<T: Send> Sync for Mutex<T> {}
 unsafe impl<T: Send> Send for MutexInner<T> {}
 unsafe impl<T: Send> Sync for MutexInner<T> {}
 
-impl <T> MutexInner <T> {
-    fn notify_all(&self) {
-        let mut tasks = self.tasks.lock();
-        for t in &*tasks {
-            t.notify();
-        }
-        tasks.clear();
-    }
-    fn add_task(&self, task: task::Task) {
-        self.tasks.lock().push(task)
-    }
-}
-
 pub struct AsyncMutexGuard<T: Sized> {
-    mutex: Arc<MutexInner<T>>,
-    locked: bool
+    mutex: Arc<MutexInner<T>>
 }
 
 pub struct MutexGuard<T: Sized> {
@@ -84,18 +69,12 @@ impl<T: Sized> Future for AsyncMutexGuard<T> {
     type Item = MutexGuard<T>;
     type Error = ();
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        if self.locked {
-            panic!()
-        }
-        self.mutex.add_task(task::current());
         if self.mutex.raw.try_lock() {
-            // println!("locking");
-            self.locked = true;
-            self.mutex.notify_all();
             Ok(Async::Ready(MutexGuard {
                 mutex: self.mutex.clone(),
             }))
         } else {
+            task::current().notify();
             Ok(Async::NotReady)
         }
     }
@@ -107,14 +86,12 @@ impl<T> Mutex<T> {
             inner: Arc::new(MutexInner {
                 raw: RawMutex::new(),
                 data: UnsafeCell::new(val),
-                tasks: ::parking_lot::Mutex::new(Vec::new()),
             }),
         }
     }
     pub fn lock_async(&self) -> AsyncMutexGuard<T> {
         AsyncMutexGuard {
             mutex: self.inner.clone(),
-            locked: false,
         }
     }
     pub fn lock(&self) -> MutexGuard<T> {
@@ -151,7 +128,6 @@ impl<T: Sized> Drop for MutexGuard<T> {
     #[inline]
     fn drop(&mut self) {
         self.mutex.raw.unlock();
-        self.mutex.notify_all();
     }
 }
 
