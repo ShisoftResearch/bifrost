@@ -46,6 +46,7 @@ impl <T> MutexInner <T> {
 
 pub struct AsyncMutexGuard<T: Sized> {
     mutex: Arc<MutexInner<T>>,
+    locked: bool
 }
 
 pub struct MutexGuard<T: Sized> {
@@ -83,14 +84,18 @@ impl<T: Sized> Future for AsyncMutexGuard<T> {
     type Item = MutexGuard<T>;
     type Error = ();
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        // println!("pulling");
+        if self.locked {
+            panic!()
+        }
+        self.mutex.add_task(task::current());
         if self.mutex.raw.try_lock() {
             // println!("locking");
+            self.locked = true;
+            self.mutex.notify_all();
             Ok(Async::Ready(MutexGuard {
                 mutex: self.mutex.clone(),
             }))
         } else {
-            self.mutex.add_task(task::current());
             Ok(Async::NotReady)
         }
     }
@@ -109,6 +114,7 @@ impl<T> Mutex<T> {
     pub fn lock_async(&self) -> AsyncMutexGuard<T> {
         AsyncMutexGuard {
             mutex: self.inner.clone(),
+            locked: false,
         }
     }
     pub fn lock(&self) -> MutexGuard<T> {

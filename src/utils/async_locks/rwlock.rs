@@ -73,7 +73,9 @@ impl<T: Sized> Future for AsyncRwLockReadGuard<T> {
     type Error = ();
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        self.lock.add_task(task::current());
         if self.lock.raw.try_read() {
+            self.lock.notify_all();
             Ok(Async::Ready(RwLockReadGuard::new(&self.lock)))
         } else {
             self.lock.add_task(task::current());
@@ -87,7 +89,9 @@ impl<T> Future for AsyncRwLockWriteGuard<T> {
     type Error = ();
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        self.lock.add_task(task::current());
         if self.lock.raw.try_write() {
+            self.lock.notify_all();
             Ok(Async::Ready(RwLockWriteGuard::new(&self.lock)))
         } else {
             self.lock.add_task(task::current());
