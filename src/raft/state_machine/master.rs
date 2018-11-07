@@ -4,6 +4,9 @@ use super::*;
 use std::collections::HashMap;
 use utils::bincode;
 use std::error::Error;
+use std::fmt::Display;
+use std::fmt::Formatter;
+use std::fmt;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ExecError {
@@ -129,3 +132,8 @@ impl MasterStateMachine {
 }
 
 impl Error for ExecError {}
+impl Display for ExecError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
