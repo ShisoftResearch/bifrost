@@ -3,6 +3,7 @@ use super::super::*;
 use super::*;
 use std::collections::HashMap;
 use utils::bincode;
+use std::error::Error;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ExecError {
@@ -126,3 +127,5 @@ impl MasterStateMachine {
         self.subs.clear()
     }
 }
+
+impl Error for ExecError {}
