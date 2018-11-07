@@ -333,6 +333,9 @@ impl ConsistentHashing {
             Err(InitTableError::GroupNotExisted)
         }
     }
+    pub fn membership(&self) -> Arc<MembershipClient> {
+        self.membership.clone()
+    }
 }
 
 fn server_joined(ch: &Arc<ConsistentHashing>, member: Member, version: u64) {
