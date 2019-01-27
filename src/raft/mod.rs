@@ -18,6 +18,7 @@ use utils::async_locks::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use utils::time::get_time;
 
 use futures::prelude::*;
+use bifrost_plugins::hash_ident;
 
 #[macro_use]
 pub mod state_machine;

@@ -1,5 +1,5 @@
 #![feature(plugin)]
-#![plugin(bifrost_plugins)]
+#![feature(proc_macro_hygiene)]
 #![feature(proc_macro)]
 #![feature(box_syntax)]
 #![feature(conservative_impl_trait)]
@@ -7,6 +7,7 @@
 #[macro_use]
 extern crate bifrost;
 extern crate bifrost_hasher;
+extern crate bifrost_plugins;
 extern crate bincode;
 extern crate byteorder;
 extern crate futures_await as futures;

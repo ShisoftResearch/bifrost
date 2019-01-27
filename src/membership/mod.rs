@@ -4,6 +4,7 @@ pub mod server;
 
 use futures::prelude::*;
 use membership::client::Member as ClientMember;
+use bifrost_plugins::hash_ident;
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_MEMBERSHIP_SERVICE) as u64;
 

@@ -1,40 +1,23 @@
-#![feature(plugin_registrar, rustc_private)]
-
-extern crate rustc;
-extern crate rustc_plugin;
-extern crate syntax;
+extern crate proc_macro;
 extern crate bifrost_hasher;
 
-use syntax::tokenstream::TokenTree;
-use syntax::ext::base::{ExtCtxt, MacResult, DummyResult, MacEager};
-use syntax::ext::build::AstBuilder;  // trait for expr_usize
-use syntax::ext::quote::rt::Span;
-use syntax::parse::token;
-use rustc_plugin::Registry;
+use proc_macro::TokenStream;
 use bifrost_hasher::hash_str;
+use proc_macro::TokenTree;
+use proc_macro::TokenTree::Ident;
 
-fn hash_ident (cx: &mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacResult + 'static> {
-    if args.len() != 1 {
-        cx.span_err(
-            sp,
-            &format!("argument should be a single identifier, but got {} arguments {:?}",
-                     args.len(), args));
-        return DummyResult::any(sp);
+#[proc_macro]
+pub fn hash_ident(item: TokenStream) -> TokenStream {
+    let tokens: Vec<_> = item.into_iter().collect();
+    if tokens.len() != 1 {
+        panic!("argument should be a single identifier, but got {} arguments {:?}",
+               tokens.len(), tokens);
     }
-
-    let text = match args[0] {
-        TokenTree::Token(_, token::Ident(s, _)) => s.to_string(),
-        _ => {
-            cx.span_err(sp, "argument should be a single identifier");
-            return DummyResult::any(sp);
-        }
+    let text = match tokens[0] {
+        TokenTree::Ident(ref ident) => ident.to_string(),
+        _ => tokens[0].to_string().trim().to_owned()
     };
     let text = &*text;
     let str = String::from(text);
-    MacEager::expr(cx.expr_usize(sp, hash_str(&str) as usize))
-}
-
-#[plugin_registrar]
-pub fn plugin_registrar(reg: &mut Registry) {
-    reg.register_macro("hash_ident", hash_ident);
+    format!("{}", hash_str(&str)).parse().unwrap()
 }

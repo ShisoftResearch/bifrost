@@ -143,7 +143,7 @@ macro_rules! service {
            fn inner_dispatch(&self, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = RPCRequestError>> {
                let (func_id, body) = extract_u64_head(data);
                match func_id as usize {
-                   $(hash_ident!($fn_name) => {
+                   $(::bifrost_plugins::hash_ident!($fn_name) => {
                        let ($($arg,)*) : ($($in_,)*) = $crate::utils::bincode::deserialize(&body);
                        Box::new(
                            self.$fn_name($($arg,)*)
@@ -182,7 +182,7 @@ macro_rules! service {
                     } else {
                         let req_data = ($($arg,)*);
                         let req_data_bytes = $crate::utils::bincode::serialize(&req_data);
-                        let req_bytes = prepend_u64(hash_ident!($fn_name) as u64, req_data_bytes);
+                        let req_bytes = prepend_u64(::bifrost_plugins::hash_ident!($fn_name) as u64, req_data_bytes);
                         let res_bytes = self.client.send_async(self.service_id, req_bytes);
                         Box::new(res_bytes.then(|res_bytes| -> Result<std::result::Result<$out, $error>, RPCError> {
                             if let Ok(res_bytes) = res_bytes {

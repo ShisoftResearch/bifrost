@@ -1,4 +1,3 @@
-#![plugin(bifrost_plugins)]
 #![crate_type = "lib"]
 #![feature(plugin)]
 #![feature(integer_atomics)]
@@ -7,6 +6,7 @@
 #![feature(conservative_impl_trait, generators)]
 #![feature(box_syntax)]
 #![feature(use_extern_macros)]
+#![feature(proc_macro_hygiene)]
 
 #[cfg(disable_shortcut)]
 pub static DISABLE_SHORTCUT: bool = true;

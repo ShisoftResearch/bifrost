@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["Hao Shi <shisoftgenius@gmail.com>"]
 
 [lib]
-plugin = true
+proc-macro = true
 
 [dependencies]
 bifrost_hasher = { path = "../hasher" }

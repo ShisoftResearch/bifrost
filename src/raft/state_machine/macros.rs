@@ -194,7 +194,7 @@ macro_rules! raft_state_machine {
                 impl $crate::raft::RaftMsg<raft_return_type!($out, $error)> for $fn_name {
                     fn encode(self) -> (u64, $crate::raft::state_machine::OpType, Vec<u8>) {
                         (
-                            hash_ident!($fn_name) as u64,
+                            ::bifrost_plugins::hash_ident!($fn_name) as u64,
                             raft_fn_op_type!($smt),
                             self.data
                         )
@@ -220,7 +220,7 @@ macro_rules! raft_state_machine {
            )*
            fn op_type_(&self, fn_id: u64) -> Option<$crate::raft::state_machine::OpType> {
                 match fn_id as usize {
-                   $(hash_ident!($fn_name) => {
+                   $(::bifrost_plugins::hash_ident!($fn_name) => {
                        Some(raft_fn_op_type!($smt))
                    }),*
                    _ => {
@@ -231,7 +231,7 @@ macro_rules! raft_state_machine {
            }
            fn dispatch_cmd_(&mut self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {
                match fn_id as usize {
-                   $(hash_ident!($fn_name) => {
+                   $(::bifrost_plugins::hash_ident!($fn_name) => {
                         raft_dispatch_cmd!($smt $fn_name self data( $( $arg : $in_ ),* ))
                    }),*
                    _ => {
@@ -242,7 +242,7 @@ macro_rules! raft_state_machine {
            }
            fn dispatch_qry_(&self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {
                match fn_id as usize {
-                   $(hash_ident!($fn_name) => {
+                   $(::bifrost_plugins::hash_ident!($fn_name) => {
                         raft_dispatch_qry!($smt $fn_name self data( $( $arg : $in_ ),* ))
                    }),*
                    _ => {

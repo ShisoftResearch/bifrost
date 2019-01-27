@@ -1,3 +1,5 @@
+use bifrost_plugins::hash_ident;
+
 pub mod client;
 pub mod server;
 //                (server_id, raft_sid, sm_id, fn_id, pattern_id)
