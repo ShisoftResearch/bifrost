@@ -22,7 +22,7 @@ bifrost_hasher = { path = "src/hasher" }
 rand = "0.3"
 
 futures-cpupool = "0.1"
-futures-await = "0.1"
+futures-await = { git = "https://github.com/vorot93/futures-await.git" }
 
 lazy_static = "0.2"
 threadpool = "1.0"
