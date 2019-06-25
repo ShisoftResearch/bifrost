@@ -25,6 +25,7 @@ pub mod conshash;
 pub mod membership;
 pub mod store;
 pub mod vector_clock;
+pub mod storage;
 
 extern crate byteorder;
 
