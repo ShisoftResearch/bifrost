@@ -39,7 +39,7 @@ impl Storage {
             while read_buffer.fill_buf()?.len() > 0 {
                 let data_id = read_buffer.read_u64::<LittleEndian>()?;
                 let length = read_buffer.read_u32::<LittleEndian>()?;
-                if last_data_id != last_file_num {
+                if last_data_id != data_id {
                     return Err(Error::from(ErrorKind::InvalidData));
                 }
                 last_data_id += 1;
