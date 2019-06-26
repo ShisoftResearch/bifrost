@@ -175,7 +175,7 @@ macro_rules! service {
                 $(#[$attr])*
                 /// Judgement: Use data ownership transfer instead of borrowing.
                 /// Some applications highly depend on RPC shortcut to achieve performance advantages.
-                /// Cloning for shortcut will significantly increase overhead. Eg. Hivemind immutable storage
+                /// Cloning for shortcut will significantly increase overhead. Eg. Hivemind immutable queue
                 pub fn $fn_name(&self, $($arg:$in_),*) -> Box<Future<Item = std::result::Result<$out, $error>, Error = RPCError>> {
                     if let Some(ref local) = get_local(self.server_id, self.service_id) {
                         Box::new(future::finished(local.$fn_name($($arg),*).wait()))
