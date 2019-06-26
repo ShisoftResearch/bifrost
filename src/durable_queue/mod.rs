@@ -170,7 +170,7 @@ where
         self.persist_for_policy(policy)
     }
 
-    pub fn pop(&mut self, policy: &UpdatePolic) -> io::Result<Option<T>> {
+    pub fn pop(&mut self, policy: &UpdatePolicy) -> io::Result<Option<T>> {
         let item = self.list.pop_front();
         if item.is_some() {
             self.persist_for_policy(policy);
