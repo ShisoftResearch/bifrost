@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicUsize, AtomicBool};
-use std::io::{BufWriter, Cursor, BufReader, Error, ErrorKind, BufRead, Seek, SeekFrom};
+use std::io::{BufWriter, Cursor, BufReader, Error, ErrorKind, BufRead, Seek, SeekFrom, Read};
 use std::fs::{File, create_dir_all, read_dir};
 use std::path::Path;
 use std::io;
@@ -11,7 +11,7 @@ use std::collections::linked_list::LinkedList;
 use std::rc::Rc;
 use std::cell::RefCell;
 
-// segmented log structured duable_queue for state machines
+// segmented log structured durable_queue for state machines
 
 type QueueRef<T> = Rc<RefCell<PartialQueue<T>>>;
 
@@ -65,7 +65,7 @@ impl <T>Storage<T> where T: Serialize + DeserializeOwned {
                 list: LinkedList::<T>::new(),
                 file
             };
-            heading_queue = Rc::new(RecCell:new(queue));
+            heading_queue = Rc::new(RefCell::new(queue));
             tailing_queue = heading_queue.clone();
         } else {
             let dir = read_dir(path)?;
@@ -74,24 +74,13 @@ impl <T>Storage<T> where T: Serialize + DeserializeOwned {
             let last_file_name = files.last().unwrap();
             let last_file_path = path.with_file_name(last_file_name);
             let last_file_num: u64 = last_file_name.split('.').next().unwrap().parse().unwrap();
+            heading_queue = PartialQueue::from_file_path(path.with_file_name(&files[0]).as_path())?;
+            tailing_queue = if files.len() > 1 { PartialQueue::from_file_path(last_file_path.as_path())? } else { heading_queue.clone() };
             last_seg_id = last_file_num;
-
-
-//            last_data_id = last_file_num;
-//            while read_buffer.fill_buf()?.len() > 0 {
-//                let data_id = read_buffer.read_u64::<LittleEndian>()?;
-//                let length = read_buffer.read_u32::<LittleEndian>()?;
-//                if last_data_id != data_id {
-//                    return Err(Error::from(ErrorKind::InvalidData));
-//                }
-//                last_data_id += 1;
-//                last_file_pos = read_buffer.seek(SeekFrom::Current(length as i64))?;
-//            }
-//            last_file = read_buffer.into_inner();
         }
         Ok(Storage {
             base_path: storage_path.clone(),
-            counter: last_data_id,
+            counter: last_seg_id,
             seg_cap: 0,
             pending_push: 0,
             pending_pop: 0,
@@ -110,22 +99,28 @@ impl <T>Storage<T> where T: Serialize + DeserializeOwned {
 }
 
 impl <T>PartialQueue<T> where T: Serialize + DeserializeOwned {
+    pub fn from_file_path(path: &Path) -> io::Result<QueueRef<T>> {
+        Self::from_file(File::open(path)?)
+    }
     pub fn from_file(file: File) -> io::Result<QueueRef<T>> {
-        let mut read_buffer = BufReader::new(File::open(last_file_path)?);
+        let mut read_buffer = BufReader::new(file);
         let header = Header {
             id: read_buffer.read_u64::<LittleEndian>()?,
             length: read_buffer.read_u32::<LittleEndian>()?,
             checksum: read_buffer.read_u32::<LittleEndian>()?
         };
         let mut buffer = vec![];
-        file.take(length as usize).read_to_end(&mut buffer)?;
+        read_buffer.read_to_end(&mut buffer)?;
+        if buffer.len() != header.length as usize {
+            return Err(Error::new(ErrorKind::InvalidData, format!("Invalid data length, expect {} got {}", header.length, buffer.len())));
+        }
         let checksum = crc32(buffer.as_slice());
         if checksum != header.checksum {
-            return Err(Error::from(ErrorKind::InvalidData));
+            return Err(Error::new(ErrorKind::InvalidData, format!("Checksum failed, expect {} got {}", header.checksum, checksum)));
         }
         let queue = PartialQueue {
             id: header.id,
-            list: bincode::deserialize(buffer.as_slice())?,
+            list: bincode::deserialize(buffer.as_slice()).unwrap(),
             file: read_buffer.into_inner()
         };
         Ok(Rc::new(RefCell::new(queue)))
