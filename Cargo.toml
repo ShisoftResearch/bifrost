@@ -37,5 +37,7 @@ tokio-service = "0.1"
 tokio-timer = "0.1"
 tokio-middleware = { git = "https://github.com/tokio-rs/tokio-middleware" }
 
+crc32fast = "*"
+
 [dev-dependencies]
 rayon = "1.0"
