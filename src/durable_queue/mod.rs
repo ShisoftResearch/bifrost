@@ -181,8 +181,11 @@ where
     pub fn persist_for_policy(&mut self, policy: &UpdatePolicy) -> io::Result<()> {
         match policy {
             &UpdatePolicy::Immediate => self.persist()?,
-            &UpdatePolicy::Delayed(d) if self.pending_ops >= d => self.persist()?,
-            _ => {}
+            &UpdatePolicy::Delayed(d) if self.pending_ops >= d => {
+                self.persist()?;
+                self.pending_ops = 0;
+            },
+            &UpdatePolicy::Delayed(d) => self.pending_ops += 1
         }
         Ok(())
     }
