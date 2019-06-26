@@ -34,6 +34,7 @@ where
     id: u64,
     list: LinkedList<T>,
     file: File,
+    pending_ops: u32,
 }
 
 pub struct Storage<T>
@@ -43,8 +44,6 @@ where
     base_path: String,
     counter: u64,
     seg_cap: u32,
-    pending_push: u32,
-    pending_pop: u32,
     push_policy: UpdatePolicy,
     pop_policy: UpdatePolicy,
     head: QueueRef<T>,
@@ -77,6 +76,7 @@ where
             let queue = PartialQueue {
                 id: starting_point,
                 list: LinkedList::<T>::new(),
+                pending_ops: 0,
                 file,
             };
             heading_queue = Rc::new(RefCell::new(queue));
@@ -102,8 +102,6 @@ where
             base_path: storage_path.clone(),
             counter: last_seg_id,
             seg_cap: 0,
-            pending_push: 0,
-            pending_pop: 0,
             push_policy: UpdatePolicy::Immediate,
             pop_policy: UpdatePolicy::Immediate,
             head: heading_queue,
@@ -158,8 +156,39 @@ where
             id: header.id,
             list: bincode::deserialize(buffer.as_slice()).unwrap(),
             file: read_buffer.into_inner(),
+            pending_ops: 0
         };
         Ok(Rc::new(RefCell::new(queue)))
+    }
+
+    pub fn persist(&mut self) -> io::Result<()> {
+        unimplemented!()
+    }
+
+    pub fn push(&mut self, item: T, policy: &UpdatePolicy) -> io::Result<()> {
+        self.list.push_back(item);
+        self.persist_for_policy(policy)
+    }
+
+    pub fn pop(&mut self, policy: &UpdatePolic) -> io::Result<Option<T>> {
+        let item = self.list.pop_front();
+        if item.is_some() {
+            self.persist_for_policy(policy);
+        }
+        Ok(item)
+    }
+
+    pub fn persist_for_policy(&mut self, policy: &UpdatePolicy) -> io::Result<()> {
+        match policy {
+            &UpdatePolicy::Immediate => self.persist()?,
+            &UpdatePolicy::Delayed(d) if self.pending_ops >= d => self.persist()?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub fn count(&self) -> usize {
+        self.list.len()
     }
 }
 
