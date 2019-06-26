@@ -1,10 +1,10 @@
 use super::cpu_relax;
+use futures::task;
 use futures::{Async, Future, Poll};
 use std::cell::UnsafeCell;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use futures::task;
 
 #[derive(Clone)]
 pub struct RwLock<T: Sized> {
@@ -116,7 +116,7 @@ impl<T> RwLockInner<T> {
     pub fn new(val: T) -> Arc<RwLockInner<T>> {
         Arc::new(RwLockInner {
             raw: RwLockRaw::new(),
-            data: UnsafeCell::new(val)
+            data: UnsafeCell::new(val),
         })
     }
 }

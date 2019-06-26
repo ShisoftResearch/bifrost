@@ -22,10 +22,10 @@ pub mod rpc;
 #[macro_use]
 pub mod raft;
 pub mod conshash;
+pub mod durable_queue;
 pub mod membership;
 pub mod store;
 pub mod vector_clock;
-pub mod durable_queue;
 
 extern crate byteorder;
 

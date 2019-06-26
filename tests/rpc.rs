@@ -165,8 +165,8 @@ mod parallel {
     use self::rayon::prelude::*;
     use super::struct_service::*;
     use super::*;
-    use bifrost_hasher::hash_str;
     use bifrost::utils::fut_exec::wait;
+    use bifrost_hasher::hash_str;
 
     #[test]
     pub fn lots_of_reqs() {
@@ -199,7 +199,8 @@ mod parallel {
         let server_id = hash_str(&addr);
         (0..1000).collect::<Vec<_>>().into_par_iter().for_each(|i| {
             let addr = (&addr).clone();
-            let client = wait(DEFAULT_CLIENT_POOL.get_by_id_async(server_id, move |_| addr)).unwrap();
+            let client =
+                wait(DEFAULT_CLIENT_POOL.get_by_id_async(server_id, move |_| addr)).unwrap();
             let service_client = AsyncServiceClient::new(0, &client);
             let response = service_client.hello(Greeting {
                 name: String::from("John"),

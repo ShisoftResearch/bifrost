@@ -2,11 +2,11 @@ use self::configs::{Configures, RaftMember, CONFIG_SM_ID};
 use super::super::*;
 use super::*;
 use std::collections::HashMap;
-use utils::bincode;
 use std::error::Error;
+use std::fmt;
 use std::fmt::Display;
 use std::fmt::Formatter;
-use std::fmt;
+use utils::bincode;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ExecError {
@@ -31,7 +31,7 @@ pub type SubStateMachine = Box<StateMachineCtl>;
 pub type SnapshotDataItem = (u64, Vec<u8>);
 pub type SnapshotDataItems = Vec<SnapshotDataItem>;
 
-raft_state_machine!{}
+raft_state_machine! {}
 
 pub struct MasterStateMachine {
     subs: HashMap<u64, SubStateMachine>,

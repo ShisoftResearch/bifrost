@@ -78,15 +78,14 @@ impl ConsistentHashing {
         let mut core = Core::new().unwrap();
         {
             let ch = ch.clone();
-            let res_fut = membership
-                .on_group_member_joined(
-                    move |r| {
-                        if let Ok((member, version)) = r {
-                            server_joined(&ch, member, version);
-                        }
-                    },
-                    group,
-                );
+            let res_fut = membership.on_group_member_joined(
+                move |r| {
+                    if let Ok((member, version)) = r {
+                        server_joined(&ch, member, version);
+                    }
+                },
+                group,
+            );
             let res = core.run(res_fut);
             if let Ok(Ok(_)) = res {
             } else {
@@ -95,15 +94,14 @@ impl ConsistentHashing {
         }
         {
             let ch = ch.clone();
-            let res_fut = membership
-                .on_group_member_online(
-                    move |r| {
-                        if let Ok((member, version)) = r {
-                            server_joined(&ch, member, version);
-                        }
-                    },
-                    group,
-                );
+            let res_fut = membership.on_group_member_online(
+                move |r| {
+                    if let Ok((member, version)) = r {
+                        server_joined(&ch, member, version);
+                    }
+                },
+                group,
+            );
             let res = core.run(res_fut);
             if let Ok(Ok(_)) = res {
             } else {
@@ -112,15 +110,14 @@ impl ConsistentHashing {
         }
         {
             let ch = ch.clone();
-            let res_fut = membership
-                .on_group_member_left(
-                    move |r| {
-                        if let Ok((member, version)) = r {
-                            server_left(&ch, member, version);
-                        }
-                    },
-                    group,
-                );
+            let res_fut = membership.on_group_member_left(
+                move |r| {
+                    if let Ok((member, version)) = r {
+                        server_left(&ch, member, version);
+                    }
+                },
+                group,
+            );
             let res = core.run(res_fut);
             if let Ok(Ok(_)) = res {
             } else {
@@ -129,15 +126,14 @@ impl ConsistentHashing {
         }
         {
             let ch = ch.clone();
-            let res_fut = membership
-                .on_group_member_offline(
-                    move |r| {
-                        if let Ok((member, version)) = r {
-                            server_left(&ch, member, version);
-                        }
-                    },
-                    group,
-                );
+            let res_fut = membership.on_group_member_offline(
+                move |r| {
+                    if let Ok((member, version)) = r {
+                        server_left(&ch, member, version);
+                    }
+                },
+                group,
+            );
             let res = core.run(res_fut);
             if let Ok(Ok(_)) = res {
             } else {

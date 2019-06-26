@@ -31,7 +31,7 @@ unsafe impl<T: Send> Send for MutexInner<T> {}
 unsafe impl<T: Send> Sync for MutexInner<T> {}
 
 pub struct AsyncMutexGuard<T: Sized> {
-    mutex: Arc<MutexInner<T>>
+    mutex: Arc<MutexInner<T>>,
 }
 
 pub struct MutexGuard<T: Sized> {

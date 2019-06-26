@@ -123,10 +123,7 @@ impl Membership {
                         let mut backedin_members: Vec<u64> = Vec::new();
                         {
                             let mut status_map = service_clone.status.write();
-                            let mut members_to_update: HashMap<
-                                u64,
-                                bool,
-                            > = HashMap::new();
+                            let mut members_to_update: HashMap<u64, bool> = HashMap::new();
                             for (id, status) in status_map.iter() {
                                 let alive = (current_time - status.last_updated) < MAX_TIMEOUT;
                                 if status.online && !alive {
