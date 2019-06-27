@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::cell::RefCell;
 use std::collections::linked_list::LinkedList;
 use std::fs::{create_dir_all, read_dir, File};
-use std::io;
+use std::{io, fs};
 use std::io::{BufRead, BufReader, BufWriter, Cursor, Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::rc::Rc;
@@ -75,19 +75,15 @@ where
             heading_queue = wrap_queue(PartialQueue::new_from_path(path, starting_point)?);
             tailing_queue = heading_queue.clone();
         } else {
-            let dir = read_dir(path)?;
-            let mut files: Vec<String> = dir
-                .map(|f| f.unwrap().file_name().to_str().unwrap().to_string())
-                .collect();
-            files.sort();
+            let files = dir_file_names(path)?;
             let last_file_name = files.last().unwrap();
             let last_file_path = path.with_file_name(last_file_name);
             let last_file_num: u64 = file_name_to_num(last_file_name);
             let first_file_name = &files[0];
             let first_file_num: u64 = file_name_to_num(first_file_name);
-            heading_queue = PartialQueue::from_file_path(path.with_file_name(first_file_name).as_path())?;
+            heading_queue = wrap_queue(PartialQueue::from_file_path(path.with_file_name(first_file_name).as_path())?);
             tailing_queue = if files.len() > 1 {
-                PartialQueue::from_file_path(last_file_path.as_path())?
+                wrap_queue(PartialQueue::from_file_path(last_file_path.as_path())?)
             } else {
                 heading_queue.clone()
             };
@@ -118,6 +114,37 @@ where
         }
         tail.push(data, &self.push_policy)
     }
+
+    pub fn pop(&mut self) -> io::Result<Option<T>> {
+        let (data, head_count) = {
+            let mut head = self.head.borrow_mut();
+            let data = head.pop(&self.pop_policy)?;
+            let head_count = head.count();
+            debug_assert_eq!(head.id, self.head_id);
+            (data, head_count)
+        };
+        if data.is_some() && head_count == 0 && self.head_id != self.counter {
+            // segment is depleted, need to remove and take the oldest
+            let old_id = self.head_id;
+            let files = dir_file_names(Path::new(&self.base_path))?;
+            debug_assert_eq!(file_name_to_num(&files[0]), old_id);
+            self.head = if files.len() == 2 {
+                debug_assert_eq!(file_name_to_num(&files[1]), self.counter);
+                self.tail.clone()
+            } else if files.len() > 2 {
+                let new_head_name = &files[1];
+                let new_head = PartialQueue::from_file_path(Path::new(&self.base_path).with_file_name(new_head_name).as_path())?;
+                self.head_id = file_name_to_num(new_head_name);
+                wrap_queue(new_head)
+            } else {
+                // 0 or 1 files are not acceptable here
+                unreachable!()
+            };
+            let old_path = Path::new(&self.base_path).with_file_name(file_name(old_id));
+            fs::remove_file(old_path.as_path())?;
+        }
+        Ok(data)
+    }
 }
 
 impl<T> PartialQueue<T>
@@ -135,10 +162,10 @@ where
         queue.persist()?;
         Ok(queue)
     }
-    pub fn from_file_path(path: &Path) -> io::Result<QueueRef<T>> {
+    pub fn from_file_path(path: &Path) -> io::Result<Self> {
         Self::from_file(File::open(path)?)
     }
-    pub fn from_file(file: File) -> io::Result<QueueRef<T>> {
+    pub fn from_file(file: File) -> io::Result<Self> {
         let mut read_buffer = BufReader::new(file);
         read_buffer.seek(SeekFrom::Start(0))?;
         let header = Header {
@@ -174,7 +201,7 @@ where
             file: read_buffer.into_inner(),
             pending_ops: 0
         };
-        Ok(wrap_queue(queue))
+        Ok(queue)
     }
 
     pub fn persist(&mut self) -> io::Result<()> {
@@ -238,4 +265,13 @@ fn wrap_queue<T>(queue: PartialQueue<T>) -> QueueRef<T> where
     T: Serialize + DeserializeOwned
 {
     Rc::new(RefCell::new(queue))
+}
+
+fn dir_file_names(dir: &Path) -> io::Result<Vec<String>> {
+    let dir = read_dir(dir)?;
+    let mut files: Vec<String> = dir
+        .map(|f| f.unwrap().file_name().to_str().unwrap().to_string())
+        .collect();
+    files.sort();
+    Ok(files)
 }
