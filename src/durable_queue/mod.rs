@@ -5,11 +5,13 @@ use serde::Serialize;
 use std::cell::RefCell;
 use std::collections::linked_list::LinkedList;
 use std::fs::{create_dir_all, read_dir, File};
-use std::{io, fs};
-use std::io::{BufRead, BufReader, BufWriter, Cursor, Error, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{
+    BufRead, BufReader, BufWriter, Cursor, Error, ErrorKind, Read, Seek, SeekFrom, Write,
+};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::{fs, io};
 
 // segmented log structured durable_queue for state machines
 
@@ -81,7 +83,9 @@ where
             let last_file_num: u64 = file_name_to_num(last_file_name);
             let first_file_name = &files[0];
             let first_file_num: u64 = file_name_to_num(first_file_name);
-            heading_queue = wrap_queue(PartialQueue::from_file_path(path.with_file_name(first_file_name).as_path())?);
+            heading_queue = wrap_queue(PartialQueue::from_file_path(
+                path.with_file_name(first_file_name).as_path(),
+            )?);
             tailing_queue = if files.len() > 1 {
                 wrap_queue(PartialQueue::from_file_path(last_file_path.as_path())?)
             } else {
@@ -133,7 +137,11 @@ where
                 self.tail.clone()
             } else if files.len() > 2 {
                 let new_head_name = &files[1];
-                let new_head = PartialQueue::from_file_path(Path::new(&self.base_path).with_file_name(new_head_name).as_path())?;
+                let new_head = PartialQueue::from_file_path(
+                    Path::new(&self.base_path)
+                        .with_file_name(new_head_name)
+                        .as_path(),
+                )?;
                 self.head_id = file_name_to_num(new_head_name);
                 wrap_queue(new_head)
             } else {
@@ -199,7 +207,7 @@ where
             id: header.id,
             list: bincode::deserialize(buffer.as_slice()).unwrap(),
             file: read_buffer.into_inner(),
-            pending_ops: 0
+            pending_ops: 0,
         };
         Ok(queue)
     }
@@ -237,7 +245,7 @@ where
         match policy {
             &UpdatePolicy::Immediate => self.persist()?,
             &UpdatePolicy::Delayed(d) if self.pending_ops >= d => self.persist()?,
-            &UpdatePolicy::Delayed(_) => self.pending_ops += 1
+            &UpdatePolicy::Delayed(_) => self.pending_ops += 1,
         }
         Ok(())
     }
@@ -261,8 +269,9 @@ fn file_name_to_num(name: &String) -> u64 {
     name.split('.').next().unwrap().parse().unwrap()
 }
 
-fn wrap_queue<T>(queue: PartialQueue<T>) -> QueueRef<T> where
-    T: Serialize + DeserializeOwned
+fn wrap_queue<T>(queue: PartialQueue<T>) -> QueueRef<T>
+where
+    T: Serialize + DeserializeOwned,
 {
     Rc::new(RefCell::new(queue))
 }
