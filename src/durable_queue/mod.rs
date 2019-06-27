@@ -103,8 +103,8 @@ where
             base_path: storage_path.clone(),
             counter: last_seg_id,
             seg_cap: 0,
-            push_policy: UpdatePolicy::Immediate,
-            pop_policy: UpdatePolicy::Immediate,
+            push_policy,
+            pop_policy,
             head: heading_queue,
             tail: tailing_queue,
             head_id: 0,
@@ -174,6 +174,7 @@ where
         write_buffer.write_u32::<LittleEndian>(checksum)?;
         write_buffer.write_all(data.as_mut_slice())?;
         write_buffer.flush()?;
+        self.file.sync_all()?;
         self.pending_ops = 0;
         Ok(())
     }
