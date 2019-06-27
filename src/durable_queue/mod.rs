@@ -49,7 +49,6 @@ where
     head: QueueRef<T>,
     tail: QueueRef<T>,
     head_id: u64,
-    tail_id: u64,
 }
 
 impl<T> Storage<T>
@@ -65,22 +64,15 @@ where
         let path = Path::new(storage_path);
         let heading_queue;
         let tailing_queue;
+        let mut head_id = 0;
+        let mut tail_id = 0;
         let mut last_seg_id = 0;
         if !path.exists() {
             create_dir_all(path);
         }
         let starting_point = 0;
         if read_dir(path)?.count() == 0 {
-            let first_file_path = path.with_file_name(format!("{:0>20}.dat", starting_point));
-            let file = File::create(first_file_path.as_path())?;
-            let mut queue = PartialQueue {
-                id: starting_point,
-                list: LinkedList::<T>::new(),
-                pending_ops: 0,
-                file,
-            };
-            queue.persist()?;
-            heading_queue = Rc::new(RefCell::new(queue));
+            heading_queue = wrap_queue(PartialQueue::new_from_path(path, starting_point)?);
             tailing_queue = heading_queue.clone();
         } else {
             let dir = read_dir(path)?;
@@ -90,14 +82,19 @@ where
             files.sort();
             let last_file_name = files.last().unwrap();
             let last_file_path = path.with_file_name(last_file_name);
-            let last_file_num: u64 = last_file_name.split('.').next().unwrap().parse().unwrap();
-            heading_queue = PartialQueue::from_file_path(path.with_file_name(&files[0]).as_path())?;
+            let last_file_num: u64 = file_name_to_num(last_file_name);
+            let first_file_name = &files[0];
+            let first_file_num: u64 = file_name_to_num(first_file_name);
+            heading_queue = PartialQueue::from_file_path(path.with_file_name(first_file_name).as_path())?;
             tailing_queue = if files.len() > 1 {
                 PartialQueue::from_file_path(last_file_path.as_path())?
             } else {
                 heading_queue.clone()
             };
             last_seg_id = last_file_num;
+            head_id = first_file_num;
+            debug_assert_eq!(last_file_num, tailing_queue.borrow().id);
+            debug_assert_eq!(first_file_num, heading_queue.borrow().id);
         }
         Ok(Storage {
             base_path: storage_path.clone(),
@@ -107,13 +104,19 @@ where
             pop_policy,
             head: heading_queue,
             tail: tailing_queue,
-            head_id: 0,
-            tail_id: 0,
+            head_id,
         })
     }
 
-    pub fn push(data: T) -> io::Result<()> {
-        unimplemented!()
+    pub fn push(&mut self, data: T) -> io::Result<()> {
+        let mut tail = self.tail.borrow_mut();
+        if tail.count() >= self.seg_cap as usize {
+            // segment is full, need to persist current and get a new one
+            tail.persist()?;
+            self.counter += 1;
+            *tail = PartialQueue::new_from_path(Path::new(&self.base_path), self.counter)?;
+        }
+        tail.push(data, &self.push_policy)
     }
 }
 
@@ -121,6 +124,17 @@ impl<T> PartialQueue<T>
 where
     T: Serialize + DeserializeOwned,
 {
+    pub fn new_from_path(path: &Path, id: u64) -> io::Result<Self> {
+        let file = File::create(path.with_file_name(file_name(id)).as_path())?;
+        let mut queue = PartialQueue {
+            id,
+            list: LinkedList::<T>::new(),
+            pending_ops: 0,
+            file,
+        };
+        queue.persist()?;
+        Ok(queue)
+    }
     pub fn from_file_path(path: &Path) -> io::Result<QueueRef<T>> {
         Self::from_file(File::open(path)?)
     }
@@ -160,7 +174,7 @@ where
             file: read_buffer.into_inner(),
             pending_ops: 0
         };
-        Ok(Rc::new(RefCell::new(queue)))
+        Ok(wrap_queue(queue))
     }
 
     pub fn persist(&mut self) -> io::Result<()> {
@@ -196,7 +210,7 @@ where
         match policy {
             &UpdatePolicy::Immediate => self.persist()?,
             &UpdatePolicy::Delayed(d) if self.pending_ops >= d => self.persist()?,
-            &UpdatePolicy::Delayed(d) => self.pending_ops += 1
+            &UpdatePolicy::Delayed(_) => self.pending_ops += 1
         }
         Ok(())
     }
@@ -210,4 +224,18 @@ pub fn crc32(data: &[u8]) -> u32 {
     let mut hasher = Hasher::new();
     hasher.update(data);
     hasher.finalize()
+}
+
+fn file_name(id: u64) -> String {
+    format!("{:0>20}.dat", id)
+}
+
+fn file_name_to_num(name: &String) -> u64 {
+    name.split('.').next().unwrap().parse().unwrap()
+}
+
+fn wrap_queue<T>(queue: PartialQueue<T>) -> QueueRef<T> where
+    T: Serialize + DeserializeOwned
+{
+    Rc::new(RefCell::new(queue))
 }
