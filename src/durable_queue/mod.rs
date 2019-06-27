@@ -1,4 +1,4 @@
-use byteorder::{LittleEndian, ReadBytesExt};
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use crc32fast::Hasher;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::collections::linked_list::LinkedList;
 use std::fs::{create_dir_all, read_dir, File};
 use std::io;
-use std::io::{BufRead, BufReader, BufWriter, Cursor, Error, ErrorKind, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, BufWriter, Cursor, Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
@@ -73,12 +73,13 @@ where
         if read_dir(path)?.count() == 0 {
             let first_file_path = path.with_file_name(format!("{:0>20}.dat", starting_point));
             let file = File::create(first_file_path.as_path())?;
-            let queue = PartialQueue {
+            let mut queue = PartialQueue {
                 id: starting_point,
                 list: LinkedList::<T>::new(),
                 pending_ops: 0,
                 file,
             };
+            queue.persist()?;
             heading_queue = Rc::new(RefCell::new(queue));
             tailing_queue = heading_queue.clone();
         } else {
@@ -125,6 +126,7 @@ where
     }
     pub fn from_file(file: File) -> io::Result<QueueRef<T>> {
         let mut read_buffer = BufReader::new(file);
+        read_buffer.seek(SeekFrom::Start(0))?;
         let header = Header {
             id: read_buffer.read_u64::<LittleEndian>()?,
             length: read_buffer.read_u32::<LittleEndian>()?,
@@ -162,7 +164,18 @@ where
     }
 
     pub fn persist(&mut self) -> io::Result<()> {
-        unimplemented!()
+        let mut data = bincode::serialize(&self.list).unwrap();
+        let len = data.len();
+        let checksum = crc32(data.as_slice());
+        let mut write_buffer = BufWriter::new(&self.file);
+        write_buffer.seek(SeekFrom::Start(0))?;
+        write_buffer.write_u64::<LittleEndian>(self.id)?;
+        write_buffer.write_u32::<LittleEndian>(len as u32)?;
+        write_buffer.write_u32::<LittleEndian>(checksum)?;
+        write_buffer.write_all(data.as_mut_slice())?;
+        write_buffer.flush()?;
+        self.pending_ops = 0;
+        Ok(())
     }
 
     pub fn push(&mut self, item: T, policy: &UpdatePolicy) -> io::Result<()> {
@@ -181,10 +194,7 @@ where
     pub fn persist_for_policy(&mut self, policy: &UpdatePolicy) -> io::Result<()> {
         match policy {
             &UpdatePolicy::Immediate => self.persist()?,
-            &UpdatePolicy::Delayed(d) if self.pending_ops >= d => {
-                self.persist()?;
-                self.pending_ops = 0;
-            },
+            &UpdatePolicy::Delayed(d) if self.pending_ops >= d => self.persist()?,
             &UpdatePolicy::Delayed(d) => self.pending_ops += 1
         }
         Ok(())
