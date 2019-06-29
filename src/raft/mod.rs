@@ -766,7 +766,7 @@ impl RaftService {
         entry.id = new_log_id;
         logs.insert(entry.id, entry.clone());
         // check and trim logs
-        let expecting_oldest_log =  last_log_id - MAX_LOG_CAPACITY as u64;
+        let expecting_oldest_log = if last_log_id > MAX_LOG_CAPACITY as u64 {last_log_id - MAX_LOG_CAPACITY as u64} else { 0 };
         let double_cap = MAX_LOG_CAPACITY << 1;
         if logs.len() > double_cap && meta.last_applied > expecting_oldest_log {
             debug!("trim logs");
