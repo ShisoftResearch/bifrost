@@ -90,6 +90,9 @@ impl StateMachineCmds for Configures {
 
 impl StateMachineCtl for Configures {
     raft_sm_complete!();
+    fn id(&self) -> u64 {
+        CONFIG_SM_ID
+    }
     fn snapshot(&self) -> Option<Vec<u8>> {
         let mut snapshot = ConfigSnapshot {
             members: HashSet::with_capacity(self.members.len()),
@@ -102,9 +105,6 @@ impl StateMachineCtl for Configures {
     fn recover(&mut self, data: Vec<u8>) {
         let snapshot: ConfigSnapshot = bincode::deserialize(&data);
         self.recover_members(&snapshot.members)
-    }
-    fn id(&self) -> u64 {
-        CONFIG_SM_ID
     }
 }
 

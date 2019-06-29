@@ -19,6 +19,7 @@ use utils::time::get_time;
 
 use bifrost_plugins::hash_ident;
 use futures::prelude::*;
+use raft::state_machine::StateMachineCtl;
 
 #[macro_use]
 pub mod state_machine;
@@ -204,10 +205,10 @@ macro_rules! members_from_meta {
 }
 
 fn check_commit(meta: &mut RwLockWriteGuard<RaftMeta>) {
+    let logs = meta.logs.read();
     while meta.commit_index > meta.last_applied {
         meta.last_applied += 1;
         let last_applied = meta.last_applied;
-        let logs = meta.logs.read();
         if let Some(entry) = logs.get(&last_applied) {
             commit_command(meta, &entry);
         };
@@ -932,6 +933,12 @@ impl Service for RaftService {
         if term_ok {
             check_commit(&mut meta);
         }
+        let mut sm = meta.state_machine.write();
+        sm.recover(data);
+        meta.term = last_included_term;
+        meta.commit_index = last_included_index;
+        meta.last_applied = last_included_index;
+        self.reset_last_checked(&mut meta);
         box future::finished(meta.term)
     }
 
