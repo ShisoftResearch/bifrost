@@ -93,7 +93,7 @@ type LogsMap = BTreeMap<u64, LogEntry>;
 service! {
     rpc append_entries(term: u64, leaderId: u64, prev_log_id: u64, prev_log_term: u64, entries: Option<LogEntries>, leader_commit: u64) -> (u64, AppendEntriesResult);
     rpc request_vote(term: u64, candidate_id: u64, last_log_id: u64, last_log_term: u64) -> ((u64, u64), bool); // term, voteGranted
-    rpc install_snapshot(term: u64, leader_id: u64, last_included_index: u64, last_included_term: u64, data: Vec<u8>, done: bool) -> u64;
+    rpc install_snapshot(term: u64, leader_id: u64, last_included_index: u64, last_included_term: u64, data: Vec<u8>) -> u64;
     rpc c_command(entry: LogEntry) -> ClientCmdResponse;
     rpc c_query(entry: LogEntry) -> ClientQryResponse;
     rpc c_server_cluster_info() -> ClientClusterInfo;
@@ -144,7 +144,7 @@ pub struct RaftMeta {
     last_checked: i64,
     membership: Membership,
     logs: Arc<RwLock<LogsMap>>,
-    state_machine: RwLock<MasterStateMachine>,
+    state_machine: Arc<RwLock<MasterStateMachine>>,
     commit_index: u64,
     last_applied: u64,
     leader_id: u64,
@@ -250,7 +250,7 @@ impl RaftService {
                 last_checked: get_time(),
                 membership: Membership::Undefined,
                 logs: Arc::new(RwLock::new(BTreeMap::new())), //TODO: read from persistent state
-                state_machine: RwLock::new(MasterStateMachine::new(opts.service_id)),
+                state_machine: Arc::new(RwLock::new(MasterStateMachine::new(opts.service_id))),
                 commit_index: 0,
                 last_applied: 0,
                 leader_id: 0,
@@ -588,25 +588,29 @@ impl RaftService {
         let commit_index = meta.commit_index;
         let term = meta.term;
         let leader_id = meta.leader_id;
+        debug_assert_eq!(self.id, leader_id);
         {
             let workers = meta.workers.lock();
             if let Membership::Leader(ref leader_meta) = meta.membership {
                 let leader_meta = leader_meta.read();
                 for member in members_from_meta!(meta).values() {
-                    let id = member.id;
-                    if id == self.id {
+                    let member_id = member.id;
+                    if member_id == self.id {
                         continue;
                     }
                     let tx = tx.clone();
                     let logs = meta.logs.clone();
+                    let meta_term = meta.term;
+                    let meta_last_applied = meta.last_applied;
                     let rpc = member.rpc.clone();
+                    let master_sm = meta.state_machine.clone();
                     let follower = {
-                        if let Some(follower) = leader_meta.followers.get(&id) {
+                        if let Some(follower) = leader_meta.followers.get(&member_id) {
                             follower.clone()
                         } else {
                             debug!(
                                 "follower not found, {}, {}",
-                                id,
+                                member_id,
                                 leader_meta.followers.len()
                             ); //TODO: remove after debug
                             continue;
@@ -642,7 +646,10 @@ impl RaftService {
                                     // detect cleaned logs
                                     let (first_log_id, _) = logs.iter().next().unwrap();
                                     if *first_log_id > follower_last_log_id {
-                                        panic!("TODO: deal with snapshot or other situations may remove old logs {}, {}", *first_log_id, follower_last_log_id)
+                                        debug!("Taking snapshot of all state machines and install them on follower {}", member_id);
+                                        let master_sm = master_sm.read();
+                                        let snapshot = master_sm.snapshot().unwrap();
+                                        rpc.install_snapshot(meta_term, leader_id, meta_last_applied, meta_term, snapshot).wait().unwrap();
                                     }
                                     let follower_last_entry = logs.get(&follower_last_log_id);
                                     match follower_last_entry {
@@ -690,6 +697,8 @@ impl RaftService {
                     });
                     members += 1;
                 }
+            } else {
+                unreachable!()
             }
         }
         match log_id {
@@ -926,7 +935,6 @@ impl Service for RaftService {
         last_included_index: u64,
         last_included_term: u64,
         data: Vec<u8>,
-        done: bool,
     ) -> Box<Future<Item = u64, Error = ()>> {
         let mut meta = self.write_meta();
         let term_ok = self.check_term(&mut meta, term, leader_id);
