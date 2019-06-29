@@ -788,11 +788,9 @@ impl RaftService {
         let data = commit_command(&meta, &entry);
         let t = get_time();
         if let Membership::Leader(ref leader_meta) = meta.membership {
-            //  ||| TODO: New member should install newest snapshot
             let mut leader_meta = leader_meta.write();
             self.reload_leader_meta(
-                //                                   |||       and logs to get updated first before leader
-                &members_from_meta!(meta), //                             |||       add it to member list in configuration
+                &members_from_meta!(meta),
                 &mut leader_meta,
                 new_log_id,
             );
