@@ -765,7 +765,11 @@ impl RaftService {
         entry.term = new_log_term;
         entry.id = new_log_id;
         logs.insert(entry.id, entry.clone());
-        // check and trim logs
+        self.check_and_trim_logs(last_log_id, meta, &mut logs);
+        (new_log_id, new_log_term)
+    }
+
+    fn check_and_trim_logs(&self, last_log_id: u64, meta: &RwLockWriteGuard<RaftMeta>, logs: &mut RwLockWriteGuard<LogsMap>) {
         let expecting_oldest_log = if last_log_id > MAX_LOG_CAPACITY as u64 {
             last_log_id - MAX_LOG_CAPACITY as u64
         } else {
@@ -779,8 +783,8 @@ impl RaftService {
                 logs.remove(&first_key).unwrap();
             }
         }
-        (new_log_id, new_log_term)
     }
+
     fn try_sync_log_to_followers(
         &self,
         meta: &mut RwLockWriteGuard<RaftMeta>,
