@@ -528,14 +528,14 @@ impl StateMachineCmds for Membership {
 }
 impl StateMachineCtl for Membership {
     raft_sm_complete!();
+    fn id(&self) -> u64 {
+        DEFAULT_SERVICE_ID
+    }
     fn snapshot(&self) -> Option<Vec<u8>> {
         //Some(serialize!(&self.map))
         None // TODO: Backup members
     }
     fn recover(&mut self, data: Vec<u8>) {
         //self.map = deserialize!(&data);
-    }
-    fn id(&self) -> u64 {
-        DEFAULT_SERVICE_ID
     }
 }

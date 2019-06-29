@@ -12,7 +12,7 @@ use std::collections::Bound::{Included, Unbounded};
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::mpsc::channel;
-use std::thread;
+use std::{thread, io};
 use threadpool::ThreadPool;
 use utils::async_locks::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use utils::time::get_time;
@@ -21,6 +21,9 @@ use bifrost_plugins::hash_ident;
 use futures::prelude::*;
 use raft::state_machine::StateMachineCtl;
 use std::f32::MAX;
+use std::fs::{File, OpenOptions};
+use std::fs;
+use std::path::Path;
 
 #[macro_use]
 pub mod state_machine;
@@ -172,10 +175,16 @@ pub struct Options {
     pub service_id: u64,
 }
 
+struct StorageEntity {
+    logs: File,
+    snapshot: File
+}
+
 pub struct RaftService {
     meta: RwLock<RaftMeta>,
     pub id: u64,
     pub options: Options,
+    storage: Option<StorageEntity>
 }
 dispatch_rpc_service_functions!(RaftService);
 
@@ -244,6 +253,7 @@ impl RaftService {
     pub fn new(opts: Options) -> Arc<RaftService> {
         let server_address = opts.address.clone();
         let server_id = hash_str(&server_address);
+        let storage_entity = StorageEntity::new_with_options(&opts).unwrap();
         let server_obj = RaftService {
             meta: RwLock::new(RaftMeta {
                 term: 0,        //TODO: read from persistent state
@@ -260,6 +270,7 @@ impl RaftService {
             }),
             id: server_id,
             options: opts,
+            storage: storage_entity
         };
         Arc::new(server_obj)
     }
@@ -1025,5 +1036,25 @@ impl RaftStateMachine {
             id: hash_str(name),
             name: name.clone(),
         }
+    }
+}
+
+impl StorageEntity {
+    pub fn new_with_options(opts: &Options) -> io::Result<Option<Self>> {
+        Ok(match &opts.storage {
+            &Storage::DISK(ref dir) => {
+                let base_path = Path::new(dir);
+                fs::create_dir_all(base_path);
+                let log_path = base_path.with_file_name("log.dat");
+                let snapshot_path = base_path.with_file_name("snapshot.dat");
+                let mut open_opts = OpenOptions::new();
+                open_opts.write(true).create(true).read(true).truncate(false);
+                Some(Self {
+                    logs: open_opts.open(log_path.as_path())?,
+                    snapshot: open_opts.open(snapshot_path.as_path())?
+                })
+            },
+            _ => None
+        })
     }
 }

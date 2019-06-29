@@ -35,6 +35,7 @@ raft_state_machine! {}
 
 pub struct MasterStateMachine {
     subs: HashMap<u64, SubStateMachine>,
+    snapshots: HashMap<u64, Vec<u8>>,
     pub configs: Configures,
 }
 
@@ -60,16 +61,7 @@ impl StateMachineCtl for MasterStateMachine {
     fn recover(&mut self, data: Vec<u8>) {
         let mut sms: SnapshotDataItems = bincode::deserialize(&data);
         for (sm_id, snapshot) in sms {
-            if let Some(sm) = self.subs.get_mut(&sm_id) {
-                sm.recover(snapshot);
-            } else if sm_id == self.configs.id() {
-                self.configs.recover(snapshot);
-            } else {
-                panic!(
-                    "state machine with id {} cannot been recovered for it cannot been found",
-                    sm_id
-                );
-            }
+            self.snapshots.insert(sm_id, snapshot);
         }
     }
 }
@@ -86,12 +78,13 @@ impl MasterStateMachine {
     pub fn new(service_id: u64) -> MasterStateMachine {
         let mut msm = MasterStateMachine {
             subs: HashMap::new(),
+            snapshots: HashMap::new(),
             configs: Configures::new(service_id),
         };
         msm
     }
 
-    pub fn register(&mut self, smc: SubStateMachine) -> RegisterResult {
+    pub fn register(&mut self, mut smc: SubStateMachine) -> RegisterResult {
         let id = smc.id();
         if id < 2 {
             return RegisterResult::RESERVED;
@@ -99,6 +92,9 @@ impl MasterStateMachine {
         if self.subs.contains_key(&id) {
             return RegisterResult::EXISTED;
         };
+        if let Some(snapshot) = self.snapshots.remove(&id) {
+            smc.recover(snapshot);
+        }
         self.subs.insert(id, smc);
         RegisterResult::OK
     }
