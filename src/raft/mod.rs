@@ -24,6 +24,8 @@ use std::f32::MAX;
 use std::fs::{File, OpenOptions};
 use std::fs;
 use std::path::Path;
+use std::io::Write;
+use std::cell::RefCell;
 
 #[macro_use]
 pub mod state_machine;
@@ -92,6 +94,14 @@ pub enum AppendEntriesResult {
     LogMismatch,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct SnapshotEntity {
+    term: u64,
+    commit_index: u64,
+    last_applied: u64,
+    snapshot: Vec<u8>
+}
+
 type LogEntries = Vec<LogEntry>;
 type LogsMap = BTreeMap<u64, LogEntry>;
 
@@ -154,6 +164,7 @@ pub struct RaftMeta {
     last_applied: u64,
     leader_id: u64,
     workers: Arc<Mutex<ThreadPool>>,
+    storage: Option<RefCell<StorageEntity>>
 }
 
 #[derive(Clone)]
@@ -184,7 +195,6 @@ pub struct RaftService {
     meta: RwLock<RaftMeta>,
     pub id: u64,
     pub options: Options,
-    storage: Option<StorageEntity>
 }
 dispatch_rpc_service_functions!(RaftService);
 
@@ -257,7 +267,7 @@ impl RaftService {
         let server_obj = RaftService {
             meta: RwLock::new(RaftMeta {
                 term: 0,        //TODO: read from persistent state
-                vote_for: None, //TODO: read from persistent state
+                vote_for: None,
                 timeout: gen_timeout(),
                 last_checked: get_time(),
                 membership: Membership::Undefined,
@@ -267,10 +277,10 @@ impl RaftService {
                 last_applied: 0,
                 leader_id: 0,
                 workers: (*RAFT_WORKER_POOL).clone(),
+                storage: storage_entity.map(|e| RefCell::new(e))
             }),
             id: server_id,
             options: opts,
-            storage: storage_entity
         };
         Arc::new(server_obj)
     }
@@ -776,11 +786,11 @@ impl RaftService {
         entry.term = new_log_term;
         entry.id = new_log_id;
         logs.insert(entry.id, entry.clone());
-        self.check_and_trim_logs(meta, &mut logs);
+        self.logs_post_processing(meta, &mut logs);
         (new_log_id, new_log_term)
     }
 
-    fn check_and_trim_logs(&self, meta: &RwLockWriteGuard<RaftMeta>, logs: &mut RwLockWriteGuard<LogsMap>) {
+    fn logs_post_processing(&self, meta: &RwLockWriteGuard<RaftMeta>, logs: &mut RwLockWriteGuard<LogsMap>) {
         let (last_log_id, _) = get_last_log_info!(self, logs);
         let expecting_oldest_log = if last_log_id > MAX_LOG_CAPACITY as u64 {
             last_log_id - MAX_LOG_CAPACITY as u64
@@ -794,6 +804,23 @@ impl RaftService {
                 let first_key = *logs.iter().next().unwrap().0;
                 logs.remove(&first_key).unwrap();
             }
+            if let Some(ref storage) = meta.storage {
+                let mut storage = storage.borrow_mut();
+                let snapshot = SnapshotEntity {
+                    term: meta.term,
+                    commit_index: meta.commit_index,
+                    last_applied: meta.last_applied,
+                    snapshot: meta.state_machine.read().snapshot().unwrap()
+                };
+                storage.snapshot.write_all(bincode::serialize(&snapshot).unwrap().as_slice());
+                storage.snapshot.sync_all().unwrap();
+            }
+        }
+        if let Some(ref storage) = meta.storage {
+            let mut storage = storage.borrow_mut();
+            let logs_data = bincode::serialize(&*meta.logs.read()).unwrap();
+            storage.logs.write_all(logs_data.as_slice());
+            storage.logs.sync_all().unwrap();
         }
     }
 
@@ -888,7 +915,7 @@ impl Service for RaftService {
                 } else if !logs.is_empty() {
                     last_new_entry = logs.values().last().unwrap().id;
                 }
-                self.check_and_trim_logs(&meta, &mut logs);
+                self.logs_post_processing(&meta, &mut logs);
             }
             if leader_commit > meta.commit_index {
                 //RI, 5
