@@ -20,12 +20,14 @@ use utils::time::get_time;
 use bifrost_plugins::hash_ident;
 use futures::prelude::*;
 use raft::state_machine::StateMachineCtl;
+use std::f32::MAX;
 
 #[macro_use]
 pub mod state_machine;
 pub mod client;
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_RAFT_DEFAULT_SERVICE) as u64;
+const MAX_LOG_CAPACITY: usize = 100;
 
 lazy_static! {
     static ref RAFT_WORKER_POOL: Arc<Mutex<ThreadPool>> = Arc::new(Mutex::new(
@@ -754,6 +756,7 @@ impl RaftService {
         meta.last_checked = get_time();
         meta.timeout = gen_timeout();
     }
+
     fn append_log(&self, meta: &RwLockWriteGuard<RaftMeta>, entry: &mut LogEntry) -> (u64, u64) {
         let mut logs = meta.logs.write();
         let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
@@ -762,6 +765,16 @@ impl RaftService {
         entry.term = new_log_term;
         entry.id = new_log_id;
         logs.insert(entry.id, entry.clone());
+        // check and trim logs
+        let expecting_oldest_log =  last_log_id - MAX_LOG_CAPACITY as u64;
+        let double_cap = MAX_LOG_CAPACITY << 1;
+        if logs.len() > double_cap && meta.last_applied > expecting_oldest_log {
+            debug!("trim logs");
+            while logs.len() > MAX_LOG_CAPACITY {
+                let first_key = *logs.iter().next().unwrap().0;
+                logs.remove(&first_key).unwrap();
+            }
+        }
         (new_log_id, new_log_term)
     }
     fn try_sync_log_to_followers(
