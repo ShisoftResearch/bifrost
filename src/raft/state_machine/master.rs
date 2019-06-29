@@ -65,7 +65,10 @@ impl StateMachineCtl for MasterStateMachine {
             } else if sm_id == self.configs.id() {
                 self.configs.recover(snapshot);
             } else {
-                panic!("state machine with id {} cannot been recovered for it cannot been found", sm_id);
+                panic!(
+                    "state machine with id {} cannot been recovered for it cannot been found",
+                    sm_id
+                );
             }
         }
     }

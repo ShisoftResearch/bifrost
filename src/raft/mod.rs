@@ -766,7 +766,11 @@ impl RaftService {
         entry.id = new_log_id;
         logs.insert(entry.id, entry.clone());
         // check and trim logs
-        let expecting_oldest_log = if last_log_id > MAX_LOG_CAPACITY as u64 {last_log_id - MAX_LOG_CAPACITY as u64} else { 0 };
+        let expecting_oldest_log = if last_log_id > MAX_LOG_CAPACITY as u64 {
+            last_log_id - MAX_LOG_CAPACITY as u64
+        } else {
+            0
+        };
         let double_cap = MAX_LOG_CAPACITY << 1;
         if logs.len() > double_cap && meta.last_applied > expecting_oldest_log {
             debug!("trim logs");
@@ -802,11 +806,7 @@ impl RaftService {
         let t = get_time();
         if let Membership::Leader(ref leader_meta) = meta.membership {
             let mut leader_meta = leader_meta.write();
-            self.reload_leader_meta(
-                &members_from_meta!(meta),
-                &mut leader_meta,
-                new_log_id,
-            );
+            self.reload_leader_meta(&members_from_meta!(meta), &mut leader_meta, new_log_id);
         }
         self.send_followers_heartbeat(meta, Some(new_log_id));
         data
