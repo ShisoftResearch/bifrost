@@ -24,7 +24,7 @@ use std::f32::MAX;
 use std::fs::{File, OpenOptions};
 use std::fs;
 use std::path::Path;
-use std::io::Write;
+use std::io::{Write, Read};
 use std::cell::RefCell;
 
 #[macro_use]
@@ -263,18 +263,38 @@ impl RaftService {
     pub fn new(opts: Options) -> Arc<RaftService> {
         let server_address = opts.address.clone();
         let server_id = hash_str(&server_address);
-        let storage_entity = StorageEntity::new_with_options(&opts).unwrap();
+        let mut storage_entity = StorageEntity::new_with_options(&opts).unwrap();
+
+        let mut term = 0;
+        let mut logs = BTreeMap::new();
+        let mut commit_index = 0;
+        let mut last_applied = 0;
+        let mut master_sm = MasterStateMachine::new(opts.service_id);
+
+        if let &mut Some(ref mut storage) = &mut storage_entity {
+            let mut snapshot_data = vec![];
+            let mut log_data = vec![];
+            storage.snapshot.read_to_end(&mut snapshot_data).unwrap();
+            storage.logs.read_to_end(&mut log_data).unwrap();
+            let snapshot: SnapshotEntity = bincode::deserialize(snapshot_data.as_slice()).unwrap();
+            logs = bincode::deserialize(log_data.as_slice()).unwrap();
+            term = snapshot.term;
+            commit_index = snapshot.commit_index;
+            last_applied = snapshot.last_applied;
+            master_sm.recover(snapshot.snapshot);
+        }
+
         let server_obj = RaftService {
             meta: RwLock::new(RaftMeta {
-                term: 0,        //TODO: read from persistent state
+                term,
                 vote_for: None,
                 timeout: gen_timeout(),
                 last_checked: get_time(),
                 membership: Membership::Undefined,
-                logs: Arc::new(RwLock::new(BTreeMap::new())), //TODO: read from persistent state
-                state_machine: Arc::new(RwLock::new(MasterStateMachine::new(opts.service_id))),
-                commit_index: 0,
-                last_applied: 0,
+                logs: Arc::new(RwLock::new(logs)),
+                state_machine: Arc::new(RwLock::new(master_sm)),
+                commit_index,
+                last_applied,
                 leader_id: 0,
                 workers: (*RAFT_WORKER_POOL).clone(),
                 storage: storage_entity.map(|e| RefCell::new(e))
