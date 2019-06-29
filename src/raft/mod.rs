@@ -765,11 +765,12 @@ impl RaftService {
         entry.term = new_log_term;
         entry.id = new_log_id;
         logs.insert(entry.id, entry.clone());
-        self.check_and_trim_logs(last_log_id, meta, &mut logs);
+        self.check_and_trim_logs(meta, &mut logs);
         (new_log_id, new_log_term)
     }
 
-    fn check_and_trim_logs(&self, last_log_id: u64, meta: &RwLockWriteGuard<RaftMeta>, logs: &mut RwLockWriteGuard<LogsMap>) {
+    fn check_and_trim_logs(&self, meta: &RwLockWriteGuard<RaftMeta>, logs: &mut RwLockWriteGuard<LogsMap>) {
+        let (last_log_id, _) = get_last_log_info!(self, logs);
         let expecting_oldest_log = if last_log_id > MAX_LOG_CAPACITY as u64 {
             last_log_id - MAX_LOG_CAPACITY as u64
         } else {
@@ -876,9 +877,8 @@ impl Service for RaftService {
                 } else if !logs.is_empty() {
                     last_new_entry = logs.values().last().unwrap().id;
                 }
-                self.check_and_trim_logs(last_new_entry, &meta, &mut logs);
+                self.check_and_trim_logs(&meta, &mut logs);
             }
-            debug_assert_ne!(last_new_entry, std::u64::MAX);
             if leader_commit > meta.commit_index {
                 //RI, 5
                 meta.commit_index = min(leader_commit, last_new_entry);
