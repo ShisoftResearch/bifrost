@@ -27,7 +27,7 @@ pub mod state_machine;
 pub mod client;
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_RAFT_DEFAULT_SERVICE) as u64;
-const MAX_LOG_CAPACITY: usize = 100;
+const MAX_LOG_CAPACITY: usize = 10;
 
 lazy_static! {
     static ref RAFT_WORKER_POOL: Arc<Mutex<ThreadPool>> = Arc::new(Mutex::new(
@@ -878,7 +878,7 @@ impl Service for RaftService {
                 }
                 self.check_and_trim_logs(last_new_entry, &meta, &mut logs);
             }
-            debug_assert_eq!(last_new_entry, std::u64::MAX);
+            debug_assert_ne!(last_new_entry, std::u64::MAX);
             if leader_commit > meta.commit_index {
                 //RI, 5
                 meta.commit_index = min(leader_commit, last_new_entry);
