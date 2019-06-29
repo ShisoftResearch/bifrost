@@ -157,7 +157,7 @@ pub enum Storage {
 }
 
 impl Storage {
-    pub fn Default() -> Storage {
+    pub fn default() -> Storage {
         Storage::MEMORY
     }
 }
@@ -677,11 +677,6 @@ impl RaftService {
                                             follower.next_index -= 1;
                                         },
                                         AppendEntriesResult::TermOut(actual_leader_id) => {
-//                                            let actual_leader = actual_leader_id.clone();
-//                                            println!(
-//                                                "term out, new term from follower is {} but this leader is {}",
-//                                                follower_term, term
-//                                            );
                                             break;
                                         }
                                     }

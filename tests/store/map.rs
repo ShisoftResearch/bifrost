@@ -16,7 +16,7 @@ fn hash_map() {
     let addr = String::from("127.0.0.1:2013");
     let mut map_sm = string_string_hashmap::Map::new_by_name(&String::from("test"));
     let raft_service = RaftService::new(Options {
-        storage: Storage::Default(),
+        storage: Storage::default(),
         address: addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
     });

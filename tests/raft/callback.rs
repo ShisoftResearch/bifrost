@@ -48,7 +48,7 @@ fn dummy() {
     println!("TESTING CALLBACK");
     let addr = String::from("127.0.0.1:2110");
     let raft_service = RaftService::new(Options {
-        storage: Storage::Default(),
+        storage: Storage::default(),
         address: addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
     });

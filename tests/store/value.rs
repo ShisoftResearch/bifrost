@@ -13,7 +13,7 @@ fn string() {
     let altered_string = String::from("The altered text");
     let mut string_sm = string::Value::new_by_name(&String::from("test"), original_string.clone());
     let service = RaftService::new(Options {
-        storage: Storage::Default(),
+        storage: Storage::default(),
         address: addr.clone(),
         service_id: DEFAULT_SERVICE_ID,
     });

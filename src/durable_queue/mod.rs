@@ -13,7 +13,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::{fs, io};
 
-// segmented log structured durable_queue for state machines
+// segmented log structured durable queue for state machines
 
 type QueueRef<T> = Rc<RefCell<PartialQueue<T>>>;
 

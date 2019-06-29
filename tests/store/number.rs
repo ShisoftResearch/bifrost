@@ -17,7 +17,7 @@ mod u32 {
         let addr = String::from("127.0.0.1:2011");
         let mut num_sm = U32::Number::new_by_name(&String::from("test"), 0);
         let service = RaftService::new(Options {
-            storage: Storage::Default(),
+            storage: Storage::default(),
             address: addr.clone(),
             service_id: DEFAULT_SERVICE_ID,
         });
@@ -86,7 +86,7 @@ mod f64 {
         let addr = String::from("127.0.0.1:2012");
         let num_sm = F64::Number::new_by_name(&String::from("test"), 0.0);
         let service = RaftService::new(Options {
-            storage: Storage::Default(),
+            storage: Storage::default(),
             address: addr.clone(),
             service_id: DEFAULT_SERVICE_ID,
         });
