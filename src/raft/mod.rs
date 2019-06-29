@@ -12,7 +12,7 @@ use std::collections::Bound::{Included, Unbounded};
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::mpsc::channel;
-use std::{thread, io};
+use std::{io, thread};
 use threadpool::ThreadPool;
 use utils::async_locks::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use utils::time::get_time;
@@ -20,12 +20,12 @@ use utils::time::get_time;
 use bifrost_plugins::hash_ident;
 use futures::prelude::*;
 use raft::state_machine::StateMachineCtl;
-use std::f32::MAX;
-use std::fs::{File, OpenOptions};
-use std::fs;
-use std::path::Path;
-use std::io::{Write, Read};
 use std::cell::RefCell;
+use std::f32::MAX;
+use std::fs;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::Path;
 
 #[macro_use]
 pub mod state_machine;
@@ -99,7 +99,7 @@ pub struct SnapshotEntity {
     term: u64,
     commit_index: u64,
     last_applied: u64,
-    snapshot: Vec<u8>
+    snapshot: Vec<u8>,
 }
 
 type LogEntries = Vec<LogEntry>;
@@ -164,7 +164,7 @@ pub struct RaftMeta {
     last_applied: u64,
     leader_id: u64,
     workers: Arc<Mutex<ThreadPool>>,
-    storage: Option<RefCell<StorageEntity>>
+    storage: Option<RefCell<StorageEntity>>,
 }
 
 #[derive(Clone)]
@@ -188,7 +188,7 @@ pub struct Options {
 
 struct StorageEntity {
     logs: File,
-    snapshot: File
+    snapshot: File,
 }
 
 pub struct RaftService {
@@ -297,7 +297,7 @@ impl RaftService {
                 last_applied,
                 leader_id: 0,
                 workers: (*RAFT_WORKER_POOL).clone(),
-                storage: storage_entity.map(|e| RefCell::new(e))
+                storage: storage_entity.map(|e| RefCell::new(e)),
             }),
             id: server_id,
             options: opts,
@@ -798,7 +798,11 @@ impl RaftService {
         meta.timeout = gen_timeout();
     }
 
-    fn leader_append_log(&self, meta: &RwLockWriteGuard<RaftMeta>, entry: &mut LogEntry) -> (u64, u64) {
+    fn leader_append_log(
+        &self,
+        meta: &RwLockWriteGuard<RaftMeta>,
+        entry: &mut LogEntry,
+    ) -> (u64, u64) {
         let mut logs = meta.logs.write();
         let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
         let new_log_id = last_log_id + 1;
@@ -810,7 +814,11 @@ impl RaftService {
         (new_log_id, new_log_term)
     }
 
-    fn logs_post_processing(&self, meta: &RwLockWriteGuard<RaftMeta>, logs: &mut RwLockWriteGuard<LogsMap>) {
+    fn logs_post_processing(
+        &self,
+        meta: &RwLockWriteGuard<RaftMeta>,
+        logs: &mut RwLockWriteGuard<LogsMap>,
+    ) {
         let (last_log_id, _) = get_last_log_info!(self, logs);
         let expecting_oldest_log = if last_log_id > MAX_LOG_CAPACITY as u64 {
             last_log_id - MAX_LOG_CAPACITY as u64
@@ -830,9 +838,11 @@ impl RaftService {
                     term: meta.term,
                     commit_index: meta.commit_index,
                     last_applied: meta.last_applied,
-                    snapshot: meta.state_machine.read().snapshot().unwrap()
+                    snapshot: meta.state_machine.read().snapshot().unwrap(),
                 };
-                storage.snapshot.write_all(bincode::serialize(&snapshot).unwrap().as_slice());
+                storage
+                    .snapshot
+                    .write_all(bincode::serialize(&snapshot).unwrap().as_slice());
                 storage.snapshot.sync_all().unwrap();
             }
         }
@@ -1095,13 +1105,17 @@ impl StorageEntity {
                 let log_path = base_path.with_file_name("log.dat");
                 let snapshot_path = base_path.with_file_name("snapshot.dat");
                 let mut open_opts = OpenOptions::new();
-                open_opts.write(true).create(true).read(true).truncate(false);
+                open_opts
+                    .write(true)
+                    .create(true)
+                    .read(true)
+                    .truncate(false);
                 Some(Self {
                     logs: open_opts.open(log_path.as_path())?,
-                    snapshot: open_opts.open(snapshot_path.as_path())?
+                    snapshot: open_opts.open(snapshot_path.as_path())?,
                 })
-            },
-            _ => None
+            }
+            _ => None,
         })
     }
 }
