@@ -757,7 +757,7 @@ impl RaftService {
         meta.timeout = gen_timeout();
     }
 
-    fn append_log(&self, meta: &RwLockWriteGuard<RaftMeta>, entry: &mut LogEntry) -> (u64, u64) {
+    fn leader_append_log(&self, meta: &RwLockWriteGuard<RaftMeta>, entry: &mut LogEntry) -> (u64, u64) {
         let mut logs = meta.logs.write();
         let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
         let new_log_id = last_log_id + 1;
@@ -876,7 +876,9 @@ impl Service for RaftService {
                 } else if !logs.is_empty() {
                     last_new_entry = logs.values().last().unwrap().id;
                 }
+                self.check_and_trim_logs(last_new_entry, &meta, &mut logs);
             }
+            debug_assert_eq!(last_new_entry, std::u64::MAX);
             if leader_commit > meta.commit_index {
                 //RI, 5
                 meta.commit_index = min(leader_commit, last_new_entry);
@@ -971,7 +973,7 @@ impl Service for RaftService {
         if !is_leader(&meta) {
             return box future::finished(ClientCmdResponse::NotLeader(meta.leader_id));
         }
-        let (new_log_id, new_log_term) = self.append_log(&meta, &mut entry);
+        let (new_log_id, new_log_term) = self.leader_append_log(&meta, &mut entry);
         let mut data = match entry.sm_id {
             // special treats for membership changes
             CONFIG_SM_ID => Some(self.try_sync_config_to_followers(&mut meta, &entry, new_log_id)),
