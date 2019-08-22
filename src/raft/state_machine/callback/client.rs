@@ -3,7 +3,6 @@ use futures::future;
 use futures::prelude::*;
 use parking_lot::RwLock;
 use rpc::Server;
-use std::boxed::FnBox;
 use std::collections::HashMap;
 use std::sync::Arc;
 use utils::time::get_time;
