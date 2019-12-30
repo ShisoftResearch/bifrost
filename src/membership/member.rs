@@ -10,6 +10,8 @@ use std::sync::Arc;
 use std::{thread, time};
 
 use futures::prelude::*;
+use crate::raft::client::RaftClient;
+use std::future::Future;
 
 static PING_INTERVAL: u64 = 100;
 

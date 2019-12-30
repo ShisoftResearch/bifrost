@@ -1,6 +1,5 @@
 use super::*;
 use bifrost_hasher::{hash_bytes, hash_str};
-use futures::prelude::{async, await};
 use raft::state_machine::callback::client::SubscriptionService;
 use raft::state_machine::callback::SubKey;
 use raft::state_machine::configs::commands::{
@@ -19,6 +18,7 @@ use std::iter::FromIterator;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use utils::async_locks::RwLock;
+use crate::raft::state_machine::master::ExecError;
 
 const ORDERING: Ordering = Ordering::Relaxed;
 pub type Client = Arc<AsyncServiceClient>;
@@ -153,11 +153,10 @@ impl RaftClientInner {
         }
     }
 
-    #[async(boxed)]
-    fn cluster_info(
+    async fn cluster_info(
         this: Arc<Self>,
         servers: HashSet<String>,
-    ) -> Result<(Option<ClientClusterInfo>, RwLockWriteGuard<Members>), ()> {
+    ) -> (Option<ClientClusterInfo>, RwLockWriteGuard<Members>) {
         let members = await!(this.members.write_async()).unwrap();
         for server_addr in servers {
             let id = hash_str(&server_addr);
@@ -184,7 +183,6 @@ impl RaftClientInner {
         return Ok((None, members));
     }
 
-    #[async(boxed)]
     fn update_info(this: Arc<Self>, servers: HashSet<String>) -> Result<(), ClientError> {
         let (cluster_info, members) = await!(Self::cluster_info(this.clone(), servers)).unwrap();
         match cluster_info {
@@ -222,7 +220,6 @@ impl RaftClientInner {
         }
     }
 
-    #[async(boxed)]
     pub fn execute<R, M>(this: Arc<Self>, sm_id: u64, msg: M) -> Result<R, ExecError>
     where
         R: 'static,
@@ -259,7 +256,7 @@ impl RaftClientInner {
         };
         return (raft_sid, sm_id, fn_id, pattern_id);
     }
-    #[async(boxed)]
+
     pub fn get_callback(this: Arc<Self>) -> Result<Arc<SubscriptionService>, SubscriptionError> {
         match (*await!(CALLBACK.read_async()).unwrap()).clone() {
             None => {
@@ -269,7 +266,7 @@ impl RaftClientInner {
             Some(c) => Ok(c),
         }
     }
-    #[async(boxed)]
+
     pub fn subscribe<M, R, F>(
         this: Arc<Self>,
         sm_id: u64,
@@ -304,7 +301,6 @@ impl RaftClientInner {
         }
     }
 
-    #[async(boxed)]
     pub fn unsubscribe(
         this: Arc<Self>,
         receipt: SubscriptionReceipt,
@@ -346,7 +342,6 @@ impl RaftClientInner {
         }
     }
 
-    #[async(boxed)]
     fn query(
         this: Arc<Self>,
         sm_id: u64,
@@ -392,7 +387,6 @@ impl RaftClientInner {
         }
     }
 
-    #[async(boxed)]
     fn command(
         this: Arc<Self>,
         sm_id: u64,
@@ -485,8 +479,8 @@ impl RaftClientInner {
             None
         }
     }
-    #[async(boxed)]
-    fn current_leader_client(this: Arc<Self>) -> Result<(u64, Client), ()> {
+
+    async fn current_leader_client(this: Arc<Self>) -> (u64, Client) {
         {
             let leader_client = this.leader_client();
             if leader_client.is_some() {

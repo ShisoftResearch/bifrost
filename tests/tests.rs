@@ -10,7 +10,6 @@ extern crate bifrost_hasher;
 extern crate bifrost_plugins;
 extern crate bincode;
 extern crate byteorder;
-extern crate futures_await as futures;
 #[macro_use]
 extern crate serde_derive;
 

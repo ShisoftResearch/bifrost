@@ -27,17 +27,8 @@ pub mod store;
 pub mod vector_clock;
 
 extern crate byteorder;
-
-extern crate futures_await as futures;
-extern crate futures_cpupool;
 extern crate parking_lot;
 extern crate thread_id;
-extern crate tokio_core;
-extern crate tokio_io;
-extern crate tokio_middleware;
-extern crate tokio_proto;
-extern crate tokio_service;
-extern crate tokio_timer;
 
 extern crate bincode;
 extern crate serde;

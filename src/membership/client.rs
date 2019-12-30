@@ -4,8 +4,9 @@ use bifrost_hasher::hash_str;
 use raft::client::{RaftClient, SubscriptionError, SubscriptionReceipt};
 use raft::state_machine::master::ExecError;
 use std::sync::Arc;
-
-use futures::prelude::*;
+use std::future::Future;
+use crate::raft::state_machine::master::ExecError;
+use crate::raft::client::{RaftClient, SubscriptionError, SubscriptionReceipt};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Member {
@@ -30,13 +31,13 @@ impl MemberClient {
     pub fn join_group(
         &self,
         group: &String,
-    ) -> impl Future<Item = Result<(), ()>, Error = ExecError> {
+    ) -> impl Future<Output = Result<(), ExecError>> {
         self.sm_client.join_group(group, &self.id)
     }
     pub fn leave_group(
         &self,
         group: &String,
-    ) -> impl Future<Item = Result<(), ()>, Error = ExecError> {
+    ) -> impl Future<Output = Result<(), ExecError>> {
         self.sm_client.leave_group(&hash_str(group), &self.id)
     }
 }
@@ -87,11 +88,11 @@ impl ObserverClient {
     ) -> impl Future<Item = Result<(Vec<Member>, u64), ()>, Error = ExecError> {
         self.sm_client.all_members(&online_only)
     }
-    pub fn on_group_member_offline<'a, F>(
+    pub fn on_group_member_offline<F>(
         &self,
         f: F,
-        group: &'a str,
-    ) -> impl Future<Item = Result<SubscriptionReceipt, SubscriptionError>, Error = ExecError>
+        group: &str,
+    ) -> impl Future<Output = Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
     where
         F: Fn(Result<(Member, u64), ()>) + 'static + Send + Sync,
     {
@@ -100,17 +101,17 @@ impl ObserverClient {
     pub fn on_any_member_offline<F>(
         &self,
         f: F,
-    ) -> impl Future<Item = Result<SubscriptionReceipt, SubscriptionError>, Error = ExecError>
+    ) -> impl Future<Output = Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
     where
         F: Fn(Result<(Member, u64), ()>) + 'static + Send + Sync,
     {
         self.sm_client.on_any_member_offline(f)
     }
-    pub fn on_group_member_online<'a, F>(
+    pub fn on_group_member_online<F>(
         &self,
         f: F,
-        group: &'a str,
-    ) -> impl Future<Item = Result<SubscriptionReceipt, SubscriptionError>, Error = ExecError>
+        group: &str,
+    ) -> impl Future<Output = Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
     where
         F: Fn(Result<(Member, u64), ()>) + 'static + Send + Sync,
     {
@@ -125,11 +126,11 @@ impl ObserverClient {
     {
         self.sm_client.on_any_member_online(f)
     }
-    pub fn on_group_member_joined<'a, F>(
+    pub fn on_group_member_joined<F>(
         &self,
         f: F,
-        group: &'a str,
-    ) -> impl Future<Item = Result<SubscriptionReceipt, SubscriptionError>, Error = ExecError>
+        group: &str,
+    ) -> impl Future<Output = Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
     where
         F: Fn(Result<(Member, u64), ()>) + 'static + Send + Sync,
     {
@@ -138,17 +139,17 @@ impl ObserverClient {
     pub fn on_any_member_joined<F>(
         &self,
         f: F,
-    ) -> impl Future<Item = Result<SubscriptionReceipt, SubscriptionError>, Error = ExecError>
+    ) -> impl Future<Output = Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
     where
         F: Fn(Result<(Member, u64), ()>) + 'static + Send + Sync,
     {
         self.sm_client.on_any_member_joined(f)
     }
-    pub fn on_group_member_left<'a, F>(
+    pub fn on_group_member_left<F>(
         &self,
         f: F,
-        group: &'a str,
-    ) -> impl Future<Item = Result<SubscriptionReceipt, SubscriptionError>, Error = ExecError>
+        group: &str,
+    ) -> impl Future<Output = Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
     where
         F: Fn(Result<(Member, u64), ()>) + 'static + Send + Sync,
     {

@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::{thread, time as std_time};
 use utils::time;
+use crate::raft::RaftService;
 
 static MAX_TIMEOUT: i64 = 1000; //5 secs for 500ms heartbeat
 
