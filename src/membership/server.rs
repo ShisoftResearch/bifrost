@@ -8,7 +8,6 @@ use membership::client::{Group as ClientGroup, Member as ClientMember};
 use parking_lot::RwLock;
 use raft::state_machine::callback::server::{notify as cb_notify, SMCallback};
 use raft::state_machine::StateMachineCtl;
-use raft::{LogEntry, RaftMsg, RaftService, Service as raft_svr_trait};
 use rpc::Server;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -16,6 +15,9 @@ use std::sync::Arc;
 use std::{thread, time as std_time};
 use utils::time;
 use crate::raft::RaftService;
+use std::future::Future;
+use crate::utils::time;
+use crate::raft::state_machine::callback::server::SMCallback;
 
 static MAX_TIMEOUT: i64 = 1000; //5 secs for 500ms heartbeat
 

@@ -21,7 +21,7 @@ macro_rules! raft_trait_fn {
 macro_rules! raft_client_fn {
     (sub $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {
         pub fn $fn_name<F>(&self, f: F, $($arg:$in_),* )
-        -> impl Future<Item = Result<SubscriptionReceipt, SubscriptionError>, Error = ExecError>
+        -> impl Future<Output = Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
         where F: Fn(raft_return_type!($out, $error)) + 'static + Send + Sync
         {
             self.client.subscribe(
@@ -33,7 +33,7 @@ macro_rules! raft_client_fn {
     };
     ($others:ident $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {
         pub fn $fn_name(&self, $($arg:$in_),*)
-        -> impl Future<Item = raft_return_type!($out, $error), Error = ExecError> {
+        -> impl Future<Output = Result<raft_return_type!($out, $error), ExecError>> {
             self.client.execute(
                 self.sm_id,
                 $fn_name::new($($arg,)*)
@@ -254,7 +254,7 @@ macro_rules! raft_state_machine {
         }
         pub mod client {
             use std::sync::Arc;
-            use futures::prelude::*;
+            use std::future::Future;
             use $crate::raft::state_machine::master::ExecError;
             use $crate::raft::client::{RaftClient, SubscriptionError, SubscriptionReceipt};
 

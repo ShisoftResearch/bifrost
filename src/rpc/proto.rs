@@ -7,7 +7,7 @@ macro_rules! dispatch_rpc_service_functions {
             fn dispatch(
                 &self,
                 data: Vec<u8>,
-            ) -> Box<Future<Item = Vec<u8>, Error = $crate::rpc::RPCRequestError>>
+            ) -> Box<Future<Output = Result<Vec<u8>, $crate::rpc::RPCRequestError>>
             where
                 Self: Sized,
             {
@@ -127,7 +127,7 @@ macro_rules! service {
         use std::sync::Arc;
         use $crate::rpc::*;
         use $crate::utils::u8vec::*;
-        use futures::{Future, future};
+        use std::future::Future;
 
         lazy_static! {
             pub static ref RPC_SVRS:
@@ -138,9 +138,9 @@ macro_rules! service {
         pub trait Service: RPCService {
            $(
                 $(#[$attr])*
-                fn $fn_name(&self, $($arg:$in_),*) -> Box<Future<Item = $out, Error = $error>>;
+                fn $fn_name(&self, $($arg:$in_),*) -> Box<Future<Output = Result<$out, $error>>>;
            )*
-           fn inner_dispatch(&self, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = RPCRequestError>> {
+           fn inner_dispatch(&self, data: Vec<u8>) -> Box<Future<Output = Result<Vec<u8>, RPCRequestError>>> {
                let (func_id, body) = extract_u64_head(data);
                match func_id as usize {
                    $(::bifrost_plugins::hash_ident!($fn_name) => {
@@ -176,7 +176,7 @@ macro_rules! service {
                 /// Judgement: Use data ownership transfer instead of borrowing.
                 /// Some applications highly depend on RPC shortcut to achieve performance advantages.
                 /// Cloning for shortcut will significantly increase overhead. Eg. Hivemind immutable queue
-                pub fn $fn_name(&self, $($arg:$in_),*) -> Box<Future<Item = std::result::Result<$out, $error>, Error = RPCError>> {
+                pub fn $fn_name(&self, $($arg:$in_),*) -> Box<Future<Output = Result<std::result::Result<$out, $error>, RPCError>>> {
                     if let Some(ref local) = get_local(self.server_id, self.service_id) {
                         Box::new(future::finished(local.$fn_name($($arg),*).wait()))
                     } else {
