@@ -1,8 +1,5 @@
 use super::raft::client::SMClient;
-use super::DEFAULT_SERVICE_ID;
 use bifrost_hasher::hash_str;
-use raft::client::{RaftClient, SubscriptionError, SubscriptionReceipt};
-use raft::state_machine::master::ExecError;
 use std::sync::Arc;
 use std::future::Future;
 use crate::raft::state_machine::master::ExecError;

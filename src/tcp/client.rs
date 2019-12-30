@@ -2,23 +2,8 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::{future, Future};
-use futures_cpupool::CpuPool;
-use num_cpus;
-
-use tokio_core::net::TcpStream;
-use tokio_core::reactor::Core;
-use tokio_middleware::Timeout;
-use tokio_proto::multiplex::ClientService;
-use tokio_proto::TcpClient;
-use tokio_service::Service;
-use tokio_timer::Timer;
-
-use super::STANDALONE_ADDRESS;
-use bifrost_hasher::hash_str;
 use tcp::proto::BytesClientProto;
 use tcp::shortcut;
-use DISABLE_SHORTCUT;
 
 pub type ResFuture = Future<Item = Vec<u8>, Error = io::Error>;
 

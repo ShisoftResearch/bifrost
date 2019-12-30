@@ -3,13 +3,8 @@ use super::callback::SubKey;
 use super::*;
 use bifrost_hasher::hash_str;
 use parking_lot::RwLock;
-use raft::AsyncServiceClient;
-use rpc;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use utils::bincode;
-
-use futures::Future;
 
 pub const CONFIG_SM_ID: u64 = 1;
 

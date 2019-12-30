@@ -1,11 +1,7 @@
 use super::*;
-use futures::future;
-use futures::prelude::*;
 use parking_lot::RwLock;
-use rpc::Server;
 use std::collections::HashMap;
 use std::sync::Arc;
-use utils::time::get_time;
 
 pub struct SubscriptionService {
     pub subs: RwLock<HashMap<SubKey, Vec<(Box<Fn(Vec<u8>) + Send + Sync>, u64)>>>,

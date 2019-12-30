@@ -6,7 +6,6 @@ use std::error::Error;
 use std::fmt;
 use std::fmt::Display;
 use std::fmt::Formatter;
-use utils::bincode;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ExecError {

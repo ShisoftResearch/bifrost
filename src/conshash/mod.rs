@@ -1,24 +1,10 @@
 use parking_lot::{RwLock, RwLockWriteGuard};
-use serde;
-use std;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 
 use bifrost_hasher::{hash_bytes, hash_str};
-use conshash::weights::client::SMClient as WeightSMClient;
-use conshash::weights::DEFAULT_SERVICE_ID;
-use membership::client::{Member, ObserverClient as MembershipClient};
-use raft::client::{RaftClient, SubscriptionError, SubscriptionReceipt};
-use raft::state_machine::master::ExecError;
-use rand;
-use utils::bincode::serialize;
-
-use futures::prelude::*;
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
-use tokio_core::reactor::Core;
 
 pub mod weights;
 

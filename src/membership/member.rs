@@ -1,15 +1,11 @@
 use super::client::{MemberClient, ObserverClient};
 use super::heartbeat_rpc::*;
 use super::raft::client::SMClient;
-use super::DEFAULT_SERVICE_ID;
 use bifrost_hasher::hash_str;
-use raft::client::RaftClient;
-use raft::state_machine::master::ExecError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::{thread, time};
 
-use futures::prelude::*;
 use crate::raft::client::RaftClient;
 use std::future::Future;
 

@@ -1,11 +1,6 @@
 use std::io::{self, ErrorKind, Write};
 use std::str;
 
-use tokio_core::io::{Framed, Io};
-use tokio_proto::multiplex::{ClientProto, ServerProto};
-
-use tcp::framed::BytesCodec;
-
 pub struct BytesServerProto;
 pub struct BytesClientProto;
 

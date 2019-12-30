@@ -1,7 +1,3 @@
-use futures::prelude::*;
-use futures_cpupool::{Builder, CpuPool};
-use num_cpus;
-
 lazy_static! {
     static ref POOL: CpuPool = Builder::new()
         .name_prefix("Bifrost Shared Exec Pool".to_string())

@@ -1,6 +1,4 @@
 use super::cpu_relax;
-use futures::task;
-use futures::{Async, Future, Poll};
 use std::cell::UnsafeCell;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicUsize, Ordering};

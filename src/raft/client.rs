@@ -1,23 +1,11 @@
 use super::*;
 use bifrost_hasher::{hash_bytes, hash_str};
-use raft::state_machine::callback::client::SubscriptionService;
-use raft::state_machine::callback::SubKey;
-use raft::state_machine::configs::commands::{
-    subscribe as conf_subscribe, unsubscribe as conf_unsubscribe,
-};
-use raft::state_machine::configs::CONFIG_SM_ID;
-use raft::state_machine::master::{ExecError, ExecResult};
-use raft::state_machine::OpType;
-use raft::{AsyncServiceClient, ClientCmdResponse, ClientQryResponse, LogEntry, RaftMsg};
-use rand;
-use rpc;
 use std::clone::Clone;
 use std::cmp::max;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::iter::FromIterator;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use utils::async_locks::RwLock;
 use crate::raft::state_machine::master::ExecError;
 
 const ORDERING: Ordering = Ordering::Relaxed;

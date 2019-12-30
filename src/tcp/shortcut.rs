@@ -1,10 +1,8 @@
 use bifrost_hasher::hash_str;
-use futures::{future, Future};
 use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::io::{Error, ErrorKind, Result};
 use std::sync::Arc;
-use tcp::server::ServerCallback;
 
 lazy_static! {
     pub static ref TCP_CALLBACKS: RwLock<BTreeMap<u64, Arc<ServerCallback>>> =

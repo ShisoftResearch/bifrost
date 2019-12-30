@@ -1,6 +1,5 @@
 use byteorder::{ByteOrder, LittleEndian};
 use std::{io, str};
-use tokio_core::io::{Codec, EasyBuf, Framed, Io};
 
 pub struct BytesCodec;
 

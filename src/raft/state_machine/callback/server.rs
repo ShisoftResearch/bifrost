@@ -1,17 +1,11 @@
-use super::super::super::RaftMsg;
 use super::super::OpType;
 use super::*;
 use bifrost_hasher::{hash_bytes, hash_str};
 use parking_lot::RwLock;
-use raft::{RaftService, IS_LEADER};
-use rpc;
 use serde;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use utils::bincode;
-
-use futures::Future;
 
 pub struct Subscriber {
     pub session_id: u64,

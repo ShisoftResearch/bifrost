@@ -1,13 +1,6 @@
 // a simple spin lock based async mutex
 
 use super::cpu_relax;
-use futures::prelude::*;
-use futures::task;
-use std::cell::RefCell;
-use std::cell::UnsafeCell;
-use std::collections::BTreeMap;
-use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
 #[derive(Clone)]

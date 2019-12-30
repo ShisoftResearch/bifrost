@@ -2,13 +2,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use futures::{future, Future};
-use tokio_proto::TcpServer;
-use tokio_service::{NewService, Service};
-
 use super::STANDALONE_ADDRESS;
-use tcp::proto::BytesServerProto;
-use tcp::shortcut;
 
 pub struct ServerCallback {
     closure: Box<Fn(Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = io::Error>>>,

@@ -7,7 +7,7 @@ macro_rules! dispatch_rpc_service_functions {
             fn dispatch(
                 &self,
                 data: Vec<u8>,
-            ) -> Box<Future<Output = Result<Vec<u8>, $crate::rpc::RPCRequestError>>
+            ) -> Box<Future<Output = Result<Vec<u8>, $crate::rpc::RPCRequestError>>>
             where
                 Self: Sized,
             {
