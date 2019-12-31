@@ -165,7 +165,6 @@ mod parallel {
     use self::rayon::prelude::*;
     use super::struct_service::*;
     use super::*;
-    use bifrost::utils::fut_exec::wait;
     use bifrost_hasher::hash_str;
 
     #[test]

@@ -11,6 +11,7 @@ use std::future::Future;
 use crate::utils::time;
 use crate::raft::state_machine::callback::server::SMCallback;
 use crate::raft::RaftService;
+use crate::membership::client::{Group as ClientGroup, Member as ClientMember};
 
 static MAX_TIMEOUT: i64 = 1000; //5 secs for 500ms heartbeat
 

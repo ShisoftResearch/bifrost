@@ -4,5 +4,4 @@ pub mod u8vec;
 pub mod bindings;
 pub mod async_locks;
 pub mod bincode;
-pub mod fut_exec;
 pub mod math;
