@@ -29,8 +29,10 @@ parking_lot = {version = "0.6", features = ["nightly"]}
 thread-id = "3.0.0"
 
 tokio = "0.2"
-
 crc32fast = "*"
+
+futures = "0.3"
+futures-locks = "0.5"
 
 [dev-dependencies]
 rayon = "1.0"

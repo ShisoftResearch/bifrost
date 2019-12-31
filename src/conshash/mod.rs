@@ -1,10 +1,16 @@
 use parking_lot::{RwLock, RwLockWriteGuard};
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 
 use bifrost_hasher::{hash_bytes, hash_str};
+use crate::raft::state_machine::master::ExecError;
+use crate::raft::client::{SubscriptionReceipt, SubscriptionError, RaftClient};
+use crate::membership::client::Member;
+use crate::conshash::weights::DEFAULT_SERVICE_ID;
+use crate::utils::bincode::serialize;
+use std::future::Future;
 
 pub mod weights;
 
@@ -227,7 +233,7 @@ impl ConsistentHashing {
         &self,
         server_name: &String,
         weight: u64,
-    ) -> impl Future<Item = bool, Error = ExecError> {
+    ) -> impl Future<Output = Result<bool, ExecError>> {
         let group_id = hash_str(&self.group_name);
         let server_id = hash_str(server_name);
         self.weight_sm_client

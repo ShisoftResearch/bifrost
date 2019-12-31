@@ -10,6 +10,7 @@ use std::{thread, time as std_time};
 use std::future::Future;
 use crate::utils::time;
 use crate::raft::state_machine::callback::server::SMCallback;
+use crate::raft::RaftService;
 
 static MAX_TIMEOUT: i64 = 1000; //5 secs for 500ms heartbeat
 

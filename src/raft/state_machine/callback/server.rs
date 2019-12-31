@@ -6,6 +6,8 @@ use serde;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use crate::raft::{RaftService, RaftMsg};
+use crate::rpc;
 
 pub struct Subscriber {
     pub session_id: u64,

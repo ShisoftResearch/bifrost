@@ -8,6 +8,7 @@ use std::{thread, time};
 
 use crate::raft::client::RaftClient;
 use std::future::Future;
+use crate::membership::DEFAULT_SERVICE_ID;
 
 static PING_INTERVAL: u64 = 100;
 

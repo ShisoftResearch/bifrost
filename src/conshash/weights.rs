@@ -1,6 +1,8 @@
 use bifrost_plugins::hash_ident;
 use std::collections::HashMap;
 use std::sync::Arc;
+use crate::raft::state_machine::StateMachineCtl;
+use crate::raft::RaftService;
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_DHT_WEIGHTS) as u64;
 
