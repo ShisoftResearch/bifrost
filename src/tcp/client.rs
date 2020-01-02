@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use tcp::proto::BytesClientProto;
 use tcp::shortcut;
-use crate::tcp::STANDALONE_ADDRESS;
+use crate::tcp::{STANDALONE_ADDRESS, shortcut};
+use bifrost_hasher::hash_str;
+use crate::DISABLE_SHORTCUT;
+use std::net::TcpListener;
 
 pub type ResFuture = Future<Item = Vec<u8>, Error = io::Error>;
 
@@ -34,7 +37,7 @@ impl Service for ClientCore {
 }
 
 impl Client {
-    pub fn connect_with_timeout(address: &String, timeout: Duration) -> io::Result<Client> {
+    pub async fn connect_with_timeout(address: &String, timeout: Duration) -> io::Result<Client> {
         let server_id = hash_str(address);
         let client = {
             if !DISABLE_SHORTCUT && shortcut::is_local(server_id) {
@@ -46,8 +49,13 @@ impl Client {
                         "STANDALONE server is not found",
                     ));
                 }
-                let mut core = Core::new()?;
-                let socket_address = address.parse().unwrap();
+                let mut listener = TcpListener::bind(address).await?;
+                loop {
+                    let (mut socket, _) = listener.accept().await?;
+                    tokio::spawn(async move {
+
+                    })
+                }
                 let future = Box::new(
                     TcpClient::new(BytesClientProto)
                         .connect(&socket_address, &core.handle())

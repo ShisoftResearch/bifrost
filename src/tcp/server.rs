@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use super::STANDALONE_ADDRESS;
+use crate::tcp::shortcut;
 
 pub struct ServerCallback {
     closure: Box<Fn(Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = io::Error>>>,
