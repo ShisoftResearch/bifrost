@@ -29,11 +29,13 @@ impl <C: Fn(BytesMut) -> BoxedRPCFuture> Server<C> {
                         // runs concurrently with all other clients. The `move` keyword is used
                         // here to move ownership of our db handle into the async closure.
                         tokio::spawn(async move {
-                            let mut data = Framed::new(socket, BytesCodec);
-                            while let Some(result) = data.next().await {
+                            let mut transport = Framed::new(socket, BytesCodec);
+                            while let Some(result) = transport.next().await {
                                 match result {
                                     Ok(data) => {
-                                        callback(data)
+                                        if let Err(e) = transport.send(callback(data).await).await {
+                                           println!("Error on TCP callback {:?}", e);
+                                        }
                                     }
                                     Err(e) => {
                                         println!("error on decoding from socket; error = {:?}", e);
