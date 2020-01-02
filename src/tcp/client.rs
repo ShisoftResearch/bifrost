@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use tcp::proto::BytesClientProto;
 use tcp::shortcut;
+use crate::tcp::STANDALONE_ADDRESS;
 
 pub type ResFuture = Future<Item = Vec<u8>, Error = io::Error>;
 
