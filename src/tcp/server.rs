@@ -8,25 +8,18 @@ use std::future::Future;
 use crate::tcp::framed::BytesCodec;
 use tokio_util::codec::Framed;
 use tokio::stream::StreamExt;
+use bytes::BytesMut;
 
-unsafe impl Send for ServerCallback {}
-unsafe impl Sync for ServerCallback {}
-
+pub type RPCFuture = dyn Future<RPCRes>;
 pub type BoxedRPCFuture = Box<RPCFuture>;
-pub type RPCReq = Vec<u8>;
+pub type RPCReq = BytesMut;
+pub type RPCRes = BytesMut;
 
 pub struct Server<C: Fn(RPCReq) -> BoxedRPCFuture>;
 
-impl <C: Fn(BytesMut) -> BoxedRPCFuture> Service for Server<C> {
-    fn call(req: RPCReq) -> BoxedRPCFuture {
-        let call = C;
-        call(req)
-    }
-}
-
-impl <C: Fn(Vec<u8>) -> BoxedRPCFuture> Server<C> {
-    pub async fn new(addr: &String) {
-        shortcut::register_server::<C>(addr).await;
+impl <C: Fn(BytesMut) -> BoxedRPCFuture> Server<C> {
+    pub async fn new(addr: &String, callback: C) {
+        shortcut::register_server::<C>(addr, callback).await;
         if !addr.eq(&STANDALONE_ADDRESS) {
             let mut listener = TcpListener::bind(&addr).await?;
             loop {
@@ -36,10 +29,11 @@ impl <C: Fn(Vec<u8>) -> BoxedRPCFuture> Server<C> {
                         // runs concurrently with all other clients. The `move` keyword is used
                         // here to move ownership of our db handle into the async closure.
                         tokio::spawn(async move {
+                            let mut data = Framed::new(socket, BytesCodec);
                             while let Some(result) = data.next().await {
                                 match result {
-                                    Ok((mid, data)) => {
-                                        Self::ca
+                                    Ok(data) => {
+                                        callback(data)
                                     }
                                     Err(e) => {
                                         println!("error on decoding from socket; error = {:?}", e);

@@ -2,7 +2,7 @@ use bifrost_hasher::hash_str;
 use std::collections::BTreeMap;
 use std::io::{Error, ErrorKind, Result};
 use std::sync::Arc;
-use crate::tcp::server::BoxedRPCFuture;
+use crate::tcp::server::{BoxedRPCFuture, RPCReq};
 use futures_locks::RwLock;
 
 lazy_static! {
@@ -10,14 +10,13 @@ lazy_static! {
         RwLock::new(BTreeMap::new());
 }
 
-pub async fn register_server<C: Fn(Vec<u8>) -> BoxedRPCFuture>(server_address: &String) {
-    let callback = C;
+pub async fn register_server<C: Fn(RPCReq) -> BoxedRPCFuture>(server_address: &String, callback: C) {
     let server_id = hash_str(server_address);
     let mut servers_cbs = TCP_CALLBACKS.write().await;
     servers_cbs.insert(server_id, box callback);
 }
 
-pub fn call(server_id: u64, data: Vec<u8>) -> BoxedRPCFuture {
+pub fn call(server_id: u64, data: RPCReq) -> BoxedRPCFuture {
     box async move {
         let server_cbs = TCP_CALLBACKS.read().await;
         match server_cbs.get(&server_id) {
