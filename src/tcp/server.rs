@@ -1,25 +1,24 @@
-use std::io;
-use std::net::{SocketAddr, TcpListener};
-use std::sync::Arc;
-
 use super::STANDALONE_ADDRESS;
 use crate::tcp::shortcut;
 use std::future::Future;
+use std::error::Error;
 use crate::tcp::framed::BytesCodec;
 use tokio_util::codec::Framed;
 use tokio::stream::StreamExt;
+use futures::SinkExt;
+use tokio::net::TcpListener;
 use bytes::BytesMut;
 
-pub type RPCFuture = dyn Future<RPCRes>;
+pub type RPCFuture = dyn Future<Output = TcpRes>;
 pub type BoxedRPCFuture = Box<RPCFuture>;
-pub type RPCReq = BytesMut;
-pub type RPCRes = BytesMut;
+pub type TcpReq = BytesMut;
+pub type TcpRes = BytesMut;
 
-pub struct Server<C: Fn(RPCReq) -> BoxedRPCFuture>;
+pub struct Server<F: Future<Output = TcpRes>, C: Fn(TcpReq) -> F>;
 
-impl <C: Fn(BytesMut) -> BoxedRPCFuture> Server<C> {
-    pub async fn new(addr: &String, callback: C) {
-        shortcut::register_server::<C>(addr, callback).await;
+impl <F: Future<Output = TcpRes>, C: Fn(BytesMut) -> F> Server<F, C> {
+    pub async fn new(addr: &String, callback: C) -> Result<(), Box<dyn Error>> {
+        shortcut::register_server::<F, C>(addr, callback).await;
         if !addr.eq(&STANDALONE_ADDRESS) {
             let mut listener = TcpListener::bind(&addr).await?;
             loop {
@@ -33,7 +32,8 @@ impl <C: Fn(BytesMut) -> BoxedRPCFuture> Server<C> {
                             while let Some(result) = transport.next().await {
                                 match result {
                                     Ok(data) => {
-                                        if let Err(e) = transport.send(callback(data).await).await {
+                                        let res = callback(data).await;
+                                        if let Err(e) = transport.send(res).await {
                                            println!("Error on TCP callback {:?}", e);
                                         }
                                     }
@@ -50,5 +50,6 @@ impl <C: Fn(BytesMut) -> BoxedRPCFuture> Server<C> {
                 }
             }
         }
+        Ok(())
     }
 }
