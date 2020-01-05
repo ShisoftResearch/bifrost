@@ -11,11 +11,11 @@ where
     }
 }
 
-pub fn deserialize<'a, T>(data: &'a Vec<u8>) -> T
+pub fn deserialize<'a, T>(data: &'a[u8]) -> T
 where
     T: serde::Deserialize<'a>,
 {
-    match bincode::deserialize(&data[..]) {
+    match bincode::deserialize(data[..]) {
         Ok(data) => data,
         Err(e) => panic!("Cannot deserialize: {:?}, data len: {}", e, data.len()),
     }

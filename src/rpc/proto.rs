@@ -1,5 +1,3 @@
-use bincode;
-
 #[macro_export]
 macro_rules! dispatch_rpc_service_functions {
     ($s:ty) => {
@@ -7,7 +5,7 @@ macro_rules! dispatch_rpc_service_functions {
             fn dispatch(
                 &self,
                 data: Vec<u8>,
-            ) -> Box<Future<Output = Result<Vec<u8>, $crate::rpc::RPCRequestError>>>
+            ) -> Box<dyn Future<Output = Result<::bytes::BytesMut, $crate::rpc::RPCRequestError>>>
             where
                 Self: Sized,
             {
@@ -122,12 +120,12 @@ macro_rules! service {
             rpc $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty;
         )*
     ) => {
-        use std;
         use std::time::Duration;
         use std::sync::Arc;
         use $crate::rpc::*;
-        use $crate::utils::u8vec::*;
         use std::future::Future;
+        use bytes::BytesMut;
+        use std::pin::Pin;
 
         lazy_static! {
             pub static ref RPC_SVRS:
@@ -138,22 +136,20 @@ macro_rules! service {
         pub trait Service: RPCService {
            $(
                 $(#[$attr])*
-                fn $fn_name(&self, $($arg:$in_),*) -> Box<Future<Output = Result<$out, $error>>>;
+                fn $fn_name(self: Pin<&Self>, $($arg:$in_),*) -> Pin<Box<dyn Future<Output = Result<$out, $error>>>>;
            )*
-           fn inner_dispatch(&self, data: Vec<u8>) -> Box<Future<Output = Result<Vec<u8>, RPCRequestError>>> {
-               let (func_id, body) = extract_u64_head(data);
+           fn inner_dispatch(self: Pin<&Self>, data: BytesMut) -> Box<dyn Future<Output = Result<BytesMut, RPCRequestError>>> {
+               let (func_id, body) = read_u64_head(data);
                match func_id as usize {
-                   $(::bifrost_plugins::hash_ident!($fn_name) => {
-                       let ($($arg,)*) : ($($in_,)*) = $crate::utils::bincode::deserialize(&body);
-                       Box::new(
-                           self.$fn_name($($arg,)*)
-                               .then(|f_result| future::ok($crate::utils::bincode::serialize(&f_result)))
-                               .map_err(|_:$error| RPCRequestError::Other) // in this case error it is impossible
-                       )
-                   }),*
-                   _ => {
-                       Box::new(future::err(RPCRequestError::FunctionIdNotFound))
-                   }
+                    $(::bifrost_plugins::hash_ident!($fn_name) => {
+                        let ($($arg,)*) : ($($in_,)*) = $crate::utils::bincode::deserialize(body.as_ref());
+                        self.$fn_name($($arg,)*)
+                            .then(|f_result| BytesMut::from($crate::utils::bincode::serialize(&f_result).as_slice()))
+                            .map_err(|_:$error| RPCRequestError::Other) // in this case error it is impossible
+                    }),*
+                    _ => {
+                        Err(RPCRequestError::FunctionIdNotFound)
+                    }
                }
            }
         }
@@ -176,21 +172,19 @@ macro_rules! service {
                 /// Judgement: Use data ownership transfer instead of borrowing.
                 /// Some applications highly depend on RPC shortcut to achieve performance advantages.
                 /// Cloning for shortcut will significantly increase overhead. Eg. Hivemind immutable queue
-                pub fn $fn_name(&self, $($arg:$in_),*) -> Box<Future<Output = Result<std::result::Result<$out, $error>, RPCError>>> {
+                pub async fn $fn_name(self: Pin<&Self>, $($arg:$in_),*) -> Result<std::result::Result<$out, $error>, RPCError> {
                     if let Some(ref local) = get_local(self.server_id, self.service_id) {
-                        Box::new(future::finished(local.$fn_name($($arg),*).wait()))
+                        local.$fn_name($($arg),*).await
                     } else {
                         let req_data = ($($arg,)*);
-                        let req_data_bytes = $crate::utils::bincode::serialize(&req_data);
+                        let req_data_bytes = BytesMut::from($crate::utils::bincode::serialize(&req_data).as_slice());
                         let req_bytes = prepend_u64(::bifrost_plugins::hash_ident!($fn_name) as u64, req_data_bytes);
-                        let res_bytes = self.client.send_async(self.service_id, req_bytes);
-                        Box::new(res_bytes.then(|res_bytes| -> Result<std::result::Result<$out, $error>, RPCError> {
-                            if let Ok(res_bytes) = res_bytes {
-                                Ok($crate::utils::bincode::deserialize(&res_bytes))
-                            } else {
-                                Err(res_bytes.err().unwrap())
-                            }
-                        }))
+                        let res_bytes = RPCClient::send_async(Pin::new(&*self.client), self.service_id, req_bytes).await;
+                        if let Ok(res_bytes) = res_bytes {
+                            Ok($crate::utils::bincode::deserialize(&res_bytes))
+                        } else {
+                            Err(res_bytes.err().unwrap())
+                        }
                     }
                 }
            )*

@@ -17,6 +17,7 @@ use bytes::{BufMut, Buf, BytesMut};
 use futures::future::{err, BoxFuture};
 use std::pin::Pin;
 use bytes::buf::BufExt;
+use crate::tcp::client::Client;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RPCRequestError {
@@ -80,6 +81,12 @@ fn decode_res(res: io::Result<BytesMut>) -> Result<BytesMut, RPCError> {
     }
 }
 
+pub fn read_u64_head(mut data: BytesMut) -> (u64, BytesMut) {
+    let num = LittleEndian::read_u64(data.as_ref());
+    data.advance_mut(8);
+    (num, data)
+}
+
 impl Server {
     pub fn new(address: &String) -> Arc<Server> {
         Arc::new(Server {
@@ -95,8 +102,7 @@ impl Server {
             address,
             box move |mut data| {
                 async {
-                    let svr_id = LittleEndian::read_u64(data.as_ref());
-                    data.advance(8);
+                    let (svr_id, data) = read_u64_head(data);
                     let svr_map = server.services.read().await;
                     let service = svr_map.get(&svr_id);
                     match service {
@@ -149,6 +155,14 @@ pub struct RPCClient {
     pub address: String,
 }
 
+pub fn prepend_u64(num: u64, data: BytesMut) -> BytesMut {
+    let mut bytes = BytesMut::new();
+    bytes.reserve(8);
+    LittleEndian::write_u64(bytes.as_mut(), num);
+    bytes.unsplit(data);
+    bytes
+}
+
 impl RPCClient {
     pub async fn send_async(
         self: Pin<&Self>,
@@ -156,12 +170,8 @@ impl RPCClient {
         data: BytesMut,
     ) -> Result<BytesMut, RPCError> {
         let mut client = self.client.lock().await;
-        let mut bytes = BytesMut::new();
-        bytes.reserve(8);
-        LittleEndian::write_u64(bytes.as_mut(), svr_id);
-        bytes.unsplit(data);
-        let res = (*client).send_msg(bytes).await; 
-        decode_res(res) 
+        let bytes = prepend_u64(svr_id, data);
+        decode_res(Client::send_msg(Pin::new(&mut *client), bytes).await)
     }
     pub fn new_async(addr: String) -> impl Future<Item = Arc<RPCClient>, Error = io::Error> {
         tcp::client::Client::connect_async(addr.clone()).map(|client| {
