@@ -4,3 +4,4 @@ pub mod u8vec;
 pub mod bindings;
 pub mod bincode;
 pub mod math;
+pub mod rwlock;
