@@ -16,6 +16,7 @@ use byteorder::{LittleEndian, ByteOrder};
 use bytes::{BufMut, Buf, BytesMut};
 use futures::future::{err, BoxFuture};
 use std::pin::Pin;
+use bytes::buf::BufExt;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RPCRequestError {
@@ -92,7 +93,7 @@ impl Server {
         let server = server.clone(); 
         tcp::server::Server::new(
             address,
-            move |mut data| {
+            box move |mut data| {
                 async {
                     let svr_id = LittleEndian::read_u64(data.as_ref());
                     data.advance(8);
@@ -107,7 +108,7 @@ impl Server {
                             RPCRequestError::ServiceIdNotFound, 
                         )),
                     }
-                }
+                }.boxed()
             },
         );
     }
@@ -155,8 +156,12 @@ impl RPCClient {
         data: BytesMut,
     ) -> Result<BytesMut, RPCError> {
         let mut client = self.client.lock().await;
-        let res = client.send(prepend_u64(svr_id, data)).await;
-        decode_res(res)
+        let mut bytes = BytesMut::new();
+        bytes.reserve(8);
+        LittleEndian::write_u64(bytes.as_mut(), svr_id);
+        bytes.unsplit(data);
+        let res = (*client).send_msg(bytes).await; 
+        decode_res(res) 
     }
     pub fn new_async(addr: String) -> impl Future<Item = Arc<RPCClient>, Error = io::Error> {
         tcp::client::Client::connect_async(addr.clone()).map(|client| {

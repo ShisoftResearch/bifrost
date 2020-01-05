@@ -8,17 +8,19 @@ use tokio::stream::StreamExt;
 use futures::SinkExt;
 use tokio::net::TcpListener;
 use bytes::BytesMut;
+use futures::future::BoxFuture;
+use std::pin::Pin;
 
 pub type RPCFuture = dyn Future<Output = TcpRes>;
 pub type BoxedRPCFuture = Box<RPCFuture>;
 pub type TcpReq = BytesMut;
-pub type TcpRes = BytesMut;
+pub type TcpRes = Pin<Box<dyn Future<Output = BytesMut>>>;
 
-pub struct Server<F: Send + Future<Output = TcpRes>, C: Fn(TcpReq) -> F>;
+pub struct Server;
 
-impl <F: Send + Future<Output = TcpRes>, C: Send + Fn(BytesMut) -> F> Server<F, C> {
-    pub async fn new(addr: &String, callback: C) -> Result<(), Box<dyn Error>> {
-        shortcut::register_server::<F, C>(addr, callback).await;
+impl Server {
+    pub async fn new(addr: &String, callback: Box<dyn Fn(TcpReq) -> TcpRes>) -> Result<(), Box<dyn Error>> {
+        shortcut::register_server(addr, callback).await;
         if !addr.eq(&STANDALONE_ADDRESS) { 
             let mut listener = TcpListener::bind(&addr).await?;
             loop {

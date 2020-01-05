@@ -14,6 +14,8 @@ use tokio_util::codec::Framed;
 use crate::tcp::framed::BytesCodec;
 use std::future::Future;
 use crate::tcp::server::{TcpReq, TcpRes};
+use bytes::BytesMut;
+use std::pin::Pin;
 
 pub struct Client {
     client: Option<Framed<TcpStream, BytesCodec>>,
@@ -46,12 +48,17 @@ impl Client {
     pub fn connect(address: &String) -> impl Future<Output = io::Result<Self>>  {
         Client::connect_with_timeout(address, Duration::from_secs(5))
     }
-    pub async fn send(&mut self, msg: TcpReq) -> impl Future<Output = Result<TcpRes, io::Error>> {
+    pub async fn send_msg(self: Pin<&mut Self>, msg: TcpReq) -> io::Result<BytesMut> {
         if let Some(ref mut transport) = self.client {
             transport.send(msg).await?;
-            time::timeout(timeout, transport.next()).await??
+            while let Some(res) = transport.next().await {
+                return res.map_err(|e| io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Cannot decode data: {:?}", e)));
+            }
+            Err(io::Error::new(io::ErrorKind::NotConnected, ""))
         } else {
-            shortcut::call(self.server_id, msg)
+            Ok(shortcut::call(self.server_id, msg).await?)
         }
     }
 }

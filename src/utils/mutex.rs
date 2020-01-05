@@ -58,8 +58,14 @@ impl <'a, T> Deref for MutexGuard<'a, T> {
 }
 
 impl <'a, T> DerefMut for MutexGuard<'a, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
+    fn deref_mut(&mut self) -> &mut T {
         unsafe  { &mut *self.lock.obj.get() }
+    }
+}
+
+impl <'a, T> Drop for MutexGuard<'a, T> {
+    fn drop(&mut self) {
+        self.lock.semaphore.store(false, Relaxed);
     }
 }
 
