@@ -9,15 +9,13 @@ use std::io;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use tcp;
-use utils::async_locks::{Mutex, RwLock};
-use utils::time;
-use utils::u8vec::*;
-use DISABLE_SHORTCUT;
-
-lazy_static! {
-    pub static ref DEFAULT_CLIENT_POOL: ClientPool = ClientPool::new();
-}
+use crate::utils::rwlock::RwLock;
+use crate::utils::mutex::Mutex;
+use crate::{tcp, DISABLE_SHORTCUT};
+use byteorder::{LittleEndian, ByteOrder};
+use bytes::{BufMut, Buf, BytesMut};
+use futures::future::{err, BoxFuture};
+use std::pin::Pin;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RPCRequestError {
@@ -33,39 +31,42 @@ pub enum RPCError {
 }
 
 pub trait RPCService: Sync + Send {
-    fn dispatch(&self, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = RPCRequestError>>;
+    fn dispatch(&self, data: BytesMut) -> BoxFuture<Result<BytesMut, RPCRequestError>>; 
     fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64);
 }
 
 pub struct Server {
-    services: RwLock<HashMap<u64, Arc<RPCService>>>,
+    services: RwLock<HashMap<u64, Arc<dyn RPCService>>>,
     pub address: String,
     pub server_id: u64,
 }
+
+unsafe impl Sync for Server {}
 
 pub struct ClientPool {
     clients: Arc<Mutex<HashMap<u64, Arc<RPCClient>>>>,
 }
 
-fn encode_res(res: Result<Vec<u8>, RPCRequestError>) -> Vec<u8> {
+fn encode_res(res: Result<BytesMut, RPCRequestError>) -> BytesMut {
     match res {
-        Ok(vec) => [0u8; 1].iter().cloned().chain(vec.into_iter()).collect(),
+        Ok(buffer) => [0u8; 1].iter().cloned().chain(buffer.into_iter()).collect(),
         Err(e) => {
             let err_id = match e {
                 RPCRequestError::FunctionIdNotFound => 1u8,
                 RPCRequestError::ServiceIdNotFound => 2u8,
                 _ => 255u8,
             };
-            vec![err_id]
+            BytesMut::from([err_id])
         }
     }
 }
 
-fn decode_res(res: io::Result<Vec<u8>>) -> Result<Vec<u8>, RPCError> {
+fn decode_res(res: io::Result<BytesMut>) -> Result<BytesMut, RPCError> {
     match res {
-        Ok(res) => {
+        Ok(mut res) => {
             if res[0] == 0u8 {
-                Ok(res.into_iter().skip(1).collect())
+                res.advance(1);
+                Ok(res)
             } else {
                 match res[0] {
                     1u8 => Err(RPCError::RequestError(RPCRequestError::FunctionIdNotFound)),
@@ -88,23 +89,26 @@ impl Server {
     }
     pub fn listen(server: &Arc<Server>) {
         let address = &server.address;
-        let server = server.clone();
+        let server = server.clone(); 
         tcp::server::Server::new(
             address,
-            tcp::server::ServerCallback::new(move |data| {
-                let (svr_id, data) = extract_u64_head(data);
-                let svr_map = server.services.read();
-                let service = svr_map.get(&svr_id);
-                match service {
-                    Some(ref service) => {
-                        let service = service.clone();
-                        Box::new(service.dispatch(data).then(|r| Ok(encode_res(r))))
+            move |mut data| {
+                async {
+                    let svr_id = LittleEndian::read_u64(data.as_ref());
+                    data.advance(8);
+                    let svr_map = server.services.read().await;
+                    let service = svr_map.get(&svr_id);
+                    match service {
+                        Some(ref service) => {
+                            let svr_Res = service.dispatch(data).await;
+                            encode_res(svr_Res)
+                        }
+                        None => encode_res(Err(
+                            RPCRequestError::ServiceIdNotFound, 
+                        )),
                     }
-                    None => Box::new(future::finished(encode_res(Err(
-                        RPCRequestError::ServiceIdNotFound,
-                    )))),
                 }
-            }),
+            },
         );
     }
     pub fn listen_and_resume(server: &Arc<Server>) {
@@ -145,16 +149,14 @@ pub struct RPCClient {
 }
 
 impl RPCClient {
-    pub fn send_async(
-        &self,
+    pub async fn send_async(
+        self: Pin<&Self>,
         svr_id: u64,
-        data: Vec<u8>,
-    ) -> impl Future<Item = Vec<u8>, Error = RPCError> {
-        self.client
-            .lock_async()
-            .map_err(|_| io::Error::from(io::ErrorKind::Other))
-            .and_then(move |client| client.send_async(prepend_u64(svr_id, data)))
-            .then(move |res| decode_res(res))
+        data: BytesMut,
+    ) -> Result<BytesMut, RPCError> {
+        let mut client = self.client.lock().await;
+        let res = client.send(prepend_u64(svr_id, data)).await;
+        decode_res(res)
     }
     pub fn new_async(addr: String) -> impl Future<Item = Arc<RPCClient>, Error = io::Error> {
         tcp::client::Client::connect_async(addr.clone()).map(|client| {

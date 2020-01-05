@@ -14,9 +14,9 @@ pub type BoxedRPCFuture = Box<RPCFuture>;
 pub type TcpReq = BytesMut;
 pub type TcpRes = BytesMut;
 
-pub struct Server<F: Future<Output = TcpRes>, C: Fn(TcpReq) -> F>;
+pub struct Server<F: Send + Future<Output = TcpRes>, C: Fn(TcpReq) -> F>;
 
-impl <F: Future<Output = TcpRes>, C: Fn(BytesMut) -> F> Server<F, C> {
+impl <F: Send + Future<Output = TcpRes>, C: Send + Fn(BytesMut) -> F> Server<F, C> {
     pub async fn new(addr: &String, callback: C) -> Result<(), Box<dyn Error>> {
         shortcut::register_server::<F, C>(addr, callback).await;
         if !addr.eq(&STANDALONE_ADDRESS) { 

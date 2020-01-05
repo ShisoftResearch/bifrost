@@ -1,12 +1,12 @@
-use bifrost::conshash::weights::Weights;
-use bifrost::conshash::{CHError, ConsistentHashing};
-use bifrost::membership::client::ObserverClient;
-use bifrost::membership::member::MemberService;
-use bifrost::membership::server::Membership;
-use bifrost::raft::client::RaftClient;
-use bifrost::raft::state_machine::callback::client::SubscriptionService;
-use bifrost::raft::*;
-use bifrost::rpc::*;
+use crate::conshash::weights::Weights;
+use crate::conshash::{CHError, ConsistentHashing};
+use crate::membership::client::ObserverClient;
+use crate::membership::member::MemberService;
+use crate::membership::server::Membership;
+use crate::raft::client::RaftClient;
+use crate::raft::state_machine::callback::client::SubscriptionService;
+use crate::raft::*;
+use crate::rpc::*;
 
 use futures::prelude::*;
 use std::collections::HashMap;

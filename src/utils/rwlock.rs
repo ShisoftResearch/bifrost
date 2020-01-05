@@ -110,3 +110,6 @@ impl <'a, T> Drop for RwLockWriteGuard<'a, T> {
         self.lock.semaphore.store(1, Relaxed)
     }
 }
+
+unsafe impl <T> Send for RwLock<T> {}
+unsafe impl <T> Sync for RwLock<T> {}

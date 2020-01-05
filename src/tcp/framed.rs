@@ -10,7 +10,7 @@ impl Decoder for BytesCodec {
     type Item = BytesMut;
     type Error = ();
 
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::In>, Self::Error> {
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         let buf_len = src.len();
         if buf_len >= BYTE_LEN {
             let len = LittleEndian::read_u64(&src[0..BYTE_LEN]) as usize;

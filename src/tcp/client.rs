@@ -7,17 +7,13 @@ use crate::DISABLE_SHORTCUT;
 
 use tokio::io;
 use tokio::net::TcpStream;
-use tokio::prelude::*;
 use tokio::time;
-use tokio::time::Timeout;
 use tokio::stream::StreamExt;
 use futures::SinkExt;
-use tokio_util::codec::{Framed, FramedWrite};
+use tokio_util::codec::Framed;
 use crate::tcp::framed::BytesCodec;
 use std::future::Future;
-use bytes::BufMut;
 use crate::tcp::server::{TcpReq, TcpRes};
-use futures::AsyncWriteExt;
 
 pub struct Client {
     client: Option<Framed<TcpStream, BytesCodec>>,
@@ -50,7 +46,7 @@ impl Client {
     pub fn connect(address: &String) -> impl Future<Output = io::Result<Self>>  {
         Client::connect_with_timeout(address, Duration::from_secs(5))
     }
-    pub async fn send_async(&mut self, msg: TcpReq) -> impl Future<Output = Result<TcpRes, io::Error>> {
+    pub async fn send(&mut self, msg: TcpReq) -> impl Future<Output = Result<TcpRes, io::Error>> {
         if let Some(ref mut transport) = self.client {
             transport.send(msg).await?;
             time::timeout(timeout, transport.next()).await??
