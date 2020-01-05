@@ -19,7 +19,7 @@ pub struct Server<F: Future<Output = TcpRes>, C: Fn(TcpReq) -> F>;
 impl <F: Future<Output = TcpRes>, C: Fn(BytesMut) -> F> Server<F, C> {
     pub async fn new(addr: &String, callback: C) -> Result<(), Box<dyn Error>> {
         shortcut::register_server::<F, C>(addr, callback).await;
-        if !addr.eq(&STANDALONE_ADDRESS) {
+        if !addr.eq(&STANDALONE_ADDRESS) { 
             let mut listener = TcpListener::bind(&addr).await?;
             loop {
                 match listener.accept().await {

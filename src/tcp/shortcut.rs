@@ -2,7 +2,7 @@ use bifrost_hasher::hash_str;
 use std::collections::BTreeMap;
 use std::io::{Error, ErrorKind, Result};
 use crate::tcp::server::{TcpReq, TcpRes};
-use futures_locks::RwLock;
+use crate::utils::rwlock::*;
 use std::future::Future;
 
 type FnRT = Box<dyn Future<Output = TcpRes>>;
@@ -12,28 +12,26 @@ lazy_static! {
 }
 
 pub async fn register_server<
-    F: Future<Output = TcpRes>,
-    C: Fn(TcpReq) -> F
+    F: Future<Output = TcpRes> + 'static,
+    C: Fn(TcpReq) -> F + 'static
 >(server_address: &String, callback: C)
 {
     let server_id = hash_str(server_address);
-    let callbacks_fut = TCP_CALLBACKS.write().await;
-    let mut servers_cbs = callbacks_fut.await;
-    servers_cbs.insert(server_id, box callback);
+    let mut servers_cbs = TCP_CALLBACKS.write().await;
+    servers_cbs.insert(server_id, Box::new(move |t| box callback(t)));
 }
 
-pub fn call(server_id: u64, data: TcpReq) -> Box<dyn Future<Output = Result<TcpRes>>> {
-    box async move {
-        let callbacks_fut = TCP_CALLBACKS.read().await;
-        let server_cbs = callbacks_fut.await;
+pub async fn call(server_id: u64, data: TcpReq) -> Result<TcpRes> {
+    let server_cbs = TCP_CALLBACKS.read().await;
         match server_cbs.get(&server_id) {
-            Some(c) => Ok(c(data).await),
+            Some(c) => {
+                Ok(c(data).await)
+            },
             _ => Err(Error::new(
                 ErrorKind::Other,
                 "Cannot found callback for shortcut",
             )),
         }
-    }
 }
 
 pub fn is_local(server_id: u64) -> bool {
