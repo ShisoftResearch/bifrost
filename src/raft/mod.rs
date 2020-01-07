@@ -14,12 +14,8 @@ use std::rc::Rc;
 use std::sync::mpsc::channel;
 use std::{io, thread};
 use threadpool::ThreadPool;
-use utils::async_locks::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use utils::time::get_time;
-
 use bifrost_plugins::hash_ident;
 use futures::prelude::*;
-use raft::state_machine::StateMachineCtl;
 use std::cell::RefCell;
 use std::f32::MAX;
 use std::fs;
@@ -27,7 +23,9 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
 use crate::utils::time::get_time;
-use futures_locks::{Mutex, RwLock, RwLockWriteGuard, RwLockReadGuard};
+use crate::utils::mutex::*;
+use crate::utils::rwlock::*;
+use std::time::Duration;
 
 #[macro_use]
 pub mod state_machine;

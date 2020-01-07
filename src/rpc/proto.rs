@@ -120,7 +120,6 @@ macro_rules! service {
             rpc $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty;
         )*
     ) => {
-        use std::time::Duration;
         use std::sync::Arc;
         use $crate::rpc::*;
         use std::future::Future;
@@ -129,18 +128,18 @@ macro_rules! service {
 
         lazy_static! {
             pub static ref RPC_SVRS:
-            ::parking_lot::RwLock<::std::collections::BTreeMap<(u64, u64), Arc<Service>>>
-            = ::parking_lot::RwLock::new(::std::collections::BTreeMap::new());
+            crate::utils::rwlock::RwLock<::std::collections::BTreeMap<(u64, u64), Arc<dyn Service>>>
+            = crate::utils::rwlock::RwLock::new(::std::collections::BTreeMap::new());
         }
 
-        pub trait Service: RPCService {
+        pub trait Service : RPCService {
            $(
                 $(#[$attr])*
-                fn $fn_name(self: Pin<&Self>, $($arg:$in_),*) -> Pin<Box<dyn Future<Output = Result<$out, $error>>>>;
+                fn $fn_name(&self, $($arg:$in_),*) -> Pin<Box<dyn Future<Output = Result<$out, $error>>>>;
            )*
            fn inner_dispatch(self: Pin<&Self>, data: BytesMut) -> Box<dyn Future<Output = Result<BytesMut, RPCRequestError>>> {
                let (func_id, body) = read_u64_head(data);
-               match func_id as usize {
+               match func_id as usize { 
                     $(::bifrost_plugins::hash_ident!($fn_name) => {
                         let ($($arg,)*) : ($($in_,)*) = $crate::utils::bincode::deserialize(body.as_ref());
                         self.$fn_name($($arg,)*)
@@ -153,8 +152,8 @@ macro_rules! service {
                }
            }
         }
-        pub fn get_local(server_id: u64, service_id: u64) -> Option<Arc<Service>> {
-            let svrs = RPC_SVRS.read();
+        pub async fn get_local(server_id: u64, service_id: u64) -> Option<Arc<dyn Service>> {
+            let svrs = RPC_SVRS.read().await;
             match svrs.get(&(server_id, service_id)) {
                 Some(s) => Some(s.clone()),
                 _ => None
@@ -173,8 +172,8 @@ macro_rules! service {
                 /// Some applications highly depend on RPC shortcut to achieve performance advantages.
                 /// Cloning for shortcut will significantly increase overhead. Eg. Hivemind immutable queue
                 pub async fn $fn_name(self: Pin<&Self>, $($arg:$in_),*) -> Result<std::result::Result<$out, $error>, RPCError> {
-                    if let Some(ref local) = get_local(self.server_id, self.service_id) {
-                        local.$fn_name($($arg),*).await
+                    if let Some(ref local) = get_local(self.server_id, self.service_id).await {
+                        Ok(local.$fn_name($($arg),*).await)
                     } else {
                         let req_data = ($($arg,)*);
                         let req_data_bytes = BytesMut::from($crate::utils::bincode::serialize(&req_data).as_slice());
