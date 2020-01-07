@@ -6,18 +6,15 @@ use self::state_machine::OpType;
 use bifrost_hasher::hash_str;
 use num_cpus;
 use rand;
-use rand::distributions::{IndependentSample, Range};
 use std::cmp::{max, min};
 use std::collections::Bound::{Included, Unbounded};
 use std::collections::{BTreeMap, HashMap};
-use std::rc::Rc;
 use std::sync::mpsc::channel;
 use std::{io, thread};
 use threadpool::ThreadPool;
 use bifrost_plugins::hash_ident;
 use futures::prelude::*;
 use std::cell::RefCell;
-use std::f32::MAX;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -26,6 +23,8 @@ use crate::utils::time::get_time;
 use crate::utils::mutex::*;
 use crate::utils::rwlock::*;
 use std::time::Duration;
+use crate::raft::state_machine::StateMachineCtl;
+use futures::FutureExt;
 
 #[macro_use]
 pub mod state_machine;
@@ -525,12 +524,12 @@ impl RaftService {
             self.insert_leader_follower_meta(leader_meta, last_log_id, member.id);
         }
     }
-    fn write_meta(&self) -> RwLockWriteGuard<RaftMeta> {
+    async fn write_meta(&self) -> RwLockWriteGuard<RaftMeta> {
         //        let t = get_time();
         let lock_mon = self.meta.write();
         //        let acq_time = get_time() - t;
         //        println!("Meta write locked acquired for {}ms for {}, leader {}", acq_time, self.id, lock_mon.leader_id);
-        lock_mon
+        lock_mon.await
     }
     pub fn read_meta(&self) -> RwLockReadGuard<RaftMeta> {
         self.meta.read()
@@ -886,8 +885,9 @@ impl RaftService {
     }
 }
 
+#[async_trait]
 impl Service for RaftService {
-    fn append_entries(
+    async fn append_entries(
         &self,
         term: u64,
         leader_id: u64,
@@ -895,9 +895,8 @@ impl Service for RaftService {
         prev_log_term: u64,
         entries: Option<LogEntries>,
         leader_commit: u64,
-    ) -> Box<Future<Item = (u64, AppendEntriesResult), Error = ()>> {
-        // TODO: check if locks can be async friendly
-        let mut meta = self.write_meta();
+    ) -> Result<(u64, AppendEntriesResult), ()> {
+        let mut meta = self.write_meta().await;
         self.reset_last_checked(&mut meta);
         let term_ok = self.check_term(&mut meta, term, leader_id); // RI, 1
         let result = if term_ok {
@@ -907,7 +906,7 @@ impl Service for RaftService {
             }
             if prev_log_id > 0 {
                 check_commit(&mut meta);
-                let mut logs = meta.logs.write();
+                let mut logs = meta.logs.write().await;
                 //RI, 2
                 let contains_prev_log = logs.contains_key(&prev_log_id);
                 let mut log_mismatch = false;
@@ -916,7 +915,7 @@ impl Service for RaftService {
                     let entry = logs.get(&prev_log_id).unwrap();
                     log_mismatch = entry.term != prev_log_term;
                 } else {
-                    return box future::finished((meta.term, AppendEntriesResult::LogMismatch)); // prev log not existed
+                    return Ok((meta.term, AppendEntriesResult::LogMismatch)); // prev log not existed
                 }
                 if log_mismatch {
                     //RI, 3
@@ -927,12 +926,12 @@ impl Service for RaftService {
                     for id in ids_to_del {
                         logs.remove(&id);
                     }
-                    return box future::finished((meta.term, AppendEntriesResult::LogMismatch)); // log mismatch
+                    return Ok((meta.term, AppendEntriesResult::LogMismatch)); // log mismatch
                 }
             }
             let mut last_new_entry = std::u64::MAX;
             {
-                let mut logs = meta.logs.write();
+                let mut logs = meta.logs.write().await;
                 let mut leader_commit = leader_commit;
                 if let Some(ref entries) = entries {
                     // entry not empty
@@ -952,28 +951,28 @@ impl Service for RaftService {
                 meta.commit_index = min(leader_commit, last_new_entry);
                 check_commit(&mut meta);
             }
-            Ok((meta.term, AppendEntriesResult::Ok))
+            (meta.term, AppendEntriesResult::Ok)
         } else {
-            Ok((meta.term, AppendEntriesResult::TermOut(meta.leader_id))) // term mismatch
+            (meta.term, AppendEntriesResult::TermOut(meta.leader_id)) // term mismatch
         };
         self.reset_last_checked(&mut meta);
-        box future::result(result)
+        return Ok(result);
     }
 
-    fn request_vote(
+    async fn request_vote(
         &self,
         term: u64,
         candidate_id: u64,
         last_log_id: u64,
         last_log_term: u64,
-    ) -> Box<Future<Item = ((u64, u64), bool), Error = ()>> {
-        let mut meta = self.write_meta();
+    ) -> Result<((u64, u64), bool), ()> {
+        let mut meta = self.write_meta().await;
         let vote_for = meta.vote_for;
         let mut vote_granted = false;
         if term > meta.term {
             check_commit(&mut meta);
             let logs = meta.logs.read();
-            let conf_sm = &meta.state_machine.read().configs;
+            let conf_sm = &meta.state_machine.read().await.configs;
             let candidate_valid = conf_sm.member_existed(candidate_id);
             debug!(
                 "{} VOTE FOR: {}, valid: {}",
@@ -1010,7 +1009,7 @@ impl Service for RaftService {
             "{} VOTE FOR: {}, granted: {}",
             self.id, candidate_id, vote_granted
         );
-        box future::finished(((meta.term, meta.leader_id), vote_granted))
+        Ok(((meta.term, meta.leader_id), vote_granted))
     }
 
     fn install_snapshot(
@@ -1020,7 +1019,7 @@ impl Service for RaftService {
         last_included_index: u64,
         last_included_term: u64,
         data: Vec<u8>,
-    ) -> Box<Future<Item = u64, Error = ()>> {
+    ) -> Box<dyn Future<Output = Result<u64, ()>>> {
         let mut meta = self.write_meta();
         let term_ok = self.check_term(&mut meta, term, leader_id);
         if term_ok {
@@ -1035,7 +1034,7 @@ impl Service for RaftService {
         box future::finished(meta.term)
     }
 
-    fn c_command(&self, entry: LogEntry) -> Box<Future<Item = ClientCmdResponse, Error = ()>> {
+    fn c_command(&self, entry: LogEntry) -> Box<dyn Future<Output = Result<ClientCmdResponse, ()>>> {
         let mut meta = self.write_meta();
         let mut entry = entry;
         if !is_leader(&meta) {
@@ -1058,7 +1057,7 @@ impl Service for RaftService {
         }
     }
 
-    fn c_query(&self, entry: LogEntry) -> Box<Future<Item = ClientQryResponse, Error = ()>> {
+    fn c_query(&self, entry: LogEntry) -> Box<dyn Future<Output = Result<ClientQryResponse, ()>>> {
         let mut meta = self.meta.read();
         let logs = meta.logs.read();
         let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
@@ -1073,11 +1072,11 @@ impl Service for RaftService {
         }
     }
 
-    fn c_server_cluster_info(&self) -> Box<Future<Item = ClientClusterInfo, Error = ()>> {
+    fn c_server_cluster_info(&self) -> Box<dyn Future<Output = Result<ClientClusterInfo, ()>>> {
         box future::finished(self.cluster_info())
     }
 
-    fn c_put_offline(&self) -> Box<Future<Item = bool, Error = ()>> {
+    fn c_put_offline(&self) -> Box<dyn Future<Output = Result<bool, ()>>> {
         box future::finished(self.leave())
     }
 }

@@ -125,6 +125,7 @@ macro_rules! service {
         use std::future::Future;
         use bytes::BytesMut;
         use std::pin::Pin;
+        use async_trait::async_trait;
 
         lazy_static! {
             pub static ref RPC_SVRS:
@@ -132,10 +133,11 @@ macro_rules! service {
             = crate::utils::rwlock::RwLock::new(::std::collections::BTreeMap::new());
         }
 
+        #[async_trait]
         pub trait Service : RPCService {
            $(
                 $(#[$attr])*
-                fn $fn_name(&self, $($arg:$in_),*) -> Pin<Box<dyn Future<Output = Result<$out, $error>>>>;
+                async fn $fn_name(&self, $($arg:$in_),*) -> Result<$out, $error>;
            )*
            fn inner_dispatch(self: Pin<&Self>, data: BytesMut) -> Box<dyn Future<Output = Result<BytesMut, RPCRequestError>>> {
                let (func_id, body) = read_u64_head(data);
