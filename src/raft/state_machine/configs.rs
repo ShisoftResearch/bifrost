@@ -39,7 +39,7 @@ raft_state_machine! {
 }
 
 impl StateMachineCmds for Configures {
-    fn new_member_(&mut self, address: String) -> Result<(), ()> {
+    fn new_member_(&mut self, address: String) {
         let addr = address.clone();
         let id = hash_str(&addr);
         if !self.members.contains_key(&id) {
@@ -60,23 +60,23 @@ impl StateMachineCmds for Configures {
         }
         Err(())
     }
-    fn del_member_(&mut self, address: String) -> Result<(), ()> {
+    fn del_member_(&mut self, address: String) {
         let hash = hash_str(&address);
         self.members.remove(&hash);
         Ok(())
     }
-    fn member_address(&self) -> Result<Vec<String>, ()> {
+    fn member_address(&self) -> Vec<String> {
         let mut members = Vec::with_capacity(self.members.len());
         for (_, member) in self.members.iter() {
             members.push(member.address.clone());
         }
         Ok(members)
     }
-    fn subscribe(&mut self, key: SubKey, address: String, session_id: u64) -> Result<u64, ()> {
+    fn subscribe(&mut self, key: SubKey, address: String, session_id: u64) -> u64 {
         let mut subs = self.subscriptions.write();
         subs.subscribe(key, &address, session_id)
     }
-    fn unsubscribe(&mut self, sub_id: u64) -> Result<(), ()> {
+    fn unsubscribe(&mut self, sub_id: u64) {
         let mut subs = self.subscriptions.write();
         subs.remove_subscription(sub_id);
         Ok(())
@@ -125,10 +125,10 @@ impl Configures {
             self.new_member(addr.clone());
         }
     }
-    pub fn new_member(&mut self, address: String) -> Result<(), ()> {
+    pub fn new_member(&mut self, address: String) {
         self.new_member_(address)
     }
-    pub fn del_member(&mut self, address: String) -> Result<(), ()> {
+    pub fn del_member(&mut self, address: String) {
         self.del_member_(address)
     }
     pub fn member_existed(&self, id: u64) -> bool {

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::utils::time::get_time;
 
 pub struct SubscriptionService {
-    pub subs: RwLock<HashMap<SubKey, Vec<(Box<Fn(Vec<u8>) + Send + Sync>, u64)>>>,
+    pub subs: RwLock<HashMap<SubKey, Vec<(Box<dyn Fn(Vec<u8>) + Send + Sync>, u64)>>>,
     pub server_address: String,
     pub session_id: u64,
 }

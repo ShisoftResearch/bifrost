@@ -7,6 +7,9 @@ use std::iter::FromIterator;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use crate::raft::state_machine::master::ExecError;
+use crate::rpc;
+use crate::raft::state_machine::callback::SubKey;
+use crate::raft::state_machine::callback::client::SubscriptionService;
 
 const ORDERING: Ordering = Ordering::Relaxed;
 pub type Client = Arc<AsyncServiceClient>;
@@ -103,15 +106,15 @@ impl RaftClient {
             if let Ok(Ok(info)) = members.clients.get(&id).unwrap().c_server_cluster_info().await
             {
                 if info.leader_id != 0 {
-                    return Ok((Some(info), members));
+                    return (Some(info), members);
                 }
             }
         }
-        return Ok((None, members));
+        return (None, members);
     }
 
     async fn update_info(&self, servers: HashSet<String>) -> Result<(), ClientError> {
-        let (cluster_info, members) = self.cluster_info(servers).await.unwrap();
+        let (cluster_info, members) = self.cluster_info(servers).await;
         match cluster_info {
             Some(info) => {
                 let remote_members = info.members;
@@ -305,8 +308,8 @@ impl RaftClient {
         }
     }
 
-    fn command(
-        this: Arc<Self>,
+    async fn command(
+        &self,
         sm_id: u64,
         fn_id: u64,
         data: Vec<u8>,
@@ -321,26 +324,26 @@ impl RaftClient {
         }
         let failure = {
             if depth > 0 {
-                let members = this.members.read();
+                let members = self.members.read().await;
                 let num_members = members.clients.len();
                 if depth >= max(num_members, 5) {
                     return Err(ExecError::TooManyRetry);
                 };
             }
-            match await!(Self::current_leader_client(this.clone())) {
-                Ok((leader_id, client)) => {
-                    match await!(client.c_command(this.gen_log_entry(sm_id, fn_id, &data))) {
+            match self.current_leader_client().await {
+                Some((leader_id, client)) => {
+                    match self.c_command(sm_id, fn_id, &data).await {
                         Ok(Ok(ClientCmdResponse::Success {
                             data,
                             last_log_term,
                             last_log_id,
                         })) => {
-                            swap_when_greater(&this.last_log_id, last_log_id);
-                            swap_when_greater(&this.last_log_term, last_log_term);
+                            swap_when_greater(&self.last_log_id, last_log_id);
+                            swap_when_greater(&self.last_log_term, last_log_term);
                             return Ok(data);
                         }
                         Ok(Ok(ClientCmdResponse::NotLeader(leader_id))) => {
-                            this.leader_id.store(leader_id, ORDERING);
+                            self.leader_id.store(leader_id, ORDERING);
                             FailureAction::NotLeader
                         }
                         Ok(Ok(ClientCmdResponse::NotCommitted)) => FailureAction::NotCommitted,
@@ -354,26 +357,26 @@ impl RaftClient {
                         }
                     }
                 }
-                Err(()) => FailureAction::UpdateInfo, // need update members
+                None => FailureAction::UpdateInfo, // need update members
             }
         }; //
         match failure {
             FailureAction::SwitchLeader => {
-                let members = this.members.read();
+                let members = self.members.read().await;
                 let num_members = members.clients.len();
-                let pos = this.qry_meta.pos.load(ORDERING);
-                let leader_id = this.leader_id.load(ORDERING);
+                let pos = self.qry_meta.pos.load(ORDERING);
+                let leader_id = self.leader_id.load(ORDERING);
                 let index = members
                     .clients
                     .keys()
                     .nth(pos as usize % num_members)
                     .unwrap();
-                this.leader_id.compare_and_swap(leader_id, *index, ORDERING);
+                self.leader_id.compare_and_swap(leader_id, *index, ORDERING);
                 debug!("CLIENT: Switch leader");
             }
             _ => {}
         }
-        await!(Self::command(this, sm_id, fn_id, data, depth + 1))
+        self.command(sm_id, fn_id, data, depth + 1).await
     }
 
     fn gen_log_entry(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>) -> LogEntry {
@@ -398,32 +401,32 @@ impl RaftClient {
         }
     }
 
-    async fn current_leader_client(this: Arc<Self>) -> (u64, Client) {
+    async fn current_leader_client(&self) -> Option<(u64, Client)> {
         {
-            let leader_client = this.leader_client();
+            let leader_client = self.leader_client();
             if leader_client.is_some() {
-                return leader_client.ok_or(());
+                return leader_client;
             }
         }
         {
             let servers = {
-                let members = this.members.read();
+                let members = self.members.read().await;
                 HashSet::from_iter(members.id_map.values().cloned())
             };
-            await!(Self::update_info(this.clone(), servers));
-            let leader_id = this.leader_id.load(ORDERING);
-            let members = this.members.read();
+            self.update_info(servers).await;
+            let leader_id = self.leader_id.load(ORDERING);
+            let members = self.members.read().await;
             if let Some(client) = members.clients.get(&leader_id) {
-                Ok((leader_id, client.clone()))
+                Some((leader_id, client.clone()))
             } else {
-                Err(())
+                None
             }
         }
     }
     pub fn current_leader_rpc_client(
-        this: Arc<Self>,
+        &self,
     ) -> impl Future<Item = Arc<rpc::RPCClient>, Error = ()> {
-        Self::current_leader_client(this).map(|(_, client)| client.client.clone())
+        self.current_leader_client().map(|(_, client)| client.client.clone())
     }
 }
 

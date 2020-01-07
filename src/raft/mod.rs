@@ -1,4 +1,3 @@
-use self::client::RaftClient;
 use self::state_machine::configs::commands::{del_member_, member_address, new_member_};
 use self::state_machine::configs::{RaftMember, CONFIG_SM_ID};
 use self::state_machine::master::{ExecError, ExecResult, MasterStateMachine, SubStateMachine};
@@ -1078,7 +1077,7 @@ impl Service for RaftService {
     }
 
     async fn c_put_offline(&self) -> bool {
-        self.leave()
+        self.leave().await
     }
 }
 
