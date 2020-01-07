@@ -5,6 +5,7 @@ use std::future::Future;
 use futures::task::{Context, Poll};
 use std::sync::atomic::Ordering::Relaxed;
 use std::ops::{Deref, DerefMut};
+use std::sync::atomic;
 
 pub struct RwLock<T> {
     semaphore: AtomicUsize,
@@ -46,13 +47,40 @@ impl <T> RwLock<T> {
             lock: Pin::new(self)
         }
     }
+
+    pub fn read_blocked(&self) -> RwLockReadGuard<T> {
+        while !self.read_acquire() {
+            atomic::spin_loop_hint();
+        }
+        RwLockReadGuard {
+            lock: self
+        }
+    }
+
+    pub fn write_blocked(&self) -> RwLockWriteGuard<T> {
+        while !self.write_acquire() {
+            atomic::spin_loop_hint();
+        }
+        RwLockWriteGuard {
+            lock: self
+        }
+    }
+
+    fn read_acquire(&self) -> bool {
+        let count = self.semaphore.load(Relaxed);
+        count >= 1 && self.semaphore.compare_and_swap(count, count + 1, Relaxed) == count
+    }
+
+    fn write_acquire(&self) -> bool {
+        self.semaphore.compare_and_awap(1, 0, Relaxed)
+    }
 }
 
 impl <'a, T> Future for RwLockWriteGuardFut<'a, T> {
     type Output = RwLockWriteGuard<'a, T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.lock.semaphore.compare_and_awap(1, 0, Relaxed) {
+        if self.lock.write_acquire() {
             Poll::Ready(RwLockWriteGuard {
                 lock: &*self.lock
             })
@@ -66,8 +94,7 @@ impl <'a, T> Future for RwLockReadGuardFut<'a, T> {
     type Output = RwLockReadGuard<'a, T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let count = self.lock.semaphore.load(Relaxed);
-        if count >= 1 && self.lock.semaphore.compare_and_swap(count, count + 1, Relaxed) == count {
+        if self.lock.read_acquire() {
             Poll::Ready(RwLockReadGuard {
                 lock: &*self.lock
             })

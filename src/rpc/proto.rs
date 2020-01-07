@@ -31,13 +31,13 @@ macro_rules! service {
     (
         $(
             $(#[$attr:meta])*
-            rpc $fn_name:ident( $( $arg:ident : $in_:ty ),* ) $(-> $out:ty)* $(| $error:ty)*;
+            rpc $fn_name:ident( $( $arg:ident : $in_:ty ),* ) $(-> $out:ty)*;
         )*
     ) => {
         service! {{
             $(
                 $(#[$attr])*
-                rpc $fn_name( $( $arg : $in_ ),* ) $(-> $out)* $(| $error)*;
+                rpc $fn_name( $( $arg : $in_ ),* ) $(-> $out)*;
             )*
         }}
     };
@@ -56,13 +56,13 @@ macro_rules! service {
             $( $expanded )*
 
             $(#[$attr])*
-            rpc $fn_name( $( $arg : $in_ ),* ) -> () | ();
+            rpc $fn_name( $( $arg : $in_ ),* ) -> ();
         }
     };
     (
         {
             $(#[$attr:meta])*
-            rpc $fn_name:ident( $( $arg:ident : $in_:ty ),* ) -> $out:ty; //return, no error
+            rpc $fn_name:ident( $( $arg:ident : $in_:ty ),* ) -> $out:ty;
 
             $( $unexpanded:tt )*
         }
@@ -74,50 +74,14 @@ macro_rules! service {
             $( $expanded )*
 
             $(#[$attr])*
-            rpc $fn_name( $( $arg : $in_ ),* ) -> $out | ();
-        }
-    };
-    (
-        {
-            $(#[$attr:meta])*
-            rpc $fn_name:ident( $( $arg:ident : $in_:ty ),* ) | $error:ty; //no return, error
-
-            $( $unexpanded:tt )*
-        }
-        $( $expanded:tt )*
-    ) => {
-        service! {
-            { $( $unexpanded )* }
-
-            $( $expanded )*
-
-            $(#[$attr])*
-            rpc $fn_name( $( $arg : $in_ ),* ) -> () | $error;
-        }
-    };
-    (
-        {
-            $(#[$attr:meta])*
-            rpc $fn_name:ident( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty; //return, error
-
-            $( $unexpanded:tt )*
-        }
-        $( $expanded:tt )*
-    ) => {
-        service! {
-            { $( $unexpanded )* }
-
-            $( $expanded )*
-
-            $(#[$attr])*
-            rpc $fn_name( $( $arg : $in_ ),* ) -> $out | $error;
+            rpc $fn_name( $( $arg : $in_ ),* ) -> $out;
         }
     };
     (
         {} // all expanded
         $(
             $(#[$attr:meta])*
-            rpc $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty;
+            rpc $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty;
         )*
     ) => {
         use std::sync::Arc;
@@ -137,7 +101,7 @@ macro_rules! service {
         pub trait Service : RPCService {
            $(
                 $(#[$attr])*
-                async fn $fn_name(&self, $($arg:$in_),*) -> Result<$out, $error>;
+                async fn $fn_name(&self, $($arg:$in_),*) -> $out;
            )*
            fn inner_dispatch(self: Pin<&Self>, data: BytesMut) -> Box<dyn Future<Output = Result<BytesMut, RPCRequestError>>> {
                let (func_id, body) = read_u64_head(data);
@@ -145,8 +109,7 @@ macro_rules! service {
                     $(::bifrost_plugins::hash_ident!($fn_name) => {
                         let ($($arg,)*) : ($($in_,)*) = $crate::utils::bincode::deserialize(body.as_ref());
                         self.$fn_name($($arg,)*)
-                            .then(|f_result| BytesMut::from($crate::utils::bincode::serialize(&f_result).as_slice()))
-                            .map_err(|_:$error| RPCRequestError::Other) // in this case error it is impossible
+                            .map(|f_result| BytesMut::from($crate::utils::bincode::serialize(&f_result).as_slice()))
                     }),*
                     _ => {
                         Err(RPCRequestError::FunctionIdNotFound)
@@ -173,7 +136,7 @@ macro_rules! service {
                 /// Judgement: Use data ownership transfer instead of borrowing.
                 /// Some applications highly depend on RPC shortcut to achieve performance advantages.
                 /// Cloning for shortcut will significantly increase overhead. Eg. Hivemind immutable queue
-                pub async fn $fn_name(self: Pin<&Self>, $($arg:$in_),*) -> Result<std::result::Result<$out, $error>, RPCError> {
+                pub async fn $fn_name(self: Pin<&Self>, $($arg:$in_),*) -> Result<$out, RPCError> {
                     if let Some(ref local) = get_local(self.server_id, self.service_id).await {
                         Ok(local.$fn_name($($arg),*).await)
                     } else {
@@ -205,8 +168,6 @@ mod syntax_test {
         rpc test(a: u32, b: u32) -> bool;
         rpc test2(a: u32);
         rpc test3(a: u32, b: u32, c: u32, d: u32);
-        rpc test4(a: u32, b: u32, c: u32, d: u32) -> bool | String;
-        rpc test5(a: u32, b: u32, c: u32, d: u32) | String;
     }
 }
 

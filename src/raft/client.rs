@@ -38,7 +38,7 @@ struct Members {
     id_map: HashMap<u64, String>,
 }
 
-struct RaftClientInner {
+struct RaftClient {
     qry_meta: QryMeta,
     members: RwLock<Members>,
     leader_id: AtomicU64,
@@ -47,73 +47,12 @@ struct RaftClientInner {
     service_id: u64,
 }
 
-pub struct RaftClient {
-    inner: Arc<RaftClientInner>,
-}
-
 impl RaftClient {
-    pub fn new(servers: &Vec<String>, service_id: u64) -> Result<Arc<RaftClient>, ClientError> {
-        Ok(Arc::new(RaftClient {
-            inner: RaftClientInner::new(servers, service_id)?,
-        }))
-    }
-
-    pub fn prepare_subscription(server: &Arc<rpc::Server>) -> Option<()> {
-        RaftClientInner::prepare_subscription(server)
-    }
-
-    pub fn execute<R, M>(&self, sm_id: u64, msg: M) -> Box<Future<Item = R, Error = ExecError>>
-    where
-        R: 'static,
-        M: RaftMsg<R> + 'static,
-    {
-        RaftClientInner::execute(self.inner.clone(), sm_id, msg)
-    }
-
-    pub fn can_callback() -> bool {
-        RaftClientInner::can_callback()
-    }
-
-    pub fn subscribe<M, R, F>(
-        &self,
-        sm_id: u64,
-        msg: M,
-        f: F,
-    ) -> Box<Future<Item = Result<SubscriptionReceipt, SubscriptionError>, Error = ExecError>>
-    where
-        M: RaftMsg<R> + 'static,
-        R: 'static,
-        F: Fn(R) + 'static + Send + Sync,
-    {
-        RaftClientInner::subscribe(self.inner.clone(), sm_id, msg, f)
-    }
-
-    pub fn unsubscribe(
-        &self,
-        receipt: SubscriptionReceipt,
-    ) -> Box<Future<Item = Result<(), SubscriptionError>, Error = ExecError>> {
-        RaftClientInner::unsubscribe(self.inner.clone(), receipt)
-    }
-
-    pub fn leader_id(&self) -> u64 {
-        self.inner.leader_id.load(ORDERING)
-    }
-
-    pub fn leader_client(&self) -> Option<(u64, Client)> {
-        self.inner.leader_client()
-    }
-
-    pub fn current_leader_rpc_client(&self) -> impl Future<Item = Arc<rpc::RPCClient>, Error = ()> {
-        RaftClientInner::current_leader_rpc_client(self.inner.clone())
-    }
-}
-
-impl RaftClientInner {
     pub fn new(
         servers: &Vec<String>,
         service_id: u64,
-    ) -> Result<Arc<RaftClientInner>, ClientError> {
-        let client = Arc::new(RaftClientInner {
+    ) -> Result<Self, ClientError> {
+        let client = RaftClient {
             qry_meta: QryMeta {
                 pos: AtomicU64::new(rand::random::<u64>()),
             },
@@ -125,7 +64,7 @@ impl RaftClientInner {
             last_log_id: AtomicU64::new(0),
             last_log_term: AtomicU64::new(0),
             service_id,
-        });
+        };
         Self::update_info(client.clone(), HashSet::from_iter(servers.iter().cloned()))
             .wait()
             .map(move |_| client)
@@ -142,10 +81,10 @@ impl RaftClientInner {
     }
 
     async fn cluster_info(
-        this: Arc<Self>,
+        &self,
         servers: HashSet<String>,
     ) -> (Option<ClientClusterInfo>, RwLockWriteGuard<Members>) {
-        let members = await!(this.members.write_async()).unwrap();
+        let members = self.members.write().await;
         for server_addr in servers {
             let id = hash_str(&server_addr);
             if !members.clients.contains_key(&id) {
@@ -154,14 +93,14 @@ impl RaftClientInner {
                         let members = members.mutate();
                         members
                             .clients
-                            .insert(id, AsyncServiceClient::new(this.service_id, &client));
+                            .insert(id, AsyncServiceClient::new(self.service_id, &client));
                     }
                     Err(_) => {
                         continue;
                     }
                 }
             }
-            if let Ok(Ok(info)) = await!(members.clients.get(&id).unwrap().c_server_cluster_info())
+            if let Ok(Ok(info)) = members.clients.get(&id).unwrap().c_server_cluster_info().await
             {
                 if info.leader_id != 0 {
                     return Ok((Some(info), members));
@@ -171,8 +110,8 @@ impl RaftClientInner {
         return Ok((None, members));
     }
 
-    fn update_info(this: Arc<Self>, servers: HashSet<String>) -> Result<(), ClientError> {
-        let (cluster_info, members) = await!(Self::cluster_info(this.clone(), servers)).unwrap();
+    async fn update_info(&self, servers: HashSet<String>) -> Result<(), ClientError> {
+        let (cluster_info, members) = self.cluster_info(servers).await.unwrap();
         match cluster_info {
             Some(info) => {
                 let remote_members = info.members;
@@ -197,27 +136,27 @@ impl RaftClientInner {
                         if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(&addr) {
                             members
                                 .clients
-                                .insert(*id, AsyncServiceClient::new(this.service_id, &client));
+                                .insert(*id, AsyncServiceClient::new(self.service_id, &client));
                         }
                     }
                 }
-                this.leader_id.store(info.leader_id, ORDERING);
+                self.leader_id.store(info.leader_id, ORDERING);
                 Ok(())
             }
             None => Err(ClientError::ServerUnreachable),
         }
     }
 
-    pub fn execute<R, M>(this: Arc<Self>, sm_id: u64, msg: M) -> Result<R, ExecError>
+    pub async fn execute<R, M>(self, sm_id: u64, msg: M) -> Result<R, ExecError>
     where
         R: 'static,
         M: RaftMsg<R> + 'static,
     {
         let (fn_id, op, req_data) = msg.encode();
         let response = match op {
-            OpType::QUERY => await!(Self::query(this, sm_id, fn_id, req_data, 0)),
+            OpType::QUERY => self.query(sm_id, fn_id, req_data, 0).await,
             OpType::COMMAND | OpType::SUBSCRIBE => {
-                await!(Self::command(this, sm_id, fn_id, req_data, 0))
+                self.command(sm_id, fn_id, req_data, 0).await
             }
         };
         match response {
@@ -245,8 +184,8 @@ impl RaftClientInner {
         return (raft_sid, sm_id, fn_id, pattern_id);
     }
 
-    pub fn get_callback(this: Arc<Self>) -> Result<Arc<SubscriptionService>, SubscriptionError> {
-        match (*await!(CALLBACK.read_async()).unwrap()).clone() {
+    pub async fn get_callback(self) -> Result<Arc<SubscriptionService>, SubscriptionError> {
+        match CALLBACK.read().await.clone() {
             None => {
                 debug!("Subscription service not set");
                 Err(SubscriptionError::SubServiceNotSet)
@@ -255,8 +194,8 @@ impl RaftClientInner {
         }
     }
 
-    pub fn subscribe<M, R, F>(
-        this: Arc<Self>,
+    pub async fn subscribe<M, R, F>(
+        &self,
         sm_id: u64,
         msg: M,
         f: F,
@@ -266,17 +205,13 @@ impl RaftClientInner {
         R: 'static,
         F: Fn(R) + 'static + Send + Sync,
     {
-        let callback = match await!(Self::get_callback(this.clone())) {
+        let callback = match self.get_callback().await {
             Ok(c) => c,
             Err(e) => return Ok(Err(e)),
         };
-        let key = this.get_sub_key(sm_id, msg);
+        let key = self.get_sub_key(sm_id, msg);
         let wrapper_fn = move |data: Vec<u8>| f(M::decode_return(&data));
-        let cluster_subs = await!(Self::execute(
-            this.clone(),
-            CONFIG_SM_ID,
-            conf_subscribe::new(&key, &callback.server_address, &callback.session_id)
-        ));
+        let cluster_subs = self.execute(CONFIG_SM_ID, conf_subscribe::new(&key, &callback.server_address, &callback.session_id)).await;
         match cluster_subs {
             Ok(Ok(sub_id)) => {
                 let mut subs_map = callback.subs.write();
@@ -289,18 +224,14 @@ impl RaftClientInner {
         }
     }
 
-    pub fn unsubscribe(
-        this: Arc<Self>,
+    pub async fn unsubscribe(
+        &self,
         receipt: SubscriptionReceipt,
     ) -> Result<Result<(), SubscriptionError>, ExecError> {
-        match await!(Self::get_callback(this.clone())) {
+        match self.get_callback().await {
             Ok(callback) => {
                 let (key, sub_id) = receipt;
-                let unsub = await!(Self::execute(
-                    this.clone(),
-                    CONFIG_SM_ID,
-                    conf_unsubscribe::new(&sub_id)
-                ));
+                let unsub = self.execute(CONFIG_SM_ID, conf_unsubscribe::new(&sub_id)).await;
                 match unsub {
                     Ok(Ok(_)) => {
                         let mut subs_map = callback.subs.write();
@@ -330,32 +261,31 @@ impl RaftClientInner {
         }
     }
 
-    fn query(
-        this: Arc<Self>,
+    async fn query(
+        &self,
         sm_id: u64,
         fn_id: u64,
         data: Vec<u8>,
         depth: usize,
     ) -> Result<ExecResult, ExecError> {
-        let pos = this.qry_meta.pos.fetch_add(1, ORDERING);
-        let members = await!(this.members.read_async()).unwrap();
+        let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
+        let members = self.members.read().await;
         let num_members = members.clients.len();
         if num_members >= 1 {
-            let res = {
-                await!(members
-                    .clients
-                    .values()
-                    .nth(pos as usize % num_members)
-                    .unwrap()
-                    .c_query(this.gen_log_entry(sm_id, fn_id, &data)))
-            };
+            let res = members
+                .clients
+                .values()
+                .nth(pos as usize % num_members)
+                .unwrap()
+                .c_query(self.gen_log_entry(sm_id, fn_id, &data))
+                .await;
             match res {
                 Ok(Ok(res)) => match res {
                     ClientQryResponse::LeftBehind => {
                         if depth >= num_members {
                             Err(ExecError::TooManyRetry)
                         } else {
-                            await!(Self::query(this.clone(), sm_id, fn_id, data, depth + 1))
+                            self.query(sm_id, fn_id, data, depth + 1).await
                         }
                     }
                     ClientQryResponse::Success {
@@ -363,8 +293,8 @@ impl RaftClientInner {
                         last_log_term,
                         last_log_id,
                     } => {
-                        swap_when_greater(&this.last_log_id, last_log_id);
-                        swap_when_greater(&this.last_log_term, last_log_term);
+                        swap_when_greater(&self.last_log_id, last_log_id);
+                        swap_when_greater(&self.last_log_term, last_log_term);
                         Ok(data)
                     }
                 },
