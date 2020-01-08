@@ -3,14 +3,12 @@ use self::state_machine::configs::{RaftMember, CONFIG_SM_ID};
 use self::state_machine::master::{ExecError, ExecResult, MasterStateMachine, SubStateMachine};
 use self::state_machine::OpType;
 use bifrost_hasher::hash_str;
-use num_cpus;
 use rand;
 use std::cmp::{max, min};
 use std::collections::Bound::{Included, Unbounded};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::mpsc::channel;
-use std::{io, thread};
-use threadpool::ThreadPool;
+use futures::channel::mpsc::channel;
+use std::io;
 use bifrost_plugins::hash_ident;
 use futures::prelude::*;
 use std::cell::RefCell;
@@ -24,6 +22,9 @@ use crate::utils::rwlock::*;
 use std::time::Duration;
 use crate::raft::state_machine::StateMachineCtl;
 use futures::FutureExt;
+use crate::raft::client::RaftClient;
+use rand::Rng;
+use futures::stream::FuturesUnordered;
 
 #[macro_use]
 pub mod state_machine;
@@ -31,12 +32,6 @@ pub mod client;
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_RAFT_DEFAULT_SERVICE) as u64;
 const MAX_LOG_CAPACITY: usize = 10;
-
-lazy_static! {
-    static ref RAFT_WORKER_POOL: Arc<Mutex<ThreadPool>> = Arc::new(Mutex::new(
-        ThreadPool::new_with_name("Raft Workers".to_string(), max(num_cpus::get(), 10))
-    ));
-}
 
 def_bindings! {
     bind val IS_LEADER: bool = false;
@@ -114,9 +109,8 @@ service! {
 }
 
 fn gen_rand(lower: i64, higher: i64) -> i64 {
-    let between = Range::new(lower, higher);
     let mut rng = rand::thread_rng();
-    between.ind_sample(&mut rng) + 1
+    rng.gen_range(lower, higher)
 }
 
 fn gen_timeout() -> i64 {
@@ -161,7 +155,6 @@ pub struct RaftMeta {
     commit_index: u64,
     last_applied: u64,
     leader_id: u64,
-    workers: Arc<Mutex<ThreadPool>>,
     storage: Option<RefCell<StorageEntity>>,
 }
 
@@ -219,7 +212,7 @@ macro_rules! get_last_log_info {
 
 macro_rules! members_from_meta {
     ($meta: expr) => {
-        $meta.state_machine.read().configs.members
+        $meta.state_machine.read().await.configs.members
     };
 }
 
@@ -330,7 +323,7 @@ impl RaftService {
                     let start_time = get_time();
                     let expected_ends = start_time + CHECKER_MS;
                     {
-                        let mut meta = server.meta.write(); //WARNING: Reentering not supported
+                        let mut meta = server.meta.write().await; //WARNING: Reentering not supported
                         let action = match meta.membership {
                             Membership::Leader(_) => CheckerAction::SendHeartbeat,
                             Membership::Follower | Membership::Candidate => {
@@ -351,10 +344,10 @@ impl RaftService {
                         };
                         match action {
                             CheckerAction::SendHeartbeat => {
-                                server.send_followers_heartbeat(&mut meta, None);
+                                server.send_followers_heartbeat(&mut meta, None).await;
                             }
                             CheckerAction::BecomeCandidate => {
-                                RaftService::become_candidate(server.clone(), &mut meta);
+                                RaftService::become_candidate(server.clone(), &mut meta).await;
                             }
                             CheckerAction::ExitLoop => {
                                 break;
@@ -387,23 +380,23 @@ impl RaftService {
     pub  async fn bootstrap(&self) {
         let mut meta = self.write_meta().await;
         let (last_log_id, _) = {
-            let logs = meta.logs.read();
+            let logs = meta.logs.read().await;
             get_last_log_info!(self, logs)
         };
         self.become_leader(&mut meta, last_log_id);
     }
-    pub fn join(&self, servers: &Vec<String>) -> Result<Result<(), ()>, ExecError> {
+    pub async fn join(&self, servers: &Vec<String>) -> Result<Result<(), ()>, ExecError> {
         debug!("Trying to join cluster with id {}", self.id);
         let client = RaftClient::new(servers, self.options.service_id);
         if let Ok(client) = client {
             let result = client
                 .execute(CONFIG_SM_ID, new_member_::new(&self.options.address))
-                .wait();
-            let members = client.execute(CONFIG_SM_ID, member_address::new()).wait();
-            let mut meta = self.write_meta();
+                .await;
+            let members = client.execute(CONFIG_SM_ID, member_address::new()).await;
+            let mut meta = self.write_meta().await;
             if let Ok(Ok(members)) = members {
                 for member in members {
-                    meta.state_machine.write().configs.new_member(member);
+                    meta.state_machine.write().await.configs.new_member(member);
                 }
             }
             self.reset_last_checked(&mut meta);
@@ -430,7 +423,7 @@ impl RaftService {
         }
         let mut meta = self.write_meta().await;
         if is_leader(&meta) {
-            if !self.send_followers_heartbeat(&mut meta, None) {
+            if !self.send_followers_heartbeat(&mut meta, None).await {
                 return false;
             }
         }
@@ -524,7 +517,7 @@ impl RaftService {
             self.insert_leader_follower_meta(leader_meta, last_log_id, member.id);
         }
     }
-    async fn write_meta(&self) -> RwLockWriteGuard<RaftMeta> {
+    async fn write_meta<'a>(&'a self) -> RwLockWriteGuard<'a, RaftMeta> {
         //        let t = get_time();
         let lock_mon = self.meta.write();
         //        let acq_time = get_time() - t;
@@ -534,26 +527,26 @@ impl RaftService {
     pub fn read_meta(&self) -> RwLockReadGuard<RaftMeta> {
         self.meta.read()
     }
-    fn become_candidate(server: Arc<RaftService>, meta: &mut RwLockWriteGuard<RaftMeta>) {
+    async fn become_candidate<'a>(server: Arc<RaftService>, meta: &'a mut RwLockWriteGuard<'a, RaftMeta>) {
         server.reset_last_checked(meta);
         let term = meta.term;
-        alter_term(meta, term + 1);
+        alter_term(&mut*meta, term + 1);
         meta.vote_for = Some(server.id);
         server.switch_membership(meta, Membership::Candidate);
         let term = meta.term;
         let id = server.id;
-        let logs = meta.logs.read();
+        let logs = meta.logs.read().await;
         let (last_log_id, last_log_term) = get_last_log_info!(server, logs);
-        let (tx, rx) = channel();
-        let mut members = 0;
-        for member in members_from_meta!(meta).values() {
+        let members: Vec<_> = members_from_meta!(meta).values().collect();
+        let mut num_members = members.len();
+        let (tx, rx) = channel(num_members);
+        for member in members {
             let rpc = member.rpc.clone();
             let tx = tx.clone();
-            members += 1;
             if member.id == server.id {
                 tx.send(RequestVoteResponse::Granted);
             } else {
-                meta.workers.lock().execute(move || {
+                meta.workers.lock().await.execute(move || {
                     if let Ok(Ok(((remote_term, remote_leader_id), vote_granted))) = rpc
                         .request_vote(term, id, last_log_id, last_log_term)
                         .wait()
@@ -569,10 +562,10 @@ impl RaftService {
                 });
             }
         }
-        meta.workers.lock().execute(move || {
+        meta.workers.lock().await.execute(move || {
             let mut granted = 0;
             let mut timeout = 2000;
-            for _ in 0..members {
+            for _ in 0..num_members {
                 if timeout <= 0 {
                     break;
                 }
@@ -620,9 +613,9 @@ impl RaftService {
         self.switch_membership(meta, Membership::Leader(leader_meta));
     }
 
-    fn send_followers_heartbeat(
-        &self,
-        meta: &mut RwLockWriteGuard<RaftMeta>,
+    async fn send_followers_heartbeat<'a>(
+        &'a self,
+        meta: &'a mut RwLockWriteGuard<'a, RaftMeta>,
         log_id: Option<u64>,
     ) -> bool {
         let (tx, rx) = channel();
@@ -632,113 +625,115 @@ impl RaftService {
         let leader_id = meta.leader_id;
         debug_assert_eq!(self.id, leader_id);
         {
-            let workers = meta.workers.lock();
             if let Membership::Leader(ref leader_meta) = meta.membership {
-                let leader_meta = leader_meta.read();
-                for member in members_from_meta!(meta).values() {
-                    let member_id = member.id;
-                    if member_id == self.id {
-                        continue;
-                    }
-                    let tx = tx.clone();
-                    let logs = meta.logs.clone();
-                    let meta_term = meta.term;
-                    let meta_last_applied = meta.last_applied;
-                    let rpc = member.rpc.clone();
-                    let master_sm = meta.state_machine.clone();
-                    let follower = {
-                        if let Some(follower) = leader_meta.followers.get(&member_id) {
-                            follower.clone()
-                        } else {
-                            debug!(
-                                "follower not found, {}, {}",
-                                member_id,
-                                leader_meta.followers.len()
-                            ); //TODO: remove after debug
-                            continue;
+                let leader_meta = leader_meta.read().await;
+                let heartbeat_futs: FuturesUnordered<_> =
+                    members_from_meta!(meta).values().filter_map(|member| {
+                        let member_id = member.id;
+                        if member_id == self.id {
+                            return None;
                         }
-                    };
-                    workers.execute(move||{
-                        let mut follower = follower.lock();
-                        let mut is_retry = false;
-                        let logs = logs.read();
-                        loop {
-                            let entries: Option<LogEntries> = { // extract logs to send to follower
-                                let list: LogEntries = logs.range(
-                                    (Included(&follower.next_index), Unbounded)
-                                ).map(|(_, entry)| entry.clone()).collect(); //TODO: avoid clone entry
-                                if list.is_empty() {None} else {Some(list)}
-                            };
-                            if is_retry && entries.is_none() { // break when retry and there is no entry
-                                debug!("stop retry when entry is empty, {}", follower.next_index);
-                                break;
+                        let tx = tx.clone();
+                        let logs = meta.logs.clone();
+                        let meta_term = meta.term;
+                        let meta_last_applied = meta.last_applied;
+                        let rpc = member.rpc.clone();
+                        let master_sm = meta.state_machine.clone();
+                        let follower = {
+                            if let Some(follower) = leader_meta.followers.get(&member_id) {
+                                follower.clone()
+                            } else {
+                                debug!(
+                                    "follower not found, {}, {}",
+                                    member_id,
+                                    leader_meta.followers.len()
+                                ); //TODO: remove after debug
+                                return None;
                             }
-                            let last_entries_id = match &entries { // get last entry id
-                                &Some(ref entries) => {
-                                    Some(entries.iter().last().unwrap().id)
-                                },
-                                &None => None
-                            };
-                            let (follower_last_log_id, follower_last_log_term) = { // extract follower last log info
-                                // assumed log ids are sequence of integers
-                                let follower_last_log_id = follower.next_index - 1;
-                                if follower_last_log_id == 0 || logs.is_empty() {
-                                    (0, 0) // 0 represents there is no logs in the leader
-                                } else {
-                                    // detect cleaned logs
-                                    let (first_log_id, _) = logs.iter().next().unwrap();
-                                    if *first_log_id > follower_last_log_id {
-                                        debug!("Taking snapshot of all state machines and install them on follower {}", member_id);
-                                        let master_sm = master_sm.read();
-                                        let snapshot = master_sm.snapshot().unwrap();
-                                        rpc.install_snapshot(meta_term, leader_id, meta_last_applied, meta_term, snapshot).wait().unwrap();
-                                    }
-                                    let follower_last_entry = logs.get(&follower_last_log_id);
-                                    match follower_last_entry {
-                                        Some(entry) => {
-                                            (entry.id, entry.term)
-                                        },
-                                        None => {
-                                            panic!("Cannot find old logs for follower, first_id: {}, follower_last: {}");
-                                        }
-                                    }
+                        };
+                        let task = async {
+                            let mut follower = follower.lock().await;
+                            let mut is_retry = false;
+                            let logs = logs.read().await;
+                            loop {
+                                let entries: Option<LogEntries> = { // extract logs to send to follower
+                                    let list: LogEntries = logs.range(
+                                        (Included(&follower.next_index), Unbounded)
+                                    ).map(|(_, entry)| entry.clone()).collect(); //TODO: avoid clone entry
+                                    if list.is_empty() {None} else {Some(list)}
+                                };
+                                if is_retry && entries.is_none() { // break when retry and there is no entry
+                                    debug!("stop retry when entry is empty, {}", follower.next_index);
+                                    break;
                                 }
-                            };
-                            let append_result = rpc.append_entries(
-                                term,
-                                leader_id,
-                                follower_last_log_id,
-                                follower_last_log_term,
-                                entries,
-                                commit_index
-                            ).wait();
-                            match append_result {
-                                Ok(Ok((follower_term, result))) => {
-                                    match result {
-                                        AppendEntriesResult::Ok => {
-                                            debug!("log updated");
-                                            if let Some(last_entries_id) = last_entries_id {
-                                                follower.next_index = last_entries_id + 1;
-                                                follower.match_index = last_entries_id;
+                                let last_entries_id = match &entries { // get last entry id
+                                    &Some(ref entries) => {
+                                        Some(entries.iter().last().unwrap().id)
+                                    },
+                                    &None => None
+                                };
+                                let (follower_last_log_id, follower_last_log_term) = { // extract follower last log info
+                                    // assumed log ids are sequence of integers
+                                    let follower_last_log_id = follower.next_index - 1;
+                                    if follower_last_log_id == 0 || logs.is_empty() {
+                                        (0, 0) // 0 represents there is no logs in the leader
+                                    } else {
+                                        // detect cleaned logs
+                                        let (first_log_id, _) = logs.iter().next().unwrap();
+                                        if *first_log_id > follower_last_log_id {
+                                            debug!("Taking snapshot of all state machines and install them on follower {}", member_id);
+                                            let master_sm = master_sm.read().await;
+                                            let snapshot = master_sm.snapshot().unwrap();
+                                            rpc.install_snapshot(meta_term, leader_id, meta_last_applied, meta_term, snapshot).wait().unwrap();
+                                        }
+                                        let follower_last_entry = logs.get(&follower_last_log_id);
+                                        match follower_last_entry {
+                                            Some(entry) => {
+                                                (entry.id, entry.term)
+                                            },
+                                            None => {
+                                                panic!("Cannot find old logs for follower, first_id: {}, follower_last: {}");
                                             }
-                                        },
-                                        AppendEntriesResult::LogMismatch => {
-                                            debug!("log mismatch, {}", follower.next_index);
-                                            follower.next_index -= 1;
-                                        },
-                                        AppendEntriesResult::TermOut(actual_leader_id) => {
-                                            break;
                                         }
                                     }
-                                },
-                                _ => {break;} // retry will happened in next heartbeat
-                            }
-                            is_retry = true;
-                        } // append entries to followers
-                        tx.send(follower.match_index);
-                    });
-                    members += 1;
-                }
+                                };
+                                let append_result = rpc.append_entries(
+                                    term,
+                                    leader_id,
+                                    follower_last_log_id,
+                                    follower_last_log_term,
+                                    entries,
+                                    commit_index
+                                ).await;
+                                match append_result {
+                                    Ok(Ok((follower_term, result))) => {
+                                        match result {
+                                            AppendEntriesResult::Ok => {
+                                                debug!("log updated");
+                                                if let Some(last_entries_id) = last_entries_id {
+                                                    follower.next_index = last_entries_id + 1;
+                                                    follower.match_index = last_entries_id;
+                                                }
+                                            },
+                                            AppendEntriesResult::LogMismatch => {
+                                                debug!("log mismatch, {}", follower.next_index);
+                                                follower.next_index -= 1;
+                                            },
+                                            AppendEntriesResult::TermOut(actual_leader_id) => {
+                                                break;
+                                            }
+                                        }
+                                    },
+                                    _ => {break;} // retry will happened in next heartbeat
+                                }
+                                is_retry = true;
+                            } // append entries to followers
+                            tx.send(follower.match_index);
+                        };
+                        members += 1;
+                        Some(task)
+                    }).collect();
+                    heartbeat_futs.collect::<_>().await;
             } else {
                 unreachable!()
             }
@@ -746,7 +741,7 @@ impl RaftService {
         match log_id {
             Some(log_id) => {
                 if let Membership::Leader(ref leader_meta) = meta.membership {
-                    let mut leader_meta = leader_meta.write();
+                    let mut leader_meta = leader_meta.write().await;
                     let mut updated_followers = 0;
                     let mut timeout = 2000 as i64; // assume client timeout is more than 2s　(5 by default)
                     for _ in 0..members {
@@ -797,12 +792,12 @@ impl RaftService {
         meta.timeout = gen_timeout();
     }
 
-    fn leader_append_log(
-        &self,
-        meta: &RwLockWriteGuard<RaftMeta>,
+    async fn leader_append_log<'a>(
+        &'a self,
+        meta: &'a RwLockWriteGuard<'a, RaftMeta>,
         entry: &mut LogEntry,
     ) -> (u64, u64) {
-        let mut logs = meta.logs.write();
+        let mut logs = meta.logs.write().await;
         let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
         let new_log_id = last_log_id + 1;
         let new_log_term = meta.term;
@@ -971,7 +966,7 @@ impl Service for RaftService {
         let mut vote_granted = false;
         if term > meta.term {
             check_commit(&mut meta);
-            let logs = meta.logs.read();
+            let logs = meta.logs.read().await;
             let conf_sm = &meta.state_machine.read().await.configs;
             let candidate_valid = conf_sm.member_existed(candidate_id);
             debug!(
@@ -1040,7 +1035,7 @@ impl Service for RaftService {
         if !is_leader(&meta) {
             return ClientCmdResponse::NotLeader(meta.leader_id);
         }
-        let (new_log_id, new_log_term) = self.leader_append_log(&meta, &mut entry);
+        let (new_log_id, new_log_term) = self.leader_append_log(&meta, &mut entry).await;
         let mut data = match entry.sm_id {
             // special treats for membership changes
             CONFIG_SM_ID => Some(self.try_sync_config_to_followers(&mut meta, &entry, new_log_id)),
@@ -1059,7 +1054,7 @@ impl Service for RaftService {
 
     async fn c_query(&self, entry: LogEntry) -> ClientQryResponse {
         let mut meta = self.meta.read().await;
-        let logs = meta.logs.read();
+        let logs = meta.logs.read().await;
         let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
         if entry.term > last_log_term || entry.id > last_log_id {
             ClientQryResponse::LeftBehind

@@ -87,7 +87,7 @@ impl RaftClient {
     }
 
     async fn cluster_info<'a>(
-        &self,
+        &'a self,
         servers: HashSet<String>,
     ) -> (Option<ClientClusterInfo>, RwLockWriteGuard<'a, Members>) {
         let mut members = self.members.write().await;
