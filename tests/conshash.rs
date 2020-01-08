@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use raft::wait;
+use bifrost::raft::client::RaftClient;
 
 #[test]
 fn primary() {

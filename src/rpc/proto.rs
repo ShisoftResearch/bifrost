@@ -136,7 +136,7 @@ macro_rules! service {
                 /// Judgement: Use data ownership transfer instead of borrowing.
                 /// Some applications highly depend on RPC shortcut to achieve performance advantages.
                 /// Cloning for shortcut will significantly increase overhead. Eg. Hivemind immutable queue
-                pub async fn $fn_name(self: Pin<&Self>, $($arg:$in_),*) -> Result<$out, RPCError> {
+                pub async fn $fn_name(&self, $($arg:$in_),*) -> Result<$out, RPCError> {
                     if let Some(ref local) = get_local(self.server_id, self.service_id).await {
                         Ok(local.$fn_name($($arg),*).await)
                     } else {

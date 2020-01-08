@@ -10,6 +10,9 @@ use crate::raft::state_machine::master::ExecError;
 use crate::rpc;
 use crate::raft::state_machine::callback::SubKey;
 use crate::raft::state_machine::callback::client::SubscriptionService;
+use crate::raft::state_machine::configs::commands::{
+    subscribe as conf_subscribe, unsubscribe as conf_unsubscribe,
+};
 
 const ORDERING: Ordering = Ordering::Relaxed;
 pub type Client = Arc<AsyncServiceClient>;
@@ -41,7 +44,7 @@ struct Members {
     id_map: HashMap<u64, String>,
 }
 
-struct RaftClient {
+pub struct RaftClient {
     qry_meta: QryMeta,
     members: RwLock<Members>,
     leader_id: AtomicU64,
@@ -83,17 +86,16 @@ impl RaftClient {
         }
     }
 
-    async fn cluster_info(
+    async fn cluster_info<'a>(
         &self,
         servers: HashSet<String>,
-    ) -> (Option<ClientClusterInfo>, RwLockWriteGuard<Members>) {
-        let members = self.members.write().await;
+    ) -> (Option<ClientClusterInfo>, RwLockWriteGuard<'a, Members>) {
+        let mut members = self.members.write().await;
         for server_addr in servers {
             let id = hash_str(&server_addr);
             if !members.clients.contains_key(&id) {
-                match rpc::DEFAULT_CLIENT_POOL.get(&server_addr) {
+                match rpc::DEFAULT_CLIENT_POOL.get(&server_addr) { 
                     Ok(client) => {
-                        let members = members.mutate();
                         members
                             .clients
                             .insert(id, AsyncServiceClient::new(self.service_id, &client));
@@ -103,7 +105,7 @@ impl RaftClient {
                     }
                 }
             }
-            if let Ok(Ok(info)) = members.clients.get(&id).unwrap().c_server_cluster_info().await
+            if let Ok(info) = members.clients.get(&id).unwrap().c_server_cluster_info().await
             {
                 if info.leader_id != 0 {
                     return (Some(info), members);
@@ -114,12 +116,11 @@ impl RaftClient {
     }
 
     async fn update_info(&self, servers: HashSet<String>) -> Result<(), ClientError> {
-        let (cluster_info, members) = self.cluster_info(servers).await;
+        let (cluster_info, mut members) = self.cluster_info(servers).await;
         match cluster_info {
             Some(info) => {
                 let remote_members = info.members;
                 let mut remote_ids = HashSet::with_capacity(remote_members.len());
-                let mut members = members.mutate();
                 members.id_map.clear();
                 for (id, addr) in remote_members {
                     members.id_map.insert(id, addr);
@@ -283,7 +284,7 @@ impl RaftClient {
                 .c_query(self.gen_log_entry(sm_id, fn_id, &data))
                 .await;
             match res {
-                Ok(Ok(res)) => match res {
+                Ok(res) => match res {
                     ClientQryResponse::LeftBehind => {
                         if depth >= num_members {
                             Err(ExecError::TooManyRetry)
@@ -332,26 +333,26 @@ impl RaftClient {
             }
             match self.current_leader_client().await {
                 Some((leader_id, client)) => {
-                    match self.c_command(sm_id, fn_id, &data).await {
-                        Ok(Ok(ClientCmdResponse::Success {
+                    match client.c_command(self.gen_log_entry(sm_id, fn_id, &data)).await {
+                        Ok(ClientCmdResponse::Success {
                             data,
                             last_log_term,
                             last_log_id,
-                        })) => {
+                        }) => {
                             swap_when_greater(&self.last_log_id, last_log_id);
                             swap_when_greater(&self.last_log_term, last_log_term);
                             return Ok(data);
                         }
-                        Ok(Ok(ClientCmdResponse::NotLeader(leader_id))) => {
+                        Ok(ClientCmdResponse::NotLeader(leader_id)) => {
                             self.leader_id.store(leader_id, ORDERING);
                             FailureAction::NotLeader
                         }
-                        Ok(Ok(ClientCmdResponse::NotCommitted)) => FailureAction::NotCommitted,
+                        Ok(ClientCmdResponse::NotCommitted) => FailureAction::NotCommitted,
                         Err(e) => {
                             debug!("CLIENT: E1 - {} - {:?}", leader_id, e);
                             FailureAction::SwitchLeader // need switch server for leader
                         }
-                        Ok(Err(e)) => {
+                        Err(e) => {
                             debug!("CLIENT: E2 - {} - {:?}", leader_id, e);
                             FailureAction::SwitchLeader // need switch server for leader
                         }

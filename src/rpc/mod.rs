@@ -19,6 +19,10 @@ use std::pin::Pin;
 use bytes::buf::BufExt;
 use crate::tcp::client::Client;
 
+lazy_static! {
+    pub static ref DEFAULT_CLIENT_POOL: ClientPool = ClientPool::new();
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RPCRequestError {
     FunctionIdNotFound,

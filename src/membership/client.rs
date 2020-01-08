@@ -3,7 +3,7 @@ use bifrost_hasher::hash_str;
 use std::sync::Arc;
 use std::future::Future;
 use crate::raft::state_machine::master::ExecError;
-use crate::raft::client::{RaftClient, SubscriptionError, SubscriptionReceipt};
+use crate::raft::client::{SubscriptionError, SubscriptionReceipt};
 use crate::membership::DEFAULT_SERVICE_ID;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
