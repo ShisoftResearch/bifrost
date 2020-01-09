@@ -298,20 +298,9 @@ impl RaftService {
         let server_address = server.options.address.clone();
         info!("Waiting for server to be initialized");
         {
-            let start_time = get_time();
             let meta = server.meta.write().await;
             let mut sm = meta.state_machine.write().await;
-            let mut inited = false;
-            while get_time() < start_time + 5000 {
-                //waiting for 5 secs
-                if let Ok(_) = sm.configs.new_member(server_address.clone()) {
-                    inited = true;
-                    break;
-                }
-            }
-            if !inited {
-                return false;
-            }
+            sm.configs.new_member(server_address.clone());
         }
         let checker_ref = server.clone();
         tokio::spawn(async {

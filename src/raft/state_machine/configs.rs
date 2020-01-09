@@ -95,10 +95,10 @@ impl StateMachineCtl for Configures {
         for (_, member) in self.members.iter() {
             snapshot.members.insert(member.address.clone());
         }
-        Some(bincode::serialize(&snapshot))
+        Some(bincode::serialize(&snapshot).unwrap())
     }
     fn recover(&mut self, data: Vec<u8>) {
-        let snapshot: ConfigSnapshot = bincode::deserialize(&data);
+        let snapshot: ConfigSnapshot = bincode::deserialize(&data).unwrap();
         self.recover_members(&snapshot.members)
     }
 }
