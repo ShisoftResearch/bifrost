@@ -25,6 +25,7 @@ use futures::FutureExt;
 use crate::raft::client::RaftClient;
 use rand::Rng;
 use futures::stream::FuturesUnordered;
+use tokio::time;
 
 #[macro_use]
 pub mod state_machine;
@@ -287,7 +288,6 @@ impl RaftService {
                 commit_index,
                 last_applied,
                 leader_id: 0,
-                workers: (*RAFT_WORKER_POOL).clone(),
                 storage: storage_entity.map(|e| RefCell::new(e)),
             }),
             id: server_id,
@@ -539,29 +539,29 @@ impl RaftService {
         let (last_log_id, last_log_term) = get_last_log_info!(server, logs);
         let members: Vec<_> = members_from_meta!(meta).values().collect();
         let mut num_members = members.len();
-        let (tx, rx) = channel(num_members);
-        for member in members {
-            let rpc = member.rpc.clone();
-            let tx = tx.clone();
-            if member.id == server.id {
-                tx.send(RequestVoteResponse::Granted);
-            } else {
-                meta.workers.lock().await.execute(move || {
+        let (mut tx, rx) = channel(num_members);
+        let members_send_stream: FuturesUnordered<_> = members.iter().map(|ref member| {
+            async {
+                let rpc = &member.rpc;
+                if member.id == server.id {
+                    tx.send(RequestVoteResponse::Granted).await;
+                } else {
                     if let Ok(Ok(((remote_term, remote_leader_id), vote_granted))) = rpc
                         .request_vote(term, id, last_log_id, last_log_term)
-                        .wait()
+                        .await
                     {
                         if vote_granted {
-                            tx.send(RequestVoteResponse::Granted);
+                            tx.send(RequestVoteResponse::Granted).await;
                         } else if remote_term > term {
-                            tx.send(RequestVoteResponse::TermOut(remote_term, remote_leader_id));
+                            tx.send(RequestVoteResponse::TermOut(remote_term, remote_leader_id)).await;
                         } else {
-                            tx.send(RequestVoteResponse::NotGranted);
+                            tx.send(RequestVoteResponse::NotGranted).await;
                         }
                     }
-                });
+                }
             }
-        }
+        }).collect();
+        let member_send_fut = members_send_stream.collect();
         meta.workers.lock().await.execute(move || {
             let mut granted = 0;
             let mut timeout = 2000;
@@ -618,158 +618,147 @@ impl RaftService {
         meta: &'a mut RwLockWriteGuard<'a, RaftMeta>,
         log_id: Option<u64>,
     ) -> bool {
-        let (tx, rx) = channel();
         let mut members = 0;
         let commit_index = meta.commit_index;
         let term = meta.term;
         let leader_id = meta.leader_id;
         debug_assert_eq!(self.id, leader_id);
-        {
-            if let Membership::Leader(ref leader_meta) = meta.membership {
-                let leader_meta = leader_meta.read().await;
-                let heartbeat_futs: FuturesUnordered<_> =
-                    members_from_meta!(meta).values().filter_map(|member| {
-                        let member_id = member.id;
-                        if member_id == self.id {
+        if let Membership::Leader(ref leader_meta) = meta.membership {
+            let leader_meta = leader_meta.read().await;
+            let heartbeat_futs: FuturesUnordered<_> =
+                members_from_meta!(meta).values().filter_map(|member| {
+                    let member_id = member.id;
+                    if member_id == self.id {
+                        return None;
+                    }
+                    let logs = meta.logs.clone();
+                    let meta_term = meta.term;
+                    let meta_last_applied = meta.last_applied;
+                    let rpc = member.rpc.clone();
+                    let master_sm = meta.state_machine.clone();
+                    let follower = {
+                        if let Some(follower) = leader_meta.followers.get(&member_id) {
+                            follower.clone()
+                        } else {
+                            debug!(
+                                "follower not found, {}, {}",
+                                member_id,
+                                leader_meta.followers.len()
+                            ); //TODO: remove after debug
                             return None;
                         }
-                        let tx = tx.clone();
-                        let logs = meta.logs.clone();
-                        let meta_term = meta.term;
-                        let meta_last_applied = meta.last_applied;
-                        let rpc = member.rpc.clone();
-                        let master_sm = meta.state_machine.clone();
-                        let follower = {
-                            if let Some(follower) = leader_meta.followers.get(&member_id) {
-                                follower.clone()
-                            } else {
-                                debug!(
-                                    "follower not found, {}, {}",
-                                    member_id,
-                                    leader_meta.followers.len()
-                                ); //TODO: remove after debug
-                                return None;
+                    };
+                    let task = async {
+                        let mut follower = follower.lock().await;
+                        let mut is_retry = false;
+                        let logs = logs.read().await;
+                        loop {
+                            let entries: Option<LogEntries> = { // extract logs to send to follower
+                                let list: LogEntries = logs.range(
+                                    (Included(&follower.next_index), Unbounded)
+                                ).map(|(_, entry)| entry.clone()).collect(); //TODO: avoid clone entry
+                                if list.is_empty() {None} else {Some(list)}
+                            };
+                            if is_retry && entries.is_none() { // break when retry and there is no entry
+                                debug!("stop retry when entry is empty, {}", follower.next_index);
+                                break;
                             }
-                        };
-                        let task = async {
-                            let mut follower = follower.lock().await;
-                            let mut is_retry = false;
-                            let logs = logs.read().await;
-                            loop {
-                                let entries: Option<LogEntries> = { // extract logs to send to follower
-                                    let list: LogEntries = logs.range(
-                                        (Included(&follower.next_index), Unbounded)
-                                    ).map(|(_, entry)| entry.clone()).collect(); //TODO: avoid clone entry
-                                    if list.is_empty() {None} else {Some(list)}
-                                };
-                                if is_retry && entries.is_none() { // break when retry and there is no entry
-                                    debug!("stop retry when entry is empty, {}", follower.next_index);
-                                    break;
-                                }
-                                let last_entries_id = match &entries { // get last entry id
-                                    &Some(ref entries) => {
-                                        Some(entries.iter().last().unwrap().id)
-                                    },
-                                    &None => None
-                                };
-                                let (follower_last_log_id, follower_last_log_term) = { // extract follower last log info
-                                    // assumed log ids are sequence of integers
-                                    let follower_last_log_id = follower.next_index - 1;
-                                    if follower_last_log_id == 0 || logs.is_empty() {
-                                        (0, 0) // 0 represents there is no logs in the leader
-                                    } else {
-                                        // detect cleaned logs
-                                        let (first_log_id, _) = logs.iter().next().unwrap();
-                                        if *first_log_id > follower_last_log_id {
-                                            debug!("Taking snapshot of all state machines and install them on follower {}", member_id);
-                                            let master_sm = master_sm.read().await;
-                                            let snapshot = master_sm.snapshot().unwrap();
-                                            rpc.install_snapshot(meta_term, leader_id, meta_last_applied, meta_term, snapshot).wait().unwrap();
-                                        }
-                                        let follower_last_entry = logs.get(&follower_last_log_id);
-                                        match follower_last_entry {
-                                            Some(entry) => {
-                                                (entry.id, entry.term)
-                                            },
-                                            None => {
-                                                panic!("Cannot find old logs for follower, first_id: {}, follower_last: {}");
-                                            }
+                            let last_entries_id = match &entries { // get last entry id
+                                &Some(ref entries) => {
+                                    Some(entries.iter().last().unwrap().id)
+                                },
+                                &None => None
+                            };
+                            let (follower_last_log_id, follower_last_log_term) = { // extract follower last log info
+                                // assumed log ids are sequence of integers
+                                let follower_last_log_id = follower.next_index - 1;
+                                if follower_last_log_id == 0 || logs.is_empty() {
+                                    (0, 0) // 0 represents there is no logs in the leader
+                                } else {
+                                    // detect cleaned logs
+                                    let (first_log_id, _) = logs.iter().next().unwrap();
+                                    if *first_log_id > follower_last_log_id {
+                                        debug!("Taking snapshot of all state machines and install them on follower {}", member_id);
+                                        let master_sm = master_sm.read().await;
+                                        let snapshot = master_sm.snapshot().unwrap();
+                                        rpc.install_snapshot(meta_term, leader_id, meta_last_applied, meta_term, snapshot).wait().unwrap();
+                                    }
+                                    let follower_last_entry = logs.get(&follower_last_log_id);
+                                    match follower_last_entry {
+                                        Some(entry) => {
+                                            (entry.id, entry.term)
+                                        },
+                                        None => {
+                                            panic!("Cannot find old logs for follower, first_id: {}, follower_last: {}");
                                         }
                                     }
-                                };
-                                let append_result = rpc.append_entries(
-                                    term,
-                                    leader_id,
-                                    follower_last_log_id,
-                                    follower_last_log_term,
-                                    entries,
-                                    commit_index
-                                ).await;
-                                match append_result {
-                                    Ok(Ok((follower_term, result))) => {
-                                        match result {
-                                            AppendEntriesResult::Ok => {
-                                                debug!("log updated");
-                                                if let Some(last_entries_id) = last_entries_id {
-                                                    follower.next_index = last_entries_id + 1;
-                                                    follower.match_index = last_entries_id;
-                                                }
-                                            },
-                                            AppendEntriesResult::LogMismatch => {
-                                                debug!("log mismatch, {}", follower.next_index);
-                                                follower.next_index -= 1;
-                                            },
-                                            AppendEntriesResult::TermOut(actual_leader_id) => {
-                                                break;
-                                            }
-                                        }
-                                    },
-                                    _ => {break;} // retry will happened in next heartbeat
                                 }
-                                is_retry = true;
-                            } // append entries to followers
-                            tx.send(follower.match_index);
-                        };
-                        members += 1;
-                        Some(task)
-                    }).collect();
-                    heartbeat_futs.collect::<_>().await;
-            } else {
-                unreachable!()
-            }
-        }
-        match log_id {
-            Some(log_id) => {
-                if let Membership::Leader(ref leader_meta) = meta.membership {
-                    let mut leader_meta = leader_meta.write().await;
-                    let mut updated_followers = 0;
-                    let mut timeout = 2000 as i64; // assume client timeout is more than 2s　(5 by default)
-                    for _ in 0..members {
-                        if timeout <= 0 {
-                            break;
+                            };
+                            let append_result = rpc.append_entries(
+                                term,
+                                leader_id,
+                                follower_last_log_id,
+                                follower_last_log_term,
+                                entries,
+                                commit_index
+                            ).await;
+                            match append_result {
+                                Ok(Ok((follower_term, result))) => {
+                                    match result {
+                                        AppendEntriesResult::Ok => {
+                                            debug!("log updated");
+                                            if let Some(last_entries_id) = last_entries_id {
+                                                follower.next_index = last_entries_id + 1;
+                                                follower.match_index = last_entries_id;
+                                            }
+                                        },
+                                        AppendEntriesResult::LogMismatch => {
+                                            debug!("log mismatch, {}", follower.next_index);
+                                            follower.next_index -= 1;
+                                        },
+                                        AppendEntriesResult::TermOut(actual_leader_id) => {
+                                            break;
+                                        }
+                                    }
+                                },
+                                _ => {break;} // retry will happened in next heartbeat
+                            }
+                            is_retry = true;
                         }
-                        if let Ok(last_matched_id) =
-                            rx.recv_timeout(Duration::from_millis(timeout as u64))
-                        {
-                            // adaptive
-                            //println!("{}, {}", last_matched_id, log_id);
-                            if last_matched_id >= log_id {
-                                updated_followers += 1;
-                                if is_majority(members, updated_followers) {
-                                    break;
+                        // append entries to followers
+                        follower.match_index
+                    };
+                    members += 1;
+                    let timeout = 2000;
+                    Some(time::timeout(Duration::from_millis(timeout), task))
+                }).collect();
+            match log_id {
+                Some(log_id) => {
+                    if let Membership::Leader(ref leader_meta) = meta.membership {
+                        let mut leader_meta = leader_meta.write().await;
+                        let mut updated_followers = 0;
+                        for heartbeat_res in heartbeat_futs {
+                            if let Ok(last_matched_id) = heartbeat_res {
+                                // adaptive
+                                //println!("{}, {}", last_matched_id, log_id);
+                                if last_matched_id >= log_id {
+                                    updated_followers += 1;
+                                    if is_majority(members, updated_followers) {
+                                        return true;
+                                    }
                                 }
                             }
                         }
-                        let current_time = get_time();
-                        timeout -= get_time() - current_time;
+                        leader_meta.last_updated = get_time();
+                        is_majority(members, updated_followers)
+                    } else {
+                        false
                     }
-                    leader_meta.last_updated = get_time();
-                    is_majority(members, updated_followers)
-                } else {
-                    false
                 }
+                None => true,
             }
-            None => true,
+        } else {
+            unreachable!()
         }
     }
     //check term number, return reject = false if server term is stale
