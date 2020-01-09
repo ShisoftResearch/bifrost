@@ -730,15 +730,15 @@ impl RaftService {
                     };
                     members += 1;
                     let timeout = 2000;
-                    Some(time::timeout(Duration::from_millis(timeout), task))
+                    Some(tokio::spawn(time::timeout(Duration::from_millis(timeout), task)))
                 }).collect();
             match log_id {
                 Some(log_id) => {
                     if let Membership::Leader(ref leader_meta) = meta.membership {
                         let mut leader_meta = leader_meta.write().await;
                         let mut updated_followers = 0;
-                        for heartbeat_res in heartbeat_futs {
-                            if let Ok(last_matched_id) = heartbeat_res {
+                        while let Some(heartbeat_res) = heartbeat_futs.next().await {
+                            if let Ok(Ok(last_matched_id)) = heartbeat_res {
                                 // adaptive
                                 //println!("{}, {}", last_matched_id, log_id);
                                 if last_matched_id >= log_id {
