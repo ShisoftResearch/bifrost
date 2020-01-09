@@ -7,7 +7,6 @@ use rand;
 use std::cmp::{max, min};
 use std::collections::Bound::{Included, Unbounded};
 use std::collections::{BTreeMap, HashMap};
-use futures::channel::mpsc::channel;
 use std::io;
 use bifrost_plugins::hash_ident;
 use futures::prelude::*;
@@ -295,13 +294,13 @@ impl RaftService {
         };
         Arc::new(server_obj)
     }
-    pub fn start(server: &Arc<RaftService>) -> bool {
+    pub async fn start(server: &Arc<RaftService>) -> bool {
         let server_address = server.options.address.clone();
         info!("Waiting for server to be initialized");
         {
             let start_time = get_time();
-            let meta = server.meta.write();
-            let mut sm = meta.state_machine.write();
+            let meta = server.meta.write().await;
+            let mut sm = meta.state_machine.write().await;
             let mut inited = false;
             while get_time() < start_time + 5000 {
                 //waiting for 5 secs
@@ -315,9 +314,7 @@ impl RaftService {
             }
         }
         let checker_ref = server.clone();
-        thread::Builder::new()
-            .name("Raft service daemon".to_string())
-            .spawn(move || {
+        tokio::spawn(async {
                 let server = checker_ref;
                 loop {
                     let start_time = get_time();
@@ -358,12 +355,12 @@ impl RaftService {
                     let end_time = get_time();
                     let time_to_sleep = expected_ends - end_time - 1;
                     if time_to_sleep > 0 {
-                        thread::sleep(Duration::from_millis(time_to_sleep as u64));
+                        time::delay_for(Duration::from_millis(time_to_sleep as u64)).await;
                     }
                 }
             });
         {
-            let mut meta = server.meta.write();
+            let mut meta = server.meta.write().await;
             meta.last_checked = get_time();
         }
         return true;
@@ -449,35 +446,35 @@ impl RaftService {
             leader_id: meta.leader_id,
         }
     }
-    pub fn num_members(&self) -> usize {
-        let meta = self.meta.read();
+    pub async fn num_members(&self) -> usize {
+        let meta = self.meta.read().await;
         let ref members = members_from_meta!(meta);
         members.len()
     }
-    pub fn num_logs(&self) -> usize {
-        let meta = self.meta.read();
-        let logs = meta.logs.read();
+    pub async fn num_logs(&self) -> usize {
+        let meta = self.meta.read().await;
+        let logs = meta.logs.read().await;
         logs.len()
     }
-    pub fn last_log_id(&self) -> Option<u64> {
-        let meta = self.meta.read();
-        let logs = meta.logs.read();
+    pub async fn last_log_id(&self) -> Option<u64> {
+        let meta = self.meta.read().await;
+        let logs = meta.logs.read().await;
         logs.keys().cloned().last()
     }
-    pub fn leader_id(&self) -> u64 {
-        let meta = self.meta.read();
+    pub async fn leader_id(&self) -> u64 {
+        let meta = self.meta.read().await;
         meta.leader_id
     }
-    pub fn is_leader(&self) -> bool {
-        let meta = self.meta.read();
+    pub async fn is_leader(&self) -> bool {
+        let meta = self.meta.read().await;
         match meta.membership {
             Membership::Leader(_) => true,
             _ => false,
         }
     }
-    pub fn register_state_machine(&self, state_machine: SubStateMachine) {
-        let meta = self.meta.read();
-        let mut master_sm = meta.state_machine.write();
+    pub async fn register_state_machine(&self, state_machine: SubStateMachine) {
+        let meta = self.meta.read().await;
+        let mut master_sm = meta.state_machine.write().await;
         master_sm.register(state_machine);
     }
     fn switch_membership(&self, meta: &mut RwLockWriteGuard<RaftMeta>, membership: Membership) {
@@ -592,10 +589,10 @@ impl RaftService {
         self.switch_membership(meta, Membership::Follower);
     }
 
-    fn become_leader(&self, meta: &mut RwLockWriteGuard<RaftMeta>, last_log_id: u64) {
+    async fn become_leader<'a>(&'a self, meta: &'a mut RwLockWriteGuard<'a, RaftMeta>, last_log_id: u64) {
         let leader_meta = RwLock::new(LeaderMeta::new());
         {
-            let mut guard = leader_meta.write();
+            let mut guard = leader_meta.write().await;
             self.reload_leader_meta(&members_from_meta!(meta), &mut guard, last_log_id);
             guard.last_updated = get_time();
         }
@@ -827,22 +824,22 @@ impl RaftService {
         }
     }
 
-    fn try_sync_log_to_followers(
-        &self,
-        meta: &mut RwLockWriteGuard<RaftMeta>,
+    async fn try_sync_log_to_followers<'a>(
+        &'a self,
+        meta: &'a mut RwLockWriteGuard<'a, RaftMeta>,
         entry: &LogEntry,
         new_log_id: u64,
     ) -> Option<ExecResult> {
-        if self.send_followers_heartbeat(meta, Some(new_log_id)) {
+        if self.send_followers_heartbeat(meta, Some(new_log_id)).await {
             meta.commit_index = new_log_id;
             Some(commit_command(meta, entry))
         } else {
             None
         }
     }
-    fn try_sync_config_to_followers(
-        &self,
-        meta: &mut RwLockWriteGuard<RaftMeta>,
+    async fn try_sync_config_to_followers<'a>(
+        &'a self,
+        meta: &'a mut RwLockWriteGuard<'a, RaftMeta>,
         entry: &LogEntry,
         new_log_id: u64,
     ) -> ExecResult {
@@ -851,10 +848,10 @@ impl RaftService {
         let data = commit_command(&meta, &entry);
         let t = get_time();
         if let Membership::Leader(ref leader_meta) = meta.membership {
-            let mut leader_meta = leader_meta.write();
+            let mut leader_meta = leader_meta.write().await;
             self.reload_leader_meta(&members_from_meta!(meta), &mut leader_meta, new_log_id);
         }
-        self.send_followers_heartbeat(meta, Some(new_log_id));
+        self.send_followers_heartbeat(meta, Some(new_log_id)).await;
         data
     }
 }
@@ -1017,8 +1014,8 @@ impl Service for RaftService {
         let (new_log_id, new_log_term) = self.leader_append_log(&meta, &mut entry).await;
         let mut data = match entry.sm_id {
             // special treats for membership changes
-            CONFIG_SM_ID => Some(self.try_sync_config_to_followers(&mut meta, &entry, new_log_id)),
-            _ => self.try_sync_log_to_followers(&mut meta, &entry, new_log_id),
+            CONFIG_SM_ID => Some(self.try_sync_config_to_followers(&mut meta, &entry, new_log_id).await),
+            _ => self.try_sync_log_to_followers(&mut meta, &entry, new_log_id).await,
         }; // Some for committed and None for not committed
         if let Some(data) = data {
             ClientCmdResponse::Success {
