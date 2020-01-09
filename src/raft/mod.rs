@@ -539,61 +539,51 @@ impl RaftService {
         let (last_log_id, last_log_term) = get_last_log_info!(server, logs);
         let members: Vec<_> = members_from_meta!(meta).values().collect();
         let mut num_members = members.len();
-        let (mut tx, rx) = channel(num_members);
-        let members_send_stream: FuturesUnordered<_> = members.iter().map(|ref member| {
-            async {
+        let members_vote_response_stream: FuturesUnordered<_> = members.iter().map(|ref member| {
+            tokio::spawn(time::timeout(Duration::from_millis(2000), async {
                 let rpc = &member.rpc;
                 if member.id == server.id {
-                    tx.send(RequestVoteResponse::Granted).await;
+                    RequestVoteResponse::Granted;
                 } else {
                     if let Ok(Ok(((remote_term, remote_leader_id), vote_granted))) = rpc
                         .request_vote(term, id, last_log_id, last_log_term)
                         .await
                     {
                         if vote_granted {
-                            tx.send(RequestVoteResponse::Granted).await;
+                            RequestVoteResponse::Granted;
                         } else if remote_term > term {
-                            tx.send(RequestVoteResponse::TermOut(remote_term, remote_leader_id)).await;
+                            RequestVoteResponse::TermOut(remote_term, remote_leader_id);
                         } else {
-                            tx.send(RequestVoteResponse::NotGranted).await;
+                            RequestVoteResponse::NotGranted;
                         }
                     }
                 }
-            }
+            }))
         }).collect();
-        let member_send_fut = members_send_stream.collect();
-        meta.workers.lock().await.execute(move || {
-            let mut granted = 0;
-            let mut timeout = 2000;
-            for _ in 0..num_members {
-                if timeout <= 0 {
+        let mut granted = 0;
+        while let Some(vote_response) = members_vote_response_stream.next().await {
+            if let Ok(Ok(res)) = vote_response {
+                let mut meta = server.meta.write().await;
+                if meta.term != term {
                     break;
                 }
-                if let Ok(res) = rx.recv_timeout(Duration::from_millis(timeout as u64)) {
-                    let mut meta = server.meta.write();
-                    if meta.term != term {
+                match res {
+                    RequestVoteResponse::TermOut(remote_term, remote_leader_id) => {
+                        server.become_follower(&mut meta, remote_term, remote_leader_id);
                         break;
                     }
-                    match res {
-                        RequestVoteResponse::TermOut(remote_term, remote_leader_id) => {
-                            server.become_follower(&mut meta, remote_term, remote_leader_id);
+                    RequestVoteResponse::Granted => {
+                        granted += 1;
+                        if is_majority(num_members as u64, granted) {
+                            server.become_leader(&mut meta, last_log_id);
                             break;
                         }
-                        RequestVoteResponse::Granted => {
-                            granted += 1;
-                            if is_majority(members, granted) {
-                                server.become_leader(&mut meta, last_log_id);
-                                break;
-                            }
-                        }
-                        _ => {}
                     }
+                    _ => {}
                 }
-                let curr_time = get_time();
-                timeout -= get_time() - curr_time;
             }
-            debug!("GRANTED: {}/{}", granted, members);
-        });
+        }
+        debug!("GRANTED: {}/{}", granted, num_members);
     }
 
     fn become_follower(&self, meta: &mut RwLockWriteGuard<RaftMeta>, term: u64, leader_id: u64) {
