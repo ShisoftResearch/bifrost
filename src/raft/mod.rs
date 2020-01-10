@@ -354,14 +354,14 @@ impl RaftService {
         }
         return true;
     }
-    pub fn new_server(opts: Options) -> (bool, Arc<RaftService>, Arc<Server>) {
+    pub async fn new_server(opts: Options) -> (bool, Arc<RaftService>, Arc<Server>) {
         let address = opts.address.clone();
         let svr_id = opts.service_id;
         let service = RaftService::new(opts);
         let server = Server::new(&address);
         Server::listen_and_resume(&server);
         server.register_service(svr_id, &service);
-        (RaftService::start(&service), service, server)
+        (RaftService::start(&service).await, service, server)
     }
     pub  async fn bootstrap(&self) {
         let mut meta = self.write_meta().await;
@@ -369,7 +369,7 @@ impl RaftService {
             let logs = meta.logs.read().await;
             get_last_log_info!(self, logs)
         };
-        self.become_leader(&mut meta, last_log_id);
+        self.become_leader(&mut meta, last_log_id).await;
     }
     pub async fn join(&self, servers: &Vec<String>) -> Result<(), ExecError> {
         debug!("Trying to join cluster with id {}", self.id);
@@ -510,8 +510,8 @@ impl RaftService {
         //        println!("Meta write locked acquired for {}ms for {}, leader {}", acq_time, self.id, lock_mon.leader_id);
         lock_mon.await
     }
-    pub fn read_meta(&self) -> RwLockReadGuard<RaftMeta> {
-        self.meta.read()
+    pub async fn read_meta<'a>(&'a self) -> RwLockReadGuard<'a, RaftMeta> {
+        self.meta.read().await
     }
     async fn become_candidate<'a>(server: Arc<RaftService>, meta: &'a mut RwLockWriteGuard<'a, RaftMeta>) {
         server.reset_last_checked(meta);
@@ -525,7 +525,7 @@ impl RaftService {
         let (last_log_id, last_log_term) = get_last_log_info!(server, logs);
         let members: Vec<_> = members_from_meta!(meta).values().collect();
         let mut num_members = members.len();
-        let members_vote_response_stream: FuturesUnordered<_> = members.iter().map(|ref member| {
+        let mut members_vote_response_stream: FuturesUnordered<_> = members.iter().map(|ref member| {
             tokio::spawn(time::timeout(Duration::from_millis(2000), async {
                 let rpc = &member.rpc;
                 if member.id == server.id {
@@ -561,7 +561,7 @@ impl RaftService {
                     RequestVoteResponse::Granted => {
                         granted += 1;
                         if is_majority(num_members as u64, granted) {
-                            server.become_leader(&mut meta, last_log_id);
+                            server.become_leader(&mut meta, last_log_id).await;
                             break;
                         }
                     }

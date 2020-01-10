@@ -12,6 +12,7 @@ use crate::utils::time;
 use crate::raft::state_machine::callback::server::SMCallback;
 use crate::raft::RaftService;
 use crate::membership::client::{Group as ClientGroup, Member as ClientMember};
+use crate::rpc::Server;
 
 static MAX_TIMEOUT: i64 = 1000; //5 secs for 500ms heartbeat
 
@@ -94,7 +95,7 @@ impl Drop for Membership {
 }
 
 impl Membership {
-    pub fn new(server: &Arc<Server>, raft_service: &Arc<RaftService>) {
+    pub async fn new(server: &Arc<Server>, raft_service: &Arc<RaftService>) {
         let service = Arc::new(HeartbeatService {
             status: RwLock::new(HashMap::new()),
             closed: AtomicBool::new(false),
@@ -106,7 +107,7 @@ impl Membership {
             .name("Membership daemon".to_string())
             .spawn(move || {
                 while !service_clone.closed.load(Ordering::Relaxed) {
-                    let is_leader = service_clone.raft_service.is_leader();
+                    let is_leader = service_clone.raft_service.is_leader().await;
                     let was_leader = service_clone.was_leader.load(Ordering::Relaxed);
                     if !was_leader && is_leader {
                         service_clone.transfer_leadership()
@@ -152,7 +153,7 @@ impl Membership {
             version: 0,
         };
         membership_service.init_callback(raft_service);
-        raft_service.register_state_machine(Box::new(membership_service));
+        raft_service.register_state_machine(Box::new(membership_service)).await;
         server.register_service(DEFAULT_SERVICE_ID, &service);
     }
     fn compose_client_member(&self, id: u64) -> ClientMember {

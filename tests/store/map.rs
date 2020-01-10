@@ -25,9 +25,9 @@ fn hash_map() {
     Server::listen_and_resume(&server);
     let sm_id = map_sm.id;
     map_sm.init_callback(&raft_service);
-    assert!(RaftService::start(&raft_service));
-    raft_service.register_state_machine(Box::new(map_sm));
-    raft_service.bootstrap();
+    assert!(RaftService::start(&raft_service).await);
+    raft_service.register_state_machine(Box::new(map_sm)).await;
+    raft_service.bootstrap().await;
 
     let raft_client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID).unwrap();
     let sm_client = SMClient::new(sm_id, &raft_client);

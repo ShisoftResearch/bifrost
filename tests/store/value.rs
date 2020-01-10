@@ -22,9 +22,9 @@ fn string() {
     string_sm.init_callback(&service);
     server.register_service(DEFAULT_SERVICE_ID, &service);
     Server::listen_and_resume(&server);
-    assert!(RaftService::start(&service));
-    service.register_state_machine(Box::new(string_sm));
-    service.bootstrap();
+    assert!(RaftService::start(&service).await);
+    service.register_state_machine(Box::new(string_sm)).await;
+    service.bootstrap().await;
 
     let client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID).unwrap();
     let sm_client = SMClient::new(sm_id, &client);

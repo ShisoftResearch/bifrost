@@ -60,9 +60,9 @@ fn dummy() {
     let sm_id = dummy_sm.id();
     server.register_service(DEFAULT_SERVICE_ID, &raft_service);
     Server::listen_and_resume(&server);
-    RaftService::start(&raft_service);
-    raft_service.register_state_machine(Box::new(dummy_sm));
-    raft_service.bootstrap();
+    RaftService::start(&raft_service).await;
+    raft_service.register_state_machine(Box::new(dummy_sm)).await;
+    raft_service.bootstrap().await;
 
     wait();
 

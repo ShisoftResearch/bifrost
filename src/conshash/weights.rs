@@ -54,11 +54,11 @@ impl StateMachineCtl for Weights {
     }
 }
 impl Weights {
-    pub fn new_with_id(id: u64, raft_service: &Arc<RaftService>) {
+    pub async fn new_with_id(id: u64, raft_service: &Arc<RaftService>) {
         raft_service.register_state_machine(Box::new(Weights {
             groups: HashMap::new(),
             id,
-        }))
+        })).await
     }
     pub fn new(raft_service: &Arc<RaftService>) {
         Self::new_with_id(DEFAULT_SERVICE_ID, raft_service)
