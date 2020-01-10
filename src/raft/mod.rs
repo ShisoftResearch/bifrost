@@ -371,7 +371,7 @@ impl RaftService {
         };
         self.become_leader(&mut meta, last_log_id);
     }
-    pub async fn join(&self, servers: &Vec<String>) -> Result<Result<(), ()>, ExecError> {
+    pub async fn join(&self, servers: &Vec<String>) -> Result<(), ExecError> {
         debug!("Trying to join cluster with id {}", self.id);
         let client = RaftClient::new(servers, self.options.service_id);
         if let Ok(client) = client {
@@ -380,7 +380,7 @@ impl RaftService {
                 .await;
             let members = client.execute(CONFIG_SM_ID, member_address::new()).await;
             let mut meta = self.write_meta().await;
-            if let Ok(Ok(members)) = members {
+            if let Ok(members) = members {
                 for member in members {
                     meta.state_machine.write().await.configs.new_member(member);
                 }

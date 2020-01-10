@@ -2,27 +2,21 @@
 //Current major problem is inner repeated macro will be recognized as outer macro which breaks expand
 
 #[macro_export]
-macro_rules! raft_return_type {
-    ($out: ty, $error: ty) => {::std::result::Result<$out, $error>};
-}
-
-#[macro_export]
 macro_rules! raft_trait_fn {
-    (qry $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {
-        fn $fn_name(&self, $($arg:$in_),*) -> raft_return_type!($out, $error);
+    (qry $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty) => {
+        fn $fn_name<'a>(&'a self, $($arg:$in_),*) -> ::std::pin::Pin<Box<dyn core::future::Future<Output = $out> + Send + 'a>>;
     };
-    (cmd $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {
-        fn $fn_name(&mut self, $($arg:$in_),*) -> raft_return_type!($out, $error);
+    (cmd $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty) => {
+        fn $fn_name<'a>(&'a mut self, $($arg:$in_),*) -> ::std::pin::Pin<Box<dyn core::future::Future<Output = $out> + Send + 'a>>;
     };
-    (sub $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {}
+    (sub $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty) => {}
 }
 
 #[macro_export]
 macro_rules! raft_client_fn {
-    (sub $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {
-        pub fn $fn_name<F>(&self, f: F, $($arg:$in_),* )
-        -> impl Future<Output = Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
-        where F: Fn(raft_return_type!($out, $error)) + 'static + Send + Sync
+    (sub $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty) => {
+        pub async fn $fn_name<F>(&self, f: F, $($arg:$in_),* ) -> Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>
+        where F: Fn($out) + 'static + Send + Sync
         {
             self.client.subscribe(
                 self.sm_id,
@@ -31,16 +25,15 @@ macro_rules! raft_client_fn {
             )
         }
     };
-    ($others:ident $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty) => {
-        pub fn $fn_name(&self, $($arg:$in_),*)
-        -> impl Future<Output = Result<raft_return_type!($out, $error), ExecError>> {
+    ($others:ident $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty) => {
+        pub async fn $fn_name(&self, $($arg:$in_),*) -> Result<$out, ExecError> {
             self.client.execute(
                 self.sm_id,
                 $fn_name::new($($arg,)*)
             )
         }
     };
-}
+} 
 
 #[macro_export]
 macro_rules! raft_fn_op_type {
@@ -95,20 +88,20 @@ macro_rules! raft_state_machine {
     (
         $(
             $(#[$attr:meta])*
-            def $smt:ident $fn_name:ident( $( $arg:ident : $in_:ty ),* ) $(-> $out:ty)* $(| $error:ty)*;
+            def $smt:ident $fn_name:ident( $( $arg:ident : $in_:ty ),* ) $(-> $out:ty)* ;
         )*
     ) => {
         raft_state_machine! {{
             $(
                 $(#[$attr])*
-                def $smt $fn_name( $( $arg : $in_ ),* ) $(-> $out)* $(| $error)*;
+                def $smt $fn_name( $( $arg : $in_ ),* ) $(-> $out)*;
             )*
         }}
     };
     (
         {
             $(#[$attr:meta])*
-            def $smt:ident $fn_name:ident( $( $arg:ident : $in_:ty ),* ); // No return, no error
+            def $smt:ident $fn_name:ident( $( $arg:ident : $in_:ty ),* ); // No return
 
             $( $unexpanded:tt )*
         }
@@ -120,7 +113,7 @@ macro_rules! raft_state_machine {
             $( $expanded )*
 
             $(#[$attr])*
-            def $smt $fn_name( $( $arg : $in_ ),* ) -> () | ();
+            def $smt $fn_name( $( $arg : $in_ ),* ) -> ();
         }
     };
     (
@@ -138,60 +131,25 @@ macro_rules! raft_state_machine {
             $( $expanded )*
 
             $(#[$attr])*
-            def $smt $fn_name( $( $arg : $in_ ),* ) -> $out | ();
-        }
-    };
-    (
-        {
-            $(#[$attr:meta])*
-            def $smt:ident $fn_name:ident( $( $arg:ident : $in_:ty ),* ) | $error:ty; //no return, error
-
-            $( $unexpanded:tt )*
-        }
-        $( $expanded:tt )*
-    ) => {
-        raft_state_machine! {
-            { $( $unexpanded )* }
-
-            $( $expanded )*
-
-            $(#[$attr])*
-            def $smt $fn_name( $( $arg : $in_ ),* ) -> () | $error;
-        }
-    };
-    (
-        {
-            $(#[$attr:meta])*
-            def $smt:ident $fn_name:ident( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty; //return, error
-
-            $( $unexpanded:tt )*
-        }
-        $( $expanded:tt )*
-    ) => {
-        raft_state_machine! {
-            { $( $unexpanded )* }
-
-            $( $expanded )*
-
-            $(#[$attr])*
-            def $smt $fn_name( $( $arg : $in_ ),* ) -> $out | $error;
+            def $smt $fn_name( $( $arg : $in_ ),* ) -> $out;
         }
     };
     (
         {} // all expanded
         $(
             $(#[$attr:meta])*
-            def $smt:ident $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty | $error:ty;
+            def $smt:ident $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty;
         )*
     ) => {
+        use async_trait::async_trait;
+
         pub mod commands {
-            use super::*;
             $(
                 #[derive(Serialize, Deserialize, Debug)]
                 pub struct $fn_name {
                     pub data: Vec<u8>
                 }
-                impl $crate::raft::RaftMsg<raft_return_type!($out, $error)> for $fn_name {
+                impl $crate::raft::RaftMsg<$out> for $fn_name {
                     fn encode(self) -> (u64, $crate::raft::state_machine::OpType, Vec<u8>) {
                         (
                             ::bifrost_plugins::hash_ident!($fn_name) as u64,
@@ -199,7 +157,7 @@ macro_rules! raft_state_machine {
                             self.data
                         )
                     }
-                    fn decode_return(data: &Vec<u8>) -> raft_return_type!($out, $error) {
+                    fn decode_return(data: &Vec<u8>) -> $out {
                         $crate::utils::bincode::deserialize(data)
                     }
                 }
@@ -213,10 +171,12 @@ macro_rules! raft_state_machine {
                 }
             )*
         }
+
+        #[async_trait]
         pub trait StateMachineCmds: $crate::raft::state_machine::StateMachineCtl {
            $(
                 $(#[$attr])*
-                raft_trait_fn!($smt $fn_name( $( $arg : $in_ ),* ) -> $out | $error);
+                raft_trait_fn!($smt $fn_name( $( $arg : $in_ ),* ) -> $out);
            )*
            fn op_type_(&self, fn_id: u64) -> Option<$crate::raft::state_machine::OpType> {
                 match fn_id as usize {
@@ -253,7 +213,10 @@ macro_rules! raft_state_machine {
            }
         }
         pub mod client {
+
             use super::*;
+            use crate::raft::client::*;
+            use crate::raft::state_machine::master::ExecError;
 
             pub struct SMClient {
                 client: Arc<RaftClient>,
@@ -262,7 +225,7 @@ macro_rules! raft_state_machine {
             impl SMClient {
                $(
                   $(#[$attr])*
-                  raft_client_fn!($smt $fn_name( $( $arg : &$in_ ),* ) -> $out | $error);
+                  raft_client_fn!($smt $fn_name( $( $arg : &$in_ ),* ) -> $out);
                )*
                pub fn new(sm_id: u64, client: &Arc<RaftClient>) -> SMClient {
                     SMClient {

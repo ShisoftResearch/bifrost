@@ -217,13 +217,12 @@ impl RaftClient {
         let wrapper_fn = move |data: Vec<u8>| f(M::decode_return(&data));
         let cluster_subs = self.execute(CONFIG_SM_ID, conf_subscribe::new(&key, &callback.server_address, &callback.session_id)).await;
         match cluster_subs {
-            Ok(Ok(sub_id)) => {
+            Ok(sub_id) => {
                 let mut subs_map = callback.subs.write();
                 let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
                 subs_lst.push((Box::new(wrapper_fn), sub_id));
                 Ok(Ok((key, sub_id)))
             }
-            Ok(Err(_)) => Ok(Err(SubscriptionError::RemoteError)),
             Err(e) => Err(e),
         }
     }
@@ -237,7 +236,7 @@ impl RaftClient {
                 let (key, sub_id) = receipt;
                 let unsub = self.execute(CONFIG_SM_ID, conf_unsubscribe::new(&sub_id)).await;
                 match unsub {
-                    Ok(Ok(_)) => {
+                    Ok(_) => {
                         let mut subs_map = callback.subs.write();
                         let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
                         let mut sub_index = 0;
@@ -254,8 +253,7 @@ impl RaftClient {
                             Ok(Err(SubscriptionError::CannotFindSubId))
                         }
                     }
-                    Ok(Err(_)) => Ok(Err(SubscriptionError::RemoteError)),
-                    Err(e) => Err(e),
+                    Err(e) => Err(e)
                 }
             }
             Err(e) => {
