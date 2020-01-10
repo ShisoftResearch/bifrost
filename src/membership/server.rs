@@ -13,6 +13,8 @@ use crate::membership::client::{Group as ClientGroup, Member as ClientMember};
 use crate::rpc::Server;
 use crate::raft::state_machine::callback::server::{notify as cb_notify, SMCallback};
 use crate::raft::{LogEntry, RaftMsg, RaftService, Service as raft_svr_trait};
+use async_trait::async_trait;
+use crate::raft::state_machine::StateMachineCtl;
 
 static MAX_TIMEOUT: i64 = 1000; //5 secs for 500ms heartbeat
 
@@ -28,9 +30,10 @@ pub struct HeartbeatService {
     was_leader: AtomicBool,
 }
 
+#[async_trait]
 impl Service for HeartbeatService {
-    fn ping(&self, id: u64) -> Box<Future<Item = (), Error = ()>> {
-        let mut stat_map = self.status.write();
+    async fn ping(&self, id: u64) -> Result<(), ()> {
+        let mut stat_map = self.status.write().await;
         let current_time = time::get_time();
         let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
             online: false,
@@ -39,7 +42,6 @@ impl Service for HeartbeatService {
         });
         stat.last_updated = current_time;
         // only update the timestamp, let the watcher thread to decide
-        box future::finished(())
     }
 }
 impl HeartbeatService {

@@ -7,28 +7,28 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic;
 
-pub struct RwLock<T> {
+pub struct RwLock<T: Unpin> {
     semaphore: AtomicUsize,
     obj: UnsafeCell<T>
 }
 
-pub struct RwLockReadGuardFut<'a, T> {
+pub struct RwLockReadGuardFut<'a, T: Unpin> {
     lock: Pin<&'a RwLock<T>>
 }
 
-pub struct RwLockWriteGuardFut<'a, T> {
+pub struct RwLockWriteGuardFut<'a, T: Unpin> {
     lock: Pin<&'a RwLock<T>>
 }
 
-pub struct RwLockReadGuard<'a, T> {
+pub struct RwLockReadGuard<'a, T: Unpin> {
     lock: &'a RwLock<T>
 }
 
-pub struct RwLockWriteGuard<'a, T> {
+pub struct RwLockWriteGuard<'a, T: Unpin> {
     lock: &'a RwLock<T>
 }
 
-impl <T> RwLock<T> {
+impl <T: Unpin> RwLock<T> {
     pub fn new(obj: T) -> Self {
         Self {
             semaphore: AtomicUsize::new(1),
@@ -72,17 +72,17 @@ impl <T> RwLock<T> {
     }
 
     fn write_acquire(&self) -> bool {
-        self.semaphore.compare_and_awap(1, 0, Relaxed)
+        self.semaphore.compare_and_swap(1, 0, Relaxed) == 1
     }
 }
 
-impl <'a, T> Future for RwLockWriteGuardFut<'a, T> {
+impl <'a, T: Unpin> Future for RwLockWriteGuardFut<'a, T> {
     type Output = RwLockWriteGuard<'a, T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.lock.write_acquire() {
             Poll::Ready(RwLockWriteGuard {
-                lock: &*self.lock
+                lock: self.lock.get_ref()
             })
         } else {
             Poll::Pending
@@ -90,13 +90,13 @@ impl <'a, T> Future for RwLockWriteGuardFut<'a, T> {
     }
 }
 
-impl <'a, T> Future for RwLockReadGuardFut<'a, T> {
+impl <'a, T: Unpin> Future for RwLockReadGuardFut<'a, T> {
     type Output = RwLockReadGuard<'a, T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.lock.read_acquire() {
             Poll::Ready(RwLockReadGuard {
-                lock: &*self.lock
+                lock: self.lock.get_ref()
             })
         } else {
             Poll::Pending
@@ -104,7 +104,7 @@ impl <'a, T> Future for RwLockReadGuardFut<'a, T> {
     }
 }
 
-impl <'a, T> Deref for RwLockReadGuard<'a, T> {
+impl <'a, T: Unpin> Deref for RwLockReadGuard<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -112,7 +112,7 @@ impl <'a, T> Deref for RwLockReadGuard<'a, T> {
     }
 }
 
-impl <'a, T> Deref for RwLockWriteGuard<'a, T> {
+impl <'a, T: Unpin> Deref for RwLockWriteGuard<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -120,19 +120,19 @@ impl <'a, T> Deref for RwLockWriteGuard<'a, T> {
     }
 }
 
-impl <'a, T> DerefMut for RwLockWriteGuard<'a, T> {
+impl <'a, T: Unpin> DerefMut for RwLockWriteGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut T {
         unsafe { &mut *self.lock.obj.get() }
     }
 }
 
-impl <'a, T> Drop for RwLockReadGuard<'a, T> {
+impl <'a, T: Unpin> Drop for RwLockReadGuard<'a, T> {
     fn drop(&mut self) {
-        self.lock.semaphore.fetch_sub(1, Relaxed)
+        self.lock.semaphore.fetch_sub(1, Relaxed);
     }
 }
 
-impl <'a, T> Drop for RwLockWriteGuard<'a, T> {
+impl <'a, T: Unpin> Drop for RwLockWriteGuard<'a, T> {
     fn drop(&mut self) {
         self.lock.semaphore.store(1, Relaxed)
     }
