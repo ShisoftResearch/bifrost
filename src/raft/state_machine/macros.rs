@@ -144,6 +144,7 @@ macro_rules! raft_state_machine {
         use async_trait::async_trait;
 
         pub mod commands {
+            use super::*;
             $(
                 #[derive(Serialize, Deserialize, Debug)]
                 pub struct $fn_name {
@@ -214,9 +215,12 @@ macro_rules! raft_state_machine {
         }
         pub mod client {
 
+            use std::sync::Arc;
             use super::*;
+            use super::commands::*;
             use crate::raft::client::*;
             use crate::raft::state_machine::master::ExecError;
+            use crate::raft::client::{RaftClient, SubscriptionError, SubscriptionReceipt};
 
             pub struct SMClient {
                 client: Arc<RaftClient>,

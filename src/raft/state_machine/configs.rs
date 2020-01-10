@@ -1,10 +1,12 @@
-use super::callback::server::Subscriptions;
-use super::callback::SubKey;
-use super::*;
 use bifrost_hasher::hash_str;
-use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use crate::utils::rwlock::*;
+use crate::raft::state_machine::callback::SubKey;
+use crate::raft::state_machine::callback::server::Subscriptions;
+use crate::raft::AsyncServiceClient;
+use crate::rpc;
+use crate::raft::state_machine::StateMachineCtl;
 
 pub const CONFIG_SM_ID: u64 = 1;
 
@@ -28,18 +30,19 @@ pub struct ConfigSnapshot {
     members: MemberConfigSnapshot,
     //TODO: snapshot for subscriptions
 }
-
+ 
 raft_state_machine! {
-    def cmd new_member_(address: String);
+    def cmd new_member_(address: String) -> Result<(), ()>;
     def cmd del_member_(address: String);
     def qry member_address() -> Vec<String>;
 
-    def cmd subscribe(key: SubKey, address: String, session_id: u64) -> u64;
+    def cmd subscribe(key: SubKey, address: String, session_id: u64) -> Result<u64, ()>;
     def cmd unsubscribe(sub_id: u64);
 }
 
+#[async_trait]
 impl StateMachineCmds for Configures {
-    fn new_member_(&mut self, address: String) {
+    async fn new_member_(&mut self, address: String) -> Result<(), ()> {
         let addr = address.clone();
         let id = hash_str(&addr);
         if !self.members.contains_key(&id) {
@@ -60,26 +63,20 @@ impl StateMachineCmds for Configures {
         }
         Err(())
     }
-    fn del_member_(&mut self, address: String) {
+    async fn del_member_(&mut self, address: String) {
         let hash = hash_str(&address);
         self.members.remove(&hash);
-        Ok(())
     }
-    fn member_address(&self) -> Vec<String> {
-        let mut members = Vec::with_capacity(self.members.len());
-        for (_, member) in self.members.iter() {
-            members.push(member.address.clone());
-        }
-        Ok(members)
+    async fn member_address(&self) -> Vec<String> {
+        self.members.values().map(|m| m.address).collect()
     }
-    fn subscribe(&mut self, key: SubKey, address: String, session_id: u64) -> u64 {
-        let mut subs = self.subscriptions.write();
+    async fn subscribe(&mut self, key: SubKey, address: String, session_id: u64) -> Result<u64, ()> {
+        let mut subs = self.subscriptions.write().await;
         subs.subscribe(key, &address, session_id)
     }
-    fn unsubscribe(&mut self, sub_id: u64) {
-        let mut subs = self.subscriptions.write();
+    async fn unsubscribe(&mut self, sub_id: u64) {
+        let mut subs = self.subscriptions.write().await;
         subs.remove_subscription(sub_id);
-        Ok(())
     }
 }
 
