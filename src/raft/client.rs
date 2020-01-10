@@ -198,7 +198,7 @@ impl RaftClient {
         }
     }
 
-    pub async fn subscribe<M, R, F>(
+    pub async fn subscribe<M, R, F, FUT>(
         &self,
         sm_id: u64,
         msg: M,
@@ -207,7 +207,7 @@ impl RaftClient {
     where
         M: RaftMsg<R> + 'static,
         R: 'static,
-        F: Fn(R) + 'static + Send + Sync,
+        F: Fn(R) -> Pin<Box<dyn Future<Output = ()>>> + 'static,
     {
         let callback = match self.get_callback().await {
             Ok(c) => c,
@@ -217,12 +217,13 @@ impl RaftClient {
         let wrapper_fn = move |data: Vec<u8>| f(M::decode_return(&data));
         let cluster_subs = self.execute(CONFIG_SM_ID, conf_subscribe::new(&key, &callback.server_address, &callback.session_id)).await;
         match cluster_subs {
-            Ok(sub_id) => {
+            Ok(Ok(sub_id)) => {
                 let mut subs_map = callback.subs.write();
                 let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
                 subs_lst.push((Box::new(wrapper_fn), sub_id));
                 Ok(Ok((key, sub_id)))
             }
+            Ok(Err(_)) => Ok(Err(SubscriptionError::RemoteError)),
             Err(e) => Err(e),
         }
     }

@@ -333,7 +333,7 @@ impl RaftService {
                                 server.send_followers_heartbeat(&mut meta, None).await;
                             }
                             CheckerAction::BecomeCandidate => {
-                                RaftService::become_candidate(server.clone(), &mut meta).await;
+                                server.become_candidate(&mut meta).await;
                             }
                             CheckerAction::ExitLoop => {
                                 break;
@@ -513,35 +513,37 @@ impl RaftService {
     pub async fn read_meta<'a>(&'a self) -> RwLockReadGuard<'a, RaftMeta> {
         self.meta.read().await
     }
-    async fn become_candidate<'a>(server: Arc<RaftService>, meta: &'a mut RwLockWriteGuard<'a, RaftMeta>) {
-        server.reset_last_checked(meta);
+    async fn become_candidate(&self, meta: &'_ mut RwLockWriteGuard<'_, RaftMeta>) {
+        self.reset_last_checked(meta);
         let term = meta.term;
-        alter_term(&mut*meta, term + 1);
-        meta.vote_for = Some(server.id);
-        server.switch_membership(meta, Membership::Candidate);
-        let term = meta.term;
-        let id = server.id;
+        alter_term(meta, term + 1);
+        meta.vote_for = Some(self.id);
+        self.switch_membership(meta, Membership::Candidate);
+        let term = meta.term;            
+        let server_id = self.id;
         let logs = meta.logs.read().await;
-        let (last_log_id, last_log_term) = get_last_log_info!(server, logs);
+        let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
         let members: Vec<_> = members_from_meta!(meta).values().collect();
         let mut num_members = members.len();
         let mut members_vote_response_stream: FuturesUnordered<_> = members.iter().map(|ref member| {
-            tokio::spawn(time::timeout(Duration::from_millis(2000), async {
-                let rpc = &member.rpc;
-                if member.id == server.id {
-                    RequestVoteResponse::Granted;
+            let rpc = member.rpc.clone();
+            tokio::spawn(time::timeout(Duration::from_millis(2000), async move {
+                if member.id == server_id {
+                    RequestVoteResponse::Granted
                 } else {
-                    if let Ok(Ok(((remote_term, remote_leader_id), vote_granted))) = rpc
-                        .request_vote(term, id, last_log_id, last_log_term)
+                    if let Ok(((remote_term, remote_leader_id), vote_granted)) = rpc
+                        .request_vote(term, server_id, last_log_id, last_log_term)
                         .await
                     {
                         if vote_granted {
-                            RequestVoteResponse::Granted;
+                            RequestVoteResponse::Granted
                         } else if remote_term > term {
-                            RequestVoteResponse::TermOut(remote_term, remote_leader_id);
+                            RequestVoteResponse::TermOut(remote_term, remote_leader_id)
                         } else {
-                            RequestVoteResponse::NotGranted;
+                            RequestVoteResponse::NotGranted
                         }
+                    } else {
+                        RequestVoteResponse::NotGranted // default for request failure
                     }
                 }
             }))
@@ -549,19 +551,18 @@ impl RaftService {
         let mut granted = 0;
         while let Some(vote_response) = members_vote_response_stream.next().await {
             if let Ok(Ok(res)) = vote_response {
-                let mut meta = server.meta.write().await;
                 if meta.term != term {
                     break;
                 }
                 match res {
                     RequestVoteResponse::TermOut(remote_term, remote_leader_id) => {
-                        server.become_follower(&mut meta, remote_term, remote_leader_id);
+                        self.become_follower(meta, remote_term, remote_leader_id);
                         break;
                     }
                     RequestVoteResponse::Granted => {
                         granted += 1;
                         if is_majority(num_members as u64, granted) {
-                            server.become_leader(&mut meta, last_log_id).await;
+                            self.become_leader(meta, last_log_id).await;
                             break;
                         }
                     }
@@ -570,6 +571,7 @@ impl RaftService {
             }
         }
         debug!("GRANTED: {}/{}", granted, num_members);
+        return;
     }
 
     fn become_follower(&self, meta: &mut RwLockWriteGuard<RaftMeta>, term: u64, leader_id: u64) {
@@ -578,7 +580,7 @@ impl RaftService {
         self.switch_membership(meta, Membership::Follower);
     }
 
-    async fn become_leader<'a>(&'a self, meta: &'a mut RwLockWriteGuard<'a, RaftMeta>, last_log_id: u64) {
+    async fn become_leader(&self, meta: &mut RwLockWriteGuard<'_, RaftMeta>, last_log_id: u64) {
         let leader_meta = RwLock::new(LeaderMeta::new());
         {
             let mut guard = leader_meta.write().await;
@@ -657,7 +659,7 @@ impl RaftService {
                                         debug!("Taking snapshot of all state machines and install them on follower {}", member_id);
                                         let master_sm = master_sm.read().await;
                                         let snapshot = master_sm.snapshot().unwrap();
-                                        rpc.install_snapshot(meta_term, leader_id, meta_last_applied, meta_term, snapshot).wait().unwrap();
+                                        rpc.install_snapshot(meta_term, leader_id, meta_last_applied, meta_term, snapshot).await.unwrap();
                                     }
                                     let follower_last_entry = logs.get(&follower_last_log_id);
                                     match follower_last_entry {
@@ -679,7 +681,7 @@ impl RaftService {
                                 commit_index
                             ).await;
                             match append_result {
-                                Ok(Ok((follower_term, result))) => {
+                                Ok((follower_term, result)) => {
                                     match result {
                                         AppendEntriesResult::Ok => {
                                             debug!("log updated");

@@ -3,22 +3,23 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use crate::utils::time::get_time;
+use async_trait::async_trait;
 
 pub struct SubscriptionService {
-    pub subs: RwLock<HashMap<SubKey, Vec<(Box<dyn Fn(Vec<u8>) + Send + Sync>, u64)>>>,
+    pub subs: RwLock<HashMap<SubKey, Vec<(Box<dyn Fn(Vec<u8>) -> Pin<Box<dyn Future<Output = ()>>>>, u64)>>>,
     pub server_address: String,
     pub session_id: u64,
 }
 
+#[async_trait]
 impl Service for SubscriptionService {
-    fn notify(&self, key: SubKey, data: Vec<u8>) -> Box<Future<Item = (), Error = ()>> {
+    async fn notify(&self, key: SubKey, data: Vec<u8>) {
         let subs = self.subs.read();
         if let Some(subs) = subs.get(&key) {
             for &(ref fun, _) in subs {
-                fun(data.clone());
+                fun(data.clone()).await;
             }
         }
-        box future::finished(())
     }
 }
 dispatch_rpc_service_functions!(SubscriptionService);

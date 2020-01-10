@@ -1,12 +1,12 @@
 use super::super::OpType;
 use super::*;
 use bifrost_hasher::{hash_bytes, hash_str};
-use parking_lot::RwLock;
+use crate::utils::rwlock::RwLock;
 use serde;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use crate::raft::{RaftService, RaftMsg};
+use crate::raft::{RaftService, RaftMsg, IS_LEADER};
 use crate::rpc;
 
 pub struct Subscriber {
@@ -129,9 +129,9 @@ pub enum NotifyError {
 }
 
 impl SMCallback {
-    pub fn new(state_machine_id: u64, raft_service: Arc<RaftService>) -> SMCallback {
-        let meta = raft_service.meta.read();
-        let sm = meta.state_machine.read();
+    pub async fn new(state_machine_id: u64, raft_service: Arc<RaftService>) -> SMCallback {
+        let meta = raft_service.meta.read().await;
+        let sm = meta.state_machine.read().await;
         let subs = sm.configs.subscriptions.clone();
         SMCallback {
             subscriptions: subs,
