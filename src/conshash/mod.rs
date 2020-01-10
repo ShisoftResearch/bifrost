@@ -1,16 +1,17 @@
-use parking_lot::{RwLock, RwLockWriteGuard};
 use std::collections::{HashMap, BTreeMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::future::Future;
 
 use bifrost_hasher::{hash_bytes, hash_str};
 use crate::raft::state_machine::master::ExecError;
 use crate::raft::client::{SubscriptionReceipt, SubscriptionError, RaftClient};
-use crate::membership::client::Member;
 use crate::conshash::weights::DEFAULT_SERVICE_ID;
 use crate::utils::bincode::serialize;
-use std::future::Future;
+use crate::membership::client::{Member, ObserverClient as MembershipClient};
+use crate::conshash::weights::client::SMClient as WeightSMClient;
+use crate::utils::rwlock::*;
 
 pub mod weights;
 
@@ -50,7 +51,7 @@ pub struct ConsistentHashing {
 }
 
 impl ConsistentHashing {
-    pub fn new_with_id(
+    pub async fn new_with_id(
         id: u64,
         group: &str,
         raft_client: &Arc<RaftClient>,
@@ -67,18 +68,16 @@ impl ConsistentHashing {
             watchers: RwLock::new(Vec::new()),
             version: AtomicU64::new(0),
         });
-        let mut core = Core::new().unwrap();
         {
             let ch = ch.clone();
-            let res_fut = membership.on_group_member_joined(
+            let res = membership.on_group_member_joined(
                 move |r| {
                     if let Ok((member, version)) = r {
                         server_joined(&ch, member, version);
                     }
                 },
                 group,
-            );
-            let res = core.run(res_fut);
+            ).await;
             if let Ok(Ok(_)) = res {
             } else {
                 return Err(CHError::WatchError(res));
@@ -86,15 +85,14 @@ impl ConsistentHashing {
         }
         {
             let ch = ch.clone();
-            let res_fut = membership.on_group_member_online(
+            let res = membership.on_group_member_online(
                 move |r| {
                     if let Ok((member, version)) = r {
                         server_joined(&ch, member, version);
                     }
                 },
                 group,
-            );
-            let res = core.run(res_fut);
+            ).await;
             if let Ok(Ok(_)) = res {
             } else {
                 return Err(CHError::WatchError(res));
@@ -102,15 +100,14 @@ impl ConsistentHashing {
         }
         {
             let ch = ch.clone();
-            let res_fut = membership.on_group_member_left(
+            let res = membership.on_group_member_left(
                 move |r| {
                     if let Ok((member, version)) = r {
                         server_left(&ch, member, version);
                     }
                 },
                 group,
-            );
-            let res = core.run(res_fut);
+            ).await;
             if let Ok(Ok(_)) = res {
             } else {
                 return Err(CHError::WatchError(res));
@@ -118,15 +115,14 @@ impl ConsistentHashing {
         }
         {
             let ch = ch.clone();
-            let res_fut = membership.on_group_member_offline(
+            let res = membership.on_group_member_offline(
                 move |r| {
                     if let Ok((member, version)) = r {
                         server_left(&ch, member, version);
                     }
                 },
                 group,
-            );
-            let res = core.run(res_fut);
+            ).await;
             if let Ok(Ok(_)) = res {
             } else {
                 return Err(CHError::WatchError(res));

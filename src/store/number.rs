@@ -3,7 +3,7 @@ macro_rules! def_store_number {
     ($m: ident, $t: ty) => {
         pub mod $m {
             use bifrost_hasher::hash_str;
-            use raft::state_machine::StateMachineCtl;
+            use crate::raft::state_machine::StateMachineCtl;
             use std::sync::Arc;
             use $crate::raft::state_machine::callback::server::SMCallback;
             use $crate::raft::RaftService;

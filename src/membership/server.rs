@@ -9,10 +9,10 @@ use std::sync::Arc;
 use std::{thread, time as std_time};
 use std::future::Future;
 use crate::utils::time;
-use crate::raft::state_machine::callback::server::SMCallback;
-use crate::raft::RaftService;
 use crate::membership::client::{Group as ClientGroup, Member as ClientMember};
 use crate::rpc::Server;
+use crate::raft::state_machine::callback::server::{notify as cb_notify, SMCallback};
+use crate::raft::{LogEntry, RaftMsg, RaftService, Service as raft_svr_trait};
 
 static MAX_TIMEOUT: i64 = 1000; //5 secs for 500ms heartbeat
 

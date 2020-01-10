@@ -47,10 +47,10 @@ impl StateMachineCtl for Weights {
         self.id
     }
     fn snapshot(&self) -> Option<Vec<u8>> {
-        Some(bincode::serialize(&self.groups))
+        Some(bincode::serialize(&self.groups).unwrap())
     }
     fn recover(&mut self, data: Vec<u8>) {
-        self.groups = bincode::deserialize(&data);
+        self.groups = bincode::deserialize(data.as_slice()).unwrap();
     }
 }
 impl Weights {

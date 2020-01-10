@@ -15,7 +15,7 @@ pub mod raft {
         def cmd leave(id: u64);
         def cmd join_group(group_name: String, id: u64);
         def cmd leave_group(group: u64, id: u64);
-        def cmd new_group(name: String) -> u64 | u64;
+        def cmd new_group(name: String) -> Result<u64, u64>;
         def cmd del_group(id: u64);
         def qry group_leader(group: u64) -> (Option<ClientMember>, u64);
         def qry group_members (group: u64, online_only: bool) -> (Vec<ClientMember>, u64);
