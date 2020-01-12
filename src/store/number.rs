@@ -148,12 +148,12 @@ macro_rules! def_store_number {
 }
 
 def_store_number!(I8, i8);
-def_store_number!(I16, i16);
-def_store_number!(I32, i32);
-def_store_number!(I64, i64);
-def_store_number!(U8, u8);
-def_store_number!(U16, u16);
-def_store_number!(U32, u32);
-def_store_number!(U64, u64);
-def_store_number!(F64, f64);
-def_store_number!(F32, f32);
+// def_store_number!(I16, i16);
+// def_store_number!(I32, i32);
+// def_store_number!(I64, i64);
+// def_store_number!(U8, u8);
+// def_store_number!(U16, u16);
+// def_store_number!(U32, u32);
+// def_store_number!(U64, u64);
+// def_store_number!(F64, f64);
+// def_store_number!(F32, f32);

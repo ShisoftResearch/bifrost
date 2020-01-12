@@ -37,65 +37,65 @@ macro_rules! def_store_hash_map {
                 def sub on_key_removed(k: $kt) -> $vt;
             }
             impl StateMachineCmds for Map {
-                fn get(&self, k: $kt) -> Result<Option<$vt>, ()> {
-                    Ok(if let Some(v) = self.map.get(&k) {
+                fn get(&self, k: $kt) -> Option<$vt> {
+                    if let Some(v) = self.map.get(&k) {
                         Some(v.clone())
                     } else {
                         None
-                    })
-                }
-                fn insert(&mut self, k: $kt, v: $vt) -> Result<Option<$vt>, ()> {
-                    if let Some(ref callback) = self.callback {
-                        callback.notify(commands::on_inserted::new(), Ok((k.clone(), v.clone())));
-                        callback.notify(commands::on_key_inserted::new(&k), Ok(v.clone()));
                     }
-                    Ok(self.map.insert(k, v))
                 }
-                fn insert_if_absent(&mut self, k: $kt, v: $vt) -> Result<$vt, ()> {
+                fn insert(&mut self, k: $kt, v: $vt) -> Option<$vt> {
+                    if let Some(ref callback) = self.callback {
+                        callback.notify(commands::on_inserted::new(), (k.clone(), v.clone()));
+                        callback.notify(commands::on_key_inserted::new(&k), v.clone());
+                    }
+                    self.map.insert(k, v)
+                }
+                fn insert_if_absent(&mut self, k: $kt, v: $vt) -> $vt {
                     if let Some(v) = self.map.get(&k) {
-                        return Ok(v.clone());
+                        return v.clone();
                     }
                     self.insert(k, v.clone());
-                    Ok(v)
+                    v
                 }
-                fn remove(&mut self, k: $kt) -> Result<Option<$vt>, ()> {
+                fn remove(&mut self, k: $kt) -> Option<$vt> {
                     let res = self.map.remove(&k);
                     if let Some(ref callback) = self.callback {
                         if let Some(ref v) = res {
                             callback
-                                .notify(commands::on_removed::new(), Ok((k.clone(), v.clone())));
-                            callback.notify(commands::on_key_removed::new(&k), Ok(v.clone()));
+                                .notify(commands::on_removed::new(), (k.clone(), v.clone()));
+                            callback.notify(commands::on_key_removed::new(&k), v.clone());
                         }
                     }
-                    Ok(res)
+                    res
                 }
-                fn is_empty(&self) -> Result<bool, ()> {
-                    Ok(self.map.is_empty())
+                fn is_empty(&self) -> bool {
+                    self.map.is_empty()
                 }
-                fn len(&self) -> Result<u64, ()> {
-                    Ok(self.map.len() as u64)
+                fn len(&self) -> u64 {
+                    self.map.len() as u64
                 }
-                fn clear(&mut self) -> Result<(), ()> {
-                    Ok(self.map.clear())
+                fn clear(&mut self) {
+                    self.map.clear()
                 }
-                fn keys(&self) -> Result<Vec<$kt>, ()> {
-                    Ok(self.map.keys().cloned().collect())
+                fn keys(&self) -> Vec<$kt> {
+                    self.map.keys().cloned().collect()
                 }
-                fn values(&self) -> Result<Vec<$vt>, ()> {
-                    Ok(self.map.values().cloned().collect())
+                fn values(&self) -> Vec<$vt> {
+                    self.map.values().cloned().collect()
                 }
-                fn entries(&self) -> Result<Vec<($kt, $vt)>, ()> {
+                fn entries(&self) -> Vec<($kt, $vt)> {
                     let mut r = Vec::new();
                     for (k, v) in self.map.iter() {
                         r.push((k.clone(), v.clone()));
                     }
-                    Ok(r)
+                    r
                 }
-                fn clone(&self) -> Result<HashMap<$kt, $vt>, ()> {
-                    Ok(self.map.clone())
+                fn clone(&self) -> HashMap<$kt, $vt> {
+                    self.map.clone()
                 }
-                fn contains_key(&self, k: $kt) -> Result<bool, ()> {
-                    Ok(self.map.contains_key(&k))
+                fn contains_key(&self, k: $kt) -> bool {
+                    self.map.contains_key(&k)
                 }
             }
             impl StateMachineCtl for Map {

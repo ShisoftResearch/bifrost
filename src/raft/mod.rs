@@ -216,13 +216,13 @@ macro_rules! members_from_meta {
     };
 }
 
-fn check_commit(meta: &mut RwLockWriteGuard<RaftMeta>) {
-    let logs = meta.logs.read();
+async fn check_commit<'a>(meta: &'a mut RwLockWriteGuard<'a, RaftMeta>) {
+    let logs = meta.logs.read().await;
     while meta.commit_index > meta.last_applied {
         meta.last_applied += 1;
         let last_applied = meta.last_applied;
         if let Some(entry) = logs.get(&last_applied) {
-            commit_command(meta, &entry);
+            commit_command(meta, &entry).await;
         };
     }
 }
@@ -231,9 +231,9 @@ fn is_majority(members: u64, granted: u64) -> bool {
     granted >= members / 2
 }
 
-fn commit_command(meta: &RwLockWriteGuard<RaftMeta>, entry: &LogEntry) -> ExecResult {
+async fn commit_command<'a>(meta: &'a RwLockWriteGuard<'a, RaftMeta>, entry: &'a LogEntry) -> ExecResult {
     with_bindings!(IS_LEADER: is_leader(meta) => {
-        meta.state_machine.write().commit_cmd(&entry)
+        meta.state_machine.write().await.commit_cmd(&entry)
     })
 }
 
@@ -373,7 +373,7 @@ impl RaftService {
     }
     pub async fn join(&self, servers: &Vec<String>) -> Result<Result<(), ()>, ExecError> {
         debug!("Trying to join cluster with id {}", self.id);
-        let client = RaftClient::new(servers, self.options.service_id);
+        let client = RaftClient::new(servers, self.options.service_id).await;
         if let Ok(client) = client {
             let result = client
                 .execute(CONFIG_SM_ID, new_member_::new(&self.options.address))
@@ -400,7 +400,7 @@ impl RaftService {
             .iter()
             .map(|&(_, ref address)| address.clone())
             .collect();
-        if let Ok(client) = RaftClient::new(&servers, self.options.service_id) {
+        if let Ok(client) = RaftClient::new(&servers, self.options.service_id).await {
             client
                 .execute(CONFIG_SM_ID, del_member_::new(&self.options.address))
                 .await;
@@ -513,7 +513,7 @@ impl RaftService {
     pub async fn read_meta<'a>(&'a self) -> RwLockReadGuard<'a, RaftMeta> {
         self.meta.read().await
     }
-    async fn become_candidate(&self, meta: &'_ mut RwLockWriteGuard<'_, RaftMeta>) {
+    async fn become_candidate<'a>(&'a self, meta: &'a mut RwLockWriteGuard<'_, RaftMeta>) {
         self.reset_last_checked(meta);
         let term = meta.term;
         alter_term(meta, term + 1);
@@ -527,8 +527,9 @@ impl RaftService {
         let mut num_members = members.len();
         let mut members_vote_response_stream: FuturesUnordered<_> = members.iter().map(|ref member| {
             let rpc = member.rpc.clone();
+            let member_id = member.id;
             tokio::spawn(time::timeout(Duration::from_millis(2000), async move {
-                if member.id == server_id {
+                if member_id == server_id {
                     RequestVoteResponse::Granted
                 } else {
                     if let Ok(((remote_term, remote_leader_id), vote_granted)) = rpc
@@ -775,10 +776,10 @@ impl RaftService {
         (new_log_id, new_log_term)
     }
 
-    async fn logs_post_processing(
-        &self,
-        meta: &RwLockWriteGuard<RaftMeta>,
-        logs: &mut RwLockWriteGuard<LogsMap>,
+    async fn logs_post_processing<'a>(
+        &'a self,
+        meta: &'a RwLockWriteGuard<'a, RaftMeta>,
+        logs: &'a mut RwLockWriteGuard<'a, LogsMap>,
     ) {
         let (last_log_id, _) = get_last_log_info!(self, logs);
         let expecting_oldest_log = if last_log_id > MAX_LOG_CAPACITY as u64 {
@@ -823,7 +824,7 @@ impl RaftService {
     ) -> Option<ExecResult> {
         if self.send_followers_heartbeat(meta, Some(new_log_id)).await {
             meta.commit_index = new_log_id;
-            Some(commit_command(meta, entry))
+            Some(commit_command(meta, entry).await)
         } else {
             None
         }
@@ -836,7 +837,7 @@ impl RaftService {
     ) -> ExecResult {
         // this will force followers to commit the changes
         meta.commit_index = new_log_id;
-        let data = commit_command(&meta, &entry);
+        let data = commit_command(&meta, &entry).await;
         let t = get_time();
         if let Membership::Leader(ref leader_meta) = meta.membership {
             let mut leader_meta = leader_meta.write().await;
@@ -849,8 +850,8 @@ impl RaftService {
 
 #[async_trait]
 impl Service for RaftService {
-    async fn append_entries(
-        &self,
+    async fn append_entries<'a>(
+        &'a self,
         term: u64,
         leader_id: u64,
         prev_log_id: u64,
