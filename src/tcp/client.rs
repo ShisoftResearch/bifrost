@@ -26,7 +26,7 @@ impl Client {
     pub async fn connect_with_timeout(address: &String, timeout: Duration) -> io::Result<Self> {
         let server_id = hash_str(address);
         let client = {
-            if !DISABLE_SHORTCUT && shortcut::is_local(server_id) {
+            if !DISABLE_SHORTCUT && shortcut::is_local(server_id).await {
                 None
             } else {
                 if address.eq(&STANDALONE_ADDRESS) {
@@ -45,8 +45,8 @@ impl Client {
             server_id
         })
     }
-    pub fn connect(address: &String) -> impl Future<Output = io::Result<Self>>  {
-        Client::connect_with_timeout(address, Duration::from_secs(5))
+    pub async fn connect(address: &String) -> io::Result<Self>  {
+        Client::connect_with_timeout(address, Duration::from_secs(5)).await
     }
     pub async fn send_msg(self: Pin<&mut Self>, msg: TcpReq) -> io::Result<BytesMut> {
         if let Some(ref mut transport) = self.client {

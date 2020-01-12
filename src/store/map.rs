@@ -121,8 +121,8 @@ macro_rules! def_store_hash_map {
                 pub fn new_by_name(name: &String) -> Map {
                     Map::new(hash_str(name))
                 }
-                pub fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
-                    self.callback = Some(SMCallback::new(self.id(), raft_service.clone()));
+                pub async fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
+                    self.callback = Some(SMCallback::new(self.id(), raft_service.clone()).await);
                 }
             }
         }

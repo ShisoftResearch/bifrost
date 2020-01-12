@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 use crate::utils::rwlock::RwLock;
 use crate::utils::mutex::Mutex;
 use crate::{tcp, DISABLE_SHORTCUT};
@@ -62,7 +61,7 @@ fn encode_res(res: Result<BytesMut, RPCRequestError>) -> BytesMut {
                 RPCRequestError::ServiceIdNotFound => 2u8,
                 _ => 255u8,
             };
-            BytesMut::from([err_id])
+            BytesMut::from(&[err_id][..])
         }
     }
 }
@@ -131,7 +130,7 @@ impl Server {
                 Server::listen(&server);
             });
     }
-    pub fn register_service<T>(&self, service_id: u64, service: &Arc<T>)
+    pub async fn register_service<T>(&self, service_id: u64, service: &Arc<T>)
     where
         T: RPCService + Sized + 'static,
     {
@@ -142,11 +141,11 @@ impl Server {
         } else {
             println!("SERVICE SHORTCUT DISABLED");
         }
-        self.services.write().insert(service_id, service);
+        self.services.write().await.insert(service_id, service);
     }
 
-    pub fn remove_service(&self, service_id: u64) {
-        self.services.write().remove(&service_id);
+    pub async fn remove_service(&self, service_id: u64) {
+        self.services.write().await.remove(&service_id);
     }
     pub fn address(&self) -> &String {
         &self.address
@@ -177,26 +176,12 @@ impl RPCClient {
         let bytes = prepend_u64(svr_id, data);
         decode_res(Client::send_msg(Pin::new(&mut *client), bytes).await)
     }
-    pub fn new_async(addr: String) -> impl Future<Item = Arc<RPCClient>, Error = io::Error> {
-        tcp::client::Client::connect_async(addr.clone()).map(|client| {
-            Arc::new(RPCClient {
-                server_id: client.server_id,
-                client: Mutex::new(client),
-                address: addr,
-            })
-        })
-    }
-
-    pub fn with_timeout(
-        addr: String,
-        timeout: Duration,
-    ) -> impl Future<Item = Arc<RPCClient>, Error = io::Error> {
-        tcp::client::Client::connect_with_timeout_async(addr.clone(), timeout).map(|client| {
-            Arc::new(RPCClient {
-                server_id: client.server_id,
-                client: Mutex::new(client),
-                address: addr,
-            })
+    pub async fn new_async(addr: &String) -> io::Result<RPCClient> {
+        let client = tcp::client::Client::connect(addr).await?;
+        Ok(RPCClient {
+            server_id: client.server_id,
+            client: Mutex::new(client),
+            address: addr.clone(),
         })
     }
 }
@@ -208,59 +193,43 @@ impl ClientPool {
         }
     }
 
-    pub fn get_async(
-        &self,
-        addr: &String,
-    ) -> impl Future<Item = Arc<RPCClient>, Error = io::Error> {
+    pub async fn get(&self, addr: &String) -> io::Result<Arc<RPCClient>> {
         let addr_clone = addr.clone();
         let server_id = hash_str(addr);
-        self.get_by_id_async(server_id, move |_| addr_clone)
+        self.get_by_id(server_id, move |_| addr_clone).await
     }
 
-    pub fn get(&self, addr: &String) -> Result<Arc<RPCClient>, io::Error> {
-        let addr_clone = addr.clone();
-        let server_id = hash_str(addr);
-        self.get_by_id(server_id, move |_| addr_clone)
-    }
-
-    pub fn get_by_id<F>(&self, server_id: u64, addr_fn: F) -> Result<Arc<RPCClient>, io::Error>
+    pub async fn get_by_id<F>(&self, server_id: u64, addr_fn: F) -> io::Result<Arc<RPCClient>>
     where
         F: FnOnce(u64) -> String,
     {
-        let mut clients = self.clients.lock();
+        let mut clients = self.clients.lock().await;
         if clients.contains_key(&server_id) {
             let client = clients.get(&server_id).unwrap().clone();
             Ok(client)
         } else {
-            let client = RPCClient::new_async(addr_fn(server_id)).wait()?;
+            let mut client = Arc::new(RPCClient::new_async(&addr_fn(server_id)).await?);
             clients.insert(server_id, client.clone());
-            return Ok(client.clone());
+            Ok(client)
         }
     }
 
-    pub fn get_by_id_async<F>(
+    pub async fn get_by_id_async<F>(
         &self,
         server_id: u64,
         addr_fn: F,
-    ) -> impl Future<Item = Arc<RPCClient>, Error = io::Error>
+    ) -> io::Result<Arc<RPCClient>>
     where
         F: FnOnce(u64) -> String,
     {
-        self.clients
-            .lock_async()
-            .map_err(|_| io::Error::from(io::ErrorKind::Other))
-            .and_then(
-                move |mut clients| -> Box<Future<Item = Arc<RPCClient>, Error = io::Error>> {
-                    if clients.contains_key(&server_id) {
-                        let client = clients.get(&server_id).unwrap().clone();
-                        box future::ok(client)
-                    } else {
-                        box RPCClient::new_async(addr_fn(server_id)).map(move |client| {
-                            clients.insert(server_id, client.clone());
-                            return client.clone();
-                        })
-                    }
-                },
-            )
+        let clients = self.clients.lock().await;
+        if clients.contains_key(&server_id) {
+            let client = clients.get(&server_id).unwrap().clone();
+            Ok(client)
+        } else {
+            let new_client = Arc::new(RPCClient::new_async(&addr_fn(server_id)).await?);
+            clients.insert(server_id, new_client.clone());
+            Ok(new_client.clone())
+        }
     }
 }

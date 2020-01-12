@@ -1,5 +1,5 @@
 use super::*;
-use parking_lot::RwLock;
+use crate::utils::rwlock::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use crate::utils::time::get_time;
@@ -14,7 +14,7 @@ pub struct SubscriptionService {
 #[async_trait]
 impl Service for SubscriptionService {
     async fn notify(&self, key: SubKey, data: Vec<u8>) {
-        let subs = self.subs.read();
+        let subs = self.subs.read().await;
         if let Some(subs) = subs.get(&key) {
             for &(ref fun, _) in subs {
                 fun(data.clone()).await;

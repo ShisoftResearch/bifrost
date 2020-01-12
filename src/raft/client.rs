@@ -54,7 +54,7 @@ pub struct RaftClient {
 }
 
 impl RaftClient {
-    pub fn new(
+    pub async fn new(
         servers: &Vec<String>,
         service_id: u64,
     ) -> Result<Self, ClientError> {
@@ -71,12 +71,11 @@ impl RaftClient {
             last_log_term: AtomicU64::new(0),
             service_id,
         };
-        Self::update_info(client.clone(), HashSet::from_iter(servers.iter().cloned()))
-            .wait()
-            .map(move |_| client)
+        client.update_info(HashSet::from_iter(servers.iter().cloned())).await?;
+        Ok(client)
     }
-    pub fn prepare_subscription(server: &Arc<rpc::Server>) -> Option<()> {
-        let mut callback = CALLBACK.write();
+    pub async fn prepare_subscription(server: &Arc<rpc::Server>) -> Option<()> {
+        let mut callback = CALLBACK.write().await;
         if callback.is_none() {
             let sub_service = SubscriptionService::initialize(&server);
             *callback = Some(sub_service.clone());
@@ -94,7 +93,7 @@ impl RaftClient {
         for server_addr in servers {
             let id = hash_str(&server_addr);
             if !members.clients.contains_key(&id) {
-                match rpc::DEFAULT_CLIENT_POOL.get(&server_addr) { 
+                match rpc::DEFAULT_CLIENT_POOL.get(&server_addr).await { 
                     Ok(client) => {
                         members
                             .clients
@@ -137,7 +136,7 @@ impl RaftClient {
                 for id in remote_ids.difference(&connected_ids) {
                     let addr = members.id_map.get(id).unwrap().clone();
                     if !members.clients.contains_key(id) {
-                        if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(&addr) {
+                        if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(&addr).await {
                             members
                                 .clients
                                 .insert(*id, AsyncServiceClient::new(self.service_id, &client));
@@ -172,8 +171,8 @@ impl RaftClient {
         }
     }
 
-    pub fn can_callback() -> bool {
-        CALLBACK.read().is_some()
+    pub async fn can_callback() -> bool {
+        CALLBACK.read().await.is_some()
     }
     fn get_sub_key<M, R>(&self, sm_id: u64, msg: M) -> SubKey
     where
@@ -218,7 +217,7 @@ impl RaftClient {
         let cluster_subs = self.execute(CONFIG_SM_ID, conf_subscribe::new(&key, &callback.server_address, &callback.session_id)).await;
         match cluster_subs {
             Ok(Ok(sub_id)) => {
-                let mut subs_map = callback.subs.write();
+                let mut subs_map = callback.subs.write().await;
                 let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
                 subs_lst.push((Box::new(wrapper_fn), sub_id));
                 Ok(Ok((key, sub_id)))
@@ -238,7 +237,7 @@ impl RaftClient {
                 let unsub = self.execute(CONFIG_SM_ID, conf_unsubscribe::new(&sub_id)).await;
                 match unsub {
                     Ok(_) => {
-                        let mut subs_map = callback.subs.write();
+                        let mut subs_map = callback.subs.write().await;
                         let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
                         let mut sub_index = 0;
                         for i in 0..subs_lst.len() {
@@ -391,8 +390,8 @@ impl RaftClient {
     pub fn leader_id(&self) -> u64 {
         self.leader_id.load(ORDERING)
     }
-    pub fn leader_client(&self) -> Option<(u64, Client)> {
-        let members = self.members.read();
+    pub async fn leader_client(&self) -> Option<(u64, Client)> {
+        let members = self.members.read().await;
         let leader_id = self.leader_id();
         if let Some(client) = members.clients.get(&leader_id) {
             Some((leader_id, client.clone()))
@@ -403,7 +402,7 @@ impl RaftClient {
 
     async fn current_leader_client(&self) -> Option<(u64, Client)> {
         {
-            let leader_client = self.leader_client();
+            let leader_client = self.leader_client().await;
             if leader_client.is_some() {
                 return leader_client;
             }
@@ -423,10 +422,11 @@ impl RaftClient {
             }
         }
     }
-    pub fn current_leader_rpc_client(
+    pub async fn current_leader_rpc_client(
         &self,
-    ) -> impl Future<Item = Arc<rpc::RPCClient>, Error = ()> {
-        self.current_leader_client().map(|(_, client)| client.client.clone())
+    ) -> Result<Arc<rpc::RPCClient>, ()> {
+        let (_, client) = self.current_leader_client().await.ok_or_else(|| ())?;
+        Ok(client.client.clone())
     }
 }
 

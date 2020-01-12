@@ -775,7 +775,7 @@ impl RaftService {
         (new_log_id, new_log_term)
     }
 
-    fn logs_post_processing(
+    async fn logs_post_processing(
         &self,
         meta: &RwLockWriteGuard<RaftMeta>,
         logs: &mut RwLockWriteGuard<LogsMap>,
@@ -799,7 +799,7 @@ impl RaftService {
                     term: meta.term,
                     commit_index: meta.commit_index,
                     last_applied: meta.last_applied,
-                    snapshot: meta.state_machine.read().snapshot().unwrap(),
+                    snapshot: meta.state_machine.read().await.snapshot().unwrap(),
                 };
                 storage
                     .snapshot
@@ -809,7 +809,7 @@ impl RaftService {
         }
         if let Some(ref storage) = meta.storage {
             let mut storage = storage.borrow_mut();
-            let logs_data = bincode::serialize(&*meta.logs.read()).unwrap();
+            let logs_data = bincode::serialize(&*meta.logs.read().await).unwrap();
             storage.logs.write_all(logs_data.as_slice());
             storage.logs.sync_all().unwrap();
         }

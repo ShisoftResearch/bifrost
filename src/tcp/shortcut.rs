@@ -29,7 +29,7 @@ pub async fn call(server_id: u64, data: TcpReq) -> Result<BytesMut> {
         }
 }
 
-pub fn is_local(server_id: u64) -> bool {
-    let cbs = TCP_CALLBACKS.read();
+pub async fn is_local(server_id: u64) -> bool {
+    let cbs = TCP_CALLBACKS.read().await;
     cbs.contains_key(&server_id)
 }
