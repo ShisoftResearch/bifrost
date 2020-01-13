@@ -25,6 +25,7 @@ use crate::raft::client::RaftClient;
 use rand::Rng;
 use futures::stream::FuturesUnordered;
 use tokio::time;
+use futures::future::BoxFuture;
 
 #[macro_use]
 pub mod state_machine;
@@ -371,7 +372,7 @@ impl RaftService {
         };
         self.become_leader(&mut meta, last_log_id).await;
     }
-    pub async fn join(&self, servers: &Vec<String>) -> Result<Result<(), ()>, ExecError> {
+    pub async fn join(&self, servers: &Vec<String>) -> Result<bool, ExecError> {
         debug!("Trying to join cluster with id {}", self.id);
         let client = RaftClient::new(servers, self.options.service_id).await;
         if let Ok(client) = client {
@@ -848,9 +849,8 @@ impl RaftService {
     }
 }
 
-#[async_trait]
 impl Service for RaftService {
-    async fn append_entries<'a>(
+    fn append_entries<'a>(
         &'a self,
         term: u64,
         leader_id: u64,
@@ -858,189 +858,199 @@ impl Service for RaftService {
         prev_log_term: u64,
         entries: Option<LogEntries>,
         leader_commit: u64,
-    ) -> (u64, AppendEntriesResult) {
-        let mut meta = self.write_meta().await;
-        self.reset_last_checked(&mut meta);
-        let term_ok = self.check_term(&mut meta, term, leader_id); // RI, 1
-        let result = if term_ok {
-            if let Membership::Candidate = meta.membership {
-                debug!("SWITCH FROM CANDIDATE BACK TO FOLLOWER {}", self.id);
-                self.become_follower(&mut meta, term, leader_id);
-            }
-            if prev_log_id > 0 {
-                check_commit(&mut meta);
-                let mut logs = meta.logs.write().await;
-                //RI, 2
-                let contains_prev_log = logs.contains_key(&prev_log_id);
-                let mut log_mismatch = false;
+    ) -> BoxFuture<(u64, AppendEntriesResult)> {
+        async {
+            let mut meta = self.write_meta().await;
+            self.reset_last_checked(&mut meta);
+            let term_ok = self.check_term(&mut meta, term, leader_id); // RI, 1
+            let result = if term_ok {
+                if let Membership::Candidate = meta.membership {
+                    debug!("SWITCH FROM CANDIDATE BACK TO FOLLOWER {}", self.id);
+                    self.become_follower(&mut meta, term, leader_id);
+                }
+                if prev_log_id > 0 {
+                    check_commit(&mut meta);
+                    let mut logs = meta.logs.write().await;
+                    //RI, 2
+                    let contains_prev_log = logs.contains_key(&prev_log_id);
+                    let mut log_mismatch = false;
 
-                if contains_prev_log {
-                    let entry = logs.get(&prev_log_id).unwrap();
-                    log_mismatch = entry.term != prev_log_term;
-                } else {
-                    return (meta.term, AppendEntriesResult::LogMismatch); // prev log not existed
-                }
-                if log_mismatch {
-                    //RI, 3
-                    let ids_to_del: Vec<u64> = logs
-                        .range((Included(prev_log_id), Unbounded))
-                        .map(|(id, _)| *id)
-                        .collect();
-                    for id in ids_to_del {
-                        logs.remove(&id);
+                    if contains_prev_log {
+                        let entry = logs.get(&prev_log_id).unwrap();
+                        log_mismatch = entry.term != prev_log_term;
+                    } else {
+                        return (meta.term, AppendEntriesResult::LogMismatch); // prev log not existed
                     }
-                    return (meta.term, AppendEntriesResult::LogMismatch); // log mismatch
-                }
-            }
-            let mut last_new_entry = std::u64::MAX;
-            {
-                let mut logs = meta.logs.write().await;
-                let mut leader_commit = leader_commit;
-                if let Some(ref entries) = entries {
-                    // entry not empty
-                    for entry in entries {
-                        let entry_id = entry.id;
-                        let sm_id = entry.sm_id;
-                        logs.entry(entry_id).or_insert(entry.clone()); // RI, 4
-                        last_new_entry = max(last_new_entry, entry_id);
+                    if log_mismatch {
+                        //RI, 3
+                        let ids_to_del: Vec<u64> = logs
+                            .range((Included(prev_log_id), Unbounded))
+                            .map(|(id, _)| *id)
+                            .collect();
+                        for id in ids_to_del {
+                            logs.remove(&id);
+                        }
+                        return (meta.term, AppendEntriesResult::LogMismatch); // log mismatch
                     }
-                } else if !logs.is_empty() {
-                    last_new_entry = logs.values().last().unwrap().id;
                 }
-                self.logs_post_processing(&meta, &mut logs);
-            }
-            if leader_commit > meta.commit_index {
-                //RI, 5
-                meta.commit_index = min(leader_commit, last_new_entry);
-                check_commit(&mut meta);
-            }
-            (meta.term, AppendEntriesResult::Ok)
-        } else {
-            (meta.term, AppendEntriesResult::TermOut(meta.leader_id)) // term mismatch
-        };
-        self.reset_last_checked(&mut meta);
-        return result;
+                let mut last_new_entry = std::u64::MAX;
+                {
+                    let mut logs = meta.logs.write().await;
+                    let mut leader_commit = leader_commit;
+                    if let Some(ref entries) = entries {
+                        // entry not empty
+                        for entry in entries {
+                            let entry_id = entry.id;
+                            let sm_id = entry.sm_id;
+                            logs.entry(entry_id).or_insert(entry.clone()); // RI, 4
+                            last_new_entry = max(last_new_entry, entry_id);
+                        }
+                    } else if !logs.is_empty() {
+                        last_new_entry = logs.values().last().unwrap().id;
+                    }
+                    self.logs_post_processing(&meta, &mut logs);
+                }
+                if leader_commit > meta.commit_index {
+                    //RI, 5
+                    meta.commit_index = min(leader_commit, last_new_entry);
+                    check_commit(&mut meta);
+                }
+                (meta.term, AppendEntriesResult::Ok)
+            } else {
+                (meta.term, AppendEntriesResult::TermOut(meta.leader_id)) // term mismatch
+            };
+            self.reset_last_checked(&mut meta);
+            return result;
+        }.boxed()
     }
 
-    async fn request_vote(
+    fn request_vote(
         &self,
         term: u64,
         candidate_id: u64,
         last_log_id: u64,
         last_log_term: u64,
-    ) -> ((u64, u64), bool) {
-        let mut meta = self.write_meta().await;
-        let vote_for = meta.vote_for;
-        let mut vote_granted = false;
-        if term > meta.term {
-            check_commit(&mut meta);
-            let logs = meta.logs.read().await;
-            let conf_sm = &meta.state_machine.read().await.configs;
-            let candidate_valid = conf_sm.member_existed(candidate_id);
-            debug!(
-                "{} VOTE FOR: {}, valid: {}",
-                self.id, candidate_id, candidate_valid
-            );
-            if (vote_for.is_none() || vote_for.unwrap() == candidate_id) && candidate_valid {
-                let (last_id, last_term) = get_last_log_info!(self, logs);
-                if last_log_id >= last_id && last_log_term >= last_term {
-                    vote_granted = true;
+    ) -> BoxFuture<((u64, u64), bool)> {
+        async {
+            let mut meta = self.write_meta().await;
+            let vote_for = meta.vote_for;
+            let mut vote_granted = false;
+            if term > meta.term {
+                check_commit(&mut meta);
+                let logs = meta.logs.read().await;
+                let conf_sm = &meta.state_machine.read().await.configs;
+                let candidate_valid = conf_sm.member_existed(candidate_id);
+                debug!(
+                    "{} VOTE FOR: {}, valid: {}",
+                    self.id, candidate_id, candidate_valid
+                );
+                if (vote_for.is_none() || vote_for.unwrap() == candidate_id) && candidate_valid {
+                    let (last_id, last_term) = get_last_log_info!(self, logs);
+                    if last_log_id >= last_id && last_log_term >= last_term {
+                        vote_granted = true;
+                    } else {
+                        debug!(
+                            "{} VOTE FOR: {}, not granted due to log check",
+                            self.id, candidate_id
+                        );
+                    }
                 } else {
                     debug!(
-                        "{} VOTE FOR: {}, not granted due to log check",
-                        self.id, candidate_id
+                        "{} VOTE FOR: {}, not granted due to voted for {}",
+                        self.id,
+                        candidate_id,
+                        vote_for.unwrap()
                     );
                 }
             } else {
                 debug!(
-                    "{} VOTE FOR: {}, not granted due to voted for {}",
-                    self.id,
-                    candidate_id,
-                    vote_for.unwrap()
+                    "{} VOTE FOR: {}, not granted due to term out",
+                    self.id, candidate_id
                 );
             }
-        } else {
+            if vote_granted {
+                meta.vote_for = Some(candidate_id);
+            }
             debug!(
-                "{} VOTE FOR: {}, not granted due to term out",
-                self.id, candidate_id
+                "{} VOTE FOR: {}, granted: {}",
+                self.id, candidate_id, vote_granted
             );
-        }
-        if vote_granted {
-            meta.vote_for = Some(candidate_id);
-        }
-        debug!(
-            "{} VOTE FOR: {}, granted: {}",
-            self.id, candidate_id, vote_granted
-        );
-        ((meta.term, meta.leader_id), vote_granted)
+            ((meta.term, meta.leader_id), vote_granted)
+        }.boxed()
     }
 
-    async fn install_snapshot(
+    fn install_snapshot(
         &self,
         term: u64,
         leader_id: u64,
         last_included_index: u64,
         last_included_term: u64,
         data: Vec<u8>,
-    ) -> u64 {
-        let mut meta = self.write_meta().await;
-        let term_ok = self.check_term(&mut meta, term, leader_id);
-        if term_ok {
-            check_commit(&mut meta);
-        }
-        let mut sm = meta.state_machine.write().await;
-        sm.recover(data);
-        meta.term = last_included_term;
-        meta.commit_index = last_included_index;
-        meta.last_applied = last_included_index;
-        self.reset_last_checked(&mut meta);
-        meta.term
-    }
-
-    async fn c_command(&self, entry: LogEntry) -> ClientCmdResponse {
-        let mut meta = self.write_meta().await;
-        let mut entry = entry;
-        if !is_leader(&meta) {
-            return ClientCmdResponse::NotLeader(meta.leader_id);
-        }
-        let (new_log_id, new_log_term) = self.leader_append_log(&meta, &mut entry).await;
-        let mut data = match entry.sm_id {
-            // special treats for membership changes
-            CONFIG_SM_ID => Some(self.try_sync_config_to_followers(&mut meta, &entry, new_log_id).await),
-            _ => self.try_sync_log_to_followers(&mut meta, &entry, new_log_id).await,
-        }; // Some for committed and None for not committed
-        if let Some(data) = data {
-            ClientCmdResponse::Success {
-                data,
-                last_log_id: new_log_id,
-                last_log_term: new_log_term,
+    ) -> BoxFuture<u64> {
+        async {
+            let mut meta = self.write_meta().await;
+            let term_ok = self.check_term(&mut meta, term, leader_id);
+            if term_ok {
+                check_commit(&mut meta);
             }
-        } else {
-            ClientCmdResponse::NotCommitted
-        }
+            let mut sm = meta.state_machine.write().await;
+            sm.recover(data);
+            meta.term = last_included_term;
+            meta.commit_index = last_included_index;
+            meta.last_applied = last_included_index;
+            self.reset_last_checked(&mut meta);
+            meta.term
+        }.boxed()
     }
 
-    async fn c_query(&self, entry: LogEntry) -> ClientQryResponse {
-        let mut meta = self.meta.read().await;
-        let logs = meta.logs.read().await;
-        let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
-        if entry.term > last_log_term || entry.id > last_log_id {
-            ClientQryResponse::LeftBehind
-        } else {
-            ClientQryResponse::Success {
-                data: meta.state_machine.read().await.exec_qry(&entry),
-                last_log_id,
-                last_log_term,
+    fn c_command(&self, entry: LogEntry) -> BoxFuture<ClientCmdResponse> {
+        async {
+            let mut meta = self.write_meta().await;
+            let mut entry = entry;
+            if !is_leader(&meta) {
+                return ClientCmdResponse::NotLeader(meta.leader_id);
             }
-        }
+            let (new_log_id, new_log_term) = self.leader_append_log(&meta, &mut entry).await;
+            let mut data = match entry.sm_id {
+                // special treats for membership changes
+                CONFIG_SM_ID => Some(self.try_sync_config_to_followers(&mut meta, &entry, new_log_id).await),
+                _ => self.try_sync_log_to_followers(&mut meta, &entry, new_log_id).await,
+            }; // Some for committed and None for not committed
+            if let Some(data) = data {
+                ClientCmdResponse::Success {
+                    data,
+                    last_log_id: new_log_id,
+                    last_log_term: new_log_term,
+                }
+            } else {
+                ClientCmdResponse::NotCommitted
+            }
+        }.boxed()
     }
 
-    async fn c_server_cluster_info(&self) -> ClientClusterInfo {
-        self.cluster_info().await
+    fn c_query(&self, entry: LogEntry) -> BoxFuture<ClientQryResponse> {
+        async {
+            let mut meta = self.meta.read().await;
+            let logs = meta.logs.read().await;
+            let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
+            if entry.term > last_log_term || entry.id > last_log_id {
+                ClientQryResponse::LeftBehind
+            } else {
+                ClientQryResponse::Success {
+                    data: meta.state_machine.read().await.exec_qry(&entry),
+                    last_log_id,
+                    last_log_term,
+                }
+            }
+        }.boxed()
     }
 
-    async fn c_put_offline(&self) -> bool {
-        self.leave().await
+    fn c_server_cluster_info(&self) -> BoxFuture<ClientClusterInfo> {
+        async { self.cluster_info().await }.boxed()
+    }
+
+    fn c_put_offline(&self) -> BoxFuture<bool> {
+        async { self.leave().await }.boxed()
     }
 }
 

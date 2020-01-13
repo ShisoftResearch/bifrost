@@ -92,7 +92,6 @@ macro_rules! service {
         use $crate::rpc::*;
         use futures::prelude::*;
         use std::pin::Pin;
-        use async_trait::async_trait;
 
         lazy_static! {
             pub static ref RPC_SVRS:
@@ -103,7 +102,7 @@ macro_rules! service {
         pub trait Service : RPCService {
            $(
                 $(#[$attr])*
-                fn $fn_name<'a>(&'a self, $($arg:$in_),*) -> Pin<Box<dyn core::future::Future<Output = $out> + Send + 'a>>;
+                fn $fn_name<'a>(&'a self, $($arg:$in_),*) -> ::futures::future::BoxFuture<$out>;
            )*
            fn inner_dispatch<'a>(&'a self, data: ::bytes::BytesMut) -> Pin<Box<dyn core::future::Future<Output = Result<::bytes::BytesMut, RPCRequestError>> + Send + 'a>> {
                let (func_id, body) = read_u64_head(data);

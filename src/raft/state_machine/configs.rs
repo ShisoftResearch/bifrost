@@ -32,7 +32,7 @@ pub struct ConfigSnapshot {
 }
  
 raft_state_machine! {
-    def cmd new_member_(address: String) -> Result<(), ()>;
+    def cmd new_member_(address: String) -> bool;
     def cmd del_member_(address: String);
     def qry member_address() -> Vec<String>;
 
@@ -40,43 +40,52 @@ raft_state_machine! {
     def cmd unsubscribe(sub_id: u64);
 }
 
-#[async_trait]
 impl StateMachineCmds for Configures {
-    async fn new_member_(&mut self, address: String) -> Result<(), ()> {
-        let addr = address.clone();
-        let id = hash_str(&addr);
-        if !self.members.contains_key(&id) {
-            match rpc::DEFAULT_CLIENT_POOL.get(&address) {
-                Ok(client) => {
-                    self.members.insert(
-                        id,
-                        RaftMember {
-                            rpc: AsyncServiceClient::new(self.service_id, &client),
-                            address,
+    fn new_member_(&mut self, address: String) -> BoxFuture<bool> {
+        async {
+            let addr = address.clone();
+            let id = hash_str(&addr);
+            if !self.members.contains_key(&id) {
+                match rpc::DEFAULT_CLIENT_POOL.get(&address).await {
+                    Ok(client) => {
+                        self.members.insert(
                             id,
-                        },
-                    );
-                    return Ok(());
+                            RaftMember {
+                                rpc: AsyncServiceClient::new(self.service_id, &client),
+                                address,
+                                id,
+                            },
+                        );
+                        return true;
+                    }
+                    Err(_) => {}
                 }
-                Err(_) => {}
             }
-        }
-        Err(())
+            false
+        }.boxed()
     }
-    async fn del_member_(&mut self, address: String) {
-        let hash = hash_str(&address);
-        self.members.remove(&hash);
+    fn del_member_(&mut self, address: String) -> BoxFuture<()> {
+        async {
+            let hash = hash_str(&address);
+            self.members.remove(&hash);
+        }.boxed()
     }
-    async fn member_address(&self) -> Vec<String> {
-        self.members.values().map(|m| m.address).collect()
+    fn member_address(&self) -> BoxFuture<Vec<String>> {
+        async {
+            self.members.values().map(|m| m.address).collect()
+        }.boxed()
     }
-    async fn subscribe(&mut self, key: SubKey, address: String, session_id: u64) -> Result<u64, ()> {
-        let mut subs = self.subscriptions.write().await;
-        subs.subscribe(key, &address, session_id)
+    fn subscribe(&mut self, key: SubKey, address: String, session_id: u64) -> BoxFuture<Result<u64, ()>> {
+        async {
+            let mut subs = self.subscriptions.write().await;
+            subs.subscribe(key, &address, session_id)
+        }.boxed()
     }
-    async fn unsubscribe(&mut self, sub_id: u64) {
-        let mut subs = self.subscriptions.write().await;
-        subs.remove_subscription(sub_id);
+    fn unsubscribe(&mut self, sub_id: u64) -> BoxFuture<()> {
+        async {
+            let mut subs = self.subscriptions.write().await;
+            subs.remove_subscription(sub_id);
+        }.boxed()
     }
 }
 
@@ -122,11 +131,11 @@ impl Configures {
             self.new_member(addr.clone());
         }
     }
-    pub fn new_member(&mut self, address: String) {
-        self.new_member_(address)
+    pub async fn new_member(&mut self, address: String) -> bool {
+        self.new_member_(address).await
     }
-    pub fn del_member(&mut self, address: String) {
-        self.del_member_(address)
+    pub async fn del_member(&mut self, address: String) {
+        self.del_member_(address).await
     }
     pub fn member_existed(&self, id: u64) -> bool {
         self.members.contains_key(&id)

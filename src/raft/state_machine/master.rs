@@ -54,11 +54,11 @@ impl StateMachineCtl for MasterStateMachine {
             }
         }
         sms.push((self.configs.id(), self.configs.snapshot().unwrap()));
-        let data = bincode::serialize(&sms);
+        let data = bincode::serialize(&sms).unwrap();
         Some(data)
     }
     fn recover(&mut self, data: Vec<u8>) {
-        let mut sms: SnapshotDataItems = bincode::deserialize(&data);
+        let mut sms: SnapshotDataItems = bincode::deserialize(data.as_slice()).unwrap();
         for (sm_id, snapshot) in sms {
             self.snapshots.insert(sm_id, snapshot);
         }

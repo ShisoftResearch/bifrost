@@ -213,23 +213,4 @@ impl ClientPool {
             Ok(client)
         }
     }
-
-    pub async fn get_by_id_async<F>(
-        &self,
-        server_id: u64,
-        addr_fn: F,
-    ) -> io::Result<Arc<RPCClient>>
-    where
-        F: FnOnce(u64) -> String,
-    {
-        let clients = self.clients.lock().await;
-        if clients.contains_key(&server_id) {
-            let client = clients.get(&server_id).unwrap().clone();
-            Ok(client)
-        } else {
-            let new_client = Arc::new(RPCClient::new_async(&addr_fn(server_id)).await?);
-            clients.insert(server_id, new_client.clone());
-            Ok(new_client.clone())
-        }
-    }
 }

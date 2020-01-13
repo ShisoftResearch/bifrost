@@ -13,6 +13,7 @@ use crate::raft::state_machine::callback::client::SubscriptionService;
 use crate::raft::state_machine::configs::commands::{
     subscribe as conf_subscribe, unsubscribe as conf_unsubscribe,
 };
+use futures::future::BoxFuture;
 
 const ORDERING: Ordering = Ordering::Relaxed;
 pub type Client = Arc<AsyncServiceClient>;
@@ -197,7 +198,7 @@ impl RaftClient {
         }
     }
 
-    pub async fn subscribe<M, R, F, FUT>(
+    pub async fn subscribe<M, R, F>(
         &self,
         sm_id: u64,
         msg: M,
@@ -205,21 +206,24 @@ impl RaftClient {
     ) -> Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>
     where
         M: RaftMsg<R> + 'static,
-        R: 'static,
-        F: Fn(R) -> Pin<Box<dyn Future<Output = ()>>> + 'static,
+        R: 'static + Send,
+        F: Fn(R) -> BoxFuture<'static, ()> + 'static + Send + Sync,
     {
         let callback = match self.get_callback().await {
             Ok(c) => c,
             Err(e) => return Ok(Err(e)),
         };
         let key = self.get_sub_key(sm_id, msg);
-        let wrapper_fn = move |data: Vec<u8>| f(M::decode_return(&data));
+        let wrapper_fn = move |data: Vec<u8>| -> BoxFuture<'static, ()> {
+            async { f(M::decode_return(&data)).await }.boxed()
+        };
         let cluster_subs = self.execute(CONFIG_SM_ID, conf_subscribe::new(&key, &callback.server_address, &callback.session_id)).await;
         match cluster_subs {
             Ok(Ok(sub_id)) => {
                 let mut subs_map = callback.subs.write().await;
                 let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
-                subs_lst.push((Box::new(wrapper_fn), sub_id));
+                let boxed_fn = Box::new(wrapper_fn);
+                subs_lst.push((boxed_fn, sub_id));
                 Ok(Ok((key, sub_id)))
             }
             Ok(Err(_)) => Ok(Err(SubscriptionError::RemoteError)),

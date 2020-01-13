@@ -4,10 +4,10 @@
 #[macro_export]
 macro_rules! raft_trait_fn {
     (qry $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty) => {
-        fn $fn_name<'a>(&'a self, $($arg:$in_),*) -> ::std::pin::Pin<Box<dyn core::future::Future<Output = $out> + Send + 'a>>;
+        fn $fn_name<'a>(&'a self, $($arg:$in_),*) -> ::futures::future::BoxFuture<$out>;
     };
     (cmd $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty) => {
-        fn $fn_name<'a>(&'a mut self, $($arg:$in_),*) -> ::std::pin::Pin<Box<dyn core::future::Future<Output = $out> + Send + 'a>>;
+        fn $fn_name<'a>(&'a mut self, $($arg:$in_),*) -> ::futures::future::BoxFuture<$out>;
     };
     (sub $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty) => {}
 }
@@ -15,14 +15,15 @@ macro_rules! raft_trait_fn {
 #[macro_export]
 macro_rules! raft_client_fn {
     (sub $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty) => {
-        pub async fn $fn_name<F>(&self, f: F, $($arg:$in_),* ) -> Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>
-        where F: Fn($out) + 'static + Send + Sync
+        pub fn $fn_name<F>(&self, f: F, $($arg:$in_),* ) 
+            -> BoxFuture<Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
+        where F: Fn($out) -> BoxFuture<'static, ()> + 'static + Send + Sync
         {
-            self.client.subscribe(
+            self.client.subscribe( 
                 self.sm_id,
                 $fn_name::new($($arg,)*),
                 f
-            )
+            ).boxed()
         }
     };
     ($others:ident $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty) => {
@@ -30,7 +31,7 @@ macro_rules! raft_client_fn {
             self.client.execute(
                 self.sm_id,
                 $fn_name::new($($arg,)*)
-            )
+            ).await
         }
     };
 } 
@@ -53,7 +54,7 @@ macro_rules! raft_dispatch_fn {
     ($fn_name:ident $s: ident $d: ident ( $( $arg:ident : $in_:ty ),* )) => {{
         let decoded: ($($in_,)*) = $crate::utils::bincode::deserialize($d);
         let ($($arg,)*) = decoded;
-        let f_result = $s.$fn_name($($arg),*);
+        let f_result = $s.$fn_name($($arg),*).await;
         Some($crate::utils::bincode::serialize(&f_result))
     }};
 }
@@ -77,8 +78,8 @@ macro_rules! raft_dispatch_qry {
 #[macro_export]
 macro_rules! raft_sm_complete {
     () => {
-        fn fn_dispatch_cmd(&mut self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {self.dispatch_cmd_(fn_id, data)}
-        fn fn_dispatch_qry(&self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {self.dispatch_qry_(fn_id, data)}
+        fn fn_dispatch_cmd<'a>(&'a mut self, fn_id: u64, data: &'a Vec<u8>) -> ::futures::future::BoxFuture<Option<Vec<u8>> > {self.dispatch_cmd_(fn_id, data)}
+        fn fn_dispatch_qry<'a>(&'a self, fn_id: u64, data: &'a Vec<u8>) -> ::futures::future::BoxFuture<Option<Vec<u8>>> {self.dispatch_qry_(fn_id, data)}
         fn op_type(&mut self, fn_id: u64) -> Option<$crate::raft::state_machine::OpType> {self.op_type_(fn_id)}
     };
 }
@@ -141,10 +142,11 @@ macro_rules! raft_state_machine {
             def $smt:ident $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty;
         )*
     ) => {
-        use async_trait::async_trait;
+        use futures::prelude::*;
+        use futures::future::BoxFuture;
 
         pub mod commands {
-            use super::*;
+            use futures::prelude::*;
             $(
                 #[derive(Serialize, Deserialize, Debug)]
                 pub struct $fn_name {
@@ -173,7 +175,6 @@ macro_rules! raft_state_machine {
             )*
         }
 
-        #[async_trait]
         pub trait StateMachineCmds: $crate::raft::state_machine::StateMachineCtl {
            $(
                 $(#[$attr])*
@@ -190,27 +191,31 @@ macro_rules! raft_state_machine {
                    }
                 }
            }
-           fn dispatch_cmd_(&mut self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {
-               match fn_id as usize {
-                   $(::bifrost_plugins::hash_ident!($fn_name) => {
-                        raft_dispatch_cmd!($smt $fn_name self data( $( $arg : $in_ ),* ))
-                   }),*
-                   _ => {
-                       debug!("Undefined function id: {}", fn_id);
-                       None
-                   }
-               }
+           fn dispatch_cmd_<'a>(&'a mut self, fn_id: u64, data: &'a Vec<u8>) -> BoxFuture<Option<Vec<u8>>> {
+               async {
+                    match fn_id as usize {
+                        $(::bifrost_plugins::hash_ident!($fn_name) => {
+                            raft_dispatch_cmd!($smt $fn_name self data( $( $arg : $in_ ),* ))
+                        }),*
+                        _ => {
+                            debug!("Undefined function id: {}", fn_id);
+                            None
+                        }
+                    }
+               }.boxed()
            }
-           fn dispatch_qry_(&self, fn_id: u64, data: &Vec<u8>) -> Option<Vec<u8>> {
-               match fn_id as usize {
-                   $(::bifrost_plugins::hash_ident!($fn_name) => {
-                        raft_dispatch_qry!($smt $fn_name self data( $( $arg : $in_ ),* ))
-                   }),*
-                   _ => {
-                       debug!("Undefined function id: {}", fn_id);
-                       None
-                   }
-               }
+           fn dispatch_qry_<'a>(&'a self, fn_id: u64, data: &'a Vec<u8>) -> BoxFuture<Option<Vec<u8>>> {
+               async {
+                    match fn_id as usize {
+                        $(::bifrost_plugins::hash_ident!($fn_name) => {
+                            raft_dispatch_qry!($smt $fn_name self data( $( $arg : $in_ ),* ))
+                        }),*
+                        _ => {
+                            debug!("Undefined function id: {}", fn_id);
+                            None
+                        }
+                    }
+               }.boxed()
            }
         }
         pub mod client {

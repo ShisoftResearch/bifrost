@@ -3,23 +3,24 @@ use crate::utils::rwlock::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use crate::utils::time::get_time;
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 
 pub struct SubscriptionService {
-    pub subs: RwLock<HashMap<SubKey, Vec<(Box<dyn Fn(Vec<u8>) -> Pin<Box<dyn Future<Output = ()>>>>, u64)>>>,
+    pub subs: RwLock<HashMap<SubKey, Vec<(Box<dyn Fn(Vec<u8>) -> BoxFuture<'static, ()> + Send>, u64)>>>,
     pub server_address: String,
     pub session_id: u64,
 }
 
-#[async_trait]
 impl Service for SubscriptionService {
-    async fn notify(&self, key: SubKey, data: Vec<u8>) {
-        let subs = self.subs.read().await;
-        if let Some(subs) = subs.get(&key) {
-            for &(ref fun, _) in subs {
-                fun(data.clone()).await;
+    fn notify(&self, key: SubKey, data: Vec<u8>) -> BoxFuture<()> {
+        async {
+            let subs = self.subs.read().await;
+            if let Some(subs) = subs.get(&key) {
+                for &(ref fun, _) in subs {
+                    fun(data.clone()).await;
+                }
             }
-        }
+        }.boxed()
     }
 }
 dispatch_rpc_service_functions!(SubscriptionService);
