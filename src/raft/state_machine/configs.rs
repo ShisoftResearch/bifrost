@@ -78,7 +78,7 @@ impl StateMachineCmds for Configures {
     fn subscribe(&mut self, key: SubKey, address: String, session_id: u64) -> BoxFuture<Result<u64, ()>> {
         async {
             let mut subs = self.subscriptions.write().await;
-            subs.subscribe(key, &address, session_id)
+            subs.subscribe(key, &address, session_id).await
         }.boxed()
     }
     fn unsubscribe(&mut self, sub_id: u64) -> BoxFuture<()> {

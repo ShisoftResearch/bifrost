@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use crate::raft::{RaftService, RaftMsg, IS_LEADER};
 use crate::rpc;
+use futures::stream::FuturesUnordered;
 
 pub struct Subscriber {
     pub session_id: u64,
@@ -35,7 +36,7 @@ impl Subscriptions {
         }
     }
 
-    pub fn subscribe(&mut self, key: SubKey, address: &String, session_id: u64) -> Result<u64, ()> {
+    pub async fn subscribe(&mut self, key: SubKey, address: &String, session_id: u64) -> Result<u64, ()> {
         let sub_service_id = DEFAULT_SERVICE_ID;
         let suber_id = hash_str(address);
         let suber_exists = self.subscribers.contains_key(&suber_id);
@@ -58,7 +59,7 @@ impl Subscriptions {
                 Subscriber {
                     session_id,
                     client: {
-                        if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(address) {
+                        if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(address).await {
                             AsyncServiceClient::new(sub_service_id, &client)
                         } else {
                             return Err(());
@@ -141,7 +142,7 @@ impl SMCallback {
         }
     }
 
-    pub fn notify<M, R>(
+    pub async fn notify<M, R>(
         &self,
         msg: M,
         message: R,
@@ -149,7 +150,7 @@ impl SMCallback {
         (
             usize,
             Vec<NotifyError>,
-            Vec<Result<Result<(), ()>, rpc::RPCError>>,
+            Vec<Result<(), rpc::RPCError>>,
         ),
         NotifyError,
     >
@@ -167,8 +168,8 @@ impl SMCallback {
                 let raft_sid = self.raft_service.options.service_id;
                 let sm_id = self.sm_id;
                 let key = (raft_sid, sm_id, fn_id, pattern_id);
-                let internal_subs = self.internal_subs.read();
-                let svr_subs = self.subscriptions.read();
+                let internal_subs = self.internal_subs.read().await;
+                let svr_subs = self.subscriptions.read().await;
                 debug!("Subs key: {:?}", svr_subs.subscriptions.keys());
                 debug!("Looking for: {:?}", &key);
                 if let Some(internal_subs) = internal_subs.get(&pattern_id) {
@@ -177,22 +178,25 @@ impl SMCallback {
                     }
                 }
                 if let Some(sub_ids) = svr_subs.subscriptions.get(&key) {
-                    let sub_result: Vec<_> = sub_ids
+                    let sub_result_futs: FuturesUnordered<_> = sub_ids
                         .iter()
                         .map(|sub_id| {
-                            if let Some(subscriber_id) = svr_subs.sub_suber.get(&sub_id) {
-                                if let Some(subscriber) = svr_subs.subscribers.get(&subscriber_id) {
-                                    let data = bincode::serialize(&message);
-                                    let client = &subscriber.client;
-                                    Ok(client.notify(key, data))
+                            async {
+                                if let Some(subscriber_id) = svr_subs.sub_suber.get(&sub_id) {
+                                    if let Some(subscriber) = svr_subs.subscribers.get(&subscriber_id) {
+                                        let data = bincode::serialize(&message).unwrap();
+                                        let client = &subscriber.client;
+                                        Ok(client.notify(key, data).await)
+                                    } else {
+                                        Err(NotifyError::CannotFindSubscriber)
+                                    }
                                 } else {
-                                    Err(NotifyError::CannotFindSubscriber)
+                                    Err(NotifyError::CannotFindSubscribers)
                                 }
-                            } else {
-                                Err(NotifyError::CannotFindSubscribers)
                             }
-                        })
+                        })  
                         .collect();
+                    let sub_result: Vec<_> = sub_result_futs.collect().await;
                     let errors = sub_result
                         .iter()
                         .filter(|r| r.is_err())
@@ -203,7 +207,6 @@ impl SMCallback {
                         .into_iter()
                         .filter(|r| r.is_ok())
                         .map(|r| r.unwrap())
-                        .map(|req| req.wait())
                         .collect::<Vec<_>>();
                     return Ok((sub_ids.len(), errors, response));
                 } else {
@@ -213,7 +216,7 @@ impl SMCallback {
             _ => return Err(NotifyError::OpTypeNotSubscribe),
         }
     }
-    pub fn internal_subscribe<R, F, M>(&self, msg: M, trigger: F) -> Result<(), NotifyError>
+    pub async fn internal_subscribe<R, F, M>(&self, msg: M, trigger: F) -> Result<(), NotifyError>
     where
         M: RaftMsg<R>,
         F: Fn(&R) + Sync + Send + 'static,
@@ -223,7 +226,7 @@ impl SMCallback {
         match op_type {
             OpType::SUBSCRIBE => {
                 let pattern_id = hash_bytes(&pattern_data.as_slice());
-                let mut internal_subs = self.internal_subs.write();
+                let mut internal_subs = self.internal_subs.write().await;
                 internal_subs
                     .entry(pattern_id)
                     .or_insert_with(|| Vec::new())
