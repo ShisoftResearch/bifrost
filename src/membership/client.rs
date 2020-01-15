@@ -5,6 +5,7 @@ use crate::raft::state_machine::master::ExecError;
 use crate::raft::client::{RaftClient, SubscriptionError, SubscriptionReceipt};
 use crate::membership::raft::client::SMClient;
 use crate::membership::DEFAULT_SERVICE_ID;
+use futures::future::BoxFuture;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Member {
@@ -92,7 +93,7 @@ impl ObserverClient {
         group: &str,
     ) -> Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>
     where
-        F: Fn((Member, u64)) + 'static + Unpin + Send + Sync,
+        F: Fn((Member, u64)) -> BoxFuture<'static, ()> + 'static + Unpin + Send + Sync,
     {
         self.sm_client.on_group_member_offline(f, &hash_str(group)).await
     }
@@ -111,7 +112,7 @@ impl ObserverClient {
         group: &str,
     ) -> impl Future<Output = Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
     where
-        F: Fn(Result<(Member, u64), ()>) + 'static + Send + Sync,
+        F: Fn((Member, u64)) -> BoxFuture<'static, ()> + 'static + Unpin + Send + Sync,
     {
         self.sm_client.on_group_member_online(f, &hash_str(group))
     }
@@ -120,7 +121,7 @@ impl ObserverClient {
         f: F,
     ) -> impl Future<Item = Result<SubscriptionReceipt, SubscriptionError>, Error = ExecError>
     where
-        F: Fn(Result<(Member, u64), ()>) + 'static + Send + Sync,
+        F: Fn(Result<(Member, u64), ()>) -> BoxFuture<'static, ()> + 'static + Unpin + Send + Sync,
     {
         self.sm_client.on_any_member_online(f)
     }
@@ -130,7 +131,7 @@ impl ObserverClient {
         group: &str,
     ) -> impl Future<Output = Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
     where
-        F: Fn(Result<(Member, u64), ()>) + 'static + Send + Sync,
+        F: Fn(Result<(Member, u64), ()>) -> BoxFuture<'static, ()> + 'static + Unpin + Send + Sync,
     {
         self.sm_client.on_group_member_joined(f, &hash_str(group))
     }
@@ -139,7 +140,7 @@ impl ObserverClient {
         f: F,
     ) -> impl Future<Output = Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
     where
-        F: Fn(Result<(Member, u64), ()>) + 'static + Send + Sync,
+        F: Fn(Result<(Member, u64), ()>) -> BoxFuture<'static, ()> + 'static + Unpin + Send + Sync,
     {
         self.sm_client.on_any_member_joined(f)
     }
@@ -149,7 +150,7 @@ impl ObserverClient {
         group: &str,
     ) -> impl Future<Output = Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
     where
-        F: Fn(Result<(Member, u64), ()>) + 'static + Send + Sync,
+        F: Fn(Result<(Member, u64), ()>) -> BoxFuture<'static, ()> + 'static + Unpin + Send + Sync,
     {
         self.sm_client.on_group_member_left(f, &hash_str(group))
     }
@@ -158,7 +159,7 @@ impl ObserverClient {
         f: F,
     ) -> impl Future<Item = Result<SubscriptionReceipt, SubscriptionError>, Error = ExecError>
     where
-        F: Fn(Result<(Member, u64), ()>) + 'static + Send + Sync,
+        F: Fn(Result<(Member, u64), ()>) -> BoxFuture<'static, ()> + 'static + Unpin + Send + Sync,
     {
         self.sm_client.on_any_member_left(f)
     }
@@ -168,7 +169,7 @@ impl ObserverClient {
         group: &String,
     ) -> impl Future<Item = Result<SubscriptionReceipt, SubscriptionError>, Error = ExecError>
     where
-        F: Fn(Result<(Option<Member>, Option<Member>, u64), ()>) + 'static + Send + Sync,
+        F: Fn(Result<(Option<Member>, Option<Member>, u64), ()>) -> BoxFuture<'static, ()> + 'static + Unpin + Send + Sync,
     {
         self.sm_client.on_group_leader_changed(f, &hash_str(group))
     }
