@@ -117,7 +117,7 @@ impl ConsistentHashing {
             let ch = ch.clone();
             let res = membership.on_group_member_offline(
                 move |r| {
-                    if let Ok((member, version)) = r {
+                    if let (member, version) = r {
                         server_left(&ch, member, version);
                     }
                 },
@@ -130,37 +130,37 @@ impl ConsistentHashing {
         }
         Ok(ch)
     }
-    pub fn new(
+    pub async fn new(
         group: &str,
         raft_client: &Arc<RaftClient>,
     ) -> Result<Arc<ConsistentHashing>, CHError> {
-        Self::new_with_id(DEFAULT_SERVICE_ID, group, raft_client)
+        Self::new_with_id(DEFAULT_SERVICE_ID, group, raft_client).await
     }
-    pub fn new_client(
+    pub async fn new_client(
         group: &str,
         raft_client: &Arc<RaftClient>,
     ) -> Result<Arc<ConsistentHashing>, CHError> {
-        Self::new_client_with_id(DEFAULT_SERVICE_ID, group, raft_client)
+        Self::new_client_with_id(DEFAULT_SERVICE_ID, group, raft_client).await
     }
-    pub fn new_client_with_id(
+    pub async fn new_client_with_id(
         id: u64,
         group: &str,
         raft_client: &Arc<RaftClient>,
     ) -> Result<Arc<ConsistentHashing>, CHError> {
-        match ConsistentHashing::new_with_id(id, group, raft_client) {
+        match ConsistentHashing::new_with_id(id, group, raft_client).await {
             Err(e) => Err(e),
-            Ok(ch) => match ch.init_table() {
+            Ok(ch) => match ch.init_table().await {
                 Err(e) => Err(CHError::InitTableError(e)),
                 Ok(_) => Ok(ch.clone()),
             },
         }
     }
-    pub fn init_table(&self) -> Result<(), InitTableError> {
+    pub async fn init_table(&self) -> Result<(), InitTableError> {
         let mut table = &mut self.tables.write();
-        self.init_table_(&mut table)
+        self.init_table_(&mut table).await
     }
-    pub fn to_server_name(&self, server_id: u64) -> String {
-        let lookup_table = self.tables.read();
+    pub async fn to_server_name(&self, server_id: u64) -> String {
+        let lookup_table = self.tables.read().await;
         lookup_table.addrs.get(&server_id).unwrap().clone()
     }
     pub fn to_server_name_option(&self, server_id: Option<u64>) -> Option<String> {
@@ -272,16 +272,16 @@ impl ConsistentHashing {
         self.watch_all_actions(wrapper);
     }
 
-    fn init_table_(
+    async fn init_table_(
         &self,
         lookup_table: &mut RwLockWriteGuard<LookupTables>,
     ) -> Result<(), InitTableError> {
-        if let Ok(Ok((mut members, version))) =
-            self.membership.group_members(&self.group_name, true).wait()
+        if let Ok(Some((mut members, version))) =
+            self.membership.group_members(&self.group_name, true).await
         {
             let group_id = hash_str(&self.group_name);
-            match self.weight_sm_client.get_weights(&group_id).wait() {
-                Ok(Ok(Some(weights))) => {
+            match self.weight_sm_client.get_weights(&group_id).await {
+                Ok(Some(weights)) => {
                     if let Some(min_weight) = weights.values().min() {
                         let mut factors: BTreeMap<u64, u32> = BTreeMap::new();
                         let min_weight = *min_weight as f64;
@@ -310,7 +310,7 @@ impl ConsistentHashing {
                     }
                 }
                 Err(e) => Err(InitTableError::NoWeightService(e)),
-                Ok(Ok(None)) => Err(InitTableError::NoWeightGroup),
+                Ok(None) => Err(InitTableError::NoWeightGroup),
                 _ => Err(InitTableError::Unknown),
             }
         } else {

@@ -4,16 +4,13 @@ use super::raft::client::SMClient;
 use bifrost_hasher::hash_str;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::{thread};
 use tokio::time;
-use std::pin::Pin;
 use futures::prelude::*;
 
 use crate::raft::client::RaftClient;
-use std::future::Future;
 use crate::membership::DEFAULT_SERVICE_ID;
 use crate::raft::state_machine::master::ExecError;
-use futures::future::BoxFuture;
+use std::pin::Pin;
 
 static PING_INTERVAL: u64 = 100;
 
@@ -59,20 +56,20 @@ impl MemberService {
     pub fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
     }
-    pub async fn leave(&self) -> Result<(), ExecError> {
+    pub async fn leave(&self) -> Result<bool, ExecError> {
         self.close();
         self.sm_client.leave(&self.id).await
     }
     pub async fn join_group(
         &self,
         group: &String,
-    ) -> Result<(), ExecError> {
+    ) -> Result<bool, ExecError> {
         self.member_client.join_group(group).await
     }
     pub async fn leave_group(
         &self,
         group: &String,
-    ) -> Result<(), ExecError> {
+    ) -> Result<bool, ExecError> {
         self.member_client.leave_group(group).await
     }
     pub fn client(&self) -> ObserverClient {
@@ -85,6 +82,10 @@ impl MemberService {
 
 impl Drop for MemberService {
     fn drop(&mut self) {
-        self.leave();
+        let sm_client = self.sm_client.clone();
+        let self_id = self.id;
+        tokio::spawn(async move {
+            sm_client.leave(&self_id).await
+        });
     }
 }

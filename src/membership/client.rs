@@ -26,17 +26,17 @@ pub struct MemberClient {
 }
 
 impl MemberClient {
-    pub fn join_group(
+    pub async fn join_group(
         &self,
         group: &String,
-    ) -> impl Future<Output = Result<(), ExecError>> {
-        self.sm_client.join_group(group, &self.id)
+    ) -> Result<bool, ExecError> {
+        self.sm_client.join_group(group, &self.id).await
     }
-    pub fn leave_group(
+    pub async fn leave_group(
         &self,
         group: &String,
-    ) -> impl Future<Output = Result<(), ExecError>> {
-        self.sm_client.leave_group(&hash_str(group), &self.id)
+    ) -> Result<bool, ExecError> {
+        self.sm_client.leave_group(&hash_str(group), &self.id).await
     }
 }
 
@@ -55,53 +55,53 @@ impl ObserverClient {
             sm_client: sm_client.clone(),
         }
     }
-    pub fn new_group(
+    pub async fn new_group(
         &self,
         name: &String,
-    ) -> impl Future<Item = Result<u64, u64>, Error = ExecError> {
-        self.sm_client.new_group(name)
+    ) -> Result<Result<u64, u64>, ExecError> {
+        self.sm_client.new_group(name).await
     }
-    pub fn del_group(
+    pub async fn del_group(
         &self,
         name: &String,
-    ) -> impl Future<Item = Result<(), ()>, Error = ExecError> {
-        self.sm_client.del_group(&hash_str(name))
+    ) -> Result<bool, ExecError> {
+        self.sm_client.del_group(&hash_str(name)).await
     }
-    pub fn group_leader(
+    pub async fn group_leader(
         &self,
         group: &String,
-    ) -> impl Future<Item = Result<(Option<Member>, u64), ()>, Error = ExecError> {
-        self.sm_client.group_leader(&hash_str(group))
+    ) -> Result<Option<(Option<Member>, u64)>, ExecError> {
+        self.sm_client.group_leader(&hash_str(group)).await
     }
-    pub fn group_members(
+    pub async fn group_members(
         &self,
         group: &String,
         online_only: bool,
-    ) -> impl Future<Item = Result<(Vec<Member>, u64), ()>, Error = ExecError> {
-        self.sm_client.group_members(&hash_str(group), &online_only)
+    ) -> Result<Option<(Vec<Member>, u64)>, ExecError> {
+        self.sm_client.group_members(&hash_str(group), &online_only).await
     }
-    pub fn all_members(
+    pub async fn all_members(
         &self,
         online_only: bool,
-    ) -> impl Future<Item = Result<(Vec<Member>, u64), ()>, Error = ExecError> {
-        self.sm_client.all_members(&online_only)
+    ) -> Result<(Vec<Member>, u64), ExecError> {
+        self.sm_client.all_members(&online_only).await
     }
-    pub fn on_group_member_offline<F>(
+    pub async fn on_group_member_offline<F>(
         &self,
         f: F,
         group: &str,
-    ) -> impl Future<Output = Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
+    ) -> Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>
     where
-        F: Fn(Result<(Member, u64), ()>) + 'static + Send + Sync,
+        F: Fn((Member, u64)) + 'static + Unpin + Send + Sync,
     {
-        self.sm_client.on_group_member_offline(f, &hash_str(group))
+        self.sm_client.on_group_member_offline(f, &hash_str(group)).await
     }
     pub fn on_any_member_offline<F>(
         &self,
         f: F,
     ) -> impl Future<Output = Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
     where
-        F: Fn(Result<(Member, u64), ()>) + 'static + Send + Sync,
+        F: Fn(Result<(Member, u64), ()>) + 'static + Unpin + Send + Sync,
     {
         self.sm_client.on_any_member_offline(f)
     }
