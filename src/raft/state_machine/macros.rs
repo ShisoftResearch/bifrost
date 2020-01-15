@@ -17,7 +17,7 @@ macro_rules! raft_client_fn {
     (sub $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty) => {
         pub fn $fn_name<F>(&self, f: F, $($arg:$in_),* ) 
             -> BoxFuture<Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
-        where F: Fn($out) -> BoxFuture<'static, ()> + 'static + Send + Sync
+        where F: Fn($out) -> BoxFuture<'static, ()> + 'static + Unpin + Send + Sync
         {
             self.client.subscribe( 
                 self.sm_id,
@@ -146,6 +146,7 @@ macro_rules! raft_state_machine {
         use futures::future::BoxFuture;
 
         pub mod commands {
+            use super::*;
             use futures::prelude::*;
             $(
                 #[derive(Serialize, Deserialize, Debug)]
@@ -219,9 +220,8 @@ macro_rules! raft_state_machine {
            }
         }
         pub mod client {
-
-            use std::sync::Arc;
             use super::*;
+            use std::sync::Arc;
             use super::commands::*;
             use crate::raft::client::*;
             use crate::raft::state_machine::master::ExecError;

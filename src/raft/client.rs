@@ -207,7 +207,7 @@ impl RaftClient {
     where
         M: RaftMsg<R> + 'static,
         R: 'static + Send,
-        F: Fn(R) -> BoxFuture<'static, ()> + 'static + Send + Sync,
+        F: Fn(R) -> BoxFuture<'static, ()> + 'static + Send + Sync + Unpin,
     {
         let callback = match self.get_callback().await {
             Ok(c) => c,
