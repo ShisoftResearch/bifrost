@@ -4,9 +4,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use crate::utils::time::get_time;
 use futures::future::BoxFuture;
+use futures::stream::FuturesUnordered;
+use std::marker::Unpin;
+
+trait SubFunc = Fn(Vec<u8>) -> BoxFuture<'static, ()>;
+trait BoxedSubFunc = SubFunc + Unpin + Send + Sync;
+
 
 pub struct SubscriptionService {
-    pub subs: RwLock<HashMap<SubKey, Vec<(Box<dyn Fn(Vec<u8>) -> BoxFuture<'static, ()> + Send>, u64)>>>,
+    pub subs: RwLock<HashMap<SubKey, Vec<(Box<dyn BoxedSubFunc>, u64)>>>,
     pub server_address: String,
     pub session_id: u64,
 }
@@ -16,9 +22,15 @@ impl Service for SubscriptionService {
         async {
             let subs = self.subs.read().await;
             if let Some(subs) = subs.get(&key) {
-                for &(ref fun, _) in subs {
-                    fun(data.clone()).await;
-                }
+                let subs = Pin::new(subs);
+                let futs: FuturesUnordered<_> = subs
+                    .iter()
+                    .map(|(fun, _)| {
+                        let fun_pinned = Pin::new(fun);
+                        fun_pinned(data.clone())
+                    })
+                    .collect();
+                let _: Vec<_> = futs.collect().await;
             }
         }.boxed()
     }
