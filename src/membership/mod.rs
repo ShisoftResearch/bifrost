@@ -11,14 +11,14 @@ pub mod raft {
     use super::*;
     raft_state_machine! {
         def cmd hb_online_changed(online: Vec<u64>, offline: Vec<u64>);
-        def cmd join(address: String) -> u64;
-        def cmd leave(id: u64);
-        def cmd join_group(group_name: String, id: u64);
-        def cmd leave_group(group: u64, id: u64);
+        def cmd join(address: String) -> Option<u64>;
+        def cmd leave(id: u64) -> bool;
+        def cmd join_group(group_name: String, id: u64) -> bool;
+        def cmd leave_group(group: u64, id: u64) -> bool;
         def cmd new_group(name: String) -> Result<u64, u64>;
-        def cmd del_group(id: u64);
-        def qry group_leader(group: u64) -> (Option<ClientMember>, u64);
-        def qry group_members (group: u64, online_only: bool) -> (Vec<ClientMember>, u64);
+        def cmd del_group(id: u64) -> bool;
+        def qry group_leader(group: u64) -> Option<(Option<ClientMember>, u64)>;
+        def qry group_members (group: u64, online_only: bool) -> Option<(Vec<ClientMember>, u64)>;
         def qry all_members (online_only: bool) -> (Vec<ClientMember>, u64);
         def sub on_group_member_offline(group: u64) -> (ClientMember, u64); //
         def sub on_any_member_offline() -> (ClientMember, u64); //

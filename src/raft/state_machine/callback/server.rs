@@ -109,7 +109,7 @@ impl Subscriptions {
 
 // used for raft services to subscribe directly from state machine instances
 pub struct InternalSubscription {
-    action: Box<Fn(&Any) + Sync + Send>,
+    action: Box<dyn Fn(&dyn Any) + Sync + Send>,
 }
 
 pub struct SMCallback {
@@ -243,13 +243,13 @@ impl SMCallback {
     }
 }
 
-pub fn notify<M, R, F>(callback: &Option<SMCallback>, msg: M, data: F)
+pub async fn notify<M, R, F>(callback: &Option<SMCallback>, msg: M, data: F)
 where
     F: Fn() -> R,
     M: RaftMsg<R> + 'static,
     R: serde::Serialize + Send + Sync + Clone + Any + 'static,
 {
     if let Some(ref callback) = *callback {
-        callback.notify(msg, data());
+        callback.notify(msg, data()).await;
     }
 }

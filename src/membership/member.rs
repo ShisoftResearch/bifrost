@@ -4,12 +4,16 @@ use super::raft::client::SMClient;
 use bifrost_hasher::hash_str;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::{thread, time};
+use std::{thread};
+use tokio::time;
+use std::pin::Pin;
+use futures::prelude::*;
 
 use crate::raft::client::RaftClient;
 use std::future::Future;
 use crate::membership::DEFAULT_SERVICE_ID;
 use crate::raft::state_machine::master::ExecError;
+use futures::future::BoxFuture;
 
 static PING_INTERVAL: u64 = 100;
 
@@ -23,7 +27,7 @@ pub struct MemberService {
 }
 
 impl MemberService {
-    pub fn new(server_address: &String, raft_client: &Arc<RaftClient>) -> Arc<MemberService> {
+    pub async fn new(server_address: &String, raft_client: &Arc<RaftClient>) -> Arc<MemberService> {
         let server_id = hash_str(server_address);
         let sm_client = Arc::new(SMClient::new(DEFAULT_SERVICE_ID, &raft_client));
         let service = Arc::new(MemberService {
@@ -37,41 +41,39 @@ impl MemberService {
             closed: AtomicBool::new(false),
             id: server_id,
         });
-        sm_client.join(&server_address).wait();
+        sm_client.join(&server_address).await;
         let service_clone = service.clone();
-        thread::Builder::new()
-            .name("Member service heartbeat".to_string())
-            .spawn(move || {
-                while !service_clone.closed.load(Ordering::Relaxed) {
-                    let rpc_client = service_clone.raft_client.current_leader_rpc_client().wait();
-                    if let Ok(rpc_client) = rpc_client {
-                        let heartbeat_client =
-                            AsyncServiceClient::new(DEFAULT_SERVICE_ID, &rpc_client);
-                        heartbeat_client.ping(service_clone.id);
-                    }
-                    thread::sleep(time::Duration::from_millis(PING_INTERVAL))
+        tokio::spawn(async {
+            while !service_clone.closed.load(Ordering::Relaxed) {
+                let rpc_client = service_clone.raft_client.current_leader_rpc_client().await;
+                if let Ok(rpc_client) = rpc_client {
+                    let heartbeat_client =
+                        AsyncServiceClient::new(DEFAULT_SERVICE_ID, &rpc_client);
+                    heartbeat_client.ping(service_clone.id).await;
                 }
-            });
+                time::delay_for(time::Duration::from_millis(PING_INTERVAL)).await
+            }
+        });
         return service;
     }
     pub fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
     }
-    pub fn leave(&self) -> impl Future<Item = Result<(), ()>, Error = ExecError> {
+    pub async fn leave(&self) -> Result<(), ExecError> {
         self.close();
-        self.sm_client.leave(&self.id)
+        self.sm_client.leave(&self.id).await
     }
-    pub fn join_group(
+    pub async fn join_group(
         &self,
         group: &String,
-    ) -> impl Future<Item = Result<(), ()>, Error = ExecError> {
-        self.member_client.join_group(group)
+    ) -> Result<(), ExecError> {
+        self.member_client.join_group(group).await
     }
-    pub fn leave_group(
+    pub async fn leave_group(
         &self,
         group: &String,
-    ) -> impl Future<Item = Result<(), ()>, Error = ExecError> {
-        self.member_client.leave_group(group)
+    ) -> Result<(), ExecError> {
+        self.member_client.leave_group(group).await
     }
     pub fn client(&self) -> ObserverClient {
         ObserverClient::new_from_sm(&self.sm_client)

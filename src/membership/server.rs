@@ -2,7 +2,7 @@ use super::heartbeat_rpc::*;
 use super::raft::*;
 use super::*;
 use bifrost_hasher::hash_str;
-use parking_lot::RwLock;
+use crate::utils::rwlock::*;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -13,8 +13,11 @@ use crate::membership::client::{Group as ClientGroup, Member as ClientMember};
 use crate::rpc::Server;
 use crate::raft::state_machine::callback::server::{notify as cb_notify, SMCallback};
 use crate::raft::{LogEntry, RaftMsg, RaftService, Service as raft_svr_trait};
-use async_trait::async_trait;
 use crate::raft::state_machine::StateMachineCtl;
+use futures::prelude::future::*;
+use futures::prelude::*;
+use tokio::{time as async_time};
+use futures::stream::FuturesUnordered;
 
 static MAX_TIMEOUT: i64 = 1000; //5 secs for 500ms heartbeat
 
@@ -30,18 +33,19 @@ pub struct HeartbeatService {
     was_leader: AtomicBool,
 }
 
-#[async_trait]
 impl Service for HeartbeatService {
-    async fn ping(&self, id: u64) -> Result<(), ()> {
-        let mut stat_map = self.status.write().await;
-        let current_time = time::get_time();
-        let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
-            online: false,
-            last_updated: current_time,
-            //orthodoxy info will trigger the watcher thread to update
-        });
-        stat.last_updated = current_time;
-        // only update the timestamp, let the watcher thread to decide
+    fn ping(&self, id: u64) -> BoxFuture<()> {
+        async {
+            let mut stat_map = self.status.write().await;
+            let current_time = time::get_time();
+            let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
+                online: false,
+                last_updated: current_time,
+                //orthodoxy info will trigger the watcher thread to update
+            });
+            stat.last_updated = current_time;
+            // only update the timestamp, let the watcher thread to decide
+        }.boxed()
     }
 }
 impl HeartbeatService {
@@ -56,9 +60,9 @@ impl HeartbeatService {
             data,
         });
     }
-    fn transfer_leadership(&self) {
+    async fn transfer_leadership(&self) {
         //update timestamp for every alive server
-        let mut stat_map = self.status.write();
+        let mut stat_map = self.status.write().await;
         let current_time = time::get_time();
         for stat in stat_map.values_mut() {
             if stat.online {
@@ -105,48 +109,46 @@ impl Membership {
             was_leader: AtomicBool::new(false),
         });
         let service_clone = service.clone();
-        thread::Builder::new()
-            .name("Membership daemon".to_string())
-            .spawn(move || {
-                while !service_clone.closed.load(Ordering::Relaxed) {
-                    let is_leader = service_clone.raft_service.is_leader().await;
-                    let was_leader = service_clone.was_leader.load(Ordering::Relaxed);
-                    if !was_leader && is_leader {
-                        service_clone.transfer_leadership()
-                    }
-                    if was_leader != is_leader {
-                        service_clone.was_leader.store(is_leader, Ordering::Relaxed);
-                    }
-                    if is_leader {
-                        let current_time = time::get_time();
-                        let mut outdated_members: Vec<u64> = Vec::new();
-                        let mut backedin_members: Vec<u64> = Vec::new();
-                        {
-                            let mut status_map = service_clone.status.write();
-                            let mut members_to_update: HashMap<u64, bool> = HashMap::new();
-                            for (id, status) in status_map.iter() {
-                                let alive = (current_time - status.last_updated) < MAX_TIMEOUT;
-                                if status.online && !alive {
-                                    outdated_members.push(*id);
-                                    members_to_update.insert(*id, alive);
-                                }
-                                if !status.online && alive {
-                                    backedin_members.push(*id);
-                                    members_to_update.insert(*id, alive);
-                                }
-                            }
-                            for (id, alive) in members_to_update.iter() {
-                                let mut status = status_map.get_mut(&id).unwrap();
-                                status.online = *alive;
-                            }
-                        }
-                        if backedin_members.len() + outdated_members.len() > 0 {
-                            service_clone.update_raft(&backedin_members, &outdated_members);
-                        }
-                    }
-                    thread::sleep(std_time::Duration::from_secs(1));
+        tokio::spawn(async {
+            while !service_clone.closed.load(Ordering::Relaxed) {
+                let is_leader = service_clone.raft_service.is_leader().await;
+                let was_leader = service_clone.was_leader.load(Ordering::Relaxed);
+                if !was_leader && is_leader {
+                    service_clone.transfer_leadership().await
                 }
-            });
+                if was_leader != is_leader {
+                    service_clone.was_leader.store(is_leader, Ordering::Relaxed);
+                }
+                if is_leader {
+                    let current_time = time::get_time();
+                    let mut outdated_members: Vec<u64> = Vec::new();
+                    let mut backedin_members: Vec<u64> = Vec::new();
+                    {
+                        let mut status_map = service_clone.status.write().await;
+                        let mut members_to_update: HashMap<u64, bool> = HashMap::new();
+                        for (id, status) in status_map.iter() {
+                            let alive = (current_time - status.last_updated) < MAX_TIMEOUT;
+                            if status.online && !alive {
+                                outdated_members.push(*id);
+                                members_to_update.insert(*id, alive);
+                            }
+                            if !status.online && alive {
+                                backedin_members.push(*id);
+                                members_to_update.insert(*id, alive);
+                            }
+                        }
+                        for (id, alive) in members_to_update.iter() {
+                            let mut status = status_map.get_mut(&id).unwrap();
+                            status.online = *alive;
+                        }
+                    }
+                    if backedin_members.len() + outdated_members.len() > 0 {
+                        service_clone.update_raft(&backedin_members, &outdated_members);
+                    }
+                }
+                async_time::delay_for(std_time::Duration::from_secs(1)).await
+            }
+        });
         let mut membership_service = Membership {
             heartbeat: service.clone(),
             groups: HashMap::new(),
@@ -156,76 +158,76 @@ impl Membership {
         };
         membership_service.init_callback(raft_service);
         raft_service.register_state_machine(Box::new(membership_service)).await;
-        server.register_service(DEFAULT_SERVICE_ID, &service);
+        server.register_service(DEFAULT_SERVICE_ID, &service).await;
     }
-    fn compose_client_member(&self, id: u64) -> ClientMember {
+     async fn compose_client_member(&self, id: u64) -> ClientMember {
         let member = self.members.get(&id).unwrap();
-        let stat_map = self.heartbeat.status.read();
+        let stat_map = self.heartbeat.status.read().await;
         ClientMember {
             id,
             address: member.address.clone(),
             online: stat_map.get(&id).unwrap().online,
         }
     }
-    fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
-        self.callback = Some(SMCallback::new(self.id(), raft_service.clone()));
+    async fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
+        self.callback = Some(SMCallback::new(self.id(), raft_service.clone()).await);
     }
-    fn notify_for_member_online(&self, id: u64) {
-        let client_member = self.compose_client_member(id);
+    async fn notify_for_member_online(&self, id: u64) {
+        let client_member = self.compose_client_member(id).await;
         let version = self.version;
         cb_notify(
             &self.callback,
             commands::on_any_member_online::new(),
-            || Ok((client_member.clone(), version)),
-        );
+            || (client_member.clone(), version),
+        ).await;
         if let Some(ref member) = self.members.get(&id) {
             for group in &member.groups {
                 cb_notify(
                     &self.callback,
                     commands::on_group_member_online::new(group),
-                    || Ok((client_member.clone(), version)),
-                );
+                    || (client_member.clone(), version),
+                ).await;
             }
         }
     }
-    fn notify_for_member_offline(&self, id: u64) {
-        let client_member = self.compose_client_member(id);
+    async fn notify_for_member_offline(&self, id: u64) {
+        let client_member = self.compose_client_member(id).await;
         let version = self.version;
         cb_notify(
             &self.callback,
             commands::on_any_member_offline::new(),
-            || Ok((client_member.clone(), version)),
-        );
+            || (client_member.clone(), version),
+        ).await;
         if let Some(ref member) = self.members.get(&id) {
             for group in &member.groups {
                 cb_notify(
                     &self.callback,
                     commands::on_group_member_offline::new(group),
-                    || Ok((client_member.clone(), version)),
-                );
+                    || (client_member.clone(), version),
+                ).await;
             }
         }
     }
-    fn notify_for_member_left(&self, id: u64) {
-        let client_member = self.compose_client_member(id);
+    async fn notify_for_member_left(&self, id: u64) {
+        let client_member = self.compose_client_member(id).await;
         let version = self.version;
         cb_notify(&self.callback, commands::on_any_member_left::new(), || {
-            Ok((client_member.clone(), version))
-        });
+            (client_member.clone(), version)
+        }).await;
         if let Some(ref member) = self.members.get(&id) {
             for group in &member.groups {
-                self.notify_for_group_member_left(*group, &client_member)
+                self.notify_for_group_member_left(*group, &client_member).await
             }
         }
     }
-    fn notify_for_group_member_left(&self, group: u64, member: &ClientMember) {
+    async fn notify_for_group_member_left(&self, group: u64, member: &ClientMember) {
         cb_notify(
             &self.callback,
             commands::on_group_member_left::new(&group),
-            || Ok((member.clone(), self.version)),
-        );
+            || (member.clone(), self.version),
+        ).await;
     }
-    fn leave_group_(&mut self, group_id: u64, id: u64, need_notify: bool) -> Result<(), ()> {
+    async fn leave_group_(&mut self, group_id: u64, id: u64, need_notify: bool) -> bool {
         let mut success = false;
         let client_member: Option<ClientMember> = None;
         if let Some(ref mut group) = self.groups.get_mut(&group_id) {
@@ -237,12 +239,12 @@ impl Membership {
         }
         if success {
             if need_notify {
-                self.notify_for_group_member_left(group_id, &self.compose_client_member(id));
+                self.notify_for_group_member_left(group_id, &self.compose_client_member(id).await);
             }
             self.group_leader_candidate_unavailable(group_id, id);
-            return Ok(());
+            true
         } else {
-            return Err(());
+            false
         }
     }
     fn member_groups(&self, member: u64) -> Option<HashSet<u64>> {
@@ -252,9 +254,9 @@ impl Membership {
             None
         }
     }
-    fn group_first_online_member_id(&self, group: u64) -> Result<Option<u64>, ()> {
+    async fn group_first_online_member_id(&self, group: u64) -> Result<Option<u64>, ()> {
         if let Some(group) = self.groups.get(&group) {
-            let stat_map = self.heartbeat.status.read();
+            let stat_map = self.heartbeat.status.read().await;
             for member in group.members.iter() {
                 if let Some(member_stat) = stat_map.get(&member) {
                     if member_stat.online {
@@ -267,7 +269,7 @@ impl Membership {
             Err(())
         }
     }
-    fn change_leader(&mut self, group_id: u64, new: Option<u64>) -> Result<(), ()> {
+    async fn change_leader(&mut self, group_id: u64, new: Option<u64>) -> Result<(), ()> {
         let mut old: Option<u64> = None;
         let mut changed = false;
         if let Some(mut group) = self.groups.get_mut(&group_id) {
@@ -279,23 +281,27 @@ impl Membership {
         }
         if changed {
             let convert = |id_opt| {
-                if let Some(id_opt) = id_opt {
-                    Some(self.compose_client_member(id_opt))
-                } else {
-                    None
+                async {
+                    if let Some(id_opt) = id_opt {
+                        Some(self.compose_client_member(id_opt).await)
+                    } else {
+                        None
+                    }
                 }
             };
+            let old_convert = convert(old).await;
+            let new_convert = convert(new).await;
             cb_notify(
                 &self.callback,
                 commands::on_group_leader_changed::new(&group_id),
-                || Ok((convert(old), convert(new), self.version)),
-            );
+                || (old_convert, new_convert, self.version),
+            ).await;
             Ok(())
         } else {
             Err(())
         }
     }
-    fn group_leader_candidate_available(&mut self, group_id: u64, member: u64) {
+    async fn group_leader_candidate_available(&mut self, group_id: u64, member: u64) {
         // if the group does not have a leader, assign the member
         let mut leader_changed = false;
         if let Some(group) = self.groups.get_mut(&group_id) {
@@ -304,10 +310,10 @@ impl Membership {
             }
         }
         if leader_changed {
-            self.change_leader(group_id, Some(member));
+            self.change_leader(group_id, Some(member)).await;
         }
     }
-    fn group_leader_candidate_unavailable(&mut self, group_id: u64, member: u64) {
+    async fn group_leader_candidate_unavailable(&mut self, group_id: u64, member: u64) {
         // if the group have a leader that is the same as the member, reelect
         let mut reelected = false;
         if let Some(group) = self.groups.get_mut(&group_id) {
@@ -316,214 +322,243 @@ impl Membership {
             }
         }
         if reelected {
-            let online_id = self.group_first_online_member_id(group_id).unwrap();
+            let online_id = self.group_first_online_member_id(group_id).await.unwrap();
             self.change_leader(group_id, online_id);
         }
     }
-    fn leader_candidate_available(&mut self, member: u64) {
+    async fn leader_candidate_available(&mut self, member: u64) {
         if let Some(groups) = self.member_groups(member) {
             for group in groups {
-                self.group_leader_candidate_available(group, member)
+                self.group_leader_candidate_available(group, member).await
             }
         }
     }
-    fn leader_candidate_unavailable(&mut self, member: u64) {
+    async fn leader_candidate_unavailable(&mut self, member: u64) {
         if let Some(groups) = self.member_groups(member) {
             for group in groups {
-                self.group_leader_candidate_unavailable(group, member)
+                self.group_leader_candidate_unavailable(group, member).await
             }
         }
     }
 }
 
 impl StateMachineCmds for Membership {
-    fn hb_online_changed(&mut self, online: Vec<u64>, offline: Vec<u64>) -> Result<(), ()> {
-        self.version += 1;
-        {
-            let mut stat_map = self.heartbeat.status.write();
-            for id in &online {
-                if let Some(ref mut stat) = stat_map.get_mut(&id) {
-                    stat.online = true;
+    fn hb_online_changed(&mut self, online: Vec<u64>, offline: Vec<u64>) -> BoxFuture<()> {
+        async {
+            self.version += 1;
+            {
+                let mut stat_map = self.heartbeat.status.write().await;
+                for id in &online {
+                    if let Some(ref mut stat) = stat_map.get_mut(&id) {
+                        stat.online = true;
+                    }
+                }
+                for id in &offline {
+                    if let Some(ref mut stat) = stat_map.get_mut(&id) {
+                        stat.online = false;
+                    }
                 }
             }
-            for id in &offline {
-                if let Some(ref mut stat) = stat_map.get_mut(&id) {
-                    stat.online = false;
-                }
+            for id in online {
+                self.notify_for_member_online(id).await;
+                self.leader_candidate_available(id).await;
             }
-        }
-        for id in online {
-            self.notify_for_member_online(id);
-            self.leader_candidate_available(id);
-        }
-        for id in offline {
-            self.notify_for_member_offline(id);
-            self.leader_candidate_unavailable(id);
-        }
-        Ok(())
+            for id in offline {
+                self.notify_for_member_offline(id).await;
+                self.leader_candidate_unavailable(id).await;
+            }
+        }.boxed()
     }
-    fn join(&mut self, address: String) -> Result<u64, ()> {
-        self.version += 1;
-        let id = hash_str(&address);
-        let mut joined = false;
-        {
-            let mut stat_map = self.heartbeat.status.write();
-            self.members.entry(id).or_insert_with(|| {
-                let current_time = time::get_time();
-                let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
-                    online: true,
-                    last_updated: current_time,
+    fn join(&mut self, address: String) -> BoxFuture<Option<u64>> {
+        async {
+            self.version += 1;
+            let id = hash_str(&address);
+            let mut joined = false;
+            {
+                let mut stat_map = self.heartbeat.status.write().await;
+                self.members.entry(id).or_insert_with(|| {
+                    let current_time = time::get_time();
+                    let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
+                        online: true,
+                        last_updated: current_time,
+                    });
+                    stat.online = true;
+                    stat.last_updated = current_time;
+                    joined = true;
+                    Member {
+                        id,
+                        address: address.clone(),
+                        groups: HashSet::new(),
+                    }
                 });
-                stat.online = true;
-                stat.last_updated = current_time;
-                joined = true;
-                Member {
+            }
+            if joined {
+                let composed_client_member = self.compose_client_member(id).await;
+                cb_notify(
+                    &self.callback,
+                    commands::on_any_member_joined::new(),
+                    || (composed_client_member, self.version),
+                ).await;
+                Some(id)
+            } else {
+                None
+            }
+        }.boxed()
+    }
+    fn leave(&mut self, id: u64) -> BoxFuture<bool> {
+        async {
+            if !self.members.contains_key(&id) {
+                return false;
+            };
+            self.version += 1;
+            let mut groups: Vec<u64> = Vec::new();
+            if let Some(member) = self.members.get(&id) {
+                for group in &member.groups {
+                    groups.push(*group);
+                }
+            }
+            self.notify_for_member_left(id).await;
+            for group_id in groups {
+                self.leave_group_(group_id, id, false).await;
+            }
+            // in this part we will not do leader_candidate_unavailable
+            // because it have already been triggered by leave_group_
+            // in the loop above
+            {
+                let mut stat_map = self.heartbeat.status.write().await;
+                stat_map.remove(&id);
+            }
+            self.members.remove(&id);
+            true
+        }.boxed()
+    }
+    fn join_group(&mut self, group_name: String, id: u64) -> BoxFuture<bool> {
+        async {
+            let group_id = hash_str(&group_name);
+            self.version += 1;
+            let mut success = false;
+            if !self.groups.contains_key(&group_id) {
+                self.new_group(group_name).await;
+            } // create group if not exists
+            if let Some(ref mut group) = self.groups.get_mut(&group_id) {
+                if let Some(ref mut member) = self.members.get_mut(&id) {
+                    group.members.insert(id);
+                    member.groups.insert(group_id);
+                    success = true;
+                }
+            }
+            if success {
+                let composed_member = self.compose_client_member(id).await;
+                cb_notify(
+                    &self.callback,
+                    commands::on_group_member_joined::new(&group_id),
+                    || (composed_member, self.version),
+                ).await;
+                self.group_leader_candidate_available(group_id, id).await;
+                true
+            } else {
+                false
+            }
+        }.boxed()
+    }
+    fn leave_group(&mut self, group_id: u64, id: u64) -> BoxFuture<bool> {
+        async {
+            self.version += 1;
+            self.leave_group_(group_id, id, true).await
+        }.boxed()
+    }
+    fn new_group(&mut self, name: String) -> BoxFuture<Result<u64, u64>> {
+        async {
+            self.version += 1;
+            let id = hash_str(&name);
+            let mut inserted = false;
+            self.groups.entry(id).or_insert_with(|| {
+                inserted = true;
+                MemberGroup {
+                    name,
                     id,
-                    address: address.clone(),
-                    groups: HashSet::new(),
+                    members: BTreeSet::new(),
+                    leader: None,
                 }
             });
-        }
-        if joined {
-            cb_notify(
-                &self.callback,
-                commands::on_any_member_joined::new(),
-                || Ok((self.compose_client_member(id), self.version)),
-            );
-            Ok(id)
-        } else {
-            Err(())
-        }
-    }
-    fn leave(&mut self, id: u64) -> Result<(), ()> {
-        if !self.members.contains_key(&id) {
-            return Err(());
-        };
-        self.version += 1;
-        let mut groups: Vec<u64> = Vec::new();
-        if let Some(member) = self.members.get(&id) {
-            for group in &member.groups {
-                groups.push(*group);
+            if inserted {
+                Ok(id)
+            } else {
+                Err(id)
             }
-        }
-        self.notify_for_member_left(id);
-        for group_id in groups {
-            self.leave_group_(group_id, id, false);
-        }
-        // in this part we will not do leader_candidate_unavailable
-        // because it have already been triggered by leave_group_
-        // in the loop above
-        {
-            let mut stat_map = self.heartbeat.status.write();
-            stat_map.remove(&id);
-        }
-        self.members.remove(&id);
-        Ok(())
+        }.boxed()
     }
-    fn join_group(&mut self, group_name: String, id: u64) -> Result<(), ()> {
-        let group_id = hash_str(&group_name);
-        self.version += 1;
-        let mut success = false;
-        if !self.groups.contains_key(&group_id) {
-            self.new_group(group_name);
-        } // create group if not exists
-        if let Some(ref mut group) = self.groups.get_mut(&group_id) {
-            if let Some(ref mut member) = self.members.get_mut(&id) {
-                group.members.insert(id);
-                member.groups.insert(group_id);
-                success = true;
+    fn del_group(&mut self, id: u64) -> BoxFuture<bool> {
+        async {
+            self.version += 1;
+            let mut members: Option<BTreeSet<u64>> = None;
+            if let Some(group) = self.groups.get(&id) {
+                members = Some(group.members.clone());
             }
-        }
-        if success {
-            cb_notify(
-                &self.callback,
-                commands::on_group_member_joined::new(&group_id),
-                || Ok((self.compose_client_member(id), self.version)),
-            );
-            self.group_leader_candidate_available(group_id, id);
-            return Ok(());
-        } else {
-            return Err(());
-        }
-    }
-    fn leave_group(&mut self, group_id: u64, id: u64) -> Result<(), ()> {
-        self.version += 1;
-        self.leave_group_(group_id, id, true)
-    }
-    fn new_group(&mut self, name: String) -> Result<u64, u64> {
-        self.version += 1;
-        let id = hash_str(&name);
-        let mut inserted = false;
-        self.groups.entry(id).or_insert_with(|| {
-            inserted = true;
-            MemberGroup {
-                name,
-                id,
-                members: BTreeSet::new(),
-                leader: None,
-            }
-        });
-        if inserted {
-            Ok(id)
-        } else {
-            Err(id)
-        }
-    }
-    fn del_group(&mut self, id: u64) -> Result<(), ()> {
-        self.version += 1;
-        let mut members: Option<BTreeSet<u64>> = None;
-        if let Some(group) = self.groups.get(&id) {
-            members = Some(group.members.clone());
-        }
-        if let Some(members) = members {
-            for member_id in members {
-                if let Some(ref mut member) = self.members.get_mut(&member_id) {
-                    member.groups.remove(&id);
+            if let Some(members) = members {
+                for member_id in members {
+                    if let Some(ref mut member) = self.members.get_mut(&member_id) {
+                        member.groups.remove(&id);
+                    }
                 }
+                self.groups.remove(&id);
+                true
+            } else {
+                false
             }
-            self.groups.remove(&id);
-            return Ok(());
-        } else {
-            return Err(());
-        }
+        }.boxed()
     }
-    fn group_leader(&self, group_id: u64) -> Result<(Option<ClientMember>, u64), ()> {
-        if let Some(group) = self.groups.get(&group_id) {
-            Ok((
-                match group.leader {
-                    Some(id) => Some(self.compose_client_member(id)),
-                    None => None,
-                },
-                self.version,
-            ))
-        } else {
-            Err(())
-        }
+    fn group_leader(&self, group_id: u64) -> BoxFuture<Option<(Option<ClientMember>, u64)>> {
+        async {
+            if let Some(group) = self.groups.get(&group_id) {
+                Some((
+                    match group.leader {
+                        Some(id) => Some(self.compose_client_member(id).await),
+                        None => None,
+                    },
+                    self.version,
+                ))
+            } else {
+                None
+            }
+        }.boxed()
     }
-    fn group_members(&self, group: u64, online_only: bool) -> Result<(Vec<ClientMember>, u64), ()> {
-        if let Some(group) = self.groups.get(&group) {
-            Ok((
-                group
+    fn group_members(&self, group: u64, online_only: bool) -> BoxFuture<Option<(Vec<ClientMember>, u64)>> {
+        async {
+            if let Some(group) = self.groups.get(&group) {
+                let futs: FuturesUnordered<_> = group
                     .members
                     .iter()
                     .map(|id| self.compose_client_member(*id))
+                    .collect();
+                let members: Vec<_> = futs.collect().await;
+                Some((
+                    members
+                        .into_iter()
+                        .filter(|member| !online_only || member.online)
+                        .collect(),
+                    self.version,
+                ))
+            } else {
+                None
+            }
+        }.boxed()
+    }
+    fn all_members(&self, online_only: bool) -> BoxFuture<(Vec<ClientMember>, u64)> {
+        async {
+            let futs: FuturesUnordered<_> = self.members
+                .iter()
+                .map(|(id, _)| self.compose_client_member(*id))
+                .collect();
+            let members: Vec<_> = futs.collect().await;
+            (
+                members
+                    .into_iter()    
                     .filter(|member| !online_only || member.online)
                     .collect(),
                 self.version,
-            ))
-        } else {
-            Err(())
-        }
-    }
-    fn all_members(&self, online_only: bool) -> Result<(Vec<ClientMember>, u64), ()> {
-        Ok((
-            self.members
-                .iter()
-                .map(|(id, _)| self.compose_client_member(*id))
-                .filter(|member| !online_only || member.online)
-                .collect(),
-            self.version,
-        ))
+            )
+        }.boxed()
     }
 }
 impl StateMachineCtl for Membership {
