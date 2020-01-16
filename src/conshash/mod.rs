@@ -2,7 +2,7 @@ use std::collections::{HashMap, BTreeMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::future::Future;
+use futures::prelude::*;
 
 use bifrost_hasher::{hash_bytes, hash_str};
 use crate::raft::state_machine::master::ExecError;
@@ -71,10 +71,10 @@ impl ConsistentHashing {
         {
             let ch = ch.clone();
             let res = membership.on_group_member_joined(
-                move |r| {
-                    if let Ok((member, version)) = r {
+                move |(member, version)| {
+                    async {
                         server_joined(&ch, member, version);
-                    }
+                    }.boxed()
                 },
                 group,
             ).await;
@@ -86,10 +86,10 @@ impl ConsistentHashing {
         {
             let ch = ch.clone();
             let res = membership.on_group_member_online(
-                move |r| {
-                    if let Ok((member, version)) = r {
-                        server_joined(&ch, member, version);
-                    }
+                move |(member, version)| {
+                    async {
+                        server_joined(&ch, member, version)
+                    }.boxed()
                 },
                 group,
             ).await;
@@ -101,10 +101,10 @@ impl ConsistentHashing {
         {
             let ch = ch.clone();
             let res = membership.on_group_member_left(
-                move |r| {
-                    if let Ok((member, version)) = r {
+                move |(member, version)| {
+                    async {
                         server_left(&ch, member, version);
-                    }
+                    }.boxed()
                 },
                 group,
             ).await;
@@ -116,10 +116,10 @@ impl ConsistentHashing {
         {
             let ch = ch.clone();
             let res = membership.on_group_member_offline(
-                move |r| {
-                    if let (member, version) = r {
+                move |(member, version)| {
+                    async {
                         server_left(&ch, member, version);
-                    }
+                    }.boxed()
                 },
                 group,
             ).await;
@@ -155,22 +155,24 @@ impl ConsistentHashing {
             },
         }
     }
-    pub async fn init_table(&self) -> Result<(), InitTableError> {
-        let mut table = &mut self.tables.write();
+    pub async fn init_table<'a>(&'a self) -> Result<(), InitTableError> {
+        let mut table = self.tables.write().await;
         self.init_table_(&mut table).await
     }
     pub async fn to_server_name(&self, server_id: u64) -> String {
         let lookup_table = self.tables.read().await;
         lookup_table.addrs.get(&server_id).unwrap().clone()
     }
-    pub fn to_server_name_option(&self, server_id: Option<u64>) -> Option<String> {
-        server_id.map(|id| {
-            let lookup_table = self.tables.read();
-            lookup_table.addrs.get(&id).unwrap().clone()
-        })
+    pub async fn to_server_name_option(&self, server_id: Option<u64>) -> Option<String> {
+        if let Some(sid) = server_id {
+            let lookup_table = self.tables.read().await;
+            Some(lookup_table.addrs.get(&sid).unwrap().clone())
+        } else {
+            None
+        }
     }
-    pub fn get_server_id(&self, hash: u64) -> Option<u64> {
-        let lookup_table = self.tables.read();
+    pub async fn get_server_id(&self, hash: u64) -> Option<u64> {
+        let lookup_table = self.tables.read().await;
         let nodes = &lookup_table.nodes;
         let slot_count = nodes.len();
         if slot_count == 0 {
@@ -196,54 +198,54 @@ impl ConsistentHashing {
         );
         b as usize
     }
-    pub fn get_server(&self, hash: u64) -> Option<String> {
-        self.to_server_name_option(self.get_server_id(hash))
+    pub async fn get_server(&self, hash: u64) -> Option<String> {
+        self.to_server_name_option(self.get_server_id(hash).await).await
     }
-    pub fn get_server_by_string(&self, string: &String) -> Option<String> {
-        self.get_server(hash_str(string))
+    pub async fn get_server_by_string(&self, string: &String) -> Option<String> {
+        self.get_server(hash_str(string)).await
     }
-    pub fn get_server_by<T>(&self, obj: &T) -> Option<String>
+    pub async fn get_server_by<T>(&self, obj: &T) -> Option<String>
     where
         T: serde::Serialize,
     {
-        self.get_server(hash_bytes(serialize(obj).as_slice()))
+        self.get_server(hash_bytes(serialize(obj).as_slice())).await
     }
-    pub fn get_server_id_by_string(&self, string: &String) -> Option<u64> {
-        self.get_server_id(hash_str(string))
+    pub async fn get_server_id_by_string(&self, string: &String) -> Option<u64> {
+        self.get_server_id(hash_str(string)).await
     }
-    pub fn get_server_id_by<T>(&self, obj: &T) -> Option<u64>
+    pub async fn get_server_id_by<T>(&self, obj: &T) -> Option<u64>
     where
         T: serde::Serialize,
     {
-        self.get_server_id(hash_bytes(serialize(obj).as_slice()))
+        self.get_server_id(hash_bytes(serialize(obj).as_slice())).await
     }
-    pub fn rand_server(&self) -> Option<String> {
+    pub async fn rand_server(&self) -> Option<String> {
         let rand = rand::random::<u64>();
-        self.get_server(rand)
+        self.get_server(rand).await
     }
-    pub fn nodes_count(&self) -> usize {
-        let lookup_table = self.tables.read();
+    pub async fn nodes_count(&self) -> usize {
+        let lookup_table = self.tables.read().await;
         return lookup_table.nodes.len();
     }
-    pub fn set_weight(
+    pub async fn set_weight(
         &self,
         server_name: &String,
         weight: u64,
-    ) -> impl Future<Output = Result<bool, ExecError>> {
+    ) -> Result<(), ExecError> {
         let group_id = hash_str(&self.group_name);
         let server_id = hash_str(server_name);
         self.weight_sm_client
             .set_weight(&group_id, &server_id, &weight)
-            .map(|res| if let Ok(_) = res { true } else { false })
+            .await
     }
-    pub fn watch_all_actions<F>(&self, f: F)
+    pub async fn watch_all_actions<F>(&self, f: F)
     where
         F: Fn(&Member, &Action, &LookupTables, &Vec<u64>) + 'static + Send + Sync,
     {
-        let mut watchers = self.watchers.write();
+        let mut watchers = self.watchers.write().await;
         watchers.push(Box::new(f));
     }
-    pub fn watch_server_nodes_range_changed<F>(&self, server: &String, f: F)
+    pub async fn watch_server_nodes_range_changed<F>(&self, server: &String, f: F)
     // return ranges [...,...)
     where
         F: Fn((usize, u32)) + 'static + Send + Sync,
@@ -269,12 +271,12 @@ impl ConsistentHashing {
                 warn!("No node exists for watch");
             }
         };
-        self.watch_all_actions(wrapper);
+        self.watch_all_actions(wrapper).await;
     }
 
-    async fn init_table_(
-        &self,
-        lookup_table: &mut RwLockWriteGuard<LookupTables>,
+    async fn init_table_<'a>(
+        &'a self,
+        lookup_table: &'a mut RwLockWriteGuard<'a, LookupTables>,
     ) -> Result<(), InitTableError> {
         if let Ok(Some((mut members, version))) =
             self.membership.group_members(&self.group_name, true).await
@@ -332,14 +334,9 @@ fn server_changed(ch: &Arc<ConsistentHashing>, member: Member, action: Action, v
     let ch_version = ch.version.load(Ordering::Relaxed);
     if ch_version < version {
         let ch = ch.clone();
-        thread::Builder::new()
-            .name(format!(
-                "Conshash member changes update - {}",
-                member.address
-            ))
-            .spawn(move || {
-                let mut lookup_table = ch.tables.write();
-                let watchers = ch.watchers.read();
+        tokio::spawn(async {
+            let mut lookup_table = ch.tables.write().await;
+                let watchers = ch.watchers.read().await;
                 let ch_version = ch.version.load(Ordering::Relaxed);
                 if ch_version >= version {
                     return;
@@ -349,6 +346,6 @@ fn server_changed(ch: &Arc<ConsistentHashing>, member: Member, action: Action, v
                 for watch in watchers.iter() {
                     watch(&member, &action, &*lookup_table, &old_nodes);
                 }
-            });
+        });
     }
 }

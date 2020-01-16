@@ -60,7 +60,7 @@ impl Weights {
             id,
         })).await
     }
-    pub fn new(raft_service: &Arc<RaftService>) {
-        Self::new_with_id(DEFAULT_SERVICE_ID, raft_service)
+    pub async fn new(raft_service: &Arc<RaftService>) {
+        Self::new_with_id(DEFAULT_SERVICE_ID, raft_service).await
     }
 }
