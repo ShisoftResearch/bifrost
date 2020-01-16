@@ -1,7 +1,6 @@
 use bifrost_hasher::hash_str;
 
 pub mod client;
-pub mod framed;
 pub mod server;
 pub mod shortcut;
 

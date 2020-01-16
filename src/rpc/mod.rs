@@ -102,7 +102,7 @@ impl Server {
         let address = &server.address;
         let server = server.clone();
         tcp::server::Server::new(address, box move |mut data| {
-            async {
+            async move {
                 let (svr_id, data) = read_u64_head(data);
                 let svr_map = server.services.read().await;
                 let service = svr_map.get(&svr_id);

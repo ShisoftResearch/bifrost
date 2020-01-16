@@ -5,7 +5,6 @@ use crate::tcp::{shortcut, STANDALONE_ADDRESS};
 use crate::DISABLE_SHORTCUT;
 use bifrost_hasher::hash_str;
 
-use crate::tcp::framed::BytesCodec;
 use crate::tcp::server::{TcpReq, TcpRes};
 use bytes::BytesMut;
 use futures::SinkExt;
@@ -15,10 +14,10 @@ use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::{Stream, StreamExt};
 use tokio::time;
-use tokio_util::codec::Framed;
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 pub struct Client {
-    client: Option<Framed<TcpStream, BytesCodec>>,
+    client: Option<Framed<TcpStream, LengthDelimitedCodec>>,
     pub server_id: u64,
 }
 
@@ -39,7 +38,7 @@ impl Client {
             }
         };
         Ok(Client {
-            client: client.map(|socket| Framed::new(socket, BytesCodec)),
+            client: client.map(|socket| Framed::new(socket, LengthDelimitedCodec::new())),
             server_id,
         })
     }
@@ -48,7 +47,7 @@ impl Client {
     }
     pub async fn send_msg(self: Pin<&mut Self>, msg: TcpReq) -> io::Result<BytesMut> {
         if let Some(ref mut transport) = self.client {
-            transport.send(msg).await?;
+            transport.send(msg.freeze()).await?;
             while let Some(res) = transport.next().await {
                 return res.map_err(|e| {
                     io::Error::new(

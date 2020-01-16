@@ -40,7 +40,7 @@ impl MemberService {
         });
         sm_client.join(&server_address).await;
         let service_clone = service.clone();
-        tokio::spawn(async {
+        tokio::spawn(async move {
             while !service_clone.closed.load(Ordering::Relaxed) {
                 let rpc_client = service_clone.raft_client.current_leader_rpc_client().await;
                 if let Ok(rpc_client) = rpc_client {
@@ -77,6 +77,6 @@ impl Drop for MemberService {
     fn drop(&mut self) {
         let sm_client = self.sm_client.clone();
         let self_id = self.id;
-        tokio::spawn(async move { sm_client.leave(&self_id).await });
+        tokio::spawn(async move { sm_client.leave(&self_id).await }.boxed());
     }
 }

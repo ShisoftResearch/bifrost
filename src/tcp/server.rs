@@ -1,5 +1,4 @@
 use super::STANDALONE_ADDRESS;
-use crate::tcp::framed::BytesCodec;
 use crate::tcp::shortcut;
 use bytes::BytesMut;
 use futures::future::BoxFuture;
@@ -9,19 +8,19 @@ use std::future::Future;
 use std::pin::Pin;
 use tokio::net::TcpListener;
 use tokio::stream::StreamExt;
-use tokio_util::codec::Framed;
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 pub type RPCFuture = dyn Future<Output = TcpRes>;
 pub type BoxedRPCFuture = Box<RPCFuture>;
 pub type TcpReq = BytesMut;
-pub type TcpRes = Pin<Box<dyn Future<Output = BytesMut>>>;
+pub type TcpRes = Pin<Box<dyn Future<Output = BytesMut> + Send + Sync>>;
 
 pub struct Server;
 
 impl Server {
     pub async fn new(
         addr: &String,
-        callback: Box<dyn Fn(TcpReq) -> TcpRes>,
+        callback: Box<dyn Fn(TcpReq) -> TcpRes + Send + Sync>,
     ) -> Result<(), Box<dyn Error>> {
         shortcut::register_server(addr, callback).await;
         if !addr.eq(&STANDALONE_ADDRESS) {
@@ -33,12 +32,12 @@ impl Server {
                         // runs concurrently with all other clients. The `move` keyword is used
                         // here to move ownership of our db handle into the async closure.
                         tokio::spawn(async move {
-                            let mut transport = Framed::new(socket, BytesCodec);
+                            let mut transport = Framed::new(socket, LengthDelimitedCodec::new());
                             while let Some(result) = transport.next().await {
                                 match result {
                                     Ok(data) => {
                                         let res = callback(data).await;
-                                        if let Err(e) = transport.send(res).await {
+                                        if let Err(e) = transport.send(res.freeze()).await {
                                             println!("Error on TCP callback {:?}", e);
                                         }
                                     }
