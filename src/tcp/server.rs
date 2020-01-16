@@ -13,7 +13,7 @@ use tokio_util::codec::{Framed, LengthDelimitedCodec};
 pub type RPCFuture = dyn Future<Output = TcpRes>;
 pub type BoxedRPCFuture = Box<RPCFuture>;
 pub type TcpReq = BytesMut;
-pub type TcpRes = Pin<Box<dyn Future<Output = BytesMut> + Send + Sync>>;
+pub type TcpRes = Pin<Box<dyn Future<Output = BytesMut> + Send>>;
 
 pub struct Server;
 

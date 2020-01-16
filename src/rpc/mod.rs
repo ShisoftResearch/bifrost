@@ -108,8 +108,8 @@ impl Server {
                 let service = svr_map.get(&svr_id);
                 match service {
                     Some(ref service) => {
-                        let svr_Res = service.dispatch(data).await;
-                        encode_res(svr_Res)
+                        let svr_res = service.dispatch(data).await;
+                        encode_res(svr_res)
                     }
                     None => encode_res(Err(RPCRequestError::ServiceIdNotFound)),
                 }
