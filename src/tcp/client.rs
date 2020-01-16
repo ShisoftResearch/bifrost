@@ -12,8 +12,8 @@ use futures::SinkExt;
 use std::future::Future;
 use std::pin::Pin;
 use tokio::io;
-use tokio::net::TcpStream;
-use tokio::stream::StreamExt;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::stream::{Stream, StreamExt};
 use tokio::time;
 use tokio_util::codec::Framed;
 

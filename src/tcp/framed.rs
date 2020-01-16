@@ -3,6 +3,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use std::{io, str};
 use tokio_util::codec::{Decoder, Encoder};
 
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct BytesCodec;
 const BYTE_LEN: usize = 9;
 
@@ -38,3 +39,10 @@ impl Encoder for BytesCodec {
         return Ok(());
     }
 }
+
+impl Default for BytesCodec {
+    fn default() -> Self {
+        Self
+    }
+}
+
