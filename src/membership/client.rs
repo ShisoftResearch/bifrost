@@ -93,84 +93,84 @@ impl ObserverClient {
         group: &str,
     ) -> Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>
     where
-        F: Fn((Member, u64)) -> BoxFuture<'static, ()> + 'static + Unpin + Send + Sync,
+        F: Fn((Member, u64)) -> BoxFuture<'static, ()> + 'static + Send + Sync,
     {
         self.sm_client.on_group_member_offline(f, &hash_str(group)).await
     }
-    pub fn on_any_member_offline<F>(
+    pub async fn on_any_member_offline<F>(
         &self,
         f: F,
-    ) -> impl Future<Output = Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
+    ) -> Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>
     where
-        F: Fn(Result<(Member, u64), ()>) + 'static + Unpin + Send + Sync,
+        F: Fn((Member, u64)) -> BoxFuture<'static, ()> + 'static + Send + Sync,
     {
-        self.sm_client.on_any_member_offline(f)
+        self.sm_client.on_any_member_offline(f).await
     }
-    pub fn on_group_member_online<F>(
-        &self,
-        f: F,
-        group: &str,
-    ) -> impl Future<Output = Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
-    where
-        F: Fn((Member, u64)) -> BoxFuture<'static, ()> + 'static + Unpin + Send + Sync,
-    {
-        self.sm_client.on_group_member_online(f, &hash_str(group))
-    }
-    pub fn on_any_member_online<F>(
-        &self,
-        f: F,
-    ) -> impl Future<Item = Result<SubscriptionReceipt, SubscriptionError>, Error = ExecError>
-    where
-        F: Fn(Result<(Member, u64), ()>) -> BoxFuture<'static, ()> + 'static + Unpin + Send + Sync,
-    {
-        self.sm_client.on_any_member_online(f)
-    }
-    pub fn on_group_member_joined<F>(
+    pub async fn on_group_member_online<F>(
         &self,
         f: F,
         group: &str,
-    ) -> impl Future<Output = Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
+    ) -> Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>
     where
-        F: Fn(Result<(Member, u64), ()>) -> BoxFuture<'static, ()> + 'static + Unpin + Send + Sync,
+        F: Fn((Member, u64)) -> BoxFuture<'static, ()> + 'static + Send + Sync,
     {
-        self.sm_client.on_group_member_joined(f, &hash_str(group))
+        self.sm_client.on_group_member_online(f, &hash_str(group)).await
     }
-    pub fn on_any_member_joined<F>(
+    pub async fn on_any_member_online<F>(
         &self,
         f: F,
-    ) -> impl Future<Output = Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
+    ) -> Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>
     where
-        F: Fn(Result<(Member, u64), ()>) -> BoxFuture<'static, ()> + 'static + Unpin + Send + Sync,
+        F: Fn((Member, u64)) -> BoxFuture<'static, ()> + 'static + Send + Sync,
     {
-        self.sm_client.on_any_member_joined(f)
+        self.sm_client.on_any_member_online(f).await
     }
-    pub fn on_group_member_left<F>(
+    pub async fn on_group_member_joined<F>(
         &self,
         f: F,
         group: &str,
-    ) -> impl Future<Output = Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
+    ) -> Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>
     where
-        F: Fn(Result<(Member, u64), ()>) -> BoxFuture<'static, ()> + 'static + Unpin + Send + Sync,
+        F: Fn((Member, u64)) -> BoxFuture<'static, ()> + 'static + Send + Sync,
     {
-        self.sm_client.on_group_member_left(f, &hash_str(group))
+        self.sm_client.on_group_member_joined(f, &hash_str(group)).await
     }
-    pub fn on_any_member_left<F>(
+    pub async fn on_any_member_joined<F>(
         &self,
         f: F,
-    ) -> impl Future<Item = Result<SubscriptionReceipt, SubscriptionError>, Error = ExecError>
+    ) -> Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>
     where
-        F: Fn(Result<(Member, u64), ()>) -> BoxFuture<'static, ()> + 'static + Unpin + Send + Sync,
+        F: Fn((Member, u64)) -> BoxFuture<'static, ()> + 'static + Send + Sync,
     {
-        self.sm_client.on_any_member_left(f)
+        self.sm_client.on_any_member_joined(f).await
     }
-    pub fn on_group_leader_changed<F>(
+    pub async fn on_group_member_left<F>(
+        &self,
+        f: F,
+        group: &str,
+    ) -> Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>
+    where
+        F: Fn((Member, u64)) -> BoxFuture<'static, ()> + 'static + Send + Sync,
+    {
+        self.sm_client.on_group_member_left(f, &hash_str(group)).await
+    }
+    pub async fn on_any_member_left<F>(
+        &self,
+        f: F,
+    ) -> Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>
+    where
+        F: Fn((Member, u64)) -> BoxFuture<'static, ()> + 'static + Send + Sync,
+    {
+        self.sm_client.on_any_member_left(f).await
+    }
+    pub async fn on_group_leader_changed<F>(
         &self,
         f: F,
         group: &String,
-    ) -> impl Future<Item = Result<SubscriptionReceipt, SubscriptionError>, Error = ExecError>
+    ) -> Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>
     where
-        F: Fn(Result<(Option<Member>, Option<Member>, u64), ()>) -> BoxFuture<'static, ()> + 'static + Unpin + Send + Sync,
+        F: Fn((Option<Member>, Option<Member>, u64)) -> BoxFuture<'static, ()> + 'static + Send + Sync,
     {
-        self.sm_client.on_group_leader_changed(f, &hash_str(group))
+        self.sm_client.on_group_leader_changed(f, &hash_str(group)).await
     }
 }

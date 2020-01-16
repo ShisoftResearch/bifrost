@@ -8,7 +8,7 @@ use futures::stream::FuturesUnordered;
 use std::marker::Unpin;
 
 trait SubFunc = Fn(Vec<u8>) -> BoxFuture<'static, ()>;
-trait BoxedSubFunc = SubFunc + Unpin + Send + Sync;
+trait BoxedSubFunc = SubFunc + Send + Sync;
 
 
 pub struct SubscriptionService {

@@ -17,7 +17,7 @@ macro_rules! raft_client_fn {
     (sub $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty) => {
         pub fn $fn_name<F>(&self, f: F, $($arg:$in_),* ) 
             -> BoxFuture<Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
-        where F: Fn($out) -> BoxFuture<'static, ()> + 'static + Unpin + Send + Sync
+        where F: Fn($out) -> BoxFuture<'static, ()> + 'static + Send + Sync
         {
             self.client.subscribe( 
                 self.sm_id,
