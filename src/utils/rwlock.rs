@@ -134,8 +134,8 @@ impl<'a, T: Unpin> Drop for RwLockWriteGuard<'a, T> {
     }
 }
 
-unsafe impl<T> Send for RwLock<T> {}
-unsafe impl<T> Sync for RwLock<T> {}
+unsafe impl<T: Unpin> Send for RwLock<T> {}
+unsafe impl<T: Unpin> Sync for RwLock<T> {}
 
 impl<'a, T: Unpin> Unpin for RwLockReadGuardFut<'a, T>{}
 impl<'a, T: Unpin> Unpin for RwLockWriteGuardFut<'a, T>{}

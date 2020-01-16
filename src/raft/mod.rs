@@ -198,6 +198,7 @@ enum CheckerAction {
     None,
 }
 
+#[derive(Clone)]
 enum RequestVoteResponse {
     Granted,
     TermOut(u64, u64),
@@ -534,7 +535,7 @@ impl RaftService {
             .map(|ref member| {
                 let rpc = member.rpc.clone();
                 let member_id = member.id;
-                tokio::spawn(time::timeout(Duration::from_millis(2000), async move {
+                let vote_fut = async move {
                     if member_id == server_id {
                         RequestVoteResponse::Granted
                     } else {
@@ -553,7 +554,11 @@ impl RaftService {
                             RequestVoteResponse::NotGranted // default for request failure
                         }
                     }
-                }))
+                };
+                time::timeout(
+                    Duration::from_millis(2000), 
+                    tokio::spawn(vote_fut)
+                )
             })
             .collect();
         let mut granted = 0;
@@ -716,7 +721,7 @@ impl RaftService {
                     };
                     members += 1;
                     let timeout = 2000;
-                    Some(tokio::spawn(time::timeout(Duration::from_millis(timeout), task)))
+                    Some(time::timeout(Duration::from_millis(timeout), tokio::spawn(task)))
                 }).collect();
             match log_id {
                 Some(log_id) => {
