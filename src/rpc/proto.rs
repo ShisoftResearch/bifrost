@@ -1,13 +1,19 @@
 #[macro_export]
 macro_rules! dispatch_rpc_service_functions {
     ($s:ty) => {
-        use futures::prelude::*;
         use bytes::BytesMut;
+        use futures::prelude::*;
         impl $crate::rpc::RPCService for $s {
             fn dispatch<'a>(
                 &'a self,
                 data: BytesMut,
-            ) -> ::std::pin::Pin<Box<dyn Future<Output = Result<::bytes::BytesMut, $crate::rpc::RPCRequestError>> + Send + 'a>>
+            ) -> ::std::pin::Pin<
+                Box<
+                    dyn Future<Output = Result<::bytes::BytesMut, $crate::rpc::RPCRequestError>>
+                        + Send
+                        + 'a,
+                >,
+            >
             where
                 Self: Sized,
             {
@@ -23,7 +29,8 @@ macro_rules! dispatch_rpc_service_functions {
                     let mut cbs = RPC_SVRS.write().await;
                     let service = unsafe { Arc::from_raw(service_ptr as *const $s) };
                     cbs.insert((server_id, service_id), service);
-                }.boxed()
+                }
+                .boxed()
             }
         }
     };

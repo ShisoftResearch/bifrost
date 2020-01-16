@@ -1,12 +1,12 @@
+use crate::raft::state_machine::callback::server::Subscriptions;
+use crate::raft::state_machine::callback::SubKey;
+use crate::raft::state_machine::StateMachineCtl;
+use crate::raft::AsyncServiceClient;
+use crate::rpc;
+use crate::utils::rwlock::*;
 use bifrost_hasher::hash_str;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use crate::utils::rwlock::*;
-use crate::raft::state_machine::callback::SubKey;
-use crate::raft::state_machine::callback::server::Subscriptions;
-use crate::raft::AsyncServiceClient;
-use crate::rpc;
-use crate::raft::state_machine::StateMachineCtl;
 
 pub const CONFIG_SM_ID: u64 = 1;
 
@@ -30,7 +30,7 @@ pub struct ConfigSnapshot {
     members: MemberConfigSnapshot,
     //TODO: snapshot for subscriptions
 }
- 
+
 raft_state_machine! {
     def cmd new_member_(address: String) -> bool;
     def cmd del_member_(address: String);
@@ -62,30 +62,37 @@ impl StateMachineCmds for Configures {
                 }
             }
             false
-        }.boxed()
+        }
+        .boxed()
     }
     fn del_member_(&mut self, address: String) -> BoxFuture<()> {
         async {
             let hash = hash_str(&address);
             self.members.remove(&hash);
-        }.boxed()
+        }
+        .boxed()
     }
     fn member_address(&self) -> BoxFuture<Vec<String>> {
-        async {
-            self.members.values().map(|m| m.address).collect()
-        }.boxed()
+        async { self.members.values().map(|m| m.address).collect() }.boxed()
     }
-    fn subscribe(&mut self, key: SubKey, address: String, session_id: u64) -> BoxFuture<Result<u64, ()>> {
+    fn subscribe(
+        &mut self,
+        key: SubKey,
+        address: String,
+        session_id: u64,
+    ) -> BoxFuture<Result<u64, ()>> {
         async {
             let mut subs = self.subscriptions.write().await;
             subs.subscribe(key, &address, session_id).await
-        }.boxed()
+        }
+        .boxed()
     }
     fn unsubscribe(&mut self, sub_id: u64) -> BoxFuture<()> {
         async {
             let mut subs = self.subscriptions.write().await;
             subs.remove_subscription(sub_id);
-        }.boxed()
+        }
+        .boxed()
     }
 }
 

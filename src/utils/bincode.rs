@@ -11,7 +11,7 @@ where
     }
 }
 
-pub fn deserialize<'a, T>(data: &'a[u8]) -> T
+pub fn deserialize<'a, T>(data: &'a [u8]) -> T
 where
     T: serde::Deserialize<'a>,
 {

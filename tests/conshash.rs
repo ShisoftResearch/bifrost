@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use raft::wait;
 use bifrost::raft::client::RaftClient;
+use raft::wait;
 
 #[test]
 fn primary() {

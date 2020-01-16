@@ -2,8 +2,8 @@ pub mod client;
 pub mod member;
 pub mod server;
 
-use bifrost_plugins::hash_ident;
 use crate::membership::client::Member as ClientMember;
+use bifrost_plugins::hash_ident;
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_MEMBERSHIP_SERVICE) as u64;
 

@@ -1,14 +1,14 @@
 use super::super::OpType;
 use super::*;
-use bifrost_hasher::{hash_bytes, hash_str};
+use crate::raft::{RaftMsg, RaftService, IS_LEADER};
+use crate::rpc;
 use crate::utils::rwlock::RwLock;
+use bifrost_hasher::{hash_bytes, hash_str};
+use futures::stream::FuturesUnordered;
 use serde;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use crate::raft::{RaftService, RaftMsg, IS_LEADER};
-use crate::rpc;
-use futures::stream::FuturesUnordered;
 
 pub struct Subscriber {
     pub session_id: u64,
@@ -36,7 +36,12 @@ impl Subscriptions {
         }
     }
 
-    pub async fn subscribe(&mut self, key: SubKey, address: &String, session_id: u64) -> Result<u64, ()> {
+    pub async fn subscribe(
+        &mut self,
+        key: SubKey,
+        address: &String,
+        session_id: u64,
+    ) -> Result<u64, ()> {
         let sub_service_id = DEFAULT_SERVICE_ID;
         let suber_id = hash_str(address);
         let suber_exists = self.subscribers.contains_key(&suber_id);
@@ -146,14 +151,7 @@ impl SMCallback {
         &self,
         msg: M,
         message: R,
-    ) -> Result<
-        (
-            usize,
-            Vec<NotifyError>,
-            Vec<Result<(), rpc::RPCError>>,
-        ),
-        NotifyError,
-    >
+    ) -> Result<(usize, Vec<NotifyError>, Vec<Result<(), rpc::RPCError>>), NotifyError>
     where
         R: serde::Serialize + Send + Sync + Clone + Any + 'static,
         M: RaftMsg<R> + 'static,
@@ -180,21 +178,19 @@ impl SMCallback {
                 if let Some(sub_ids) = svr_subs.subscriptions.get(&key) {
                     let sub_result_futs: FuturesUnordered<_> = sub_ids
                         .iter()
-                        .map(|sub_id| {
-                            async {
-                                if let Some(subscriber_id) = svr_subs.sub_suber.get(&sub_id) {
-                                    if let Some(subscriber) = svr_subs.subscribers.get(&subscriber_id) {
-                                        let data = bincode::serialize(&message).unwrap();
-                                        let client = &subscriber.client;
-                                        Ok(client.notify(key, data).await)
-                                    } else {
-                                        Err(NotifyError::CannotFindSubscriber)
-                                    }
+                        .map(|sub_id| async {
+                            if let Some(subscriber_id) = svr_subs.sub_suber.get(&sub_id) {
+                                if let Some(subscriber) = svr_subs.subscribers.get(&subscriber_id) {
+                                    let data = bincode::serialize(&message).unwrap();
+                                    let client = &subscriber.client;
+                                    Ok(client.notify(key, data).await)
                                 } else {
-                                    Err(NotifyError::CannotFindSubscribers)
+                                    Err(NotifyError::CannotFindSubscriber)
                                 }
+                            } else {
+                                Err(NotifyError::CannotFindSubscribers)
                             }
-                        })  
+                        })
                         .collect();
                     let sub_result: Vec<_> = sub_result_futs.collect().await;
                     let errors = sub_result

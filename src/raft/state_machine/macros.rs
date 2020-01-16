@@ -15,11 +15,11 @@ macro_rules! raft_trait_fn {
 #[macro_export]
 macro_rules! raft_client_fn {
     (sub $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty) => {
-        pub fn $fn_name<F>(&self, f: F, $($arg:$in_),* ) 
+        pub fn $fn_name<F>(&self, f: F, $($arg:$in_),* )
             -> BoxFuture<Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>>
         where F: Fn($out) -> BoxFuture<'static, ()> + 'static + Send + Sync
         {
-            self.client.subscribe( 
+            self.client.subscribe(
                 self.sm_id,
                 $fn_name::new($($arg,)*),
                 f
@@ -34,7 +34,7 @@ macro_rules! raft_client_fn {
             ).await
         }
     };
-} 
+}
 
 #[macro_export]
 macro_rules! raft_fn_op_type {

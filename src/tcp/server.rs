@@ -1,15 +1,15 @@
 use super::STANDALONE_ADDRESS;
-use crate::tcp::shortcut;
-use std::future::Future;
-use std::error::Error;
 use crate::tcp::framed::BytesCodec;
-use tokio_util::codec::Framed;
-use tokio::stream::StreamExt;
-use futures::SinkExt;
-use tokio::net::TcpListener;
+use crate::tcp::shortcut;
 use bytes::BytesMut;
 use futures::future::BoxFuture;
+use futures::SinkExt;
+use std::error::Error;
+use std::future::Future;
 use std::pin::Pin;
+use tokio::net::TcpListener;
+use tokio::stream::StreamExt;
+use tokio_util::codec::Framed;
 
 pub type RPCFuture = dyn Future<Output = TcpRes>;
 pub type BoxedRPCFuture = Box<RPCFuture>;
@@ -19,9 +19,12 @@ pub type TcpRes = Pin<Box<dyn Future<Output = BytesMut>>>;
 pub struct Server;
 
 impl Server {
-    pub async fn new(addr: &String, callback: Box<dyn Fn(TcpReq) -> TcpRes>) -> Result<(), Box<dyn Error>> {
+    pub async fn new(
+        addr: &String,
+        callback: Box<dyn Fn(TcpReq) -> TcpRes>,
+    ) -> Result<(), Box<dyn Error>> {
         shortcut::register_server(addr, callback).await;
-        if !addr.eq(&STANDALONE_ADDRESS) { 
+        if !addr.eq(&STANDALONE_ADDRESS) {
             let mut listener = TcpListener::bind(&addr).await?;
             loop {
                 match listener.accept().await {
@@ -36,7 +39,7 @@ impl Server {
                                     Ok(data) => {
                                         let res = callback(data).await;
                                         if let Err(e) = transport.send(res).await {
-                                           println!("Error on TCP callback {:?}", e);
+                                            println!("Error on TCP callback {:?}", e);
                                         }
                                     }
                                     Err(e) => {

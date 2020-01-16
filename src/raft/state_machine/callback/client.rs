@@ -1,15 +1,14 @@
 use super::*;
 use crate::utils::rwlock::*;
-use std::collections::HashMap;
-use std::sync::Arc;
 use crate::utils::time::get_time;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
+use std::collections::HashMap;
 use std::marker::Unpin;
+use std::sync::Arc;
 
 trait SubFunc = Fn(Vec<u8>) -> BoxFuture<'static, ()>;
 trait BoxedSubFunc = SubFunc + Send + Sync;
-
 
 pub struct SubscriptionService {
     pub subs: RwLock<HashMap<SubKey, Vec<(Box<dyn BoxedSubFunc>, u64)>>>,
@@ -32,7 +31,8 @@ impl Service for SubscriptionService {
                     .collect();
                 let _: Vec<_> = futs.collect().await;
             }
-        }.boxed()
+        }
+        .boxed()
     }
 }
 dispatch_rpc_service_functions!(SubscriptionService);

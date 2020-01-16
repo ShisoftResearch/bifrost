@@ -10,7 +10,8 @@ fn startup() {
         storage: Storage::default(),
         address: String::from("127.0.0.1:2000"),
         service_id: DEFAULT_SERVICE_ID,
-    }).await;
+    })
+    .await;
     assert!(success);
 }
 
@@ -138,19 +139,23 @@ fn log_replication() {
     server4.register_service(DEFAULT_SERVICE_ID, &service4);
     Server::listen_and_resume(&server4);
     assert!(RaftService::start(&service4).await);
-    let join_result = service4.join(&vec![s1_addr.clone(), s2_addr.clone(), s3_addr.clone()]).await;
+    let join_result = service4
+        .join(&vec![s1_addr.clone(), s2_addr.clone(), s3_addr.clone()])
+        .await;
     join_result.unwrap();
 
     let server5 = Server::new(&s5_addr);
     server5.register_service(DEFAULT_SERVICE_ID, &service5);
     Server::listen_and_resume(&server5);
     assert!(RaftService::start(&service5).await);
-    let join_result = service5.join(&vec![
-        s1_addr.clone(),
-        s2_addr.clone(),
-        s3_addr.clone(),
-        s4_addr.clone(),
-    ]).await;
+    let join_result = service5
+        .join(&vec![
+            s1_addr.clone(),
+            s2_addr.clone(),
+            s3_addr.clone(),
+            s4_addr.clone(),
+        ])
+        .await;
     join_result.unwrap();
 
     wait(); // wait for membership replication to take effect

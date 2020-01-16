@@ -61,7 +61,9 @@ fn dummy() {
     server.register_service(DEFAULT_SERVICE_ID, &raft_service);
     Server::listen_and_resume(&server);
     RaftService::start(&raft_service).await;
-    raft_service.register_state_machine(Box::new(dummy_sm)).await;
+    raft_service
+        .register_state_machine(Box::new(dummy_sm))
+        .await;
     raft_service.bootstrap().await;
 
     wait();

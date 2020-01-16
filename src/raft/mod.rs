@@ -2,30 +2,30 @@ use self::state_machine::configs::commands::{del_member_, member_address, new_me
 use self::state_machine::configs::{RaftMember, CONFIG_SM_ID};
 use self::state_machine::master::{ExecError, ExecResult, MasterStateMachine, SubStateMachine};
 use self::state_machine::OpType;
+use crate::raft::client::RaftClient;
+use crate::raft::state_machine::StateMachineCtl;
+use crate::utils::mutex::*;
+use crate::utils::rwlock::*;
+use crate::utils::time::get_time;
 use bifrost_hasher::hash_str;
+use bifrost_plugins::hash_ident;
+use futures::future::BoxFuture;
+use futures::prelude::*;
+use futures::stream::FuturesUnordered;
+use futures::FutureExt;
 use rand;
+use rand::Rng;
+use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::collections::Bound::{Included, Unbounded};
 use std::collections::{BTreeMap, HashMap};
-use std::io;
-use bifrost_plugins::hash_ident;
-use futures::prelude::*;
-use std::cell::RefCell;
 use std::fs;
 use std::fs::{File, OpenOptions};
+use std::io;
 use std::io::{Read, Write};
 use std::path::Path;
-use crate::utils::time::get_time;
-use crate::utils::mutex::*;
-use crate::utils::rwlock::*;
 use std::time::Duration;
-use crate::raft::state_machine::StateMachineCtl;
-use futures::FutureExt;
-use crate::raft::client::RaftClient;
-use rand::Rng;
-use futures::stream::FuturesUnordered;
 use tokio::time;
-use futures::future::BoxFuture;
 
 #[macro_use]
 pub mod state_machine;
@@ -232,7 +232,10 @@ fn is_majority(members: u64, granted: u64) -> bool {
     granted >= members / 2
 }
 
-async fn commit_command<'a>(meta: &'a RwLockWriteGuard<'a, RaftMeta>, entry: &'a LogEntry) -> ExecResult {
+async fn commit_command<'a>(
+    meta: &'a RwLockWriteGuard<'a, RaftMeta>,
+    entry: &'a LogEntry,
+) -> ExecResult {
     with_bindings!(IS_LEADER: is_leader(meta) => {
         meta.state_machine.write().await.commit_cmd(&entry)
     })
@@ -305,50 +308,50 @@ impl RaftService {
         }
         let checker_ref = server.clone();
         tokio::spawn(async {
-                let server = checker_ref;
-                loop {
-                    let start_time = get_time();
-                    let expected_ends = start_time + CHECKER_MS;
-                    {
-                        let mut meta = server.meta.write().await; //WARNING: Reentering not supported
-                        let action = match meta.membership {
-                            Membership::Leader(_) => CheckerAction::SendHeartbeat,
-                            Membership::Follower | Membership::Candidate => {
-                                let current_time = get_time();
-                                let timeout_time = meta.timeout + meta.last_checked;
-                                let timeout_elapsed = current_time - timeout_time;
-                                if meta.vote_for == None && timeout_elapsed > 0 {
-                                    // TODO: in my test sometimes timeout_elapsed may go 1 for no reason, require investigation
-                                    //Timeout, require election
-                                    //debug!("TIMEOUT!!! GOING TO CANDIDATE!!! {}, {}", server_id, timeout_elapsed);
-                                    CheckerAction::BecomeCandidate
-                                } else {
-                                    CheckerAction::None
-                                }
+            let server = checker_ref;
+            loop {
+                let start_time = get_time();
+                let expected_ends = start_time + CHECKER_MS;
+                {
+                    let mut meta = server.meta.write().await; //WARNING: Reentering not supported
+                    let action = match meta.membership {
+                        Membership::Leader(_) => CheckerAction::SendHeartbeat,
+                        Membership::Follower | Membership::Candidate => {
+                            let current_time = get_time();
+                            let timeout_time = meta.timeout + meta.last_checked;
+                            let timeout_elapsed = current_time - timeout_time;
+                            if meta.vote_for == None && timeout_elapsed > 0 {
+                                // TODO: in my test sometimes timeout_elapsed may go 1 for no reason, require investigation
+                                //Timeout, require election
+                                //debug!("TIMEOUT!!! GOING TO CANDIDATE!!! {}, {}", server_id, timeout_elapsed);
+                                CheckerAction::BecomeCandidate
+                            } else {
+                                CheckerAction::None
                             }
-                            Membership::Offline => CheckerAction::ExitLoop,
-                            Membership::Undefined => CheckerAction::None,
-                        };
-                        match action {
-                            CheckerAction::SendHeartbeat => {
-                                server.send_followers_heartbeat(&mut meta, None).await;
-                            }
-                            CheckerAction::BecomeCandidate => {
-                                server.become_candidate(&mut meta).await;
-                            }
-                            CheckerAction::ExitLoop => {
-                                break;
-                            }
-                            CheckerAction::None => {}
                         }
-                    }
-                    let end_time = get_time();
-                    let time_to_sleep = expected_ends - end_time - 1;
-                    if time_to_sleep > 0 {
-                        time::delay_for(Duration::from_millis(time_to_sleep as u64)).await;
+                        Membership::Offline => CheckerAction::ExitLoop,
+                        Membership::Undefined => CheckerAction::None,
+                    };
+                    match action {
+                        CheckerAction::SendHeartbeat => {
+                            server.send_followers_heartbeat(&mut meta, None).await;
+                        }
+                        CheckerAction::BecomeCandidate => {
+                            server.become_candidate(&mut meta).await;
+                        }
+                        CheckerAction::ExitLoop => {
+                            break;
+                        }
+                        CheckerAction::None => {}
                     }
                 }
-            });
+                let end_time = get_time();
+                let time_to_sleep = expected_ends - end_time - 1;
+                if time_to_sleep > 0 {
+                    time::delay_for(Duration::from_millis(time_to_sleep as u64)).await;
+                }
+            }
+        });
         {
             let mut meta = server.meta.write().await;
             meta.last_checked = get_time();
@@ -364,7 +367,7 @@ impl RaftService {
         server.register_service(svr_id, &service);
         (RaftService::start(&service).await, service, server)
     }
-    pub  async fn bootstrap(&self) {
+    pub async fn bootstrap(&self) {
         let mut meta = self.write_meta().await;
         let (last_log_id, _) = {
             let logs = meta.logs.read().await;
@@ -520,36 +523,39 @@ impl RaftService {
         alter_term(meta, term + 1);
         meta.vote_for = Some(self.id);
         self.switch_membership(meta, Membership::Candidate);
-        let term = meta.term;            
+        let term = meta.term;
         let server_id = self.id;
         let logs = meta.logs.read().await;
         let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
         let members: Vec<_> = members_from_meta!(meta).values().collect();
         let mut num_members = members.len();
-        let mut members_vote_response_stream: FuturesUnordered<_> = members.iter().map(|ref member| {
-            let rpc = member.rpc.clone();
-            let member_id = member.id;
-            tokio::spawn(time::timeout(Duration::from_millis(2000), async move {
-                if member_id == server_id {
-                    RequestVoteResponse::Granted
-                } else {
-                    if let Ok(((remote_term, remote_leader_id), vote_granted)) = rpc
-                        .request_vote(term, server_id, last_log_id, last_log_term)
-                        .await
-                    {
-                        if vote_granted {
-                            RequestVoteResponse::Granted
-                        } else if remote_term > term {
-                            RequestVoteResponse::TermOut(remote_term, remote_leader_id)
-                        } else {
-                            RequestVoteResponse::NotGranted
-                        }
+        let mut members_vote_response_stream: FuturesUnordered<_> = members
+            .iter()
+            .map(|ref member| {
+                let rpc = member.rpc.clone();
+                let member_id = member.id;
+                tokio::spawn(time::timeout(Duration::from_millis(2000), async move {
+                    if member_id == server_id {
+                        RequestVoteResponse::Granted
                     } else {
-                        RequestVoteResponse::NotGranted // default for request failure
+                        if let Ok(((remote_term, remote_leader_id), vote_granted)) = rpc
+                            .request_vote(term, server_id, last_log_id, last_log_term)
+                            .await
+                        {
+                            if vote_granted {
+                                RequestVoteResponse::Granted
+                            } else if remote_term > term {
+                                RequestVoteResponse::TermOut(remote_term, remote_leader_id)
+                            } else {
+                                RequestVoteResponse::NotGranted
+                            }
+                        } else {
+                            RequestVoteResponse::NotGranted // default for request failure
+                        }
                     }
-                }
-            }))
-        }).collect();
+                }))
+            })
+            .collect();
         let mut granted = 0;
         while let Some(vote_response) = members_vote_response_stream.next().await {
             if let Ok(Ok(res)) = vote_response {
@@ -921,7 +927,8 @@ impl Service for RaftService {
             };
             self.reset_last_checked(&mut meta);
             return result;
-        }.boxed()
+        }
+        .boxed()
     }
 
     fn request_vote(
@@ -976,7 +983,8 @@ impl Service for RaftService {
                 self.id, candidate_id, vote_granted
             );
             ((meta.term, meta.leader_id), vote_granted)
-        }.boxed()
+        }
+        .boxed()
     }
 
     fn install_snapshot(
@@ -1000,7 +1008,8 @@ impl Service for RaftService {
             meta.last_applied = last_included_index;
             self.reset_last_checked(&mut meta);
             meta.term
-        }.boxed()
+        }
+        .boxed()
     }
 
     fn c_command(&self, entry: LogEntry) -> BoxFuture<ClientCmdResponse> {
@@ -1013,8 +1022,14 @@ impl Service for RaftService {
             let (new_log_id, new_log_term) = self.leader_append_log(&meta, &mut entry).await;
             let mut data = match entry.sm_id {
                 // special treats for membership changes
-                CONFIG_SM_ID => Some(self.try_sync_config_to_followers(&mut meta, &entry, new_log_id).await),
-                _ => self.try_sync_log_to_followers(&mut meta, &entry, new_log_id).await,
+                CONFIG_SM_ID => Some(
+                    self.try_sync_config_to_followers(&mut meta, &entry, new_log_id)
+                        .await,
+                ),
+                _ => {
+                    self.try_sync_log_to_followers(&mut meta, &entry, new_log_id)
+                        .await
+                }
             }; // Some for committed and None for not committed
             if let Some(data) = data {
                 ClientCmdResponse::Success {
@@ -1025,7 +1040,8 @@ impl Service for RaftService {
             } else {
                 ClientCmdResponse::NotCommitted
             }
-        }.boxed()
+        }
+        .boxed()
     }
 
     fn c_query(&self, entry: LogEntry) -> BoxFuture<ClientQryResponse> {
@@ -1042,7 +1058,8 @@ impl Service for RaftService {
                     last_log_term,
                 }
             }
-        }.boxed()
+        }
+        .boxed()
     }
 
     fn c_server_cluster_info(&self) -> BoxFuture<ClientClusterInfo> {

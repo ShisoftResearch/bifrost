@@ -62,8 +62,7 @@ macro_rules! def_store_hash_map {
                     let res = self.map.remove(&k);
                     if let Some(ref callback) = self.callback {
                         if let Some(ref v) = res {
-                            callback
-                                .notify(commands::on_removed::new(), (k.clone(), v.clone()));
+                            callback.notify(commands::on_removed::new(), (k.clone(), v.clone()));
                             callback.notify(commands::on_key_removed::new(&k), v.clone());
                         }
                     }

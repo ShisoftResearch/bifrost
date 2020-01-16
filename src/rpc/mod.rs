@@ -1,22 +1,22 @@
 #[macro_use]
 pub mod proto;
 
+use crate::tcp::client::Client;
+use crate::utils::mutex::Mutex;
+use crate::utils::rwlock::RwLock;
+use crate::{tcp, DISABLE_SHORTCUT};
 use bifrost_hasher::hash_str;
+use byteorder::{ByteOrder, LittleEndian};
+use bytes::buf::BufExt;
+use bytes::{Buf, BufMut, BytesMut};
+use futures::future::{err, BoxFuture};
 use futures::prelude::*;
 use futures::{future, Future};
 use std::collections::HashMap;
 use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::thread;
-use crate::utils::rwlock::RwLock;
-use crate::utils::mutex::Mutex;
-use crate::{tcp, DISABLE_SHORTCUT};
-use byteorder::{LittleEndian, ByteOrder};
-use bytes::{BufMut, Buf, BytesMut};
-use futures::future::{err, BoxFuture};
-use std::pin::Pin;
-use bytes::buf::BufExt;
-use crate::tcp::client::Client;
 
 lazy_static! {
     pub static ref DEFAULT_CLIENT_POOL: ClientPool = ClientPool::new();
@@ -36,7 +36,7 @@ pub enum RPCError {
 }
 
 pub trait RPCService: Sync + Send {
-    fn dispatch(&self, data: BytesMut) -> BoxFuture<Result<BytesMut, RPCRequestError>>; 
+    fn dispatch(&self, data: BytesMut) -> BoxFuture<Result<BytesMut, RPCRequestError>>;
     fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64);
 }
 
@@ -100,26 +100,22 @@ impl Server {
     }
     pub fn listen(server: &Arc<Server>) {
         let address = &server.address;
-        let server = server.clone(); 
-        tcp::server::Server::new(
-            address,
-            box move |mut data| {
-                async {
-                    let (svr_id, data) = read_u64_head(data);
-                    let svr_map = server.services.read().await;
-                    let service = svr_map.get(&svr_id);
-                    match service {
-                        Some(ref service) => {
-                            let svr_Res = service.dispatch(data).await;
-                            encode_res(svr_Res)
-                        }
-                        None => encode_res(Err(
-                            RPCRequestError::ServiceIdNotFound, 
-                        )),
+        let server = server.clone();
+        tcp::server::Server::new(address, box move |mut data| {
+            async {
+                let (svr_id, data) = read_u64_head(data);
+                let svr_map = server.services.read().await;
+                let service = svr_map.get(&svr_id);
+                match service {
+                    Some(ref service) => {
+                        let svr_Res = service.dispatch(data).await;
+                        encode_res(svr_Res)
                     }
-                }.boxed()
-            },
-        );
+                    None => encode_res(Err(RPCRequestError::ServiceIdNotFound)),
+                }
+            }
+            .boxed()
+        });
     }
     pub fn listen_and_resume(server: &Arc<Server>) {
         let server = server.clone();

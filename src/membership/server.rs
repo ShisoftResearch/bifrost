@@ -1,23 +1,23 @@
 use super::heartbeat_rpc::*;
 use super::raft::*;
 use super::*;
-use bifrost_hasher::hash_str;
+use crate::membership::client::{Group as ClientGroup, Member as ClientMember};
+use crate::raft::state_machine::callback::server::{notify as cb_notify, SMCallback};
+use crate::raft::state_machine::StateMachineCtl;
+use crate::raft::{LogEntry, RaftMsg, RaftService, Service as raft_svr_trait};
+use crate::rpc::Server;
 use crate::utils::rwlock::*;
+use crate::utils::time;
+use bifrost_hasher::hash_str;
+use futures::prelude::future::*;
+use futures::prelude::*;
+use futures::stream::FuturesUnordered;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::{thread, time as std_time};
-use std::future::Future;
-use crate::utils::time;
-use crate::membership::client::{Group as ClientGroup, Member as ClientMember};
-use crate::rpc::Server;
-use crate::raft::state_machine::callback::server::{notify as cb_notify, SMCallback};
-use crate::raft::{LogEntry, RaftMsg, RaftService, Service as raft_svr_trait};
-use crate::raft::state_machine::StateMachineCtl;
-use futures::prelude::future::*;
-use futures::prelude::*;
-use tokio::{time as async_time};
-use futures::stream::FuturesUnordered;
+use tokio::time as async_time;
 
 static MAX_TIMEOUT: i64 = 1000; //5 secs for 500ms heartbeat
 
@@ -45,7 +45,8 @@ impl Service for HeartbeatService {
             });
             stat.last_updated = current_time;
             // only update the timestamp, let the watcher thread to decide
-        }.boxed()
+        }
+        .boxed()
     }
 }
 impl HeartbeatService {
@@ -157,10 +158,12 @@ impl Membership {
             version: 0,
         };
         membership_service.init_callback(raft_service);
-        raft_service.register_state_machine(Box::new(membership_service)).await;
+        raft_service
+            .register_state_machine(Box::new(membership_service))
+            .await;
         server.register_service(DEFAULT_SERVICE_ID, &service).await;
     }
-     async fn compose_client_member(&self, id: u64) -> ClientMember {
+    async fn compose_client_member(&self, id: u64) -> ClientMember {
         let member = self.members.get(&id).unwrap();
         let stat_map = self.heartbeat.status.read().await;
         ClientMember {
@@ -179,14 +182,16 @@ impl Membership {
             &self.callback,
             commands::on_any_member_online::new(),
             || (client_member.clone(), version),
-        ).await;
+        )
+        .await;
         if let Some(ref member) = self.members.get(&id) {
             for group in &member.groups {
                 cb_notify(
                     &self.callback,
                     commands::on_group_member_online::new(group),
                     || (client_member.clone(), version),
-                ).await;
+                )
+                .await;
             }
         }
     }
@@ -197,14 +202,16 @@ impl Membership {
             &self.callback,
             commands::on_any_member_offline::new(),
             || (client_member.clone(), version),
-        ).await;
+        )
+        .await;
         if let Some(ref member) = self.members.get(&id) {
             for group in &member.groups {
                 cb_notify(
                     &self.callback,
                     commands::on_group_member_offline::new(group),
                     || (client_member.clone(), version),
-                ).await;
+                )
+                .await;
             }
         }
     }
@@ -213,10 +220,12 @@ impl Membership {
         let version = self.version;
         cb_notify(&self.callback, commands::on_any_member_left::new(), || {
             (client_member.clone(), version)
-        }).await;
+        })
+        .await;
         if let Some(ref member) = self.members.get(&id) {
             for group in &member.groups {
-                self.notify_for_group_member_left(*group, &client_member).await
+                self.notify_for_group_member_left(*group, &client_member)
+                    .await
             }
         }
     }
@@ -225,7 +234,8 @@ impl Membership {
             &self.callback,
             commands::on_group_member_left::new(&group),
             || (member.clone(), self.version),
-        ).await;
+        )
+        .await;
     }
     async fn leave_group_(&mut self, group_id: u64, id: u64, need_notify: bool) -> bool {
         let mut success = false;
@@ -280,13 +290,11 @@ impl Membership {
             }
         }
         if changed {
-            let convert = |id_opt| {
-                async {
-                    if let Some(id_opt) = id_opt {
-                        Some(self.compose_client_member(id_opt).await)
-                    } else {
-                        None
-                    }
+            let convert = |id_opt| async {
+                if let Some(id_opt) = id_opt {
+                    Some(self.compose_client_member(id_opt).await)
+                } else {
+                    None
                 }
             };
             let old_convert = convert(old).await;
@@ -295,7 +303,8 @@ impl Membership {
                 &self.callback,
                 commands::on_group_leader_changed::new(&group_id),
                 || (old_convert, new_convert, self.version),
-            ).await;
+            )
+            .await;
             Ok(())
         } else {
             Err(())
@@ -367,7 +376,8 @@ impl StateMachineCmds for Membership {
                 self.notify_for_member_offline(id).await;
                 self.leader_candidate_unavailable(id).await;
             }
-        }.boxed()
+        }
+        .boxed()
     }
     fn join(&mut self, address: String) -> BoxFuture<Option<u64>> {
         async {
@@ -398,12 +408,14 @@ impl StateMachineCmds for Membership {
                     &self.callback,
                     commands::on_any_member_joined::new(),
                     || (composed_client_member, self.version),
-                ).await;
+                )
+                .await;
                 Some(id)
             } else {
                 None
             }
-        }.boxed()
+        }
+        .boxed()
     }
     fn leave(&mut self, id: u64) -> BoxFuture<bool> {
         async {
@@ -430,7 +442,8 @@ impl StateMachineCmds for Membership {
             }
             self.members.remove(&id);
             true
-        }.boxed()
+        }
+        .boxed()
     }
     fn join_group(&mut self, group_name: String, id: u64) -> BoxFuture<bool> {
         async {
@@ -453,19 +466,22 @@ impl StateMachineCmds for Membership {
                     &self.callback,
                     commands::on_group_member_joined::new(&group_id),
                     || (composed_member, self.version),
-                ).await;
+                )
+                .await;
                 self.group_leader_candidate_available(group_id, id).await;
                 true
             } else {
                 false
             }
-        }.boxed()
+        }
+        .boxed()
     }
     fn leave_group(&mut self, group_id: u64, id: u64) -> BoxFuture<bool> {
         async {
             self.version += 1;
             self.leave_group_(group_id, id, true).await
-        }.boxed()
+        }
+        .boxed()
     }
     fn new_group(&mut self, name: String) -> BoxFuture<Result<u64, u64>> {
         async {
@@ -486,7 +502,8 @@ impl StateMachineCmds for Membership {
             } else {
                 Err(id)
             }
-        }.boxed()
+        }
+        .boxed()
     }
     fn del_group(&mut self, id: u64) -> BoxFuture<bool> {
         async {
@@ -506,7 +523,8 @@ impl StateMachineCmds for Membership {
             } else {
                 false
             }
-        }.boxed()
+        }
+        .boxed()
     }
     fn group_leader(&self, group_id: u64) -> BoxFuture<Option<(Option<ClientMember>, u64)>> {
         async {
@@ -521,9 +539,14 @@ impl StateMachineCmds for Membership {
             } else {
                 None
             }
-        }.boxed()
+        }
+        .boxed()
     }
-    fn group_members(&self, group: u64, online_only: bool) -> BoxFuture<Option<(Vec<ClientMember>, u64)>> {
+    fn group_members(
+        &self,
+        group: u64,
+        online_only: bool,
+    ) -> BoxFuture<Option<(Vec<ClientMember>, u64)>> {
         async {
             if let Some(group) = self.groups.get(&group) {
                 let futs: FuturesUnordered<_> = group
@@ -542,23 +565,26 @@ impl StateMachineCmds for Membership {
             } else {
                 None
             }
-        }.boxed()
+        }
+        .boxed()
     }
     fn all_members(&self, online_only: bool) -> BoxFuture<(Vec<ClientMember>, u64)> {
         async {
-            let futs: FuturesUnordered<_> = self.members
+            let futs: FuturesUnordered<_> = self
+                .members
                 .iter()
                 .map(|(id, _)| self.compose_client_member(*id))
                 .collect();
             let members: Vec<_> = futs.collect().await;
             (
                 members
-                    .into_iter()    
+                    .into_iter()
                     .filter(|member| !online_only || member.online)
                     .collect(),
                 self.version,
             )
-        }.boxed()
+        }
+        .boxed()
     }
 }
 impl StateMachineCtl for Membership {

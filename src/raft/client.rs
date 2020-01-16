@@ -1,19 +1,19 @@
 use super::*;
+use crate::raft::state_machine::callback::client::SubscriptionService;
+use crate::raft::state_machine::callback::SubKey;
+use crate::raft::state_machine::configs::commands::{
+    subscribe as conf_subscribe, unsubscribe as conf_unsubscribe,
+};
+use crate::raft::state_machine::master::ExecError;
+use crate::rpc;
 use bifrost_hasher::{hash_bytes, hash_str};
+use futures::future::BoxFuture;
 use std::clone::Clone;
 use std::cmp::max;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::iter::FromIterator;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use crate::raft::state_machine::master::ExecError;
-use crate::rpc;
-use crate::raft::state_machine::callback::SubKey;
-use crate::raft::state_machine::callback::client::SubscriptionService;
-use crate::raft::state_machine::configs::commands::{
-    subscribe as conf_subscribe, unsubscribe as conf_unsubscribe,
-};
-use futures::future::BoxFuture;
 
 const ORDERING: Ordering = Ordering::Relaxed;
 pub type Client = Arc<AsyncServiceClient>;
@@ -55,10 +55,7 @@ pub struct RaftClient {
 }
 
 impl RaftClient {
-    pub async fn new(
-        servers: &Vec<String>,
-        service_id: u64,
-    ) -> Result<Self, ClientError> {
+    pub async fn new(servers: &Vec<String>, service_id: u64) -> Result<Self, ClientError> {
         let client = RaftClient {
             qry_meta: QryMeta {
                 pos: AtomicU64::new(rand::random::<u64>()),
@@ -72,7 +69,9 @@ impl RaftClient {
             last_log_term: AtomicU64::new(0),
             service_id,
         };
-        client.update_info(HashSet::from_iter(servers.iter().cloned())).await?;
+        client
+            .update_info(HashSet::from_iter(servers.iter().cloned()))
+            .await?;
         Ok(client)
     }
     pub async fn prepare_subscription(server: &Arc<rpc::Server>) -> Option<()> {
@@ -94,7 +93,7 @@ impl RaftClient {
         for server_addr in servers {
             let id = hash_str(&server_addr);
             if !members.clients.contains_key(&id) {
-                match rpc::DEFAULT_CLIENT_POOL.get(&server_addr).await { 
+                match rpc::DEFAULT_CLIENT_POOL.get(&server_addr).await {
                     Ok(client) => {
                         members
                             .clients
@@ -105,7 +104,12 @@ impl RaftClient {
                     }
                 }
             }
-            if let Ok(info) = members.clients.get(&id).unwrap().c_server_cluster_info().await
+            if let Ok(info) = members
+                .clients
+                .get(&id)
+                .unwrap()
+                .c_server_cluster_info()
+                .await
             {
                 if info.leader_id != 0 {
                     return (Some(info), members);
@@ -159,9 +163,7 @@ impl RaftClient {
         let (fn_id, op, req_data) = msg.encode();
         let response = match op {
             OpType::QUERY => self.query(sm_id, fn_id, req_data, 0).await,
-            OpType::COMMAND | OpType::SUBSCRIBE => {
-                self.command(sm_id, fn_id, req_data, 0).await
-            }
+            OpType::COMMAND | OpType::SUBSCRIBE => self.command(sm_id, fn_id, req_data, 0).await,
         };
         match response {
             Ok(data) => match data {
@@ -217,7 +219,12 @@ impl RaftClient {
         let wrapper_fn = move |data: Vec<u8>| -> BoxFuture<'static, ()> {
             async { f(M::decode_return(&data)).await }.boxed()
         };
-        let cluster_subs = self.execute(CONFIG_SM_ID, conf_subscribe::new(&key, &callback.server_address, &callback.session_id)).await;
+        let cluster_subs = self
+            .execute(
+                CONFIG_SM_ID,
+                conf_subscribe::new(&key, &callback.server_address, &callback.session_id),
+            )
+            .await;
         match cluster_subs {
             Ok(Ok(sub_id)) => {
                 let mut subs_map = callback.subs.write().await;
@@ -238,7 +245,9 @@ impl RaftClient {
         match self.get_callback().await {
             Ok(callback) => {
                 let (key, sub_id) = receipt;
-                let unsub = self.execute(CONFIG_SM_ID, conf_unsubscribe::new(&sub_id)).await;
+                let unsub = self
+                    .execute(CONFIG_SM_ID, conf_unsubscribe::new(&sub_id))
+                    .await;
                 match unsub {
                     Ok(_) => {
                         let mut subs_map = callback.subs.write().await;
@@ -257,7 +266,7 @@ impl RaftClient {
                             Ok(Err(SubscriptionError::CannotFindSubId))
                         }
                     }
-                    Err(e) => Err(e)
+                    Err(e) => Err(e),
                 }
             }
             Err(e) => {
@@ -335,7 +344,10 @@ impl RaftClient {
             }
             match self.current_leader_client().await {
                 Some((leader_id, client)) => {
-                    match client.c_command(self.gen_log_entry(sm_id, fn_id, &data)).await {
+                    match client
+                        .c_command(self.gen_log_entry(sm_id, fn_id, &data))
+                        .await
+                    {
                         Ok(ClientCmdResponse::Success {
                             data,
                             last_log_term,
@@ -426,9 +438,7 @@ impl RaftClient {
             }
         }
     }
-    pub async fn current_leader_rpc_client(
-        &self,
-    ) -> Result<Arc<rpc::RPCClient>, ()> {
+    pub async fn current_leader_rpc_client(&self) -> Result<Arc<rpc::RPCClient>, ()> {
         let (_, client) = self.current_leader_client().await.ok_or_else(|| ())?;
         Ok(client.client.clone())
     }

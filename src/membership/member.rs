@@ -2,13 +2,13 @@ use super::client::{MemberClient, ObserverClient};
 use super::heartbeat_rpc::*;
 use super::raft::client::SMClient;
 use bifrost_hasher::hash_str;
+use futures::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::time;
-use futures::prelude::*;
 
-use crate::raft::client::RaftClient;
 use crate::membership::DEFAULT_SERVICE_ID;
+use crate::raft::client::RaftClient;
 use crate::raft::state_machine::master::ExecError;
 use std::pin::Pin;
 
@@ -44,8 +44,7 @@ impl MemberService {
             while !service_clone.closed.load(Ordering::Relaxed) {
                 let rpc_client = service_clone.raft_client.current_leader_rpc_client().await;
                 if let Ok(rpc_client) = rpc_client {
-                    let heartbeat_client =
-                        AsyncServiceClient::new(DEFAULT_SERVICE_ID, &rpc_client);
+                    let heartbeat_client = AsyncServiceClient::new(DEFAULT_SERVICE_ID, &rpc_client);
                     heartbeat_client.ping(service_clone.id).await;
                 }
                 time::delay_for(time::Duration::from_millis(PING_INTERVAL)).await
@@ -60,16 +59,10 @@ impl MemberService {
         self.close();
         self.sm_client.leave(&self.id).await
     }
-    pub async fn join_group(
-        &self,
-        group: &String,
-    ) -> Result<bool, ExecError> {
+    pub async fn join_group(&self, group: &String) -> Result<bool, ExecError> {
         self.member_client.join_group(group).await
     }
-    pub async fn leave_group(
-        &self,
-        group: &String,
-    ) -> Result<bool, ExecError> {
+    pub async fn leave_group(&self, group: &String) -> Result<bool, ExecError> {
         self.member_client.leave_group(group).await
     }
     pub fn client(&self) -> ObserverClient {
@@ -84,8 +77,6 @@ impl Drop for MemberService {
     fn drop(&mut self) {
         let sm_client = self.sm_client.clone();
         let self_id = self.id;
-        tokio::spawn(async move {
-            sm_client.leave(&self_id).await
-        });
+        tokio::spawn(async move { sm_client.leave(&self_id).await });
     }
 }

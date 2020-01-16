@@ -21,7 +21,7 @@ macro_rules! def_store_value {
                 fn set(&mut self, v: $t) -> Result<(), ()> {
                     if let Some(ref callback) = self.callback {
                         let old = self.val.clone();
-                        callback.notify(commands::on_changed::new(), Ok((old, v.clone())));
+                        callback.notify(commands::on_changed::new(), (old, v.clone()));
                     }
                     self.val = v;
                     Ok(())
@@ -53,8 +53,8 @@ macro_rules! def_store_value {
                 pub fn new_by_name(name: &String, val: $t) -> Value {
                     Value::new(hash_str(name), val)
                 }
-                pub fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
-                    self.callback = Some(SMCallback::new(self.id(), raft_service.clone()));
+                pub async fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
+                    self.callback = Some(SMCallback::new(self.id(), raft_service.clone()).await);
                 }
             }
         }

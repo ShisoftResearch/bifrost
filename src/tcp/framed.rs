@@ -1,7 +1,7 @@
 use byteorder::{ByteOrder, LittleEndian};
+use bytes::{Buf, BufMut, BytesMut};
 use std::{io, str};
 use tokio_util::codec::{Decoder, Encoder};
-use bytes::{BytesMut, BufMut, Buf};
 
 pub struct BytesCodec;
 const BYTE_LEN: usize = 9;
@@ -35,6 +35,6 @@ impl Encoder for BytesCodec {
         let mut data_buf = dst.split_off(16);
         data_buf.put(msg);
         dst.unsplit(data_buf);
-        return Ok(())
+        return Ok(());
     }
 }

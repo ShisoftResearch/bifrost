@@ -35,7 +35,7 @@ pub mod simple_service {
             let addr = addr.clone();
             let server = Server::new(&addr);
             server.register_service(0, &Arc::new(HelloServer));
-            Server::listen_and_resume(&server);;
+            Server::listen_and_resume(&server);
         }
         thread::sleep(Duration::from_millis(1000));
         let client = RPCClient::new_async(addr).wait().unwrap();
@@ -49,7 +49,6 @@ pub mod simple_service {
         let error_msg = response.wait().unwrap().err().unwrap();
         assert_eq!(error_msg, expected_err_msg);
     }
-
 }
 
 pub mod struct_service {
