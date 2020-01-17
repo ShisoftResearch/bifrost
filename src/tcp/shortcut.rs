@@ -22,9 +22,7 @@ pub async fn register_server(server_address: &String, callback: Box<dyn TcpCallb
 pub async fn call(server_id: u64, data: TcpReq) -> Result<BytesMut> {
     let server_cbs = TCP_CALLBACKS.read().await;
     match server_cbs.get(&server_id) {
-        Some(c) => {
-            Ok(c(data).await)
-        },
+        Some(c) => Ok(c(data).await),
         _ => Err(Error::new(
             ErrorKind::Other,
             "Cannot found callback for shortcut",

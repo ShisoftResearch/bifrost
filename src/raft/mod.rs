@@ -555,10 +555,7 @@ impl RaftService {
                         }
                     }
                 };
-                time::timeout(
-                    Duration::from_millis(2000),
-                    tokio::spawn(vote_fut)
-                )
+                time::timeout(Duration::from_millis(2000), tokio::spawn(vote_fut))
             })
             .collect();
         let mut granted = 0;

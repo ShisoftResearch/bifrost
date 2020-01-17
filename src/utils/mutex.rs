@@ -71,5 +71,5 @@ impl<'a, T: Unpin> Drop for MutexGuard<'a, T> {
 
 unsafe impl<T: Unpin> Send for Mutex<T> {}
 unsafe impl<T: Unpin> Sync for Mutex<T> {}
-impl<'a, T: Unpin> Unpin for MutexGuardFut<'a, T>{}
-impl<'a, T: Unpin> Unpin for MutexGuard<'a, T>{}
+impl<'a, T: Unpin> Unpin for MutexGuardFut<'a, T> {}
+impl<'a, T: Unpin> Unpin for MutexGuard<'a, T> {}
