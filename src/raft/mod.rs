@@ -556,7 +556,7 @@ impl RaftService {
                     }
                 };
                 time::timeout(
-                    Duration::from_millis(2000), 
+                    Duration::from_millis(2000),
                     tokio::spawn(vote_fut)
                 )
             })
@@ -605,8 +605,8 @@ impl RaftService {
     }
 
     async fn send_followers_heartbeat<'a>(
-        &'a self,
-        meta: &'a mut RwLockWriteGuard<'a, RaftMeta>,
+        &self,
+        meta: &mut RwLockWriteGuard<'a, RaftMeta>,
         log_id: Option<u64>,
     ) -> bool {
         let mut members = 0;
@@ -627,19 +627,17 @@ impl RaftService {
                     let meta_last_applied = meta.last_applied;
                     let rpc = member.rpc.clone();
                     let master_sm = meta.state_machine.clone();
-                    let follower = {
-                        if let Some(follower) = leader_meta.followers.get(&member_id) {
-                            follower.clone()
-                        } else {
-                            debug!(
-                                "follower not found, {}, {}",
-                                member_id,
-                                leader_meta.followers.len()
-                            ); //TODO: remove after debug
-                            return None;
-                        }
+                    let follower = if let Some(follower) = leader_meta.followers.get(&member_id) {
+                        follower.clone()
+                    } else {
+                        debug!(
+                            "follower not found, {}, {}",
+                            member_id,
+                            leader_meta.followers.len()
+                        ); //TODO: remove after debug
+                        return None;
                     };
-                    let task = async {
+                    let task = async move {
                         let mut follower = follower.lock().await;
                         let mut is_retry = false;
                         let logs = logs.read().await;
