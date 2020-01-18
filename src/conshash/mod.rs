@@ -162,7 +162,7 @@ impl ConsistentHashing {
             },
         }
     }
-    pub async fn init_table<'a>(&'a self) -> Result<(), InitTableError> {
+    pub async fn init_table(&self) -> Result<(), InitTableError> {
         let mut table = self.tables.write().await;
         self.init_table_(&mut table).await
     }
@@ -347,7 +347,7 @@ fn server_changed(ch: &Arc<ConsistentHashing>, member: Member, action: Action, v
                 return;
             }
             let old_nodes = lookup_table.nodes.clone();
-            ch.init_table_(&mut lookup_table);
+            ch.init_table_(&mut lookup_table).await;
             for watch in watchers.iter() {
                 watch(&member, &action, &*lookup_table, &old_nodes);
             }

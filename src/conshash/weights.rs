@@ -16,29 +16,34 @@ pub struct Weights {
     pub id: u64,
 }
 impl StateMachineCmds for Weights {
-    fn set_weight(&mut self, group: u64, id: u64, weight: u64) -> Result<(), ()> {
-        *self
+    fn set_weight(&mut self, group: u64, id: u64, weight: u64) -> BoxFuture<()> {
+        async {
+            *self
             .groups
             .entry(group)
             .or_insert_with(|| HashMap::new())
             .entry(id)
             .or_insert_with(|| 0) = weight;
-        Ok(())
+        }.boxed()
     }
-    fn get_weights(&self, group: u64) -> Result<Option<HashMap<u64, u64>>, ()> {
-        Ok(match self.groups.get(&group) {
-            Some(m) => Some(m.clone()),
-            None => None,
-        })
-    }
-    fn get_weight(&self, group: u64, id: u64) -> Result<Option<u64>, ()> {
-        Ok(match self.groups.get(&group) {
-            Some(m) => match m.get(&id) {
-                Some(w) => Some(*w),
+    fn get_weights(&self, group: u64) -> BoxFuture<Option<HashMap<u64, u64>>> {
+        async {
+            match self.groups.get(&group) {
+                Some(m) => Some(m.clone()),
                 None => None,
-            },
-            None => None,
-        })
+            }
+        }.boxed()
+    }
+    fn get_weight(&self, group: u64, id: u64) -> BoxFuture<Option<u64>> {
+        async {
+            match self.groups.get(&group) {
+                Some(m) => match m.get(&id) {
+                    Some(w) => Some(*w),
+                    None => None,
+                },
+                None => None,
+            }
+        }.boxed();
     }
 }
 impl StateMachineCtl for Weights {
