@@ -606,62 +606,54 @@ impl RaftService {
         meta: &mut RwLockWriteGuard<'a, RaftMeta>,
         log_id: Option<u64>,
     ) -> bool {
-
-        let leader_id = meta.leader_id;
-
-        debug_assert_eq!(self.id, leader_id);
         if let Membership::Leader(ref leader_meta) = meta.membership {
+            let leader_id = meta.leader_id;
+            debug_assert_eq!(self.id, leader_id);
             let leader_meta = leader_meta.read().await;
-            let heartbeat_futs: FuturesUnordered<_> =
-                members_from_meta!(meta).values().filter_map(|member| {
-                    let member_id = member.id;
-                    if member_id == self.id {
-                        return None;
-                    }
-                    let follower = if let Some(follower) = leader_meta.followers.get(&member_id) {
-                        follower
-                    } else {
-                        debug!(
-                            "follower not found, {}, {}",
-                            member_id,
-                            leader_meta.followers.len()
-                        ); //TODO: remove after debug
-                        return None;
-                    };
-                    // get a send follower task without await
-                    let task = self.send_follower_heardbeat(
-                        meta,
-                        follower,
-                        member
-                    ); // no await
-                    let timeout = 2000;
-                    Some(time::timeout(Duration::from_millis(timeout), tokio::spawn(task)))
-                }).collect();
+            let heartbeat_futs = FuturesUnordered::new();
+            for member in members_from_meta!(meta).values() {
+                let member_id = member.id;
+                if member_id == self.id {
+                    continue;
+                }
+                let follower = if let Some(follower) = leader_meta.followers.get(&member_id) {
+                    follower
+                } else {
+                    debug!(
+                        "follower not found, {}, {}",
+                        member_id,
+                        leader_meta.followers.len()
+                    ); //TODO: remove after debug
+                    continue;
+                };
+                // get a send follower task without await
+                let task = box self.send_follower_heardbeat(meta, follower, member); // no await
+                let task_spawned = tokio::spawn(task);
+                let timeout = 2000;
+                let task_with_timeout = time::timeout(Duration::from_millis(timeout), task_spawned);
+                heartbeat_futs.push();
+            }
             let members = heartbeat_futs.len();
-            match log_id {
-                Some(log_id) => {
-                    if let Membership::Leader(ref leader_meta) = meta.membership {
-                        let mut leader_meta = leader_meta.write().await;
-                        let mut updated_followers = 0;
-                        while let Some(heartbeat_res) = heartbeat_futs.next().await {
-                            if let Ok(Ok(last_matched_id)) = heartbeat_res {
-                                // adaptive
-                                //println!("{}, {}", last_matched_id, log_id);
-                                if last_matched_id >= log_id {
-                                    updated_followers += 1;
-                                    if is_majority(members, updated_followers) {
-                                        return true;
-                                    }
-                                }
+            if let (Some(log_id), &Membership::Leader(ref leader_meta)) = (log_id, &meta.membership) {
+                let mut leader_meta = leader_meta.write().await;
+                let mut updated_followers = 0;
+                while let Some(heartbeat_res) = heartbeat_futs.next().await {
+                    if let Ok(Ok(last_matched_id)) = heartbeat_res {
+                        // adaptive
+                        //println!("{}, {}", last_matched_id, log_id);
+                        if last_matched_id >= log_id {
+                            updated_followers += 1;
+                            if is_majority(members as u64, updated_followers) {
+                                return true;
                             }
                         }
-                        leader_meta.last_updated = get_time();
-                        is_majority(members, updated_followers)
-                    } else {
-                        false
                     }
                 }
-                None => true,
+                leader_meta.last_updated = get_time();
+                // is_majority(members, updated_followers)
+                false
+            } else {
+                !log_id.is_some()
             }
         } else {
             unreachable!()
