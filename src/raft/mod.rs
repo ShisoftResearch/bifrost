@@ -667,7 +667,7 @@ impl RaftService {
         member: &RaftMember
     ) -> u64 {
 
-        let rpc = member.rpc;
+        let rpc = &member.rpc;
         let member_id = member.id;
 
         let commit_index = meta.commit_index;
@@ -679,7 +679,7 @@ impl RaftService {
         let master_sm = &meta.state_machine;
         let logs = &meta.logs;
 
-        let follower = follower.lock().await;
+        let mut follower = follower.lock().await;
         let logs = logs.read().await;
         let mut is_retry = false;
         loop {

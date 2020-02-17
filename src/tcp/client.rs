@@ -45,7 +45,7 @@ impl Client {
     pub async fn connect(address: &String) -> io::Result<Self> {
         Client::connect_with_timeout(address, Duration::from_secs(5)).await
     }
-    pub async fn send_msg(self: Pin<&mut Self>, msg: TcpReq) -> io::Result<BytesMut> {
+    pub async fn send_msg(mut self: Pin<&mut Self>, msg: TcpReq) -> io::Result<BytesMut> {
         if let Some(ref mut transport) = self.client {
             transport.send(msg.freeze()).await?;
             while let Some(res) = transport.next().await {
