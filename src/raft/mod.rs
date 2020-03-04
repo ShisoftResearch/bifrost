@@ -156,7 +156,7 @@ pub struct RaftMeta {
     commit_index: u64,
     last_applied: u64,
     leader_id: u64,
-    storage: Option<RefCell<StorageEntity>>,
+    storage: Option<Arc<RwLock<StorageEntity>>>,
 }
 
 #[derive(Clone)]
@@ -292,7 +292,7 @@ impl RaftService {
                 commit_index,
                 last_applied,
                 leader_id: 0,
-                storage: storage_entity.map(|e| RefCell::new(e)),
+                storage: storage_entity.map(|e| Arc::new(RwLock::new(e))),
             }),
             id: server_id,
             options: opts,
@@ -602,7 +602,7 @@ impl RaftService {
     }
 
     async fn send_followers_heartbeat<'a>(
-        &self,
+        self: &self,
         meta: &mut RwLockWriteGuard<'a, RaftMeta>,
         log_id: Option<u64>,
     ) -> bool {
@@ -627,11 +627,11 @@ impl RaftService {
                     continue;
                 };
                 // get a send follower task without await
-                let task = box self.send_follower_heardbeat(meta, follower, member); // no await
-                let task_spawned = tokio::spawn(task);
+                let heartbeat_fut = Box::pin(self.send_follower_heardbeat(meta, follower, member));
+                let task_spawned = heartbeat_fut; // tokio::spawn(heartbeat_fut);
                 let timeout = 2000;
                 let task_with_timeout = time::timeout(Duration::from_millis(timeout), task_spawned);
-                heartbeat_futs.push();
+                heartbeat_futs.push(task_with_timeout);
             }
             let members = heartbeat_futs.len();
             if let (Some(log_id), &Membership::Leader(ref leader_meta)) = (log_id, &meta.membership) {
@@ -790,14 +790,14 @@ impl RaftService {
         entry.term = new_log_term;
         entry.id = new_log_id;
         logs.insert(entry.id, entry.clone());
-        self.logs_post_processing(meta, &mut logs);
+        self.logs_post_processing(meta, logs).await;
         (new_log_id, new_log_term)
     }
 
     async fn logs_post_processing<'a>(
         &'a self,
         meta: &'a RwLockWriteGuard<'a, RaftMeta>,
-        logs: &'a mut RwLockWriteGuard<'a, LogsMap>,
+        mut logs: RwLockWriteGuard<'a, LogsMap>,
     ) {
         let (last_log_id, _) = get_last_log_info!(self, logs);
         let expecting_oldest_log = if last_log_id > MAX_LOG_CAPACITY as u64 {
@@ -813,7 +813,7 @@ impl RaftService {
                 logs.remove(&first_key).unwrap();
             }
             if let Some(ref storage) = meta.storage {
-                let mut storage = storage.borrow_mut();
+                let mut storage = storage.write().await;
                 let snapshot = SnapshotEntity {
                     term: meta.term,
                     commit_index: meta.commit_index,
@@ -827,8 +827,9 @@ impl RaftService {
             }
         }
         if let Some(ref storage) = meta.storage {
-            let mut storage = storage.borrow_mut();
+            let mut storage = storage.write().await;
             let logs_data = bincode::serialize(&*meta.logs.read().await).unwrap();
+            // TODO: async file system calls
             storage.logs.write_all(logs_data.as_slice());
             storage.logs.sync_all().unwrap();
         }
@@ -867,8 +868,8 @@ impl RaftService {
 }
 
 impl Service for RaftService {
-    fn append_entries<'a>(
-        &'a self,
+    fn append_entries(
+        &self,
         term: u64,
         leader_id: u64,
         prev_log_id: u64,
@@ -925,7 +926,7 @@ impl Service for RaftService {
                     } else if !logs.is_empty() {
                         last_new_entry = logs.values().last().unwrap().id;
                     }
-                    self.logs_post_processing(&meta, &mut logs);
+                    self.logs_post_processing(&meta, logs);
                 }
                 if leader_commit > meta.commit_index {
                     //RI, 5
