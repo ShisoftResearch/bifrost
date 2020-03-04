@@ -212,12 +212,6 @@ macro_rules! get_last_log_info {
     }};
 }
 
-macro_rules! members_from_meta {
-    ($meta: expr) => {
-        $meta.state_machine.read().await.configs.members
-    };
-}
-
 async fn check_commit<'a>(meta: &'a mut RwLockWriteGuard<'a, RaftMeta>) {
     let logs = meta.logs.read().await;
     while meta.commit_index > meta.last_applied {
@@ -442,7 +436,8 @@ impl RaftService {
     }
     pub async fn num_members(&self) -> usize {
         let meta = self.meta.read().await;
-        let ref members = members_from_meta!(meta);
+        let member_sm = meta.state_machine.read().await;
+        let ref members = member_sm.configs.members;
         members.len()
     }
     pub async fn num_logs(&self) -> usize {
@@ -515,7 +510,7 @@ impl RaftService {
         //        println!("Meta write locked acquired for {}ms for {}, leader {}", acq_time, self.id, lock_mon.leader_id);
         lock_mon.await
     }
-    pub async fn read_meta<'a>(&'a self) -> RwLockReadGuard<'a, RaftMeta> {
+    pub async fn read_meta(&self) -> RwLockReadGuard<'_, RaftMeta> {
         self.meta.read().await
     }
     async fn become_candidate<'a>(&'a self, meta: &'a mut RwLockWriteGuard<'_, RaftMeta>) {
@@ -526,38 +521,45 @@ impl RaftService {
         self.switch_membership(meta, Membership::Candidate);
         let term = meta.term;
         let server_id = self.id;
-        let logs = meta.logs.read().await;
-        let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
-        let members: Vec<_> = members_from_meta!(meta).values().collect();
-        let mut num_members = members.len();
-        let mut members_vote_response_stream: FuturesUnordered<_> = members
-            .iter()
-            .map(|ref member| {
-                let rpc = member.rpc.clone();
-                let member_id = member.id;
-                let vote_fut = async move {
-                    if member_id == server_id {
-                        RequestVoteResponse::Granted
-                    } else {
-                        if let Ok(((remote_term, remote_leader_id), vote_granted)) = rpc
-                            .request_vote(term, server_id, last_log_id, last_log_term)
-                            .await
-                        {
-                            if vote_granted {
-                                RequestVoteResponse::Granted
-                            } else if remote_term > term {
-                                RequestVoteResponse::TermOut(remote_term, remote_leader_id)
-                            } else {
-                                RequestVoteResponse::NotGranted
-                            }
+        let (last_log_id, last_log_term) = {
+            let logs = meta.logs.read().await;
+            get_last_log_info!(self, logs)
+        };
+        let (mut members_vote_response_stream, num_members) = {
+            let members: Vec<_> = {
+                let member_sm = meta.state_machine.read().await;
+                let ref members = member_sm.configs.members;
+                members.values().map(|member| (member.rpc.clone(), member.id)).collect()
+            };
+            let len = members.len();
+            let futs: FuturesUnordered<_> = members
+                .into_iter()
+                .map(|(rpc, member_id)| {
+                    let vote_fut = async move {
+                        if member_id == server_id {
+                            RequestVoteResponse::Granted
                         } else {
-                            RequestVoteResponse::NotGranted // default for request failure
+                            if let Ok(((remote_term, remote_leader_id), vote_granted)) = rpc
+                                .request_vote(term, server_id, last_log_id, last_log_term)
+                                .await
+                            {
+                                if vote_granted {
+                                    RequestVoteResponse::Granted
+                                } else if remote_term > term {
+                                    RequestVoteResponse::TermOut(remote_term, remote_leader_id)
+                                } else {
+                                    RequestVoteResponse::NotGranted
+                                }
+                            } else {
+                                RequestVoteResponse::NotGranted // default for request failure
+                            }
                         }
-                    }
-                };
-                time::timeout(Duration::from_millis(2000), tokio::spawn(vote_fut))
-            })
-            .collect();
+                    };
+                    time::timeout(Duration::from_millis(2000), tokio::spawn(vote_fut))
+                })
+                .collect();
+            (futs, len)
+        };
         let mut granted = 0;
         while let Some(vote_response) = members_vote_response_stream.next().await {
             if let Ok(Ok(res)) = vote_response {
@@ -594,7 +596,9 @@ impl RaftService {
         let leader_meta = RwLock::new(LeaderMeta::new());
         {
             let mut guard = leader_meta.write().await;
-            self.reload_leader_meta(&members_from_meta!(meta), &mut guard, last_log_id);
+            let member_sm = meta.state_machine.read().await;
+            let ref members = member_sm.configs.members;
+            self.reload_leader_meta(members, &mut guard, last_log_id);
             guard.last_updated = get_time();
         }
         meta.leader_id = self.id;
@@ -602,7 +606,7 @@ impl RaftService {
     }
 
     async fn send_followers_heartbeat<'a>(
-        self: &self,
+        &self,
         meta: &mut RwLockWriteGuard<'a, RaftMeta>,
         log_id: Option<u64>,
     ) -> bool {
@@ -610,8 +614,10 @@ impl RaftService {
             let leader_id = meta.leader_id;
             debug_assert_eq!(self.id, leader_id);
             let leader_meta = leader_meta.read().await;
-            let heartbeat_futs = FuturesUnordered::new();
-            for member in members_from_meta!(meta).values() {
+            let mut heartbeat_futs = FuturesUnordered::new();
+            let member_sm = meta.state_machine.read().await;
+            let ref members = member_sm.configs.members;
+            for member in members.values() {
                 let member_id = member.id;
                 if member_id == self.id {
                     continue;
@@ -627,7 +633,7 @@ impl RaftService {
                     continue;
                 };
                 // get a send follower task without await
-                let heartbeat_fut = Box::pin(self.send_follower_heardbeat(meta, follower, member));
+                let heartbeat_fut = Box::pin(self.send_follower_heartbeat(meta, follower, member.rpc.clone(), member_id));
                 let task_spawned = heartbeat_fut; // tokio::spawn(heartbeat_fut);
                 let timeout = 2000;
                 let task_with_timeout = time::timeout(Duration::from_millis(timeout), task_spawned);
@@ -638,7 +644,7 @@ impl RaftService {
                 let mut leader_meta = leader_meta.write().await;
                 let mut updated_followers = 0;
                 while let Some(heartbeat_res) = heartbeat_futs.next().await {
-                    if let Ok(Ok(last_matched_id)) = heartbeat_res {
+                    if let Ok(last_matched_id) = heartbeat_res {
                         // adaptive
                         //println!("{}, {}", last_matched_id, log_id);
                         if last_matched_id >= log_id {
@@ -660,16 +666,13 @@ impl RaftService {
         }
     }
 
-    async fn send_follower_heardbeat<'a>(
+    async fn send_follower_heartbeat(
         &self,
-        meta: &mut RwLockWriteGuard<'a, RaftMeta>,
+        meta: &RwLockWriteGuard<'_, RaftMeta>,
         follower: &Mutex<FollowerStatus>,
-        member: &RaftMember
+        rpc: Arc<AsyncServiceClient>,
+        member_id: u64
     ) -> u64 {
-
-        let rpc = &member.rpc;
-        let member_id = member.id;
-
         let commit_index = meta.commit_index;
         let term = meta.term;
         let leader_id = meta.leader_id;
@@ -860,7 +863,9 @@ impl RaftService {
         let t = get_time();
         if let Membership::Leader(ref leader_meta) = meta.membership {
             let mut leader_meta = leader_meta.write().await;
-            self.reload_leader_meta(&members_from_meta!(meta), &mut leader_meta, new_log_id);
+            let member_sm = meta.state_machine.read().await;
+            let ref members = member_sm.configs.members;
+            self.reload_leader_meta(members, &mut leader_meta, new_log_id);
         }
         self.send_followers_heartbeat(meta, Some(new_log_id)).await;
         data

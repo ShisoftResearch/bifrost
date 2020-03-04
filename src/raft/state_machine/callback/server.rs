@@ -153,14 +153,14 @@ impl SMCallback {
         message: R,
     ) -> Result<(usize, Vec<NotifyError>, Vec<Result<(), rpc::RPCError>>), NotifyError>
     where
-        R: serde::Serialize + Send + Sync + Clone + Any + 'static,
+        R: serde::Serialize + Send + Sync + Clone + Any + Unpin + 'static,
         M: RaftMsg<R> + 'static,
     {
         if !IS_LEADER.get() {
             return Err(NotifyError::IsNotLeader);
         }
         let (fn_id, op_type, pattern_data) = msg.encode();
-        match op_type {
+        return match op_type {
             OpType::SUBSCRIBE => {
                 let pattern_id = hash_bytes(&pattern_data.as_slice());
                 let raft_sid = self.raft_service.options.service_id;
@@ -178,17 +178,22 @@ impl SMCallback {
                 if let Some(sub_ids) = svr_subs.subscriptions.get(&key) {
                     let sub_result_futs: FuturesUnordered<_> = sub_ids
                         .iter()
-                        .map(|sub_id| async {
-                            if let Some(subscriber_id) = svr_subs.sub_suber.get(&sub_id) {
-                                if let Some(subscriber) = svr_subs.subscribers.get(&subscriber_id) {
-                                    let data = bincode::serialize(&message).unwrap();
-                                    let client = &subscriber.client;
-                                    Ok(client.notify(key, data).await)
+                        .map(|sub_id| {
+                            let message = Pin::new(&message);
+                            let sub_id = sub_id.clone();
+                            async move {
+                                let svr_subs = self.subscriptions.read().await;
+                                if let Some(subscriber_id) = svr_subs.sub_suber.get(&sub_id) {
+                                    if let Some(subscriber) = svr_subs.subscribers.get(&subscriber_id) {
+                                        let data = bincode::serialize(&*message).unwrap();
+                                        let client = &subscriber.client;
+                                        Ok(client.notify(key, data).await)
+                                    } else {
+                                        Err(NotifyError::CannotFindSubscriber)
+                                    }
                                 } else {
-                                    Err(NotifyError::CannotFindSubscriber)
+                                    Err(NotifyError::CannotFindSubscribers)
                                 }
-                            } else {
-                                Err(NotifyError::CannotFindSubscribers)
                             }
                         })
                         .collect();
@@ -204,12 +209,12 @@ impl SMCallback {
                         .filter(|r| r.is_ok())
                         .map(|r| r.unwrap())
                         .collect::<Vec<_>>();
-                    return Ok((sub_ids.len(), errors, response));
+                    Ok((sub_ids.len(), errors, response))
                 } else {
-                    return Err(NotifyError::CannotFindSubscription);
+                    Err(NotifyError::CannotFindSubscription)
                 }
             }
-            _ => return Err(NotifyError::OpTypeNotSubscribe),
+            _ => Err(NotifyError::OpTypeNotSubscribe),
         }
     }
     pub async fn internal_subscribe<R, F, M>(&self, msg: M, trigger: F) -> Result<(), NotifyError>
@@ -241,9 +246,9 @@ impl SMCallback {
 
 pub async fn notify<M, R, F>(callback: &Option<SMCallback>, msg: M, data: F)
 where
-    F: Fn() -> R,
+    F: FnOnce() -> R,
     M: RaftMsg<R> + 'static,
-    R: serde::Serialize + Send + Sync + Clone + Any + 'static,
+    R: serde::Serialize + Send + Sync + Clone + Unpin + Any + 'static,
 {
     if let Some(ref callback) = *callback {
         callback.notify(msg, data()).await;

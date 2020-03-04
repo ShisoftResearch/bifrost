@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::{thread, time as std_time};
 use tokio::time as async_time;
+use std::pin::Pin;
 
 static MAX_TIMEOUT: i64 = 1000; //5 secs for 500ms heartbeat
 
@@ -290,19 +291,21 @@ impl Membership {
             }
         }
         if changed {
-            let convert = |id_opt| async {
-                if let Some(id_opt) = id_opt {
-                    Some(self.compose_client_member(id_opt).await)
-                } else {
-                    None
-                }
+            let version = self.version;
+            let old_convert = if let Some(id_opt) = old {
+                Some(self.compose_client_member(id_opt).await)
+            } else {
+                None
             };
-            let old_convert = convert(old).await;
-            let new_convert = convert(new).await;
+            let new_convert = if let Some(id_opt) = new {
+                Some(self.compose_client_member(id_opt).await)
+            } else {
+                None
+            };
             cb_notify(
                 &self.callback,
                 commands::on_group_leader_changed::new(&group_id),
-                || (old_convert, new_convert, self.version),
+                move || (old_convert, new_convert, version),
             )
             .await;
             Ok(())

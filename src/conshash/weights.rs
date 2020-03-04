@@ -43,7 +43,7 @@ impl StateMachineCmds for Weights {
                 },
                 None => None,
             }
-        }.boxed();
+        }.boxed()
     }
 }
 impl StateMachineCtl for Weights {

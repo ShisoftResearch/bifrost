@@ -155,7 +155,7 @@ impl RaftClient {
         }
     }
 
-    pub async fn execute<R, M>(self, sm_id: u64, msg: M) -> Result<R, ExecError>
+    pub async fn execute<R, M>(&self, sm_id: u64, msg: M) -> Result<R, ExecError>
     where
         R: 'static,
         M: RaftMsg<R> + 'static,
