@@ -31,7 +31,7 @@ impl Server {
                         // Like with other small servers, we'll `spawn` this client to ensure it
                         // runs concurrently with all other clients. The `move` keyword is used
                         // here to move ownership of our db handle into the async closure.
-                        tokio::spawn(async move {
+                        tokio::spawn(async {
                             let mut transport = Framed::new(socket, LengthDelimitedCodec::new());
                             while let Some(result) = transport.next().await {
                                 match result {
@@ -46,7 +46,6 @@ impl Server {
                                     }
                                 }
                             }
-
                             // The connection will be closed at this point as `lines.next()` has returned `None`.
                         });
                     }

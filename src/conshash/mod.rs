@@ -73,10 +73,7 @@ impl ConsistentHashing {
             let res = membership
                 .on_group_member_joined(
                     move |(member, version)| {
-                        async {
-                            server_joined(&ch, member, version).await;
-                        }
-                        .boxed()
+                        server_joined(ch, member, version).boxed()
                     },
                     group,
                 )
@@ -90,7 +87,7 @@ impl ConsistentHashing {
             let ch = ch.clone();
             let res = membership
                 .on_group_member_online(
-                    move |(member, version)| async { server_joined(&ch, member, version).await }.boxed(),
+                    move |(member, version)| server_joined(ch, member, version).boxed(),
                     group,
                 )
                 .await;
@@ -104,10 +101,7 @@ impl ConsistentHashing {
             let res = membership
                 .on_group_member_left(
                     move |(member, version)| {
-                        async {
-                            server_left(&ch, member, version).await;
-                        }
-                        .boxed()
+                        server_left(ch, member, version).boxed()
                     },
                     group,
                 )
@@ -122,10 +116,7 @@ impl ConsistentHashing {
             let res = membership
                 .on_group_member_offline(
                     move |(member, version)| {
-                        async {
-                            server_left(&ch, member, version).await;
-                        }
-                        .boxed()
+                        server_left(ch, member, version).boxed()
                     },
                     group,
                 )
@@ -279,9 +270,9 @@ impl ConsistentHashing {
         self.watch_all_actions(wrapper).await;
     }
 
-    async fn init_table_<'a>(
-        &'a self,
-        lookup_table: &'a mut RwLockWriteGuard<'a, LookupTables>,
+    async fn init_table_(
+        &self,
+        lookup_table: &mut RwLockWriteGuard<'_, LookupTables>,
     ) -> Result<(), InitTableError> {
         if let Ok(Some((mut members, version))) =
             self.membership.group_members(&self.group_name, true).await
@@ -329,25 +320,27 @@ impl ConsistentHashing {
     }
 }
 
-async fn server_joined(ch: &Arc<ConsistentHashing>, member: Member, version: u64) {
+async fn server_joined(ch: Arc<ConsistentHashing>, member: Member, version: u64) {
     server_changed(ch, member, Action::Joined, version).await;
 }
-async fn server_left(ch: &Arc<ConsistentHashing>, member: Member, version: u64) {
+async fn server_left(ch: Arc<ConsistentHashing>, member: Member, version: u64) {
     server_changed(ch, member, Action::Left, version).await;
 }
-async fn server_changed(ch: &Arc<ConsistentHashing>, member: Member, action: Action, version: u64) {
+async fn server_changed(ch: Arc<ConsistentHashing>, member: Member, action: Action, version: u64) {
     let ch_version = ch.version.load(Ordering::Relaxed);
     if ch_version < version {
-        let mut lookup_table = ch.tables.write().await;
         let watchers = ch.watchers.read().await;
         let ch_version = ch.version.load(Ordering::Relaxed);
         if ch_version >= version {
             return;
         }
-        let old_nodes = lookup_table.nodes.clone();
-        ch.init_table_(&mut lookup_table).await;
-        for watch in watchers.iter() {
-            watch(&member, &action, &*lookup_table, &old_nodes);
+        {
+            let mut lookup_table = ch.tables.write().await;
+            let old_nodes = lookup_table.nodes.clone();
+            ch.init_table_(&mut lookup_table).await;
+            for watch in watchers.iter() {
+                watch(&member, &action, &*lookup_table, &old_nodes);
+            }
         }
-    }
+    } 
 }

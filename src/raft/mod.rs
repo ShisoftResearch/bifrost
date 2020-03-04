@@ -212,7 +212,7 @@ macro_rules! get_last_log_info {
     }};
 }
 
-async fn check_commit<'a>(meta: &'a mut RwLockWriteGuard<'a, RaftMeta>) {
+async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
     let logs = meta.logs.read().await;
     while meta.commit_index > meta.last_applied {
         meta.last_applied += 1;

@@ -190,7 +190,7 @@ impl RaftClient {
         return (raft_sid, sm_id, fn_id, pattern_id);
     }
 
-    pub async fn get_callback(self) -> Result<Arc<SubscriptionService>, SubscriptionError> {
+    pub async fn get_callback(&self) -> Result<Arc<SubscriptionService>, SubscriptionError> {
         match CALLBACK.read().await.clone() {
             None => {
                 debug!("Subscription service not set");
@@ -217,7 +217,7 @@ impl RaftClient {
         };
         let key = self.get_sub_key(sm_id, msg);
         let wrapper_fn = move |data: Vec<u8>| -> BoxFuture<'static, ()> {
-            async { f(M::decode_return(&data)).await }.boxed()
+            f(M::decode_return(&data)).boxed()
         };
         let cluster_subs = self
             .execute(
@@ -276,122 +276,126 @@ impl RaftClient {
         }
     }
 
-    async fn query(
+    fn query(
         &self,
         sm_id: u64,
         fn_id: u64,
         data: Vec<u8>,
         depth: usize,
-    ) -> Result<ExecResult, ExecError> {
-        let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
-        let members = self.members.read().await;
-        let num_members = members.clients.len();
-        if num_members >= 1 {
-            let res = members
-                .clients
-                .values()
-                .nth(pos as usize % num_members)
-                .unwrap()
-                .c_query(self.gen_log_entry(sm_id, fn_id, &data))
-                .await;
-            match res {
-                Ok(res) => match res {
-                    ClientQryResponse::LeftBehind => {
-                        if depth >= num_members {
-                            Err(ExecError::TooManyRetry)
-                        } else {
-                            self.query(sm_id, fn_id, data, depth + 1).await
+    ) -> BoxFuture<Result<ExecResult, ExecError>> {
+        async {
+            let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
+            let members = self.members.read().await;
+            let num_members = members.clients.len();
+            if num_members >= 1 {
+                let res = members
+                    .clients
+                    .values()
+                    .nth(pos as usize % num_members)
+                    .unwrap()
+                    .c_query(self.gen_log_entry(sm_id, fn_id, &data))
+                    .await;
+                match res {
+                    Ok(res) => match res {
+                        ClientQryResponse::LeftBehind => {
+                            if depth >= num_members {
+                                Err(ExecError::TooManyRetry)
+                            } else {
+                                self.query(sm_id, fn_id, data, depth + 1).await
+                            }
                         }
-                    }
-                    ClientQryResponse::Success {
-                        data,
-                        last_log_term,
-                        last_log_id,
-                    } => {
-                        swap_when_greater(&self.last_log_id, last_log_id);
-                        swap_when_greater(&self.last_log_term, last_log_term);
-                        Ok(data)
-                    }
-                },
-                _ => Err(ExecError::Unknown),
-            }
-        } else {
-            Err(ExecError::ServersUnreachable)
-        }
-    }
-
-    async fn command(
-        &self,
-        sm_id: u64,
-        fn_id: u64,
-        data: Vec<u8>,
-        depth: usize,
-    ) -> Result<ExecResult, ExecError> {
-        enum FailureAction {
-            SwitchLeader,
-            NotCommitted,
-            UpdateInfo,
-            NotLeader,
-            Retry,
-        }
-        let failure = {
-            if depth > 0 {
-                let members = self.members.read().await;
-                let num_members = members.clients.len();
-                if depth >= max(num_members, 5) {
-                    return Err(ExecError::TooManyRetry);
-                };
-            }
-            match self.current_leader_client().await {
-                Some((leader_id, client)) => {
-                    match client
-                        .c_command(self.gen_log_entry(sm_id, fn_id, &data))
-                        .await
-                    {
-                        Ok(ClientCmdResponse::Success {
+                        ClientQryResponse::Success {
                             data,
                             last_log_term,
                             last_log_id,
-                        }) => {
+                        } => {
                             swap_when_greater(&self.last_log_id, last_log_id);
                             swap_when_greater(&self.last_log_term, last_log_term);
-                            return Ok(data);
+                            Ok(data)
                         }
-                        Ok(ClientCmdResponse::NotLeader(leader_id)) => {
-                            self.leader_id.store(leader_id, ORDERING);
-                            FailureAction::NotLeader
-                        }
-                        Ok(ClientCmdResponse::NotCommitted) => FailureAction::NotCommitted,
-                        Err(e) => {
-                            debug!("CLIENT: E1 - {} - {:?}", leader_id, e);
-                            FailureAction::SwitchLeader // need switch server for leader
-                        }
-                        Err(e) => {
-                            debug!("CLIENT: E2 - {} - {:?}", leader_id, e);
-                            FailureAction::SwitchLeader // need switch server for leader
+                    },
+                    _ => Err(ExecError::Unknown),
+                }
+            } else {
+                Err(ExecError::ServersUnreachable)
+            }
+        }.boxed()
+    }
+
+    fn command(
+        &self,
+        sm_id: u64,
+        fn_id: u64,
+        data: Vec<u8>,
+        depth: usize,
+    ) -> BoxFuture<Result<ExecResult, ExecError>> {
+        async {
+            enum FailureAction {
+                SwitchLeader,
+                NotCommitted,
+                UpdateInfo,
+                NotLeader,
+                Retry,
+            }
+            let failure = {
+                if depth > 0 {
+                    let members = self.members.read().await;
+                    let num_members = members.clients.len();
+                    if depth >= max(num_members, 5) {
+                        return Err(ExecError::TooManyRetry);
+                    };
+                }
+                match self.current_leader_client().await {
+                    Some((leader_id, client)) => {
+                        match client
+                            .c_command(self.gen_log_entry(sm_id, fn_id, &data))
+                            .await
+                        {
+                            Ok(ClientCmdResponse::Success {
+                                data,
+                                last_log_term,
+                                last_log_id,
+                            }) => {
+                                swap_when_greater(&self.last_log_id, last_log_id);
+                                swap_when_greater(&self.last_log_term, last_log_term);
+                                return Ok(data);
+                            }
+                            Ok(ClientCmdResponse::NotLeader(leader_id)) => {
+                                self.leader_id.store(leader_id, ORDERING);
+                                FailureAction::NotLeader
+                            }
+                            Ok(ClientCmdResponse::NotCommitted) => FailureAction::NotCommitted,
+                            Err(e) => {
+                                debug!("CLIENT: E1 - {} - {:?}", leader_id, e);
+                                FailureAction::SwitchLeader // need switch server for leader
+                            }
+                            Err(e) => {
+                                debug!("CLIENT: E2 - {} - {:?}", leader_id, e);
+                                FailureAction::SwitchLeader // need switch server for leader
+                            }
                         }
                     }
+                    None => FailureAction::UpdateInfo, // need update members
                 }
-                None => FailureAction::UpdateInfo, // need update members
+            }; //
+            match failure {
+                FailureAction::SwitchLeader => {
+                    let members = self.members.read().await;
+                    let num_members = members.clients.len();
+                    let pos = self.qry_meta.pos.load(ORDERING);
+                    let leader_id = self.leader_id.load(ORDERING);
+                    let index = members
+                        .clients
+                        .keys()
+                        .nth(pos as usize % num_members)
+                        .unwrap();
+                    self.leader_id.compare_and_swap(leader_id, *index, ORDERING);
+                    debug!("CLIENT: Switch leader");
+                }
+                _ => {}
             }
-        }; //
-        match failure {
-            FailureAction::SwitchLeader => {
-                let members = self.members.read().await;
-                let num_members = members.clients.len();
-                let pos = self.qry_meta.pos.load(ORDERING);
-                let leader_id = self.leader_id.load(ORDERING);
-                let index = members
-                    .clients
-                    .keys()
-                    .nth(pos as usize % num_members)
-                    .unwrap();
-                self.leader_id.compare_and_swap(leader_id, *index, ORDERING);
-                debug!("CLIENT: Switch leader");
-            }
-            _ => {}
-        }
-        self.command(sm_id, fn_id, data, depth + 1).await
+            self.command(sm_id, fn_id, data, depth + 1).await
+        }.boxed()
     }
 
     fn gen_log_entry(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>) -> LogEntry {
