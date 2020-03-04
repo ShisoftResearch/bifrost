@@ -37,7 +37,8 @@ pub enum RPCError {
 
 pub trait RPCService: Sync + Send {
     fn dispatch(&self, data: BytesMut) -> BoxFuture<Result<BytesMut, RPCRequestError>>;
-    fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64);
+    fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64)
+        -> ::std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
 }
 
 pub struct Server {
@@ -133,7 +134,7 @@ impl Server {
         let service = service.clone();
         if !DISABLE_SHORTCUT {
             let service_ptr = Arc::into_raw(service.clone()) as usize;
-            service.register_shortcut_service(service_ptr, self.server_id, service_id);
+            service.register_shortcut_service(service_ptr, self.server_id, service_id).await;
         } else {
             println!("SERVICE SHORTCUT DISABLED");
         }

@@ -19,12 +19,12 @@ macro_rules! dispatch_rpc_service_functions {
             {
                 self.inner_dispatch(data)
             }
-            fn register_shortcut_service<'a>(
-                &'a self,
+            fn register_shortcut_service(
+                &self,
                 service_ptr: usize,
                 server_id: u64,
                 service_id: u64,
-            ) -> ::std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            ) -> ::std::pin::Pin<Box<dyn Future<Output = ()> + Send>> {
                 async {
                     let mut cbs = RPC_SVRS.write().await;
                     let service = unsafe { Arc::from_raw(service_ptr as *const $s) };

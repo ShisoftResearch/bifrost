@@ -78,8 +78,8 @@ macro_rules! raft_dispatch_qry {
 #[macro_export]
 macro_rules! raft_sm_complete {
     () => {
-        fn fn_dispatch_cmd<'a>(&'a mut self, fn_id: u64, data: &'a Vec<u8>) -> ::futures::future::BoxFuture<Option<Vec<u8>> > {self.dispatch_cmd_(fn_id, data)}
-        fn fn_dispatch_qry<'a>(&'a self, fn_id: u64, data: &'a Vec<u8>) -> ::futures::future::BoxFuture<Option<Vec<u8>>> {self.dispatch_qry_(fn_id, data)}
+        fn fn_dispatch_cmd<'a>(&'a mut self, fn_id: u64, data: &'a Vec<u8>) -> ::futures::future::BoxFuture<'a, Option<Vec<u8>>> {self.dispatch_cmd_(fn_id, data)}
+        fn fn_dispatch_qry<'a>(&'a self, fn_id: u64, data: &'a Vec<u8>) -> ::futures::future::BoxFuture<'a, Option<Vec<u8>>> {self.dispatch_qry_(fn_id, data)}
         fn op_type(&mut self, fn_id: u64) -> Option<$crate::raft::state_machine::OpType> {self.op_type_(fn_id)}
     };
 }

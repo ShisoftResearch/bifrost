@@ -102,24 +102,24 @@ impl MasterStateMachine {
         &self.configs.members
     }
 
-    pub fn commit_cmd(&mut self, entry: &LogEntry) -> ExecResult {
+    pub async fn commit_cmd(&mut self, entry: &LogEntry) -> ExecResult {
         match entry.sm_id {
-            CONFIG_SM_ID => parse_output(self.configs.fn_dispatch_cmd(entry.fn_id, &entry.data)),
+            CONFIG_SM_ID => parse_output(self.configs.fn_dispatch_cmd(entry.fn_id, &entry.data).await),
             _ => {
                 if let Some(sm) = self.subs.get_mut(&entry.sm_id) {
-                    parse_output(sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data))
+                    parse_output(sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data).await)
                 } else {
                     Err(ExecError::SmNotFound)
                 }
             }
         }
     }
-    pub fn exec_qry(&self, entry: &LogEntry) -> ExecResult {
+    pub async fn exec_qry(&self, entry: &LogEntry) -> ExecResult {
         match entry.sm_id {
-            CONFIG_SM_ID => parse_output(self.configs.fn_dispatch_qry(entry.fn_id, &entry.data)),
+            CONFIG_SM_ID => parse_output(self.configs.fn_dispatch_qry(entry.fn_id, &entry.data).await),
             _ => {
                 if let Some(sm) = self.subs.get(&entry.sm_id) {
-                    parse_output(sm.fn_dispatch_qry(entry.fn_id, &entry.data))
+                    parse_output(sm.fn_dispatch_qry(entry.fn_id, &entry.data).await)
                 } else {
                     Err(ExecError::SmNotFound)
                 }

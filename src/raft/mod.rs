@@ -232,7 +232,7 @@ async fn commit_command<'a>(
     entry: &'a LogEntry,
 ) -> ExecResult {
     with_bindings!(IS_LEADER: is_leader(meta) => {
-        meta.state_machine.write().await.commit_cmd(&entry)
+        meta.state_machine.write().await.commit_cmd(&entry).await
     })
 }
 
@@ -1070,7 +1070,7 @@ impl Service for RaftService {
                 ClientQryResponse::LeftBehind
             } else {
                 ClientQryResponse::Success {
-                    data: meta.state_machine.read().await.exec_qry(&entry),
+                    data: meta.state_machine.read().await.exec_qry(&entry).await,
                     last_log_id,
                     last_log_term,
                 }

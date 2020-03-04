@@ -18,16 +18,16 @@ macro_rules! def_store_value {
                 def sub on_changed() -> ($t, $t);
             }
             impl StateMachineCmds for Value {
-                fn set(&mut self, v: $t) -> Result<(), ()> {
+                fn set(&mut self, v: $t) -> ::futures::future::BoxFuture<()> {
                     if let Some(ref callback) = self.callback {
                         let old = self.val.clone();
                         callback.notify(commands::on_changed::new(), (old, v.clone()));
                     }
                     self.val = v;
-                    Ok(())
+                    async {()}.boxed()
                 }
-                fn get(&self) -> Result<$t, ()> {
-                    Ok(self.val.clone())
+                fn get(&self) -> ::futures::future::BoxFuture<$t> {
+                    async { self.val.clone() }.boxed()
                 }
             }
             impl StateMachineCtl for Value {
