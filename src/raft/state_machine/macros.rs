@@ -193,7 +193,7 @@ macro_rules! raft_state_machine {
                 }
            }
            fn dispatch_cmd_<'a>(&'a mut self, fn_id: u64, data: &'a Vec<u8>) -> BoxFuture<Option<Vec<u8>>> {
-               async {
+               async move {
                     match fn_id as usize {
                         $(::bifrost_plugins::hash_ident!($fn_name) => {
                             raft_dispatch_cmd!($smt $fn_name self data( $( $arg : $in_ ),* ))
@@ -206,7 +206,7 @@ macro_rules! raft_state_machine {
                }.boxed()
            }
            fn dispatch_qry_<'a>(&'a self, fn_id: u64, data: &'a Vec<u8>) -> BoxFuture<Option<Vec<u8>>> {
-               async {
+               async move {
                     match fn_id as usize {
                         $(::bifrost_plugins::hash_ident!($fn_name) => {
                             raft_dispatch_qry!($smt $fn_name self data( $( $arg : $in_ ),* ))

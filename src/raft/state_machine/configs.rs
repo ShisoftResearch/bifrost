@@ -7,6 +7,7 @@ use crate::utils::rwlock::*;
 use bifrost_hasher::hash_str;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use futures::FutureExt;
 
 pub const CONFIG_SM_ID: u64 = 1;
 
@@ -42,7 +43,7 @@ raft_state_machine! {
 
 impl StateMachineCmds for Configures {
     fn new_member_(&mut self, address: String) -> BoxFuture<bool> {
-        async {
+        async move {
             let addr = address.clone();
             let id = hash_str(&addr);
             if !self.members.contains_key(&id) {
@@ -66,14 +67,12 @@ impl StateMachineCmds for Configures {
         .boxed()
     }
     fn del_member_(&mut self, address: String) -> BoxFuture<()> {
-        async {
-            let hash = hash_str(&address);
-            self.members.remove(&hash);
-        }
-        .boxed()
+        let hash = hash_str(&address);
+        self.members.remove(&hash);
+        future::ready(()).boxed()
     }
     fn member_address(&self) -> BoxFuture<Vec<String>> {
-        async { self.members.values().map(|m| m.address).collect() }.boxed()
+        future::ready(self.members.values().map(|m| m.address.clone()).collect()).boxed()
     }
     fn subscribe(
         &mut self,
@@ -81,14 +80,14 @@ impl StateMachineCmds for Configures {
         address: String,
         session_id: u64,
     ) -> BoxFuture<Result<u64, ()>> {
-        async {
+        async move {
             let mut subs = self.subscriptions.write().await;
             subs.subscribe(key, &address, session_id).await
         }
         .boxed()
     }
     fn unsubscribe(&mut self, sub_id: u64) -> BoxFuture<()> {
-        async {
+        async move {
             let mut subs = self.subscriptions.write().await;
             subs.remove_subscription(sub_id);
         }

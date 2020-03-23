@@ -18,7 +18,7 @@ pub struct SubscriptionService {
 
 impl Service for SubscriptionService {
     fn notify(&self, key: SubKey, data: Vec<u8>) -> BoxFuture<()> {
-        async {
+        async move {
             let subs = self.subs.read().await;
             if let Some(subs) = subs.get(&key) {
                 let subs = Pin::new(subs);
