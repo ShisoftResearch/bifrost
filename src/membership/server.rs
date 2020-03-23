@@ -111,7 +111,7 @@ impl Membership {
             was_leader: AtomicBool::new(false),
         });
         let service_clone = service.clone();
-        tokio::spawn(async {
+        tokio::spawn(async move {
             while !service_clone.closed.load(Ordering::Relaxed) {
                 let is_leader = service_clone.raft_service.is_leader().await;
                 let was_leader = service_clone.was_leader.load(Ordering::Relaxed);

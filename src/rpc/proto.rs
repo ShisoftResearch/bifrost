@@ -25,7 +25,7 @@ macro_rules! dispatch_rpc_service_functions {
                 server_id: u64,
                 service_id: u64,
             ) -> ::std::pin::Pin<Box<dyn Future<Output = ()> + Send>> {
-                async {
+                async move {
                     let mut cbs = RPC_SVRS.write().await;
                     let service = unsafe { Arc::from_raw(service_ptr as *const $s) };
                     cbs.insert((server_id, service_id), service);
@@ -113,7 +113,7 @@ macro_rules! service {
            )*
            fn inner_dispatch<'a>(&'a self, data: ::bytes::BytesMut) -> Pin<Box<dyn core::future::Future<Output = Result<::bytes::BytesMut, RPCRequestError>> + Send + 'a>> {
                let (func_id, body) = read_u64_head(data);
-               async {
+               async move {
                 match func_id as usize {
                     $(::bifrost_plugins::hash_ident!($fn_name) => {
                         let ($($arg,)*) : ($($in_,)*) = $crate::utils::bincode::deserialize(body.as_ref());

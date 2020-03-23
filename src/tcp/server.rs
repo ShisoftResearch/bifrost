@@ -9,6 +9,8 @@ use std::pin::Pin;
 use tokio::net::TcpListener;
 use tokio::stream::StreamExt;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
+use std::sync::Arc;
+use crate::tcp::shortcut::call;
 
 pub type RPCFuture = dyn Future<Output = TcpRes>;
 pub type BoxedRPCFuture = Box<RPCFuture>;
@@ -20,9 +22,9 @@ pub struct Server;
 impl Server {
     pub async fn new(
         addr: &String,
-        callback: Box<dyn Fn(TcpReq) -> TcpRes + Send + Sync>,
+        callback: Arc<dyn Fn(TcpReq) -> TcpRes + Send + Sync>,
     ) -> Result<(), Box<dyn Error>> {
-        shortcut::register_server(addr, callback).await;
+        shortcut::register_server(addr, &callback).await;
         if !addr.eq(&STANDALONE_ADDRESS) {
             let mut listener = TcpListener::bind(&addr).await?;
             loop {
@@ -31,7 +33,8 @@ impl Server {
                         // Like with other small servers, we'll `spawn` this client to ensure it
                         // runs concurrently with all other clients. The `move` keyword is used
                         // here to move ownership of our db handle into the async closure.
-                        tokio::spawn(async {
+                        let callback = callback.clone();
+                        tokio::spawn(async move {
                             let mut transport = Framed::new(socket, LengthDelimitedCodec::new());
                             while let Some(result) = transport.next().await {
                                 match result {

@@ -73,6 +73,7 @@ impl ConsistentHashing {
             let res = membership
                 .on_group_member_joined(
                     move |(member, version)| {
+                        let ch = ch.clone();
                         server_joined(ch, member, version).boxed()
                     },
                     group,
@@ -87,7 +88,10 @@ impl ConsistentHashing {
             let ch = ch.clone();
             let res = membership
                 .on_group_member_online(
-                    move |(member, version)| server_joined(ch, member, version).boxed(),
+                    move |(member, version)| {
+                        let ch = ch.clone();
+                        server_joined(ch, member, version).boxed()
+                    },
                     group,
                 )
                 .await;
@@ -101,6 +105,7 @@ impl ConsistentHashing {
             let res = membership
                 .on_group_member_left(
                     move |(member, version)| {
+                        let ch = ch.clone();
                         server_left(ch, member, version).boxed()
                     },
                     group,
@@ -116,6 +121,7 @@ impl ConsistentHashing {
             let res = membership
                 .on_group_member_offline(
                     move |(member, version)| {
+                        let ch = ch.clone();
                         server_left(ch, member, version).boxed()
                     },
                     group,
@@ -327,6 +333,7 @@ async fn server_left(ch: Arc<ConsistentHashing>, member: Member, version: u64) {
     server_changed(ch, member, Action::Left, version).await;
 }
 async fn server_changed(ch: Arc<ConsistentHashing>, member: Member, action: Action, version: u64) {
+    // let ch = ch.clone();
     let ch_version = ch.version.load(Ordering::Relaxed);
     if ch_version < version {
         let watchers = ch.watchers.read().await;

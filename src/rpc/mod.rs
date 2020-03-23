@@ -102,7 +102,8 @@ impl Server {
     pub fn listen(server: &Arc<Server>) {
         let address = &server.address;
         let server = server.clone();
-        tcp::server::Server::new(address, box move |mut data| {
+        tcp::server::Server::new(address, Arc::new(move |mut data| {
+            let server = server.clone();
             async move {
                 let (svr_id, data) = read_u64_head(data);
                 let svr_map = server.services.read().await;
@@ -115,8 +116,8 @@ impl Server {
                     None => encode_res(Err(RPCRequestError::ServiceIdNotFound)),
                 }
             }
-            .boxed()
-        });
+                .boxed()
+        }));
     }
     pub fn listen_and_resume(server: &Arc<Server>) {
         let server = server.clone();

@@ -213,10 +213,11 @@ macro_rules! get_last_log_info {
 }
 
 async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
-    let logs = meta.logs.read().await;
     while meta.commit_index > meta.last_applied {
         meta.last_applied += 1;
         let last_applied = meta.last_applied;
+        // TODO: Get rid of frequent locking and clone?
+        let logs = meta.logs.read().await;
         if let Some(entry) = logs.get(&last_applied) {
             commit_command(meta, &entry).await;
         };
@@ -840,20 +841,20 @@ impl RaftService {
 
     async fn try_sync_log_to_followers<'a>(
         &'a self,
-        meta: &'a mut RwLockWriteGuard<'a, RaftMeta>,
+        mut meta: RwLockWriteGuard<'a, RaftMeta>,
         entry: &LogEntry,
         new_log_id: u64,
     ) -> Option<ExecResult> {
-        if self.send_followers_heartbeat(meta, Some(new_log_id)).await {
+        if self.send_followers_heartbeat(&mut meta, Some(new_log_id)).await {
             meta.commit_index = new_log_id;
-            Some(commit_command(meta, entry).await)
+            Some(commit_command(&mut meta, entry).await)
         } else {
             None
         }
     }
     async fn try_sync_config_to_followers<'a>(
         &'a self,
-        meta: &'a mut RwLockWriteGuard<'a, RaftMeta>,
+        mut meta: RwLockWriteGuard<'a, RaftMeta>,
         entry: &LogEntry,
         new_log_id: u64,
     ) -> ExecResult {
@@ -867,7 +868,7 @@ impl RaftService {
             let ref members = member_sm.configs.members;
             self.reload_leader_meta(members, &mut leader_meta, new_log_id);
         }
-        self.send_followers_heartbeat(meta, Some(new_log_id)).await;
+        self.send_followers_heartbeat(&mut meta, Some(new_log_id)).await;
         data
     }
 }
@@ -882,7 +883,7 @@ impl Service for RaftService {
         entries: Option<LogEntries>,
         leader_commit: u64,
     ) -> BoxFuture<(u64, AppendEntriesResult)> {
-        async {
+        async move {
             let mut meta = self.write_meta().await;
             self.reset_last_checked(&mut meta);
             let term_ok = self.check_term(&mut meta, term, leader_id); // RI, 1
@@ -955,7 +956,7 @@ impl Service for RaftService {
         last_log_id: u64,
         last_log_term: u64,
     ) -> BoxFuture<((u64, u64), bool)> {
-        async {
+        async move {
             let mut meta = self.write_meta().await;
             let vote_for = meta.vote_for;
             let mut vote_granted = false;
@@ -1012,14 +1013,13 @@ impl Service for RaftService {
         last_included_term: u64,
         data: Vec<u8>,
     ) -> BoxFuture<u64> {
-        async {
+        async move {
             let mut meta = self.write_meta().await;
             let term_ok = self.check_term(&mut meta, term, leader_id);
             if term_ok {
                 check_commit(&mut meta);
             }
-            let mut sm = meta.state_machine.write().await;
-            sm.recover(data);
+            meta.state_machine.write().await.recover(data);
             meta.term = last_included_term;
             meta.commit_index = last_included_index;
             meta.last_applied = last_included_index;
@@ -1030,7 +1030,7 @@ impl Service for RaftService {
     }
 
     fn c_command(&self, entry: LogEntry) -> BoxFuture<ClientCmdResponse> {
-        async {
+        async move {
             let mut meta = self.write_meta().await;
             let mut entry = entry;
             if !is_leader(&meta) {
@@ -1040,11 +1040,11 @@ impl Service for RaftService {
             let mut data = match entry.sm_id {
                 // special treats for membership changes
                 CONFIG_SM_ID => Some(
-                    self.try_sync_config_to_followers(&mut meta, &entry, new_log_id)
+                    self.try_sync_config_to_followers(meta, &entry, new_log_id)
                         .await,
                 ),
                 _ => {
-                    self.try_sync_log_to_followers(&mut meta, &entry, new_log_id)
+                    self.try_sync_log_to_followers(meta, &entry, new_log_id)
                         .await
                 }
             }; // Some for committed and None for not committed
@@ -1062,7 +1062,7 @@ impl Service for RaftService {
     }
 
     fn c_query(&self, entry: LogEntry) -> BoxFuture<ClientQryResponse> {
-        async {
+        async move {
             let mut meta = self.meta.read().await;
             let logs = meta.logs.read().await;
             let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
