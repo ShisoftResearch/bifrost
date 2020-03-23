@@ -283,7 +283,7 @@ impl RaftClient {
         data: Vec<u8>,
         depth: usize,
     ) -> BoxFuture<Result<ExecResult, ExecError>> {
-        async {
+        async move {
             let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
             let members = self.members.read().await;
             let num_members = members.clients.len();
@@ -329,7 +329,7 @@ impl RaftClient {
         data: Vec<u8>,
         depth: usize,
     ) -> BoxFuture<Result<ExecResult, ExecError>> {
-        async {
+        async move {
             enum FailureAction {
                 SwitchLeader,
                 NotCommitted,

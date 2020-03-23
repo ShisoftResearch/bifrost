@@ -4,6 +4,7 @@ macro_rules! def_store_value {
         pub mod $m {
             use bifrost_hasher::hash_str;
             use std::sync::Arc;
+            use futures::FutureExt;
             use $crate::raft::state_machine::callback::server::SMCallback;
             use $crate::raft::state_machine::StateMachineCtl;
             use $crate::raft::RaftService;
@@ -24,10 +25,10 @@ macro_rules! def_store_value {
                         callback.notify(commands::on_changed::new(), (old, v.clone()));
                     }
                     self.val = v;
-                    async {()}.boxed()
+                    future::ready(()).boxed()
                 }
                 fn get(&self) -> ::futures::future::BoxFuture<$t> {
-                    async { self.val.clone() }.boxed()
+                    future::ready(self.val.clone()).boxed()
                 }
             }
             impl StateMachineCtl for Value {

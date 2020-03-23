@@ -6,6 +6,7 @@ macro_rules! def_store_hash_map {
             use bifrost_hasher::hash_str;
             use std::collections::HashMap;
             use std::sync::Arc;
+            use futures::FutureExt;
             use $crate::raft::state_machine::callback::server::SMCallback;
             use $crate::raft::state_machine::StateMachineCtl;
             use $crate::raft::RaftService;
@@ -43,21 +44,21 @@ macro_rules! def_store_hash_map {
                         } else {
                             None
                         };
-                    Box::pin(async { value })
+                    future::ready(value).boxed()
                 }
                 fn insert(&mut self, k: $kt, v: $vt) -> ::futures::future::BoxFuture<Option<$vt>> {
                     if let Some(ref callback) = self.callback {
                         callback.notify(commands::on_inserted::new(), (k.clone(), v.clone()));
                         callback.notify(commands::on_key_inserted::new(&k), v.clone());
                     }
-                    Box::pin(async { self.map.insert(k, v) })
+                    future::ready(self.map.insert(k, v)).boxed()
                 }
                 fn insert_if_absent(&mut self, k: $kt, v: $vt) -> ::futures::future::BoxFuture<$vt> {
                     if let Some(v) = self.map.get(&k) {
-                        return Box::pin(async { v.clone() });
+                        return future::ready(v.clone()).boxed();
                     }
                     self.insert(k, v.clone());
-                    Box::pin(async { v })
+                    future::ready(v).boxed()
                 }
                 fn remove(&mut self, k: $kt) -> ::futures::future::BoxFuture<Option<$vt>> {
                     let res = self.map.remove(&k);
@@ -67,35 +68,35 @@ macro_rules! def_store_hash_map {
                             callback.notify(commands::on_key_removed::new(&k), v.clone());
                         }
                     }
-                    Box::pin(async { res })
+                    future::ready(res).boxed()
                 }
                 fn is_empty(&self) -> ::futures::future::BoxFuture<bool> {
-                    Box::pin(async { self.map.is_empty() })
+                    future::ready(self.map.is_empty()).boxed()
                 }
                 fn len(&self) -> ::futures::future::BoxFuture<u64> {
-                    Box::pin(async { self.map.len() as u64 })
+                    future::ready(self.map.len() as u64).boxed()
                 }
                 fn clear(&mut self) -> ::futures::future::BoxFuture<()> {
-                    Box::pin(async { self.map.clear() })
+                    future::ready(self.map.clear()).boxed()
                 }
                 fn keys(&self) -> ::futures::future::BoxFuture<Vec<$kt>> {
-                    Box::pin(async { self.map.keys().cloned().collect() })
+                    future::ready(self.map.keys().cloned().collect()).boxed()
                 }
                 fn values(&self) -> ::futures::future::BoxFuture<Vec<$vt>> {
-                    Box::pin(async { self.map.values().cloned().collect() })
+                    future::ready(self.map.values().cloned().collect()).boxed()
                 }
                 fn entries(&self) -> ::futures::future::BoxFuture<Vec<($kt, $vt)>> {
                     let mut r = Vec::new();
                     for (k, v) in self.map.iter() {
                         r.push((k.clone(), v.clone()));
                     }
-                    Box::pin(async { r })
+                    future::ready(r).boxed()
                 }
                 fn clone(&self) -> ::futures::future::BoxFuture<HashMap<$kt, $vt>> {
-                    Box::pin(async { self.map.clone() })
+                    future::ready(self.map.clone()).boxed()
                 }
                 fn contains_key(&self, k: $kt) -> ::futures::future::BoxFuture<bool> {
-                    Box::pin(async { self.map.contains_key(&k) })
+                    future::ready(self.map.contains_key(&k)).boxed()
                 }
             }
             impl StateMachineCtl for Map {

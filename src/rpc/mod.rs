@@ -86,9 +86,11 @@ fn decode_res(res: io::Result<BytesMut>) -> Result<BytesMut, RPCError> {
 }
 
 pub fn read_u64_head(mut data: BytesMut) -> (u64, BytesMut) {
-    let num = LittleEndian::read_u64(data.as_ref());
-    data.advance_mut(8);
-    (num, data)
+    unsafe {
+        let num = LittleEndian::read_u64(data.as_ref());
+        data.advance_mut(8);
+        (num, data)
+    }
 }
 
 impl Server {

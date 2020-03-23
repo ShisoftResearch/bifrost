@@ -36,7 +36,7 @@ pub struct HeartbeatService {
 
 impl Service for HeartbeatService {
     fn ping(&self, id: u64) -> BoxFuture<()> {
-        async {
+        async move {
             let mut stat_map = self.status.write().await;
             let current_time = time::get_time();
             let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
@@ -356,7 +356,7 @@ impl Membership {
 
 impl StateMachineCmds for Membership {
     fn hb_online_changed(&mut self, online: Vec<u64>, offline: Vec<u64>) -> BoxFuture<()> {
-        async {
+        async move {
             self.version += 1;
             {
                 let mut stat_map = self.heartbeat.status.write().await;
@@ -383,7 +383,7 @@ impl StateMachineCmds for Membership {
         .boxed()
     }
     fn join(&mut self, address: String) -> BoxFuture<Option<u64>> {
-        async {
+        async move {
             self.version += 1;
             let id = hash_str(&address);
             let mut joined = false;
@@ -421,7 +421,7 @@ impl StateMachineCmds for Membership {
         .boxed()
     }
     fn leave(&mut self, id: u64) -> BoxFuture<bool> {
-        async {
+        async move {
             if !self.members.contains_key(&id) {
                 return false;
             };
@@ -449,7 +449,7 @@ impl StateMachineCmds for Membership {
         .boxed()
     }
     fn join_group(&mut self, group_name: String, id: u64) -> BoxFuture<bool> {
-        async {
+        async move {
             let group_id = hash_str(&group_name);
             self.version += 1;
             let mut success = false;
@@ -480,14 +480,14 @@ impl StateMachineCmds for Membership {
         .boxed()
     }
     fn leave_group(&mut self, group_id: u64, id: u64) -> BoxFuture<bool> {
-        async {
+        async move {
             self.version += 1;
             self.leave_group_(group_id, id, true).await
         }
         .boxed()
     }
     fn new_group(&mut self, name: String) -> BoxFuture<Result<u64, u64>> {
-        async {
+        async move {
             self.version += 1;
             let id = hash_str(&name);
             let mut inserted = false;
@@ -509,7 +509,7 @@ impl StateMachineCmds for Membership {
         .boxed()
     }
     fn del_group(&mut self, id: u64) -> BoxFuture<bool> {
-        async {
+        async move {
             self.version += 1;
             let mut members: Option<BTreeSet<u64>> = None;
             if let Some(group) = self.groups.get(&id) {
@@ -530,7 +530,7 @@ impl StateMachineCmds for Membership {
         .boxed()
     }
     fn group_leader(&self, group_id: u64) -> BoxFuture<Option<(Option<ClientMember>, u64)>> {
-        async {
+        async move {
             if let Some(group) = self.groups.get(&group_id) {
                 Some((
                     match group.leader {
@@ -550,7 +550,7 @@ impl StateMachineCmds for Membership {
         group: u64,
         online_only: bool,
     ) -> BoxFuture<Option<(Vec<ClientMember>, u64)>> {
-        async {
+        async move {
             if let Some(group) = self.groups.get(&group) {
                 let futs: FuturesUnordered<_> = group
                     .members
@@ -572,7 +572,7 @@ impl StateMachineCmds for Membership {
         .boxed()
     }
     fn all_members(&self, online_only: bool) -> BoxFuture<(Vec<ClientMember>, u64)> {
-        async {
+        async move {
             let futs: FuturesUnordered<_> = self
                 .members
                 .iter()

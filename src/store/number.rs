@@ -7,6 +7,7 @@ macro_rules! def_store_number {
             use std::sync::Arc;
             use $crate::raft::state_machine::callback::server::SMCallback;
             use $crate::raft::RaftService;
+            use futures::FutureExt;
 
             pub struct Number {
                 pub num: $t,
@@ -42,49 +43,35 @@ macro_rules! def_store_number {
             }
             impl StateMachineCmds for Number {
                 fn set(&mut self, n: $t) -> BoxFuture<()> {
-                    async {
-                        let on = self.num;
-                        self.num = n;
-                        if let Some(ref callback) = self.callback {
-                            callback.notify(commands::on_changed::new(), (on, n));
-                        }
+                    let on = self.num;
+                    self.num = n;
+                    if let Some(ref callback) = self.callback {
+                        callback.notify(commands::on_changed::new(), (on, n));
                     }
-                    .boxed()
+                    future::ready(()).boxed()
                 }
                 fn get(&self) -> BoxFuture<$t> {
-                    async { self.num }.boxed()
+                    future::ready(self.num).boxed()
                 }
                 fn get_and_add(&mut self, n: $t) -> BoxFuture<$t> {
-                    async {
-                        let on = self.num;
-                        self.set(on + n);
-                        on
-                    }
-                    .boxed()
+                    let on = self.num;
+                    self.set(on + n);
+                    future::ready(on).boxed()
                 }
                 fn add_and_get(&mut self, n: $t) -> BoxFuture<$t> {
-                    async {
-                        let on = self.num;
-                        self.set(on + n);
-                        self.num
-                    }
-                    .boxed()
+                    let on = self.num;
+                    self.set(on + n);
+                    future::ready(self.num).boxed()
                 }
                 fn get_and_minus(&mut self, n: $t) -> BoxFuture<$t> {
-                    async {
-                        let on = self.num;
-                        self.set(on - n);
-                        on
-                    }
-                    .boxed()
+                    let on = self.num;
+                    self.set(on - n);
+                    future::ready(on).boxed()
                 }
                 fn minus_and_get(&mut self, n: $t) -> BoxFuture<$t> {
-                    async {
-                        let on = self.num;
-                        self.set(on - n);
-                        self.num
-                    }
-                    .boxed()
+                    let on = self.num;
+                    self.set(on - n);
+                    future::ready(self.num).boxed()
                 }
                 fn get_and_incr(&mut self) -> BoxFuture<$t> {
                     self.get_and_add(1 as $t)
@@ -99,54 +86,36 @@ macro_rules! def_store_number {
                     self.minus_and_get(1 as $t)
                 }
                 fn get_and_multiply(&mut self, n: $t) -> BoxFuture<$t> {
-                    async {
-                        let on = self.num;
-                        self.set(on * n);
-                        on
-                    }
-                    .boxed()
+                    let on = self.num;
+                    self.set(on * n);
+                    future::ready(on).boxed()
                 }
                 fn multiply_and_get(&mut self, n: $t) -> BoxFuture<$t> {
-                    async {
-                        let on = self.num;
-                        self.set(on * n);
-                        self.num
-                    }
-                    .boxed()
+                    let on = self.num;
+                    self.set(on * n);
+                    future::ready(self.num).boxed()
                 }
                 fn get_and_divide(&mut self, n: $t) -> BoxFuture<$t> {
-                    async {
-                        let on = self.num;
-                        self.set(on / n);
-                        on
-                    }
-                    .boxed()
+                    let on = self.num;
+                    self.set(on / n);
+                    future::ready(on).boxed()
                 }
                 fn divide_and_get(&mut self, n: $t) -> BoxFuture<$t> {
-                    async {
-                        let on = self.num;
-                        self.set(on / n);
-                        self.num
-                    }
-                    .boxed()
+                    let on = self.num;
+                    self.set(on / n);
+                    future::ready(self.num).boxed()
                 }
                 fn compare_and_swap(&mut self, original: $t, n: $t) -> BoxFuture<$t> {
-                    async {
-                        let on = self.num;
-                        if on == original {
-                            self.set(n);
-                        }
-                        on
+                    let on = self.num;
+                    if on == original {
+                        self.set(n);
                     }
-                    .boxed()
+                    future::ready(on).boxed()
                 }
                 fn swap(&mut self, n: $t) -> BoxFuture<$t> {
-                    async {
-                        let on = self.num;
-                        self.set(n);
-                        on
-                    }
-                    .boxed()
+                    let on = self.num;
+                    self.set(n);
+                    future::ready(on).boxed()
                 }
             }
             impl StateMachineCtl for Number {

@@ -3,6 +3,7 @@ use crate::raft::RaftService;
 use bifrost_plugins::hash_ident;
 use std::collections::HashMap;
 use std::sync::Arc;
+use futures::FutureExt;
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_DHT_WEIGHTS) as u64;
 
@@ -17,33 +18,28 @@ pub struct Weights {
 }
 impl StateMachineCmds for Weights {
     fn set_weight(&mut self, group: u64, id: u64, weight: u64) -> BoxFuture<()> {
-        async {
-            *self
+        *self
             .groups
             .entry(group)
             .or_insert_with(|| HashMap::new())
             .entry(id)
             .or_insert_with(|| 0) = weight;
-        }.boxed()
+        future::ready(()).boxed()
     }
     fn get_weights(&self, group: u64) -> BoxFuture<Option<HashMap<u64, u64>>> {
-        async {
-            match self.groups.get(&group) {
-                Some(m) => Some(m.clone()),
-                None => None,
-            }
-        }.boxed()
+        future::ready(match self.groups.get(&group) {
+            Some(m) => Some(m.clone()),
+            None => None,
+        }).boxed()
     }
     fn get_weight(&self, group: u64, id: u64) -> BoxFuture<Option<u64>> {
-        async {
-            match self.groups.get(&group) {
-                Some(m) => match m.get(&id) {
-                    Some(w) => Some(*w),
-                    None => None,
-                },
+        future::ready(match self.groups.get(&group) {
+            Some(m) => match m.get(&id) {
+                Some(w) => Some(*w),
                 None => None,
-            }
-        }.boxed()
+            },
+            None => None,
+        }).boxed()
     }
 }
 impl StateMachineCtl for Weights {
