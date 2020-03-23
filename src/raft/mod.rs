@@ -1080,11 +1080,11 @@ impl Service for RaftService {
     }
 
     fn c_server_cluster_info(&self) -> BoxFuture<ClientClusterInfo> {
-        async { self.cluster_info().await }.boxed()
+        self.cluster_info().boxed()
     }
 
     fn c_put_offline(&self) -> BoxFuture<bool> {
-        async { self.leave().await }.boxed()
+        self.leave().boxed()
     }
 }
 
