@@ -7,9 +7,6 @@ edition = "2018"
 [lib]
 name = "bifrost"
 
-[[test]]
-name = "tests"
-
 [dependencies]
 bincode = "*"
 byteorder = "1"
