@@ -56,7 +56,7 @@ pub struct RaftClient {
 }
 
 impl RaftClient {
-    pub async fn new(servers: &Vec<String>, service_id: u64) -> Result<Self, ClientError> {
+    pub async fn new(servers: &Vec<String>, service_id: u64) -> Result<Arc<Self>, ClientError> {
         let client = RaftClient {
             qry_meta: QryMeta {
                 pos: AtomicU64::new(rand::random::<u64>()),
@@ -73,7 +73,7 @@ impl RaftClient {
         client
             .update_info(HashSet::from_iter(servers.iter().cloned()))
             .await?;
-        Ok(client)
+        Ok(Arc::new(client))
     }
     pub async fn prepare_subscription(server: &Arc<rpc::Server>) -> Option<()> {
         let mut callback = CALLBACK.write().await;

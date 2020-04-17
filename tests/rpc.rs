@@ -1,7 +1,13 @@
+#![feature(proc_macro_hygiene)]
+#![feature(box_syntax)]
+#![feature(async_closure)]
+
 use bifrost::*;
 use std::sync::Arc;
 use std::time::Duration;
 use serde::{Serialize, Deserialize};
+use tokio::time::delay_for;
+use futures::future::BoxFuture;
 
 pub mod simple_service {
 
@@ -15,11 +21,11 @@ pub mod simple_service {
     struct HelloServer;
 
     impl Service for HelloServer {
-        fn hello(&self, name: String) -> Box<dyn Future<Output = String>> {
-            box future::ready(format!("Hello, {}!", name))
+        fn hello(&self, name: String) -> BoxFuture<String> {
+            future::ready(format!("Hello, {}!", name)).boxed()
         }
-        fn error(&self, message: String) -> Box<dyn Future<Output = Result<(), String>>> {
-            box future::ready(Err(message.clone()))
+        fn error(&self, message: String) -> BoxFuture<Result<(), String>> {
+            future::ready(Err(message.clone())).boxed()
         }
     }
     dispatch_rpc_service_functions!(HelloServer);
@@ -33,7 +39,7 @@ pub mod simple_service {
             server.register_service(0, &Arc::new(HelloServer));
             Server::listen_and_resume(&server);
         }
-        thread::sleep(Duration::from_millis(1000));
+        delay_for(Duration::from_millis(1000)).await;
         let client = RPCClient::new_async(&addr).await.unwrap();
         let service_client = AsyncServiceClient::new(0, &client);
         let response = service_client.hello(String::from("Jack"));
@@ -70,17 +76,17 @@ pub mod struct_service {
     pub struct HelloServer;
 
     impl Service for HelloServer {
-        fn hello(&self, gret: Greeting) -> Box<Future<Item = Respond, Error = ()>> {
-            box future::ok(Respond {
+        fn hello(&self, gret: Greeting) -> BoxFuture<Respond> {
+            future::ready(Respond {
                 text: format!("Hello, {}. It is {} now!", gret.name, gret.time),
                 owner: 42,
-            })
+            }).boxed()
         }
     }
     dispatch_rpc_service_functions!(HelloServer);
 
-    #[test]
-    pub fn struct_rpc() {
+    #[tokio::test(threaded_scheduler)]
+    pub async fn struct_rpc() {
         let addr = String::from("127.0.0.1:1400");
         {
             let addr = addr.clone();
@@ -88,14 +94,14 @@ pub mod struct_service {
             server.register_service(0, &Arc::new(HelloServer));
             Server::listen_and_resume(&server);
         }
-        thread::sleep(Duration::from_millis(1000));
-        let client = RPCClient::new_async(addr).wait().unwrap();
+        delay_for(Duration::from_millis(1000)).await;
+        let client = RPCClient::new_async(&addr).await.unwrap();
         let service_client = AsyncServiceClient::new(0, &client);
         let response = service_client.hello(Greeting {
             name: String::from("Jack"),
             time: 12,
         });
-        let res = response.wait().unwrap().unwrap();
+        let res = response.await.unwrap();
         let greeting_str = res.text;
         println!("SERVER RESPONDED: {}", greeting_str);
         assert_eq!(greeting_str, String::from("Hello, Jack. It is 12 now!"));
@@ -115,14 +121,14 @@ mod multi_server {
         id: u64,
     }
     impl Service for IdServer {
-        fn query_server_id(&self) -> Box<Future<Item = u64, Error = ()>> {
-            box future::ok(self.id)
+        fn query_server_id(&self) -> BoxFuture<u64> {
+            future::ready(self.id).boxed()
         }
     }
     dispatch_rpc_service_functions!(IdServer);
 
-    #[test]
-    fn multi_server_rpc() {
+    #[tokio::test(threaded_scheduler)]
+    async fn multi_server_rpc() {
         let addrs = vec![
             String::from("127.0.0.1:1500"),
             String::from("127.0.0.1:1600"),
@@ -133,35 +139,33 @@ mod multi_server {
         for addr in &addrs {
             {
                 let addr = addr.clone();
-                thread::spawn(move || {
+                tokio::spawn(async move {
                     let server = Server::new(&addr); // 0 is service id
-                    server.register_service(id, &Arc::new(IdServer { id: id }));
-                    Server::listen(&server);
+                    server.register_service(id, &Arc::new(IdServer { id: id })).await;
+                    Server::listen(&server)
                 });
                 id += 1;
             }
         }
         id = 0;
-        thread::sleep(Duration::from_millis(1000));
+        delay_for(Duration::from_millis(1000)).await;
         for addr in &addrs {
-            let client = RPCClient::new_async(addr.clone()).wait().unwrap();
+            let client = RPCClient::new_async(addr).await.unwrap();
             let service_client = AsyncServiceClient::new(id, &client);
-            let id_res = service_client.query_server_id().wait().unwrap();
-            assert_eq!(id_res.unwrap(), id);
+            let id_res = service_client.query_server_id().await.unwrap();
+            assert_eq!(id_res, id);
             id += 1;
         }
     }
 }
 
 mod parallel {
-    use self::rayon::iter::IntoParallelIterator;
-    use self::rayon::prelude::*;
     use super::struct_service::*;
     use super::*;
     use bifrost_hasher::hash_str;
 
-    #[test]
-    pub fn lots_of_reqs() {
+    #[tokio::test(threaded_scheduler)]
+    pub async fn lots_of_reqs() {
         let addr = String::from("127.0.0.1:1411");
         {
             let addr = addr.clone();
@@ -169,7 +173,7 @@ mod parallel {
             server.register_service(0, &Arc::new(HelloServer));
             Server::listen_and_resume(&server);
         }
-        thread::sleep(Duration::from_millis(1000));
+        delay_for(Duration::from_millis(1000)).await;
         let client = RPCClient::new_async(addr.clone()).wait().unwrap();
         let service_client = AsyncServiceClient::new(0, &client);
 

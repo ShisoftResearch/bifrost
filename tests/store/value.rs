@@ -6,8 +6,9 @@ use bifrost::store::value::string;
 use bifrost::store::value::string::client::SMClient;
 use futures::prelude::*;
 
-#[test]
-fn string() {
+
+#[tokio::test(threaded_scheduler)]
+async fn string() {
     let addr = String::from("127.0.0.1:2010");
     let original_string = String::from("The stored text");
     let altered_string = String::from("The altered text");
@@ -26,7 +27,7 @@ fn string() {
     service.register_state_machine(Box::new(string_sm)).await;
     service.bootstrap().await;
 
-    let client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID).unwrap();
+    let client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID).await.unwrap();
     let sm_client = SMClient::new(sm_id, &client);
     let unchanged_str = original_string.clone();
     let changed_str = altered_string.clone();
@@ -38,7 +39,7 @@ fn string() {
     //            assert_eq!(new, changed_str);
     //        }
     //    }).unwrap().unwrap();
-    assert_eq!(&sm_client.get().wait().unwrap().unwrap(), &original_string);
-    sm_client.set(&altered_string).wait().unwrap().unwrap();
-    assert_eq!(&sm_client.get().wait().unwrap().unwrap(), &altered_string);
+    assert_eq!(&sm_client.get().await.unwrap(), &original_string);
+    sm_client.set(&altered_string).await.unwrap();
+    assert_eq!(&sm_client.get().await.unwrap(), &altered_string);
 }

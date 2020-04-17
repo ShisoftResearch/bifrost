@@ -4,8 +4,8 @@ use bifrost::raft::*;
 use bifrost::rpc::Server;
 use std::fs::File;
 
-#[test]
-fn startup() {
+#[tokio::test(threaded_scheduler)]
+async fn startup() {
     let (success, _, _) = RaftService::new_server(Options {
         storage: Storage::default(),
         address: String::from("127.0.0.1:2000"),
@@ -15,8 +15,8 @@ fn startup() {
     assert!(success);
 }
 
-#[test]
-fn server_membership() {
+#[tokio::test(threaded_scheduler)]
+async fn server_membership() {
     let s1_addr = String::from("127.0.0.1:2001");
     let s2_addr = String::from("127.0.0.1:2002");
     let s3_addr = String::from("127.0.0.1:2003");
@@ -64,7 +64,7 @@ fn server_membership() {
     assert_eq!(service1.num_members().await, 3);
     assert_eq!(service3.num_members().await, 3);
 
-    wait();
+    wait().await;
 
     // check in service2. Although it is a log replication problem but membership changes should take effect immediately
     assert_eq!(service2.num_members().await, 3);
@@ -77,13 +77,13 @@ fn server_membership() {
     //test remove leader
     assert_eq!(service1.leader_id(), service1.id);
     assert!(service1.leave().await);
-    wait(); // there will be some unavailability in leader transaction
+    wait().await; // there will be some unavailability in leader transaction
     assert_eq!(service3.leader_id(), service3.id);
     assert_eq!(service3.num_members().await, 1);
 }
 
-#[test]
-fn log_replication() {
+#[tokio::test(threaded_scheduler)]
+async fn log_replication() {
     let s1_addr = String::from("127.0.0.1:2004");
     let s2_addr = String::from("127.0.0.1:2005");
     let s3_addr = String::from("127.0.0.1:2006");
@@ -158,7 +158,7 @@ fn log_replication() {
         .await;
     join_result.unwrap();
 
-    wait(); // wait for membership replication to take effect
+    wait().await; // wait for membership replication to take effect
 
     assert_eq!(service1.num_logs().await, service2.num_logs().await);
     assert_eq!(service2.num_logs().await, service3.num_logs().await);
@@ -166,7 +166,7 @@ fn log_replication() {
     assert_eq!(service4.num_logs().await, service5.num_logs().await);
     assert_eq!(service5.num_logs().await, 4); // check all logs replicated
 
-    wait();
+    wait().await;
 
     assert_eq!(service1.leader_id().await, service1.id);
     assert_eq!(service2.leader_id().await, service1.id);

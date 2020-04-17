@@ -18,7 +18,7 @@ extern crate env_logger;
 
 mod conshash;
 mod membership;
-mod raft;
+pub mod raft;
 mod rpc;
 mod store;
 mod utils;
