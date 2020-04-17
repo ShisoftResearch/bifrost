@@ -148,6 +148,7 @@ macro_rules! raft_state_machine {
         pub mod commands {
             use super::*;
             use futures::prelude::*;
+            use serde::{Serialize, Deserialize};
             $(
                 #[derive(Serialize, Deserialize, Debug)]
                 pub struct $fn_name {

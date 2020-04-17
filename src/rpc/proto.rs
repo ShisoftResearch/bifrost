@@ -184,7 +184,7 @@ mod syntax_test {
 
 #[cfg(test)]
 mod struct_test {
-
+    use serde::{Serialize, Deserialize};
     #[derive(Serialize, Deserialize, Debug, Clone)]
     pub struct a {
         b: u32,

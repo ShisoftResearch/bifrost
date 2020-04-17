@@ -26,27 +26,8 @@ pub mod membership;
 pub mod store;
 pub mod vector_clock;
 
-extern crate byteorder;
-extern crate parking_lot;
-extern crate thread_id;
-
-extern crate bincode;
-extern crate serde;
-#[macro_use]
-extern crate serde_derive;
-
 #[macro_use]
 extern crate log;
-extern crate env_logger;
-
-extern crate num_cpus;
-extern crate rand;
-extern crate threadpool;
 
 #[macro_use]
 extern crate lazy_static;
-
-extern crate bifrost_hasher;
-extern crate bifrost_plugins;
-
-extern crate crc32fast;

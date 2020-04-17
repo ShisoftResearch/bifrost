@@ -6,6 +6,7 @@ use bifrost_hasher::hash_str;
 use futures::future::BoxFuture;
 use std::future::Future;
 use std::sync::Arc;
+use serde::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Member {

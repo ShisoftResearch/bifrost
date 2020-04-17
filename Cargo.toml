@@ -15,8 +15,7 @@ bincode = "*"
 byteorder = "1"
 env_logger = "*"
 log = "*"
-serde = "*"
-serde_derive = "*"
+serde = { version = "1.0", features = ["derive"] }
 bifrost_plugins = { path = "src/plugins" }
 bifrost_hasher = { path = "src/hasher" }
 rand = "*"
@@ -28,12 +27,12 @@ parking_lot = {version = "*", features = ["nightly"]}
 thread-id = "3"
 
 tokio = { version = "0.2", features = ["full"] }
-tokio-util = {version = "0.2", features = ["full"]}
+tokio-util = {version = "0.3.1", features = ["full"]}
 bytes = "0.5"
 crc32fast = "*"
 
 futures = "0.3"
-async-trait = "0.1.22"
+async-trait = "0.1.30"
 
 [dev-dependencies]
 rayon = "1"

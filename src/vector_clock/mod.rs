@@ -2,6 +2,7 @@ use bifrost_hasher::hash_str;
 use parking_lot::RwLock;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use serde::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub enum Relation {

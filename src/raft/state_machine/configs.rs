@@ -8,6 +8,7 @@ use bifrost_hasher::hash_str;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use futures::FutureExt;
+use serde::{Serialize, Deserialize};
 
 pub const CONFIG_SM_ID: u64 = 1;
 

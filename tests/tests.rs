@@ -1,18 +1,13 @@
 #![feature(plugin)]
-#![feature(proc_macro_hygiene)]
+#![feature(integer_atomics)]
 #![feature(proc_macro)]
 #![feature(box_syntax)]
-#![feature(conservative_impl_trait)]
+#![feature(use_extern_macros)]
+#![feature(proc_macro_hygiene)]
+#![feature(trait_alias)]
 
 #[macro_use]
 extern crate bifrost;
-extern crate bifrost_hasher;
-extern crate bifrost_plugins;
-extern crate bincode;
-extern crate byteorder;
-#[macro_use]
-extern crate serde_derive;
-
 #[macro_use]
 extern crate lazy_static;
 extern crate parking_lot;
@@ -20,7 +15,6 @@ extern crate parking_lot;
 #[macro_use]
 extern crate log;
 extern crate env_logger;
-extern crate tokio_service;
 
 mod conshash;
 mod membership;

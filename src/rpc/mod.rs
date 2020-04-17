@@ -17,6 +17,7 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::thread;
+use serde::{Serialize, Deserialize};
 
 lazy_static! {
     pub static ref DEFAULT_CLIENT_POOL: ClientPool = ClientPool::new();
@@ -176,13 +177,13 @@ impl RPCClient {
         let bytes = prepend_u64(svr_id, data);
         decode_res(Client::send_msg(Pin::new(&mut *client), bytes).await)
     }
-    pub async fn new_async(addr: &String) -> io::Result<RPCClient> {
+    pub async fn new_async(addr: &String) -> io::Result<Arc<RPCClient>> {
         let client = tcp::client::Client::connect(addr).await?;
-        Ok(RPCClient {
+        Ok(Arc::new(RPCClient {
             server_id: client.server_id,
             client: Mutex::new(client),
             address: addr.clone(),
-        })
+        }))
     }
 }
 
@@ -208,7 +209,7 @@ impl ClientPool {
             let client = clients.get(&server_id).unwrap().clone();
             Ok(client)
         } else {
-            let mut client = Arc::new(RPCClient::new_async(&addr_fn(server_id)).await?);
+            let mut client = RPCClient::new_async(&addr_fn(server_id)).await?;
             clients.insert(server_id, client.clone());
             Ok(client)
         }

@@ -26,6 +26,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::time::Duration;
 use tokio::time;
+use serde::{Serialize, Deserialize};
 
 #[macro_use]
 pub mod state_machine;

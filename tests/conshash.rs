@@ -8,7 +8,6 @@ use crate::raft::state_machine::callback::client::SubscriptionService;
 use crate::raft::*;
 use crate::rpc::*;
 
-use futures::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

@@ -6,6 +6,7 @@ use crate::utils::rwlock::RwLock;
 use bifrost_hasher::{hash_bytes, hash_str};
 use futures::stream::FuturesUnordered;
 use serde;
+use serde::{Serialize, Deserialize};
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
