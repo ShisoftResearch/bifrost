@@ -361,7 +361,7 @@ impl RaftService {
         let service = RaftService::new(opts);
         let server = Server::new(&address);
         Server::listen_and_resume(&server);
-        server.register_service(svr_id, &service);
+        server.register_service(svr_id, &service).await;
         (RaftService::start(&service).await, service, server)
     }
     pub async fn bootstrap(&self) {
@@ -1156,7 +1156,7 @@ mod test {
             service_id: DEFAULT_SERVICE_ID,
         });
         let server1 = Server::new(&s1_addr);
-        server1.register_service(DEFAULT_SERVICE_ID, &service1);
+        server1.register_service(DEFAULT_SERVICE_ID, &service1).await;
         Server::listen_and_resume(&server1);
         assert!(RaftService::start(&service1).await);
         service1.bootstrap().await;
@@ -1167,7 +1167,7 @@ mod test {
             service_id: DEFAULT_SERVICE_ID,
         });
         let server2 = Server::new(&s2_addr);
-        server2.register_service(DEFAULT_SERVICE_ID, &service2);
+        server2.register_service(DEFAULT_SERVICE_ID, &service2).await;
         Server::listen_and_resume(&server2);
         assert!(RaftService::start(&service2).await);
         let join_result = service2.join(&vec![s1_addr.clone()]).await;
@@ -1186,7 +1186,7 @@ mod test {
             service_id: DEFAULT_SERVICE_ID,
         });
         let server3 = Server::new(&s3_addr);
-        server3.register_service(DEFAULT_SERVICE_ID, &service3);
+        server3.register_service(DEFAULT_SERVICE_ID, &service3).await;
         Server::listen_and_resume(&server3);
         assert!(RaftService::start(&service3).await);
         let join_result = service3.join(&vec![s1_addr.clone(), s2_addr.clone()]).await;
@@ -1248,27 +1248,27 @@ mod test {
         });
 
         let server1 = Server::new(&s1_addr);
-        server1.register_service(DEFAULT_SERVICE_ID, &service1);
+        server1.register_service(DEFAULT_SERVICE_ID, &service1).await;
         Server::listen_and_resume(&server1);
         assert!(RaftService::start(&service1).await);
         service1.bootstrap().await;
 
         let server2 = Server::new(&s2_addr);
-        server2.register_service(DEFAULT_SERVICE_ID, &service2);
+        server2.register_service(DEFAULT_SERVICE_ID, &service2).await;
         Server::listen_and_resume(&server2);
         assert!(RaftService::start(&service2).await);
         let join_result = service2.join(&vec![s1_addr.clone(), s2_addr.clone()]).await;
         join_result.unwrap();
 
         let server3 = Server::new(&s3_addr);
-        server3.register_service(DEFAULT_SERVICE_ID, &service3);
+        server3.register_service(DEFAULT_SERVICE_ID, &service3).await;
         Server::listen_and_resume(&server3);
         assert!(RaftService::start(&service3).await);
         let join_result = service3.join(&vec![s1_addr.clone(), s2_addr.clone()]).await;
         join_result.unwrap();
 
         let server4 = Server::new(&s4_addr);
-        server4.register_service(DEFAULT_SERVICE_ID, &service4);
+        server4.register_service(DEFAULT_SERVICE_ID, &service4).await;
         Server::listen_and_resume(&server4);
         assert!(RaftService::start(&service4).await);
         let join_result = service4
@@ -1277,7 +1277,7 @@ mod test {
         join_result.unwrap();
 
         let server5 = Server::new(&s5_addr);
-        server5.register_service(DEFAULT_SERVICE_ID, &service5);
+        server5.register_service(DEFAULT_SERVICE_ID, &service5).await;
         Server::listen_and_resume(&server5);
         assert!(RaftService::start(&service5).await);
         let join_result = service5

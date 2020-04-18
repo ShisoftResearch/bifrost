@@ -38,13 +38,13 @@ impl Service for SubscriptionService {
 dispatch_rpc_service_functions!(SubscriptionService);
 
 impl SubscriptionService {
-    pub fn initialize(server: &Arc<Server>) -> Arc<SubscriptionService> {
+    pub async fn initialize(server: &Arc<Server>) -> Arc<SubscriptionService> {
         let service = Arc::new(SubscriptionService {
             subs: RwLock::new(HashMap::new()),
             server_address: server.address().clone(),
             session_id: get_time() as u64,
         });
-        server.register_service(DEFAULT_SERVICE_ID, &service);
-        return service;
+        server.register_service(DEFAULT_SERVICE_ID, &service).await;
+        service
     }
 }

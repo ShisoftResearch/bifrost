@@ -78,7 +78,7 @@ impl RaftClient {
     pub async fn prepare_subscription(server: &Arc<rpc::Server>) -> Option<()> {
         let mut callback = CALLBACK.write().await;
         if callback.is_none() {
-            let sub_service = SubscriptionService::initialize(&server);
+            let sub_service = SubscriptionService::initialize(&server).await;
             *callback = Some(sub_service.clone());
             return Some(());
         } else {

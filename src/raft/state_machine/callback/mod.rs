@@ -70,7 +70,7 @@ mod test {
             callback: SMCallback::new(10, raft_service.clone()).await,
         };
         let sm_id = dummy_sm.id();
-        server.register_service(DEFAULT_SERVICE_ID, &raft_service);
+        server.register_service(DEFAULT_SERVICE_ID, &raft_service).await;
         Server::listen_and_resume(&server);
         RaftService::start(&raft_service).await;
         raft_service

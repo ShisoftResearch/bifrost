@@ -10,7 +10,6 @@ name = "bifrost"
 [dependencies]
 bincode = "*"
 byteorder = "1"
-env_logger = "*"
 log = "*"
 serde = { version = "1.0", features = ["derive"] }
 bifrost_plugins = { path = "src/plugins" }
@@ -32,4 +31,4 @@ futures = "0.3"
 async-trait = "0.1.30"
 
 [dev-dependencies]
-rayon = "1"
+env_logger = "*"

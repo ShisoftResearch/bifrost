@@ -18,6 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::thread;
 use serde::{Serialize, Deserialize};
+use std::error::Error;
 
 lazy_static! {
     pub static ref DEFAULT_CLIENT_POOL: ClientPool = ClientPool::new();
@@ -87,11 +88,8 @@ fn decode_res(res: io::Result<BytesMut>) -> Result<BytesMut, RPCError> {
 }
 
 pub fn read_u64_head(mut data: BytesMut) -> (u64, BytesMut) {
-    unsafe {
-        let num = LittleEndian::read_u64(data.as_ref());
-        data.advance_mut(8);
-        (num, data)
-    }
+    let num = data.get_u64_le(); LittleEndian::read_u64(data.as_ref());
+    (num, data)
 }
 
 impl Server {
@@ -102,7 +100,7 @@ impl Server {
             server_id: hash_str(address),
         })
     }
-    pub fn listen(server: &Arc<Server>) {
+    pub async fn listen(server: &Arc<Server>) -> Result<(), Box<dyn Error>> {
         let address = &server.address;
         let server = server.clone();
         tcp::server::Server::new(address, Arc::new(move |mut data| {
@@ -116,21 +114,24 @@ impl Server {
                         let svr_res = service.dispatch(data).await;
                         encode_res(svr_res)
                     }
-                    None => encode_res(Err(RPCRequestError::ServiceIdNotFound)),
+                    None => {
+                        let svr_ids = svr_map.keys().collect::<Vec<_>>();
+                        debug!("Service Id NOT found {}, have {:?}", svr_id, svr_ids);
+                        encode_res(Err(RPCRequestError::ServiceIdNotFound))
+                    },
                 }
             }
-                .boxed()
-        }));
+            .boxed()
+        })).await
     }
+
     pub fn listen_and_resume(server: &Arc<Server>) {
         let server = server.clone();
-        thread::Builder::new()
-            .name(format!("RPC Server - {}", server.address))
-            .spawn(move || {
-                let server = server;
-                Server::listen(&server);
-            });
+        tokio::spawn(async move {
+            Self::listen(&server).await.unwrap();
+        });
     }
+
     pub async fn register_service<T>(&self, service_id: u64, service: &Arc<T>)
     where
         T: RPCService + Sized + 'static,
@@ -160,9 +161,8 @@ pub struct RPCClient {
 }
 
 pub fn prepend_u64(num: u64, data: BytesMut) -> BytesMut {
-    let mut bytes = BytesMut::new();
-    bytes.reserve(8);
-    LittleEndian::write_u64(bytes.as_mut(), num);
+    let mut bytes = BytesMut::with_capacity(8);
+    bytes.put_u64_le(num);
     bytes.unsplit(data);
     bytes
 }
@@ -251,14 +251,14 @@ mod test {
             {
                 let addr = addr.clone();
                 let server = Server::new(&addr);
-                server.register_service(0, &Arc::new(HelloServer));
+                server.register_service(0, &Arc::new(HelloServer)).await;
                 Server::listen_and_resume(&server);
             }
             delay_for(Duration::from_millis(1000)).await;
             let client = RPCClient::new_async(&addr).await.unwrap();
             let service_client = AsyncServiceClient::new(0, &client);
-            let response = service_client.hello(String::from("Jack"));
-            let greeting_str = response.await.unwrap();
+            let response = service_client.hello(String::from("Jack")).await;
+            let greeting_str = response.unwrap();
             println!("SERVER RESPONDED: {}", greeting_str);
             assert_eq!(greeting_str, String::from("Hello, Jack!"));
             let expected_err_msg = String::from("This error is a good one");
@@ -302,11 +302,12 @@ mod test {
 
         #[tokio::test(threaded_scheduler)]
         pub async fn struct_rpc() {
+            env_logger::try_init();
             let addr = String::from("127.0.0.1:1400");
             {
                 let addr = addr.clone();
                 let server = Server::new(&addr); // 0 is service id
-                server.register_service(0, &Arc::new(HelloServer));
+                server.register_service(0, &Arc::new(HelloServer)).await;
                 Server::listen_and_resume(&server);
             }
             delay_for(Duration::from_millis(1000)).await;
@@ -354,11 +355,9 @@ mod test {
             for addr in &addrs {
                 {
                     let addr = addr.clone();
-                    tokio::spawn(async move {
-                        let server = Server::new(&addr); // 0 is service id
-                        server.register_service(id, &Arc::new(IdServer { id: id })).await;
-                        Server::listen(&server)
-                    });
+                    let server = Server::new(&addr); // 0 is service id
+                    server.register_service(id, &Arc::new(IdServer { id: id })).await;
+                    Server::listen_and_resume(&server);
                     id += 1;
                 }
             }
@@ -367,8 +366,9 @@ mod test {
             for addr in &addrs {
                 let client = RPCClient::new_async(addr).await.unwrap();
                 let service_client = AsyncServiceClient::new(id, &client);
-                let id_res = service_client.query_server_id().await.unwrap();
-                assert_eq!(id_res, id);
+                let id_res = service_client.query_server_id().await;
+                let id_un = id_res.unwrap();
+                assert_eq!(id_un, id);
                 id += 1;
             }
         }
@@ -388,7 +388,7 @@ mod test {
             {
                 let addr = addr.clone();
                 let server = Server::new(&addr); // 0 is service id
-                server.register_service(0, &Arc::new(HelloServer));
+                server.register_service(0, &Arc::new(HelloServer)).await;
                 Server::listen_and_resume(&server);
             }
             delay_for(Duration::from_millis(1000)).await;
@@ -397,7 +397,7 @@ mod test {
 
             println!("Testing parallel RPC reqs");
 
-            let mut futs = (0..1000).map(|i| {
+            let mut futs = (0..100).map(|i| {
                 let service_client = service_client.clone();
                 tokio::spawn(async move {
                     let response = service_client.hello(Greeting {
@@ -416,7 +416,7 @@ mod test {
 
             // test pool
             let server_id = hash_str(&addr);
-            let mut futs = (0..1000).map(|i| {
+            let mut futs = (0..100).map(|i| {
                 let addr = (&addr).clone();
                 tokio::spawn(async move {
                     let client = DEFAULT_CLIENT_POOL.get_by_id(server_id, move |_| addr).await.unwrap();
