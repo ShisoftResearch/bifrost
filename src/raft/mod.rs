@@ -1205,12 +1205,12 @@ mod test {
         assert_eq!(service3.num_members().await, 2);
 
         //test remove leader
-        assert_eq!(service1.leader_id(), service1.id);
+        assert_eq!(service1.leader_id().await, service1.id);
         assert!(service1.leave().await);
 
         async_wait_5_secs().await; // there will be some unavailability in leader transaction
         
-        assert_eq!(service3.leader_id(), service3.id);
+        assert_eq!(service3.leader_id().await, service3.id);
         assert_eq!(service3.num_members().await, 1);
     }
 

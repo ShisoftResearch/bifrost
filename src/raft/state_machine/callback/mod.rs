@@ -35,10 +35,10 @@ mod test {
 
     impl StateMachineCmds for Trigger {
         fn trigger(&mut self) -> BoxFuture<()> {
-            async {
-                self.count += 1;
+            self.count += 1;
+            async move {
                 self.callback
-                    .notify(commands::on_trigged::new(), self.count).await;
+                    .notify(commands::on_trigged::new(), self.count).await.unwrap();
             }.boxed()
         }
     }
@@ -102,7 +102,7 @@ mod test {
         for i in 0..loops {
             let sm_client = sm_client.clone();
             expected_sum += i + 1;
-            tokio::spawn(async {
+            tokio::spawn(async move {
                 sm_client.trigger().await.unwrap();
             });
         }

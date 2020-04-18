@@ -454,9 +454,9 @@ mod test {
             ch3_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
         });
 
-        assert_eq!(ch1.nodes_count(), 6);
-        assert_eq!(ch2.nodes_count(), 2);
-        assert_eq!(ch3.nodes_count(), 1);
+        assert_eq!(ch1.nodes_count().await, 6);
+        assert_eq!(ch2.nodes_count().await, 2);
+        assert_eq!(ch3.nodes_count().await, 1);
 
         let mut ch_1_mapping: HashMap<String, u64> = HashMap::new();
         for i in 0..30000usize {

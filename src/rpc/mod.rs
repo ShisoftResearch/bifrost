@@ -378,8 +378,10 @@ mod test {
         use super::struct_service::*;
         use super::*;
         use bifrost_hasher::hash_str;
-        use crate::rpc::{Server, RPCClient};
-        
+        use crate::rpc::{Server, RPCClient, DEFAULT_CLIENT_POOL};
+        use futures::prelude::stream::*;
+        use futures::FutureExt;
+
         #[tokio::test(threaded_scheduler)]
         pub async fn lots_of_reqs() {
             let addr = String::from("127.0.0.1:1411");
@@ -395,34 +397,43 @@ mod test {
 
             println!("Testing parallel RPC reqs");
 
-            (0..1000).collect::<Vec<_>>().into_par_iter().for_each(|i| {
-                let response = service_client.hello(Greeting {
-                    name: String::from("John"),
-                    time: i,
-                });
-                let res = response.await.unwrap().unwrap();
-                let greeting_str = res.text;
-                println!("SERVER RESPONDED: {}", greeting_str);
-                assert_eq!(greeting_str, format!("Hello, John. It is {} now!", i));
-                assert_eq!(42, res.owner);
-            });
+            let mut futs = (0..1000).map(|i| {
+                let service_client = service_client.clone();
+                tokio::spawn(async move {
+                    let response = service_client.hello(Greeting {
+                        name: String::from("John"),
+                        time: i,
+                    });
+                    let res = response.await.unwrap();
+                    let greeting_str = res.text;
+                    println!("SERVER RESPONDED: {}", greeting_str);
+                    assert_eq!(greeting_str, format!("Hello, John. It is {} now!", i));
+                    assert_eq!(42, res.owner);
+                }).boxed()
+            })
+            .collect::<FuturesUnordered<_>>();
+            while futs.next().await.is_some() {};
 
             // test pool
             let server_id = hash_str(&addr);
-            (0..1000).collect::<Vec<_>>().into_par_iter().for_each(|i| {
+            let mut futs = (0..1000).map(|i| {
                 let addr = (&addr).clone();
-                let client = DEFAULT_CLIENT_POOL.get_by_id_async(server_id, move |_| addr).await.unwrap();
-                let service_client = AsyncServiceClient::new(0, &client);
-                let response = service_client.hello(Greeting {
-                    name: String::from("John"),
-                    time: i,
-                });
-                let res = response.await.unwrap().unwrap();
-                let greeting_str = res.text;
-                println!("SERVER RESPONDED: {}", greeting_str);
-                assert_eq!(greeting_str, format!("Hello, John. It is {} now!", i));
-                assert_eq!(42, res.owner);
-            });
+                tokio::spawn(async move {
+                    let client = DEFAULT_CLIENT_POOL.get_by_id(server_id, move |_| addr).await.unwrap();
+                    let service_client = AsyncServiceClient::new(0, &client);
+                    let response = service_client.hello(Greeting {
+                        name: String::from("John"),
+                        time: i,
+                    });
+                    let res = response.await.unwrap();
+                    let greeting_str = res.text;
+                    println!("SERVER RESPONDED: {}", greeting_str);
+                    assert_eq!(greeting_str, format!("Hello, John. It is {} now!", i));
+                    assert_eq!(42, res.owner);
+                }).boxed()
+            })
+            .collect::<FuturesUnordered<_>>();
+            while futs.next().await.is_some() {};
         }
     }
 }
