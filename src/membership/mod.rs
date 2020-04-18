@@ -46,9 +46,10 @@ mod test {
     use crate::raft::client::RaftClient;
     use crate::membership::client::ObserverClient;
     use std::sync::Arc;
-    use std::sync::atomic::Ordering;
-    use tokio::future;
+    use std::sync::atomic::*;
     use crate::membership::member::MemberService;
+    use crate::utils::time::async_wait_5_secs;
+    use futures::prelude::*;
 
     #[tokio::test(threaded_scheduler)]
     async fn primary() {
@@ -307,7 +308,7 @@ mod test {
 
         member1_svr.close(); // close only end the heartbeat thread
 
-        wait().await;
+        async_wait_5_secs().await;
 
         assert_eq!(
             member1_svr
@@ -490,7 +491,7 @@ mod test {
             0
         );
 
-        wait().await;
+        async_wait_5_secs().await;
 
         assert_eq!(any_member_joined_count.load(Ordering::Relaxed), 3);
         assert_eq!(any_member_left_count.load(Ordering::Relaxed), 1);

@@ -133,12 +133,17 @@ macro_rules! def_store_hash_map {
 def_store_hash_map!(string_u8vec_hashmap <String, Vec<u8>>);
 
 #[cfg(test)]
-mod test {
+mod test {    
+    use futures::prelude::*;
     use std::collections::{HashMap, HashSet};
     use std::iter::FromIterator;
     use crate::raft::{DEFAULT_SERVICE_ID, RaftService, Options, Storage};
     use crate::raft::client::RaftClient;
     use crate::rpc::Server;
+    use crate::utils::time::async_wait_5_secs;
+    use string_string_hashmap::client::SMClient;
+
+    def_store_hash_map!(string_string_hashmap <String, String>);
 
     #[tokio::test(threaded_scheduler)]
     async fn hash_map() {
@@ -158,7 +163,7 @@ mod test {
         raft_service.register_state_machine(Box::new(map_sm)).await;
         raft_service.bootstrap().await;
 
-        let raft_client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID).unwrap();
+        let raft_client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID).await.unwrap();
         let sm_client = SMClient::new(sm_id, &raft_client);
         RaftClient::prepare_subscription(&server);
 
@@ -182,77 +187,74 @@ mod test {
         removed_stash.insert(sk2.clone(), sv2.clone());
 
         sm_client.on_inserted(move |res| {
-            if let Ok((key, value)) = res {
-                println!("GOT INSERT CALLBACK {:?} -> {:?}", key, value);
-                assert_eq!(inserted_stash.get(&key).unwrap(), &value);
-            }
+            let (key, value) = res;
+            println!("GOT INSERT CALLBACK {:?} -> {:?}", key, value);
+            assert_eq!(inserted_stash.get(&key).unwrap(), &value);
+            future::ready(()).boxed()
         });
         sm_client.on_removed(move |res| {
-            if let Ok((key, value)) = res {
-                println!("GOT REMOVED CALLBACK {:?} -> {:?}", key, value);
-                assert_eq!(removed_stash.get(&key).unwrap(), &value);
-            }
+            let (key, value) = res;
+            println!("GOT REMOVED CALLBACK {:?} -> {:?}", key, value);
+            assert_eq!(removed_stash.get(&key).unwrap(), &value);
+            future::ready(()).boxed()
         });
         sm_client.on_key_inserted(
             |res| {
-                if let Ok(value) = res {
-                    println!("GOT K1 CALLBACK {:?}", value);
-                    assert_eq!(&String::from("v1"), &value);
-                }
+                println!("GOT K1 CALLBACK {:?}", res);
+                assert_eq!(&String::from("v1"), &res);
+                future::ready(()).boxed()
             },
             &sk1,
         );
         sm_client.on_key_removed(
             |res| {
-                if let Ok(value) = res {
-                    println!("GOT K2 CALLBACK {:?}", value);
-                    assert_eq!(&String::from("v2"), &value);
-                }
+                println!("GOT K2 CALLBACK {:?}", res);
+                assert_eq!(&String::from("v2"), &res);
+                future::ready(()).boxed()
             },
             &sk2,
         );
-        assert!(sm_client.is_empty().wait().unwrap().unwrap());
-        sm_client.insert(&sk1, &sv1).wait().unwrap().unwrap();
-        sm_client.insert(&sk2, &sv2).wait().unwrap().unwrap();
-        assert!(!sm_client.is_empty().wait().unwrap().unwrap());
+        assert!(sm_client.is_empty().await.unwrap());
+        sm_client.insert(&sk1, &sv1).await.unwrap();
+        sm_client.insert(&sk2, &sv2).await.unwrap();
+        assert!(!sm_client.is_empty().await.unwrap());
 
-        assert_eq!(sm_client.len().wait().unwrap().unwrap(), 2);
-        assert_eq!(sm_client.get(&sk1).wait().unwrap().unwrap().unwrap(), sv1);
-        assert_eq!(sm_client.get(&sk2).wait().unwrap().unwrap().unwrap(), sv2);
+        assert_eq!(sm_client.len().await.unwrap(), 2);
+        assert_eq!(sm_client.get(&sk1).await.unwrap().unwrap(), sv1);
+        assert_eq!(sm_client.get(&sk2).await.unwrap().unwrap(), sv2);
 
         sm_client
             .insert_if_absent(&sk2, &String::from("kv2"))
-            .wait()
-            .unwrap()
+            .await
             .unwrap();
-        assert_eq!(sm_client.len().wait().unwrap().unwrap(), 2);
-        assert_eq!(sm_client.get(&sk2).wait().unwrap().unwrap().unwrap(), sv2);
+        assert_eq!(sm_client.len().await.unwrap(), 2);
+        assert_eq!(sm_client.get(&sk2).await.unwrap().unwrap(), sv2);
 
         assert_eq!(
-            sm_client.remove(&sk2).wait().unwrap().unwrap().unwrap(),
+            sm_client.remove(&sk2).await.unwrap().unwrap(),
             sv2
         );
-        assert_eq!(sm_client.len().wait().unwrap().unwrap(), 1);
-        assert!(sm_client.get(&sk2).wait().unwrap().unwrap().is_none());
+        assert_eq!(sm_client.len().await.unwrap(), 1);
+        assert!(sm_client.get(&sk2).await.unwrap().is_none());
 
-        sm_client.clear().wait().unwrap().unwrap();
-        assert_eq!(sm_client.len().wait().unwrap().unwrap(), 0);
+        sm_client.clear().await.unwrap();
+        assert_eq!(sm_client.len().await.unwrap(), 0);
 
-        sm_client.insert(&sk1, &sv1).wait().unwrap().unwrap();
-        sm_client.insert(&sk2, &sv2).wait().unwrap().unwrap();
-        sm_client.insert(&sk3, &sv3).wait().unwrap().unwrap();
-        sm_client.insert(&sk4, &sv4).wait().unwrap().unwrap();
-        assert_eq!(sm_client.len().wait().unwrap().unwrap(), 4);
+        sm_client.insert(&sk1, &sv1).await.unwrap().unwrap();
+        sm_client.insert(&sk2, &sv2).await.unwrap().unwrap();
+        sm_client.insert(&sk3, &sv3).await.unwrap().unwrap();
+        sm_client.insert(&sk4, &sv4).await.unwrap().unwrap();
+        assert_eq!(sm_client.len().await.unwrap(), 4);
 
-        let remote_keys = sm_client.keys().wait().unwrap().unwrap();
+        let remote_keys = sm_client.keys().await.unwrap();
         let remote_keys_set = HashSet::<String>::from_iter(remote_keys.iter().cloned());
         assert_eq!(remote_keys_set.len(), 4);
 
-        let remote_values = sm_client.values().wait().unwrap().unwrap();
+        let remote_values = sm_client.values().await.unwrap();
         let remote_values_set = HashSet::<String>::from_iter(remote_values.iter().cloned());
         assert_eq!(remote_values_set.len(), 4);
 
-        let remote_entries = sm_client.entries().wait().unwrap().unwrap();
+        let remote_entries = sm_client.entries().await.unwrap();
         let remote_entries_set = HashSet::<(String, String)>::from_iter(remote_entries.iter().cloned());
         assert_eq!(remote_entries_set.len(), 4);
 
@@ -286,13 +288,13 @@ mod test {
         expected_hashmap.insert(sk2.clone(), sv2.clone());
         expected_hashmap.insert(sk3.clone(), sv3.clone());
         expected_hashmap.insert(sk4.clone(), sv4.clone());
-        assert_eq!(expected_hashmap, sm_client.clone().wait().unwrap().unwrap());
+        assert_eq!(expected_hashmap, sm_client.clone().await.unwrap());
 
-        assert!(sm_client.contains_key(&sk1).wait().unwrap().unwrap());
-        assert!(sm_client.contains_key(&sk2).wait().unwrap().unwrap());
-        assert!(sm_client.contains_key(&sk3).wait().unwrap().unwrap());
-        assert!(sm_client.contains_key(&sk4).wait().unwrap().unwrap());
+        assert!(sm_client.contains_key(&sk1).await.unwrap());
+        assert!(sm_client.contains_key(&sk2).await.unwrap());
+        assert!(sm_client.contains_key(&sk3).await.unwrap());
+        assert!(sm_client.contains_key(&sk4).await.unwrap());
 
-        wait();
+        async_wait_5_secs().await;
     }
 }

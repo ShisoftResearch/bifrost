@@ -62,13 +62,14 @@ macro_rules! def_store_value {
     };
 }
 
-def_store_value!(string, String);
-
 #[cfg(test)]
 mod test {
     use crate::raft::{RaftService, Storage, DEFAULT_SERVICE_ID, Options};
     use crate::rpc::Server;
     use crate::raft::client::RaftClient;
+    use string::client::SMClient;
+
+    def_store_value!(string, String);
 
     #[tokio::test(threaded_scheduler)]
     async fn string() {

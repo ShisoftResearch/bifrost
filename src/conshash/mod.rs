@@ -356,7 +356,7 @@ async fn server_changed(ch: Arc<ConsistentHashing>, member: Member, action: Acti
 mod test {
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::*;
     use crate::conshash::ConsistentHashing;
     use crate::conshash::weights::Weights;
     use crate::membership::member::MemberService;
@@ -365,6 +365,7 @@ mod test {
     use crate::raft::{RaftService, Storage, Options};
     use crate::rpc::Server;
     use crate::membership::server::Membership;
+    use crate::utils::time::async_wait_5_secs;
 
     #[tokio::test(threaded_scheduler)]
     async fn primary() {
@@ -486,7 +487,7 @@ mod test {
 
         member1_svr.leave().await.unwrap();
 
-        wait().await;
+        async_wait_5_secs().await;
 
         let mut ch_1_mapping: HashMap<String, u64> = HashMap::new();
         for i in 0..30000usize {
@@ -503,7 +504,7 @@ mod test {
             let server = ch2.get_server_by_string(&k).await.unwrap();
             *ch_2_mapping.entry(server.clone()).or_insert(0) += 1;
         }
-        assert_eq!(ch_2_mapping.get(&server_2).unwrap(), &30000);https://twitter.com/FanBuckle/status/1251197768334544897/photo/1
+        assert_eq!(ch_2_mapping.get(&server_2).unwrap(), &30000);
 
         for i in 0..30000usize {
             let k = format!("k - {}", i);

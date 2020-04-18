@@ -1132,6 +1132,7 @@ mod test {
     use crate::raft::{RaftService, Storage, DEFAULT_SERVICE_ID, Options};
     use crate::raft::state_machine::master::ExecError;
     use crate::rpc::Server;
+    use crate::utils::time::async_wait_5_secs;
 
     #[tokio::test(threaded_scheduler)]
     async fn startup() {
@@ -1193,7 +1194,7 @@ mod test {
         assert_eq!(service1.num_members().await, 3);
         assert_eq!(service3.num_members().await, 3);
 
-        wait().await;
+        async_wait_5_secs().await;
 
         // check in service2. Although it is a log replication problem but membership changes should take effect immediately
         assert_eq!(service2.num_members().await, 3);
@@ -1206,7 +1207,9 @@ mod test {
         //test remove leader
         assert_eq!(service1.leader_id(), service1.id);
         assert!(service1.leave().await);
-        wait().await; // there will be some unavailability in leader transaction
+
+        async_wait_5_secs().await; // there will be some unavailability in leader transaction
+        
         assert_eq!(service3.leader_id(), service3.id);
         assert_eq!(service3.num_members().await, 1);
     }
@@ -1287,7 +1290,7 @@ mod test {
             .await;
         join_result.unwrap();
 
-        wait().await; // wait for membership replication to take effect
+        async_wait_5_secs().await; // wait for membership replication to take effect
 
         assert_eq!(service1.num_logs().await, service2.num_logs().await);
         assert_eq!(service2.num_logs().await, service3.num_logs().await);
@@ -1295,7 +1298,7 @@ mod test {
         assert_eq!(service4.num_logs().await, service5.num_logs().await);
         assert_eq!(service5.num_logs().await, 4); // check all logs replicated
 
-        wait().await;
+        async_wait_5_secs().await;
 
         assert_eq!(service1.leader_id().await, service1.id);
         assert_eq!(service2.leader_id().await, service1.id);

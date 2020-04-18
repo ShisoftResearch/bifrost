@@ -218,7 +218,6 @@ impl ClientPool {
 
 #[cfg(test)]
 mod test {
-    use bifrost::*;
     use std::sync::Arc;
     use std::time::Duration;
     use serde::{Serialize, Deserialize};
@@ -379,9 +378,8 @@ mod test {
         use super::struct_service::*;
         use super::*;
         use bifrost_hasher::hash_str;
-        use bifrost::rpc::{Server, RPCClient};
         use crate::rpc::{Server, RPCClient};
-
+        
         #[tokio::test(threaded_scheduler)]
         pub async fn lots_of_reqs() {
             let addr = String::from("127.0.0.1:1411");
@@ -392,7 +390,7 @@ mod test {
                 Server::listen_and_resume(&server);
             }
             delay_for(Duration::from_millis(1000)).await;
-            let client = RPCClient::new_async(&addr).wait().unwrap();
+            let client = RPCClient::new_async(&addr).await.unwrap();
             let service_client = AsyncServiceClient::new(0, &client);
 
             println!("Testing parallel RPC reqs");
@@ -402,7 +400,7 @@ mod test {
                     name: String::from("John"),
                     time: i,
                 });
-                let res = response.wait().unwrap().unwrap();
+                let res = response.await.unwrap().unwrap();
                 let greeting_str = res.text;
                 println!("SERVER RESPONDED: {}", greeting_str);
                 assert_eq!(greeting_str, format!("Hello, John. It is {} now!", i));
@@ -419,7 +417,7 @@ mod test {
                     name: String::from("John"),
                     time: i,
                 });
-                let res = response.wait().unwrap().unwrap();
+                let res = response.await.unwrap().unwrap();
                 let greeting_str = res.text;
                 println!("SERVER RESPONDED: {}", greeting_str);
                 assert_eq!(greeting_str, format!("Hello, John. It is {} now!", i));

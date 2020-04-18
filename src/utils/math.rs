@@ -30,8 +30,6 @@ pub fn avg_scale(nums: &Vec<u64>) -> Option<u64> {
     return None;
 }
 
-use bifrost::utils::math;
-
 #[cfg(test)]
 mod test {
     use crate::utils::math;

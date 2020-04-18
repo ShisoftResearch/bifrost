@@ -13,14 +13,15 @@ service! {
 
 #[cfg(test)]
 mod test {
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::*;
     use crate::raft::client::RaftClient;
     use std::sync::Arc;
     use crate::raft::{Storage, RaftService, Options, DEFAULT_SERVICE_ID};
     use crate::raft::state_machine::callback::server::SMCallback;
     use crate::rpc::Server;
     use crate::raft::state_machine::StateMachineCtl;
-    use futures::FutureExt;
+    use crate::utils::time::async_wait_5_secs;
+    use future::FutureExt;
 
     pub struct Trigger {
         count: u64,
@@ -77,7 +78,7 @@ mod test {
             .await;
         raft_service.bootstrap().await;
 
-        wait().await;
+        async_wait_5_secs().await;
 
         let raft_client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID).await.unwrap();
         let sm_client = Arc::new(client::SMClient::new(sm_id, &raft_client));
@@ -93,6 +94,7 @@ mod test {
                 counter_clone.fetch_add(1, Ordering::Relaxed);
                 sumer_clone.fetch_add(res as usize, Ordering::Relaxed);
                 println!("CALLBACK TRIGGERED {}", res);
+                future::ready(()).boxed()
             })
             .await
             .unwrap();
@@ -105,7 +107,7 @@ mod test {
             });
         }
 
-        wait().await;
+        async_wait_5_secs().await;
 
         assert_eq!(counter.load(Ordering::Relaxed), loops);
         assert_eq!(sumer.load(Ordering::Relaxed), expected_sum);
