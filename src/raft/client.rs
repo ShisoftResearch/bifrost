@@ -163,7 +163,7 @@ impl RaftClient {
     {
         let (fn_id, op, req_data) = msg.encode();
         let response = match op {
-            OpType::QUERY => self.query(sm_id, fn_id, req_data, 0).await,
+            OpType::QUERY => self.query(sm_id, fn_id, req_data).await,
             OpType::COMMAND | OpType::SUBSCRIBE => self.command(sm_id, fn_id, req_data, 0).await,
         };
         match response {
@@ -277,14 +277,14 @@ impl RaftClient {
         }
     }
 
-    fn query(
+    async fn query(
         &self,
         sm_id: u64,
         fn_id: u64,
         data: Vec<u8>,
-        depth: usize,
-    ) -> BoxFuture<Result<ExecResult, ExecError>> {
-        async move {
+    ) -> Result<ExecResult, ExecError> {
+        let mut depth = 0;
+        loop {
             let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
             let members = self.members.read().await;
             let num_members = members.clients.len();
@@ -300,9 +300,10 @@ impl RaftClient {
                     Ok(res) => match res {
                         ClientQryResponse::LeftBehind => {
                             if depth >= num_members {
-                                Err(ExecError::TooManyRetry)
+                                return Err(ExecError::TooManyRetry)
                             } else {
-                                self.query(sm_id, fn_id, data, depth + 1).await
+                                depth += 1;
+                                continue;
                             }
                         }
                         ClientQryResponse::Success {
@@ -312,15 +313,15 @@ impl RaftClient {
                         } => {
                             swap_when_greater(&self.last_log_id, last_log_id);
                             swap_when_greater(&self.last_log_term, last_log_term);
-                            Ok(data)
+                            return Ok(data)
                         }
                     },
-                    _ => Err(ExecError::Unknown),
+                    _ => return Err(ExecError::Unknown),
                 }
             } else {
-                Err(ExecError::ServersUnreachable)
+                return Err(ExecError::ServersUnreachable)
             }
-        }.boxed()
+        }
     }
 
     fn command(

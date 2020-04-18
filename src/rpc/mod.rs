@@ -222,7 +222,7 @@ mod test {
     use std::time::Duration;
     use serde::{Serialize, Deserialize};
     use tokio::time::delay_for;
-    use futures::future::BoxFuture;
+    use futures::future::BoxFuture; 
 
     pub mod simple_service {
 

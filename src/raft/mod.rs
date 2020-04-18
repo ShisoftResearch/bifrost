@@ -301,7 +301,7 @@ impl RaftService {
         {
             let meta = server.meta.write().await;
             let mut sm = meta.state_machine.write().await;
-            sm.configs.new_member(server_address.clone());
+            sm.configs.new_member(server_address.clone()).await;
         }
         let checker_ref = server.clone();
         tokio::spawn(async {
@@ -383,7 +383,7 @@ impl RaftService {
             let mut meta = self.write_meta().await;
             if let Ok(members) = members {
                 for member in members {
-                    meta.state_machine.write().await.configs.new_member(member);
+                    meta.state_machine.write().await.configs.new_member(member).await;
                 }
             }
             self.reset_last_checked(&mut meta);
