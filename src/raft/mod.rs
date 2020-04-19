@@ -9,9 +9,11 @@ use crate::utils::rwlock::*;
 use crate::utils::time::get_time;
 use bifrost_hasher::hash_str;
 use bifrost_plugins::hash_ident;
+use futures::executor::*;
 use futures::future::BoxFuture;
 use futures::prelude::*;
 use futures::stream::FuturesUnordered;
+use futures::task::SpawnExt;
 use futures::FutureExt;
 use rand;
 use rand::Rng;
@@ -19,14 +21,13 @@ use serde::{Deserialize, Serialize};
 use std::cmp::{max, min};
 use std::collections::Bound::{Included, Unbounded};
 use std::collections::{BTreeMap, HashMap};
-use std::fs;
+use std::{fs, thread};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::time::Duration;
-use tokio::runtime::*;
-use tokio::time;
+use async_std::future::timeout as future_timeout;
 
 #[macro_use]
 pub mod state_machine;
@@ -117,7 +118,7 @@ fn gen_rand(lower: i64, higher: i64) -> i64 {
 }
 
 fn gen_timeout() -> i64 {
-    gen_rand(1000, 5000)
+    gen_rand(2000, 5000)
 }
 
 struct FollowerStatus {
@@ -159,7 +160,7 @@ pub struct RaftMeta {
     last_applied: u64,
     leader_id: u64,
     storage: Option<Arc<RwLock<StorageEntity>>>,
-    threadpool: Runtime,
+    threadpool: ThreadPool,
 }
 
 #[derive(Clone)]
@@ -291,12 +292,10 @@ impl RaftService {
                 last_applied,
                 leader_id: 0,
                 storage: storage_entity.map(|e| Arc::new(RwLock::new(e))),
-                threadpool: Builder::new()
-                    .enable_all()
-                    .core_threads(THREAD_POOL_SIZE)
-                    .thread_name("raft-service")
-                    .threaded_scheduler()
-                    .build()
+                threadpool: ThreadPool::builder()
+                    .pool_size(THREAD_POOL_SIZE)
+                    .name_prefix("raft-service")
+                    .create()
                     .unwrap(),
             }),
             id: server_id,
@@ -324,55 +323,59 @@ impl RaftService {
             }
         }
         let checker_ref = server.clone();
-        meta.threadpool.spawn(async {
-            let server = checker_ref;
-            loop {
-                let start_time = get_time();
-                let expected_ends = start_time + CHECKER_MS;
-                {
-                    let mut meta = server.meta.write().await; //WARNING: Reentering not supported
-                    let action = match meta.membership {
-                        Membership::Leader(_) => CheckerAction::SendHeartbeat,
-                        Membership::Follower | Membership::Candidate => {
-                            debug_assert!(meta.timeout > 100);
-                            let current_time = get_time();
-                            let timeout_time = meta.last_checked + meta.timeout;
-                            let time_remains = timeout_time - current_time;
-                            if meta.vote_for == None && time_remains < 0 {
-                                // TODO: in my test sometimes timeout_elapsed may go 1 for no reason, require investigation
-                                //Timeout, require election
-                                debug!(
-                                    "TIMEOUT!!! GOING TO CANDIDATE!!! {}, time remains {}ms",
-                                    server.id, time_remains
-                                );
-                                CheckerAction::BecomeCandidate
-                            } else {
-                                CheckerAction::None
+        thread::Builder::new().name("raft-sentinel".to_string()).spawn(|| {
+            futures::executor::block_on(async {
+                let server = checker_ref;
+                loop {
+                    let start_time = get_time();
+                    let expected_ends = start_time + CHECKER_MS;
+                    {
+                        let mut meta = server.meta.write().await; //WARNING: Reentering not supported
+                        let action = match meta.membership {
+                            Membership::Leader(_) => CheckerAction::SendHeartbeat,
+                            Membership::Follower | Membership::Candidate => {
+                                debug_assert!(meta.timeout > 100);
+                                let current_time = get_time();
+                                let timeout_time = meta.last_checked + meta.timeout;
+                                let time_remains = timeout_time - current_time;
+                                if meta.vote_for == None && time_remains < 0 {
+                                    // TODO: in my test sometimes timeout_elapsed may go 1 for no reason, require investigation
+                                    //Timeout, require election
+                                    debug!(
+                                        "TIMEOUT!!! GOING TO CANDIDATE!!! {}, time remains {}ms",
+                                        server.id, time_remains
+                                    );
+                                    CheckerAction::BecomeCandidate
+                                } else {
+                                    CheckerAction::None
+                                }
                             }
+                            Membership::Offline => CheckerAction::ExitLoop,
+                            Membership::Undefined => CheckerAction::None,
+                        };
+                        match action {
+                            CheckerAction::SendHeartbeat => {
+                                server.send_followers_heartbeat(&mut meta, None).await;
+                            }
+                            CheckerAction::BecomeCandidate => {
+                                server.become_candidate(&mut meta).await;
+                            }
+                            CheckerAction::ExitLoop => {
+                                break;
+                            }
+                            CheckerAction::None => {}
                         }
-                        Membership::Offline => CheckerAction::ExitLoop,
-                        Membership::Undefined => CheckerAction::None,
-                    };
-                    match action {
-                        CheckerAction::SendHeartbeat => {
-                            server.send_followers_heartbeat(&mut meta, None).await;
-                        }
-                        CheckerAction::BecomeCandidate => {
-                            server.become_candidate(&mut meta).await;
-                        }
-                        CheckerAction::ExitLoop => {
-                            break;
-                        }
-                        CheckerAction::None => {}
+                    }
+                    let end_time = get_time();
+                    let time_to_sleep = expected_ends - end_time - 1;
+                    if time_to_sleep > 0 {
+                        // Use thread sleep here because we want system scheduler for precision
+                        thread::sleep(Duration::from_millis(time_to_sleep as u64));
                     }
                 }
-                let end_time = get_time();
-                let time_to_sleep = expected_ends - end_time - 1;
-                if time_to_sleep > 0 {
-                    time::delay_for(Duration::from_millis(time_to_sleep as u64)).await;
-                }
-            }
-        });
+            });
+        })
+        .unwrap();
         meta.last_checked = get_time() + (CHECKER_MS * 10);
         return true;
     }
@@ -600,14 +603,17 @@ impl RaftService {
                             }
                         }
                     };
-                    time::timeout(Duration::from_millis(2000), tokio::spawn(vote_fut))
+                    future_timeout(
+                        Duration::from_millis(2000),
+                        meta.threadpool.spawn_with_handle(vote_fut).unwrap(),
+                    )
                 })
                 .collect();
             (futs, len)
         };
         let mut granted = 0;
         while let Some(vote_response) = members_vote_response_stream.next().await {
-            if let Ok(Ok(res)) = vote_response {
+            if let Ok(res) = vote_response {
                 if meta.term != term {
                     break;
                 }
@@ -693,10 +699,9 @@ impl RaftService {
                         member_id,
                     );
                     let heartbeat_fut = async move { (member_id, hb_fut.await) }.boxed();
-                    let task_spawned = meta.threadpool.spawn(heartbeat_fut);
-                    let timeout = 5000;
-                    let task_with_timeout =
-                        time::timeout(Duration::from_millis(timeout), task_spawned);
+                    let task_spawned = meta.threadpool.spawn_with_handle(heartbeat_fut).unwrap();
+                    let timeout = 1000;
+                    let task_with_timeout = future_timeout(Duration::from_millis(timeout), task_spawned);
                     heartbeat_futs.push(task_with_timeout);
                 }
             }
@@ -710,7 +715,7 @@ impl RaftService {
                 let mut leader_meta = leader_meta.write().await;
                 let mut updated_followers = 0;
                 while let Some(heartbeat_res) = heartbeat_futs.next().await {
-                    if let Ok(Ok((member_id, last_matched_id))) = heartbeat_res {
+                    if let Ok((member_id, last_matched_id)) = heartbeat_res {
                         // adaptive
                         debug!(
                             "Heartbeat response from {} is {:?}",
@@ -1360,7 +1365,7 @@ mod test {
         server1
             .register_service(DEFAULT_SERVICE_ID, &service1)
             .await;
-        Server::listen_and_resume(&server1);
+        Server::listen_and_resume(&server1).await;
         assert!(RaftService::start(&service1).await);
         service1.bootstrap().await;
 
@@ -1368,7 +1373,7 @@ mod test {
         server2
             .register_service(DEFAULT_SERVICE_ID, &service2)
             .await;
-        Server::listen_and_resume(&server2);
+        Server::listen_and_resume(&server2).await;
         assert!(RaftService::start(&service2).await);
         let join_result = service2.join(&vec![s1_addr.clone(), s2_addr.clone()]).await;
         join_result.unwrap();
@@ -1377,7 +1382,7 @@ mod test {
         server3
             .register_service(DEFAULT_SERVICE_ID, &service3)
             .await;
-        Server::listen_and_resume(&server3);
+        Server::listen_and_resume(&server3).await;
         assert!(RaftService::start(&service3).await);
         let join_result = service3.join(&vec![s1_addr.clone(), s2_addr.clone()]).await;
         join_result.unwrap();
@@ -1386,7 +1391,7 @@ mod test {
         server4
             .register_service(DEFAULT_SERVICE_ID, &service4)
             .await;
-        Server::listen_and_resume(&server4);
+        Server::listen_and_resume(&server4).await;
         assert!(RaftService::start(&service4).await);
         let join_result = service4
             .join(&vec![s1_addr.clone(), s2_addr.clone(), s3_addr.clone()])
@@ -1397,7 +1402,7 @@ mod test {
         server5
             .register_service(DEFAULT_SERVICE_ID, &service5)
             .await;
-        Server::listen_and_resume(&server5);
+        Server::listen_and_resume(&server5).await;
         assert!(RaftService::start(&service5).await);
         let join_result = service5
             .join(&vec![
