@@ -183,7 +183,7 @@ mod test {
             let sm_id = num_sm.id;
             let server = Server::new(&addr);
             server.register_service(DEFAULT_SERVICE_ID, &service).await;
-            Server::listen_and_resume(&server);
+            Server::listen_and_resume(&server).await;
             num_sm.init_callback(&service);
             assert!(RaftService::start(&service).await);
             service.register_state_machine(Box::new(num_sm)).await;
@@ -244,7 +244,7 @@ mod test {
             let sm_id = num_sm.id;
             let server = Server::new(&addr);
             server.register_service(DEFAULT_SERVICE_ID, &service).await;
-            Server::listen_and_resume(&server);
+            Server::listen_and_resume(&server).await;
             assert!(RaftService::start(&service).await);
             service.register_state_machine(Box::new(num_sm)).await;
             service.bootstrap().await;

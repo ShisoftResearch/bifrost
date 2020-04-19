@@ -266,7 +266,7 @@ mod test {
                 let addr = addr.clone();
                 let server = Server::new(&addr);
                 server.register_service(0, &Arc::new(HelloServer)).await;
-                Server::listen_and_resume(&server);
+                Server::listen_and_resume(&server).await;
             }
             delay_for(Duration::from_millis(1000)).await;
             let client = RPCClient::new_async(&addr).await.unwrap();
@@ -323,7 +323,7 @@ mod test {
                 let addr = addr.clone();
                 let server = Server::new(&addr); // 0 is service id
                 server.register_service(0, &Arc::new(HelloServer)).await;
-                Server::listen_and_resume(&server);
+                Server::listen_and_resume(&server).await;
             }
             delay_for(Duration::from_millis(1000)).await;
             let client = RPCClient::new_async(&addr).await.unwrap();
@@ -374,7 +374,7 @@ mod test {
                     server
                         .register_service(id, &Arc::new(IdServer { id: id }))
                         .await;
-                    Server::listen_and_resume(&server);
+                    Server::listen_and_resume(&server).await;
                     id += 1;
                 }
             }
@@ -406,7 +406,7 @@ mod test {
                 let addr = addr.clone();
                 let server = Server::new(&addr); // 0 is service id
                 server.register_service(0, &Arc::new(HelloServer)).await;
-                Server::listen_and_resume(&server);
+                Server::listen_and_resume(&server).await;
             }
             delay_for(Duration::from_millis(1000)).await;
             let client = RPCClient::new_async(&addr).await.unwrap();

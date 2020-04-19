@@ -386,7 +386,7 @@ impl RaftService {
         let svr_id = opts.service_id;
         let service = RaftService::new(opts);
         let server = Server::new(&address);
-        Server::listen_and_resume(&server);
+        Server::listen_and_resume(&server).await;
         server.register_service(svr_id, &service).await;
         (RaftService::start(&service).await, service, server)
     }
@@ -1240,7 +1240,7 @@ mod test {
     use crate::raft::state_machine::master::ExecError;
     use crate::raft::{Options, RaftService, Storage, DEFAULT_SERVICE_ID};
     use crate::rpc::Server;
-    use crate::utils::time::async_wait_5_secs;
+    use crate::utils::time::async_wait_secs;
 
     #[tokio::test(threaded_scheduler)]
     async fn startup() {
@@ -1310,7 +1310,7 @@ mod test {
         assert_eq!(service1.num_members().await, 3);
         assert_eq!(service3.num_members().await, 3);
 
-        async_wait_5_secs().await;
+        async_wait_secs().await;
 
         // check in service2. Although it is a log replication problem but membership changes should take effect immediately
         assert_eq!(service2.num_members().await, 3);
@@ -1324,7 +1324,7 @@ mod test {
         assert_eq!(service1.leader_id().await, service1.id);
         assert!(service1.leave().await);
 
-        async_wait_5_secs().await; // there will be some unavailability in leader transaction
+        async_wait_secs().await; // there will be some unavailability in leader transaction
 
         assert_eq!(service3.leader_id().await, service3.id);
         assert_eq!(service3.num_members().await, 1);
@@ -1417,7 +1417,7 @@ mod test {
             .await;
         join_result.unwrap();
 
-        async_wait_5_secs().await; // wait for membership replication to take effect
+        async_wait_secs().await; // wait for membership replication to take effect
 
         assert_eq!(service1.num_logs().await, service2.num_logs().await);
         assert_eq!(service2.num_logs().await, service3.num_logs().await);
@@ -1425,7 +1425,7 @@ mod test {
         assert_eq!(service4.num_logs().await, service5.num_logs().await);
         assert_eq!(service5.num_logs().await, 4); // check all logs replicated
 
-        async_wait_5_secs().await;
+        async_wait_secs().await;
 
         assert_eq!(service1.leader_id().await, service1.id);
         assert_eq!(service2.leader_id().await, service1.id);

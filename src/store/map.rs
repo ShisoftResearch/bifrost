@@ -142,7 +142,7 @@ mod test {
     use crate::raft::client::RaftClient;
     use crate::raft::{Options, RaftService, Storage, DEFAULT_SERVICE_ID};
     use crate::rpc::Server;
-    use crate::utils::time::async_wait_5_secs;
+    use crate::utils::time::async_wait_secs;
     use futures::prelude::*;
     use std::collections::{HashMap, HashSet};
     use std::iter::FromIterator;
@@ -163,7 +163,7 @@ mod test {
         server
             .register_service(DEFAULT_SERVICE_ID, &raft_service)
             .await;
-        Server::listen_and_resume(&server);
+        Server::listen_and_resume(&server).await;
         let sm_id = map_sm.id;
         map_sm.init_callback(&raft_service);
         assert!(RaftService::start(&raft_service).await);
@@ -302,6 +302,6 @@ mod test {
         assert!(sm_client.contains_key(&sk3).await.unwrap());
         assert!(sm_client.contains_key(&sk4).await.unwrap());
 
-        async_wait_5_secs().await;
+        async_wait_secs().await;
     }
 }

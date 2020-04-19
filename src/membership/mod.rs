@@ -46,7 +46,7 @@ mod test {
     use crate::raft::client::RaftClient;
     use crate::raft::{Options, RaftService, Storage};
     use crate::rpc::Server;
-    use crate::utils::time::async_wait_5_secs;
+    use crate::utils::time::async_wait_secs;
     use futures::prelude::*;
     use std::sync::atomic::*;
     use std::sync::Arc;
@@ -62,7 +62,7 @@ mod test {
         let server = Server::new(&addr);
         let heartbeat_service = Membership::new(&server, &raft_service);
         server.register_service(0, &raft_service).await;
-        Server::listen_and_resume(&server);
+        Server::listen_and_resume(&server).await;
         RaftService::start(&raft_service).await;
         raft_service.bootstrap().await;
 
@@ -73,7 +73,7 @@ mod test {
         let wild_raft_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
         let client = ObserverClient::new(&wild_raft_client);
 
-        RaftClient::prepare_subscription(&server);
+        RaftClient::prepare_subscription(&server).await;
 
         client.new_group(&group_1).await.unwrap().unwrap();
         client.new_group(&group_2).await.unwrap().unwrap();
@@ -308,7 +308,7 @@ mod test {
 
         member1_svr.close(); // close only end the heartbeat thread
 
-        async_wait_5_secs().await;
+        async_wait_secs().await;
 
         assert_eq!(
             member1_svr
@@ -491,7 +491,7 @@ mod test {
             0
         );
 
-        async_wait_5_secs().await;
+        async_wait_secs().await;
 
         assert_eq!(any_member_joined_count.load(Ordering::Relaxed), 3);
         assert_eq!(any_member_left_count.load(Ordering::Relaxed), 1);

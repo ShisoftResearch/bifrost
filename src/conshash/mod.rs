@@ -362,7 +362,7 @@ mod test {
     use crate::raft::client::RaftClient;
     use crate::raft::{Options, RaftService, Storage};
     use crate::rpc::Server;
-    use crate::utils::time::async_wait_5_secs;
+    use crate::utils::time::async_wait_secs;
     use std::collections::HashMap;
     use std::sync::atomic::*;
     use std::sync::Arc;
@@ -378,7 +378,7 @@ mod test {
         let server = Server::new(&addr);
         let heartbeat_service = Membership::new(&server, &raft_service).await;
         server.register_service(0, &raft_service).await;
-        Server::listen_and_resume(&server);
+        Server::listen_and_resume(&server).await;
         RaftService::start(&raft_service);
         raft_service.bootstrap();
 
@@ -493,7 +493,7 @@ mod test {
 
         member1_svr.leave().await.unwrap();
 
-        async_wait_5_secs().await;
+        async_wait_secs().await;
 
         let mut ch_1_mapping: HashMap<String, u64> = HashMap::new();
         for i in 0..30000usize {

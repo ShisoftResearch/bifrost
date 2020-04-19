@@ -18,7 +18,7 @@ mod test {
     use crate::raft::state_machine::StateMachineCtl;
     use crate::raft::{Options, RaftService, Storage, DEFAULT_SERVICE_ID};
     use crate::rpc::Server;
-    use crate::utils::time::async_wait_5_secs;
+    use crate::utils::time::async_wait_secs;
     use future::FutureExt;
     use std::sync::atomic::*;
     use std::sync::Arc;
@@ -77,14 +77,14 @@ mod test {
         server
             .register_service(DEFAULT_SERVICE_ID, &raft_service)
             .await;
-        Server::listen_and_resume(&server);
+        Server::listen_and_resume(&server).await;
         RaftService::start(&raft_service).await;
         raft_service
             .register_state_machine(Box::new(dummy_sm))
             .await;
         raft_service.bootstrap().await;
 
-        async_wait_5_secs().await;
+        async_wait_secs().await;
 
         let raft_client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID)
             .await
@@ -116,7 +116,7 @@ mod test {
             });
         }
 
-        async_wait_5_secs().await;
+        async_wait_secs().await;
 
         assert_eq!(counter.load(Ordering::Relaxed), loops);
         assert_eq!(sumer.load(Ordering::Relaxed), expected_sum);

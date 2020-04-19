@@ -19,6 +19,6 @@ pub async fn async_wait(duration: Duration) {
     delay_for(duration).await;
 }
 
-pub async fn async_wait_5_secs() {
+pub async fn async_wait_secs() {
     async_wait(Duration::from_secs(2)).await;
 }
