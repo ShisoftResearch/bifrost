@@ -1264,26 +1264,36 @@ mod test {
             address: s1_addr.clone(),
             service_id: DEFAULT_SERVICE_ID,
         });
+        info!("Starting server 1");
         let server1 = Server::new(&s1_addr);
+        info!("Register raft service for server 1");
         server1
             .register_service(DEFAULT_SERVICE_ID, &service1)
             .await;
+        info!("Listening server 1");
         Server::listen_and_resume(&server1).await;
+        info!("Start raft service server 1");
         assert!(RaftService::start(&service1).await);
+        info!("Bootstrap raft service server 1");
         service1.bootstrap().await;
         let num_members = service1.num_members().await;
         assert_eq!(num_members, 1);
+        info!("Starting server 2");
+        let server2 = Server::new(&s2_addr);
+        info!("Register raft service for server 2");
+        server2
+            .register_service(DEFAULT_SERVICE_ID, &service2)
+            .await;
+        info!("Listening server 2");
+        Server::listen_and_resume(&server2).await;
+        info!("Start raft service for server 2");
         let service2 = RaftService::new(Options {
             storage: Storage::default(),
             address: s2_addr.clone(),
             service_id: DEFAULT_SERVICE_ID,
         });
-        let server2 = Server::new(&s2_addr);
-        server2
-            .register_service(DEFAULT_SERVICE_ID, &service2)
-            .await;
-        Server::listen_and_resume(&server2).await;
         assert!(RaftService::start(&service2).await);
+        info!("Server 2 join with server 1");
         let join_result = service2.join(&vec![s1_addr.clone()]).await;
         match join_result {
             Err(ExecError::ServersUnreachable) => panic!("Server unreachable"),
@@ -1292,41 +1302,47 @@ mod test {
             Ok(join_success) => assert!(join_success),
         }
         assert!(join_result.is_ok());
+        info!("Checking number of members in both side");
         assert_eq!(service1.num_members().await, 2);
         assert_eq!(service2.num_members().await, 2);
+        info!("Starting server 3");
         let service3 = RaftService::new(Options {
             storage: Storage::default(),
             address: s3_addr.clone(),
             service_id: DEFAULT_SERVICE_ID,
         });
         let server3 = Server::new(&s3_addr);
+        Server::listen_and_resume(&server3).await;
+        info!("Register raft service for server 3");
         server3
             .register_service(DEFAULT_SERVICE_ID, &service3)
             .await;
-        Server::listen_and_resume(&server3).await;
+        info!("Start raft service for server 3");
         assert!(RaftService::start(&service3).await);
+        info!("Server 3 join server 1 and server 2");
         let join_result = service3.join(&vec![s1_addr.clone(), s2_addr.clone()]).await;
         assert!(join_result.unwrap());
+        info!("Checking numbers of users on 3 servers");
         assert_eq!(service1.num_members().await, 3);
+        assert_eq!(service2.num_members().await, 3);
         assert_eq!(service3.num_members().await, 3);
 
         async_wait_secs().await;
 
-        // check in service2. Although it is a log replication problem but membership changes should take effect immediately
-        assert_eq!(service2.num_members().await, 3);
-
         // test remove member
+        info!("Server 2 is leaving");
         assert!(service2.leave().await);
+        info!("Check number of servers, should be 2");
         assert_eq!(service1.num_members().await, 2);
         assert_eq!(service3.num_members().await, 2);
 
         //test remove leader
+        info!("Ensuring leader is server 1");
         assert_eq!(service1.leader_id().await, service1.id);
+        info!("Leader (server 1) leave the cluster");
         assert!(service1.leave().await);
 
         async_wait_secs().await; // there will be some unavailability in leader transaction
-
-        assert_eq!(service3.leader_id().await, service3.id);
         assert_eq!(service3.num_members().await, 1);
     }
 
