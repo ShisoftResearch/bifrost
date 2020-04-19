@@ -26,6 +26,7 @@ use std::path::Path;
 use std::time::Duration;
 use tokio::time;
 use serde::{Serialize, Deserialize};
+use tokio::runtime::*;
 
 #[macro_use]
 pub mod state_machine;
@@ -33,6 +34,7 @@ pub mod client;
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_RAFT_DEFAULT_SERVICE) as u64;
 const MAX_LOG_CAPACITY: usize = 10;
+const THREAD_POOL_SIZE: usize = 10;
 
 def_bindings! {
     bind val IS_LEADER: bool = false;
@@ -43,7 +45,7 @@ pub trait RaftMsg<R>: Send + Sync {
     fn decode_return(data: &Vec<u8>) -> R;
 }
 
-const CHECKER_MS: i64 = 10;
+const CHECKER_MS: i64 = 500;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LogEntry {
@@ -115,7 +117,7 @@ fn gen_rand(lower: i64, higher: i64) -> i64 {
 }
 
 fn gen_timeout() -> i64 {
-    gen_rand(200, 500)
+    gen_rand(1000, 5000)
 }
 
 struct FollowerStatus {
@@ -157,6 +159,7 @@ pub struct RaftMeta {
     last_applied: u64,
     leader_id: u64,
     storage: Option<Arc<RwLock<StorageEntity>>>,
+    threadpool: Runtime
 }
 
 #[derive(Clone)]
@@ -288,6 +291,7 @@ impl RaftService {
                 last_applied,
                 leader_id: 0,
                 storage: storage_entity.map(|e| Arc::new(RwLock::new(e))),
+                threadpool: Builder::new().enable_all().core_threads(THREAD_POOL_SIZE).thread_name("raft-service").threaded_scheduler().build().unwrap()
             }),
             id: server_id,
             options: opts,
@@ -297,8 +301,8 @@ impl RaftService {
     pub async fn start(server: &Arc<RaftService>) -> bool {
         let server_address = server.options.address.clone();
         info!("Waiting for raft server to be initialized");
+        let mut meta = server.meta.write().await;
         {
-            let meta = server.meta.write().await;
             let mut sm = meta.state_machine.write().await;
             let mut inited = false;
             let start_time = get_time();
@@ -314,7 +318,7 @@ impl RaftService {
             }
         }
         let checker_ref = server.clone();
-        tokio::spawn(async {
+        meta.threadpool.spawn(async {
             let server = checker_ref;
             loop {
                 let start_time = get_time();
@@ -324,13 +328,14 @@ impl RaftService {
                     let action = match meta.membership {
                         Membership::Leader(_) => CheckerAction::SendHeartbeat,
                         Membership::Follower | Membership::Candidate => {
+                            debug_assert!(meta.timeout > 100);
                             let current_time = get_time();
-                            let timeout_time = meta.timeout + meta.last_checked;
-                            let timeout_elapsed = current_time - timeout_time;
-                            if meta.vote_for == None && timeout_elapsed > 0 {
+                            let timeout_time = meta.last_checked + meta.timeout;
+                            let time_remains = timeout_time - current_time;
+                            if meta.vote_for == None && time_remains < 0 {
                                 // TODO: in my test sometimes timeout_elapsed may go 1 for no reason, require investigation
                                 //Timeout, require election
-                                //debug!("TIMEOUT!!! GOING TO CANDIDATE!!! {}, {}", server_id, timeout_elapsed);
+                                debug!("TIMEOUT!!! GOING TO CANDIDATE!!! {}, time remains {}ms", server.id, time_remains);
                                 CheckerAction::BecomeCandidate
                             } else {
                                 CheckerAction::None
@@ -359,10 +364,7 @@ impl RaftService {
                 }
             }
         });
-        {
-            let mut meta = server.meta.write().await;
-            meta.last_checked = get_time();
-        }
+        meta.last_checked = get_time() + (CHECKER_MS * 10);
         return true;
     }
     pub async fn new_server(opts: Options) -> (bool, Arc<RaftService>, Arc<Server>) {
@@ -386,18 +388,25 @@ impl RaftService {
         debug!("Trying to join cluster with id {}", self.id);
         let client = RaftClient::new(servers, self.options.service_id).await;
         if let Ok(client) = client {
+            debug!("Executing in SM to create new member {}, {}", &self.options.address, self.id);
             let result = client
                 .execute(CONFIG_SM_ID, new_member_::new(&self.options.address))
                 .await;
+            debug!("Getting member address: {}", self.id);
             let members = client.execute(CONFIG_SM_ID, member_address::new()).await;
+            debug!("Updating local meta by acquiring lock: {}", self.id);
             let mut meta = self.write_meta().await;
             if let Ok(members) = members {
+                debug!("We have following members for {}: {:?}", self.id, members);
                 for member in members {
                     meta.state_machine.write().await.configs.new_member(member).await;
                 }
             }
-            self.reset_last_checked(&mut meta);
+            debug!("Become follower bacause of join: {}", self.id);
             self.become_follower(&mut meta, 0, client.leader_id());
+            debug!("Resetting last checked for join: {}", self.id);
+            self.reset_last_checked(&mut meta);
+            debug!("Completed join for {}, result {:}", self.id, result.is_ok() && *result.as_ref().unwrap());
             result
         } else {
             Err(ExecError::CannotConstructClient)
@@ -622,6 +631,7 @@ impl RaftService {
         meta: &mut RwLockWriteGuard<'a, RaftMeta>,
         log_id: Option<u64>,
     ) -> bool {
+        debug!("Sending followers heartbeat");
         if let Membership::Leader(ref leader_meta) = meta.membership {
             let leader_id = meta.leader_id;
             debug_assert_eq!(self.id, leader_id);
@@ -647,7 +657,7 @@ impl RaftService {
                         continue;
                     };
                     // get a send follower task without await
-                    let heartbeat_fut = Self::send_follower_heartbeat(
+                    let hb_fut = Self::send_follower_heartbeat(
                         meta.commit_index,
                         meta.term,
                         meta.leader_id,
@@ -657,9 +667,12 @@ impl RaftService {
                         follower.clone(),
                         member.rpc.clone(),
                         member_id
-                    ).boxed();
-                    let task_spawned = tokio::spawn(heartbeat_fut);
-                    let timeout = 2000;
+                    );
+                    let heartbeat_fut = async move {
+                        (member_id, hb_fut.await)
+                    }.boxed();
+                    let task_spawned = meta.threadpool.spawn(heartbeat_fut);
+                    let timeout = 5000;
                     let task_with_timeout = time::timeout(Duration::from_millis(timeout), task_spawned);
                     heartbeat_futs.push(task_with_timeout);
                 }
@@ -673,9 +686,9 @@ impl RaftService {
                 let mut leader_meta = leader_meta.write().await;
                 let mut updated_followers = 0;
                 while let Some(heartbeat_res) = heartbeat_futs.next().await {
-                    if let Ok(Ok(last_matched_id)) = heartbeat_res {
+                    if let Ok(Ok((member_id, last_matched_id))) = heartbeat_res {
                         // adaptive
-                        //println!("{}, {}", last_matched_id, log_id);
+                        debug!("Heartbeat response from {} is {:?}", member_id, last_matched_id);
                         if last_matched_id >= log_id {
                             updated_followers += 1;
                             if is_majority(followers as u64, updated_followers) {
@@ -714,7 +727,7 @@ impl RaftService {
         // let meta_last_applied = meta.last_applied;
         // let master_sm = &meta.state_machine;
         // let logs = &meta.logs;
-
+        debug!("Sending follower heartbeat to {}", member_id);
         let mut follower = follower.lock().await;
         let logs = logs.read().await;
         let mut is_retry = false;
@@ -726,8 +739,8 @@ impl RaftService {
                 if list.is_empty() {None} else {Some(list)}
             };
             if is_retry && entries.is_none() { // break when retry and there is no entry
-                debug!("stop retry when entry is empty, {}", follower.next_index);
-                break;
+                debug!("Stop retry when entry is empty, {}, member id {}", follower.next_index, member_id);
+                return follower.match_index;
             }
             let last_entries_id = match &entries { // get last entry id
                 &Some(ref entries) => {
@@ -772,14 +785,14 @@ impl RaftService {
                 Ok((_follower_term, result)) => {
                     match result {
                         AppendEntriesResult::Ok => {
-                            debug!("log updated");
+                            debug!("log updated: {}", member_id);
                             if let Some(last_entries_id) = last_entries_id {
                                 follower.next_index = last_entries_id + 1;
                                 follower.match_index = last_entries_id;
                             }
                         },
                         AppendEntriesResult::LogMismatch => {
-                            debug!("log mismatch, {}", follower.next_index);
+                            debug!("log mismatch, {}, member id {}", follower.next_index, member_id);
                             follower.next_index -= 1;
                         },
                         AppendEntriesResult::TermOut(_actual_leader_id) => {
@@ -809,7 +822,7 @@ impl RaftService {
         return true;
     }
     fn reset_last_checked(&self, meta: &mut RwLockWriteGuard<RaftMeta>) {
-        //println!("elapsed: {}, id: {}, term: {}", get_time() - meta.last_checked, self.id, meta.term);
+        debug!("Reset last checked. Elapsed: {}, id: {}, term: {}", get_time() - meta.last_checked, self.id, meta.term);
         meta.last_checked = get_time();
         meta.timeout = gen_timeout();
     }
@@ -878,6 +891,7 @@ impl RaftService {
         entry: &LogEntry,
         new_log_id: u64,
     ) -> Option<ExecResult> {
+        debug!("Sync logs to followers");
         if self.send_followers_heartbeat(&mut meta, Some(new_log_id)).await {
             meta.commit_index = new_log_id;
             Some(commit_command(&mut meta, entry).await)
@@ -892,6 +906,7 @@ impl RaftService {
         new_log_id: u64,
     ) -> ExecResult {
         // this will force followers to commit the changes
+        debug!("Sync config to followers");
         meta.commit_index = new_log_id;
         let data = commit_command(&meta, &entry).await;
         let t = get_time();
@@ -1189,7 +1204,7 @@ mod test {
         });
         let server1 = Server::new(&s1_addr);
         server1.register_service(DEFAULT_SERVICE_ID, &service1).await;
-        Server::listen_and_resume(&server1);
+        Server::listen_and_resume(&server1).await;
         assert!(RaftService::start(&service1).await);
         service1.bootstrap().await;
         let num_members = service1.num_members().await;
@@ -1201,14 +1216,14 @@ mod test {
         });
         let server2 = Server::new(&s2_addr);
         server2.register_service(DEFAULT_SERVICE_ID, &service2).await;
-        Server::listen_and_resume(&server2);
+        Server::listen_and_resume(&server2).await;
         assert!(RaftService::start(&service2).await);
         let join_result = service2.join(&vec![s1_addr.clone()]).await;
         match join_result {
             Err(ExecError::ServersUnreachable) => panic!("Server unreachable"),
             Err(ExecError::CannotConstructClient) => panic!("Cannot Construct Client"),
             Err(e) => panic!(e),
-            Ok(_) => {}
+            Ok(join_success) => assert!(join_success)
         }
         assert!(join_result.is_ok());
         assert_eq!(service1.num_members().await, 2);
@@ -1220,10 +1235,10 @@ mod test {
         });
         let server3 = Server::new(&s3_addr);
         server3.register_service(DEFAULT_SERVICE_ID, &service3).await;
-        Server::listen_and_resume(&server3);
+        Server::listen_and_resume(&server3).await;
         assert!(RaftService::start(&service3).await);
         let join_result = service3.join(&vec![s1_addr.clone(), s2_addr.clone()]).await;
-        join_result.unwrap();
+        assert!(join_result.unwrap());
         assert_eq!(service1.num_members().await, 3);
         assert_eq!(service3.num_members().await, 3);
 

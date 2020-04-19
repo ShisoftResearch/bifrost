@@ -20,5 +20,5 @@ pub async fn async_wait(duration: Duration) {
 }
 
 pub async fn async_wait_5_secs() {
-    async_wait(Duration::from_secs(5)).await;
+    async_wait(Duration::from_secs(2)).await;
 }

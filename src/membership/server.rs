@@ -20,7 +20,7 @@ use std::{thread, time as std_time};
 use tokio::time as async_time;
 use std::pin::Pin;
 
-static MAX_TIMEOUT: i64 = 1000; //5 secs for 500ms heartbeat
+static MAX_TIMEOUT: i64 = 5000; //5 secs for 500ms heartbeat
 
 struct HBStatus {
     online: bool,

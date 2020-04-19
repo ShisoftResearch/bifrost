@@ -19,6 +19,8 @@ use std::sync::Arc;
 use std::thread;
 use serde::{Serialize, Deserialize};
 use std::error::Error;
+use std::time::Duration;
+use tokio::time::delay_for;
 
 lazy_static! {
     pub static ref DEFAULT_CLIENT_POOL: ClientPool = ClientPool::new();
@@ -125,11 +127,12 @@ impl Server {
         })).await
     }
 
-    pub fn listen_and_resume(server: &Arc<Server>) {
+    pub async fn listen_and_resume(server: &Arc<Server>) {
         let server = server.clone();
         tokio::spawn(async move {
             Self::listen(&server).await.unwrap();
         });
+        delay_for(Duration::from_secs(1)).await
     }
 
     pub async fn register_service<T>(&self, service_id: u64, service: &Arc<T>)
