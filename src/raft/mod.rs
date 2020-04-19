@@ -7,6 +7,7 @@ use crate::raft::state_machine::StateMachineCtl;
 use crate::utils::mutex::*;
 use crate::utils::rwlock::*;
 use crate::utils::time::get_time;
+use async_std::future::timeout as future_timeout;
 use bifrost_hasher::hash_str;
 use bifrost_plugins::hash_ident;
 use futures::executor::*;
@@ -21,13 +22,12 @@ use serde::{Deserialize, Serialize};
 use std::cmp::{max, min};
 use std::collections::Bound::{Included, Unbounded};
 use std::collections::{BTreeMap, HashMap};
-use std::{fs, thread};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::time::Duration;
-use async_std::future::timeout as future_timeout;
+use std::{fs, thread};
 
 #[macro_use]
 pub mod state_machine;
@@ -323,59 +323,61 @@ impl RaftService {
             }
         }
         let checker_ref = server.clone();
-        thread::Builder::new().name("raft-sentinel".to_string()).spawn(|| {
-            futures::executor::block_on(async {
-                let server = checker_ref;
-                loop {
-                    let start_time = get_time();
-                    let expected_ends = start_time + CHECKER_MS;
-                    {
-                        let mut meta = server.meta.write().await; //WARNING: Reentering not supported
-                        let action = match meta.membership {
-                            Membership::Leader(_) => CheckerAction::SendHeartbeat,
-                            Membership::Follower | Membership::Candidate => {
-                                debug_assert!(meta.timeout > 100);
-                                let current_time = get_time();
-                                let timeout_time = meta.last_checked + meta.timeout;
-                                let time_remains = timeout_time - current_time;
-                                if meta.vote_for == None && time_remains < 0 {
-                                    // TODO: in my test sometimes timeout_elapsed may go 1 for no reason, require investigation
-                                    //Timeout, require election
-                                    debug!(
+        thread::Builder::new()
+            .name("raft-sentinel".to_string())
+            .spawn(|| {
+                futures::executor::block_on(async {
+                    let server = checker_ref;
+                    loop {
+                        let start_time = get_time();
+                        let expected_ends = start_time + CHECKER_MS;
+                        {
+                            let mut meta = server.meta.write().await; //WARNING: Reentering not supported
+                            let action = match meta.membership {
+                                Membership::Leader(_) => CheckerAction::SendHeartbeat,
+                                Membership::Follower | Membership::Candidate => {
+                                    debug_assert!(meta.timeout > 100);
+                                    let current_time = get_time();
+                                    let timeout_time = meta.last_checked + meta.timeout;
+                                    let time_remains = timeout_time - current_time;
+                                    if meta.vote_for == None && time_remains < 0 {
+                                        // TODO: in my test sometimes timeout_elapsed may go 1 for no reason, require investigation
+                                        //Timeout, require election
+                                        debug!(
                                         "TIMEOUT!!! GOING TO CANDIDATE!!! {}, time remains {}ms",
                                         server.id, time_remains
                                     );
-                                    CheckerAction::BecomeCandidate
-                                } else {
-                                    CheckerAction::None
+                                        CheckerAction::BecomeCandidate
+                                    } else {
+                                        CheckerAction::None
+                                    }
                                 }
+                                Membership::Offline => CheckerAction::ExitLoop,
+                                Membership::Undefined => CheckerAction::None,
+                            };
+                            match action {
+                                CheckerAction::SendHeartbeat => {
+                                    server.send_followers_heartbeat(&mut meta, None).await;
+                                }
+                                CheckerAction::BecomeCandidate => {
+                                    server.become_candidate(&mut meta).await;
+                                }
+                                CheckerAction::ExitLoop => {
+                                    break;
+                                }
+                                CheckerAction::None => {}
                             }
-                            Membership::Offline => CheckerAction::ExitLoop,
-                            Membership::Undefined => CheckerAction::None,
-                        };
-                        match action {
-                            CheckerAction::SendHeartbeat => {
-                                server.send_followers_heartbeat(&mut meta, None).await;
-                            }
-                            CheckerAction::BecomeCandidate => {
-                                server.become_candidate(&mut meta).await;
-                            }
-                            CheckerAction::ExitLoop => {
-                                break;
-                            }
-                            CheckerAction::None => {}
+                        }
+                        let end_time = get_time();
+                        let time_to_sleep = expected_ends - end_time - 1;
+                        if time_to_sleep > 0 {
+                            // Use thread sleep here because we want system scheduler for precision
+                            thread::sleep(Duration::from_millis(time_to_sleep as u64));
                         }
                     }
-                    let end_time = get_time();
-                    let time_to_sleep = expected_ends - end_time - 1;
-                    if time_to_sleep > 0 {
-                        // Use thread sleep here because we want system scheduler for precision
-                        thread::sleep(Duration::from_millis(time_to_sleep as u64));
-                    }
-                }
-            });
-        })
-        .unwrap();
+                });
+            })
+            .unwrap();
         meta.last_checked = get_time() + (CHECKER_MS * 10);
         return true;
     }
@@ -701,7 +703,8 @@ impl RaftService {
                     let heartbeat_fut = async move { (member_id, hb_fut.await) }.boxed();
                     let task_spawned = meta.threadpool.spawn_with_handle(heartbeat_fut).unwrap();
                     let timeout = 1000;
-                    let task_with_timeout = future_timeout(Duration::from_millis(timeout), task_spawned);
+                    let task_with_timeout =
+                        future_timeout(Duration::from_millis(timeout), task_spawned);
                     heartbeat_futs.push(task_with_timeout);
                 }
             }
