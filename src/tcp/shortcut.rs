@@ -14,7 +14,10 @@ lazy_static! {
         RwLock::new(BTreeMap::new());
 }
 
-pub async fn register_server(server_address: &String, callback: &Arc<dyn TcpCallbackFuncShareable>) {
+pub async fn register_server(
+    server_address: &String,
+    callback: &Arc<dyn TcpCallbackFuncShareable>,
+) {
     let server_id = hash_str(server_address);
     let mut servers_cbs = TCP_CALLBACKS.write().await;
     servers_cbs.insert(server_id, callback.clone());

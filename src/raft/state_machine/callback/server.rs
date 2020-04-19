@@ -6,7 +6,7 @@ use crate::utils::rwlock::RwLock;
 use bifrost_hasher::{hash_bytes, hash_str};
 use futures::stream::FuturesUnordered;
 use serde;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -185,7 +185,9 @@ impl SMCallback {
                             async move {
                                 let svr_subs = self.subscriptions.read().await;
                                 if let Some(subscriber_id) = svr_subs.sub_suber.get(&sub_id) {
-                                    if let Some(subscriber) = svr_subs.subscribers.get(&subscriber_id) {
+                                    if let Some(subscriber) =
+                                        svr_subs.subscribers.get(&subscriber_id)
+                                    {
                                         let data = bincode::serialize(&*message).unwrap();
                                         let client = &subscriber.client;
                                         Ok(client.notify(key, data).await)
@@ -216,7 +218,7 @@ impl SMCallback {
                 }
             }
             _ => Err(NotifyError::OpTypeNotSubscribe),
-        }
+        };
     }
     pub async fn internal_subscribe<R, F, M>(&self, msg: M, trigger: F) -> Result<(), NotifyError>
     where

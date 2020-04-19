@@ -14,11 +14,11 @@ use futures::prelude::*;
 use futures::stream::FuturesUnordered;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::{thread, time as std_time};
 use tokio::time as async_time;
-use std::pin::Pin;
 
 static MAX_TIMEOUT: i64 = 5000; //5 secs for 500ms heartbeat
 

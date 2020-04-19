@@ -3,8 +3,8 @@ macro_rules! def_store_value {
     ($m: ident, $t: ty) => {
         pub mod $m {
             use bifrost_hasher::hash_str;
-            use std::sync::Arc;
             use futures::FutureExt;
+            use std::sync::Arc;
             use $crate::raft::state_machine::callback::server::SMCallback;
             use $crate::raft::state_machine::StateMachineCtl;
             use $crate::raft::RaftService;
@@ -65,9 +65,9 @@ macro_rules! def_store_value {
 
 #[cfg(test)]
 mod test {
-    use crate::raft::{RaftService, Storage, DEFAULT_SERVICE_ID, Options};
-    use crate::rpc::Server;
     use crate::raft::client::RaftClient;
+    use crate::raft::{Options, RaftService, Storage, DEFAULT_SERVICE_ID};
+    use crate::rpc::Server;
     use string::client::SMClient;
 
     def_store_value!(string, String);
@@ -77,7 +77,8 @@ mod test {
         let addr = String::from("127.0.0.1:2010");
         let original_string = String::from("The stored text");
         let altered_string = String::from("The altered text");
-        let mut string_sm = string::Value::new_by_name(&String::from("test"), original_string.clone());
+        let mut string_sm =
+            string::Value::new_by_name(&String::from("test"), original_string.clone());
         let service = RaftService::new(Options {
             storage: Storage::default(),
             address: addr.clone(),
@@ -92,7 +93,9 @@ mod test {
         service.register_state_machine(Box::new(string_sm)).await;
         service.bootstrap().await;
 
-        let client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID).await.unwrap();
+        let client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID)
+            .await
+            .unwrap();
         let sm_client = SMClient::new(sm_id, &client);
         let unchanged_str = original_string.clone();
         let changed_str = altered_string.clone();

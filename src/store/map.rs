@@ -4,9 +4,9 @@ macro_rules! def_store_hash_map {
         pub mod $m {
             use super::*;
             use bifrost_hasher::hash_str;
+            use futures::FutureExt;
             use std::collections::HashMap;
             use std::sync::Arc;
-            use futures::FutureExt;
             use $crate::raft::state_machine::callback::server::SMCallback;
             use $crate::raft::state_machine::StateMachineCtl;
             use $crate::raft::RaftService;
@@ -40,10 +40,10 @@ macro_rules! def_store_hash_map {
             impl StateMachineCmds for Map {
                 fn get(&self, k: $kt) -> ::futures::future::BoxFuture<Option<$vt>> {
                     let value = if let Some(v) = self.map.get(&k) {
-                            Some(v.clone())
-                        } else {
-                            None
-                        };
+                        Some(v.clone())
+                    } else {
+                        None
+                    };
                     future::ready(value).boxed()
                 }
                 fn insert(&mut self, k: $kt, v: $vt) -> ::futures::future::BoxFuture<Option<$vt>> {
@@ -53,7 +53,11 @@ macro_rules! def_store_hash_map {
                     }
                     future::ready(self.map.insert(k, v)).boxed()
                 }
-                fn insert_if_absent(&mut self, k: $kt, v: $vt) -> ::futures::future::BoxFuture<$vt> {
+                fn insert_if_absent(
+                    &mut self,
+                    k: $kt,
+                    v: $vt,
+                ) -> ::futures::future::BoxFuture<$vt> {
                     if let Some(v) = self.map.get(&k) {
                         return future::ready(v.clone()).boxed();
                     }
@@ -134,14 +138,14 @@ macro_rules! def_store_hash_map {
 def_store_hash_map!(string_u8vec_hashmap <String, Vec<u8>>);
 
 #[cfg(test)]
-mod test {    
+mod test {
+    use crate::raft::client::RaftClient;
+    use crate::raft::{Options, RaftService, Storage, DEFAULT_SERVICE_ID};
+    use crate::rpc::Server;
+    use crate::utils::time::async_wait_5_secs;
     use futures::prelude::*;
     use std::collections::{HashMap, HashSet};
     use std::iter::FromIterator;
-    use crate::raft::{DEFAULT_SERVICE_ID, RaftService, Options, Storage};
-    use crate::raft::client::RaftClient;
-    use crate::rpc::Server;
-    use crate::utils::time::async_wait_5_secs;
     use string_string_hashmap::client::SMClient;
 
     def_store_hash_map!(string_string_hashmap <String, String>);
@@ -156,7 +160,9 @@ mod test {
             service_id: DEFAULT_SERVICE_ID,
         });
         let server = Server::new(&addr);
-        server.register_service(DEFAULT_SERVICE_ID, &raft_service).await;
+        server
+            .register_service(DEFAULT_SERVICE_ID, &raft_service)
+            .await;
         Server::listen_and_resume(&server);
         let sm_id = map_sm.id;
         map_sm.init_callback(&raft_service);
@@ -164,7 +170,9 @@ mod test {
         raft_service.register_state_machine(Box::new(map_sm)).await;
         raft_service.bootstrap().await;
 
-        let raft_client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID).await.unwrap();
+        let raft_client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID)
+            .await
+            .unwrap();
         let sm_client = SMClient::new(sm_id, &raft_client);
         RaftClient::prepare_subscription(&server);
 
@@ -231,10 +239,7 @@ mod test {
         assert_eq!(sm_client.len().await.unwrap(), 2);
         assert_eq!(sm_client.get(&sk2).await.unwrap().unwrap(), sv2);
 
-        assert_eq!(
-            sm_client.remove(&sk2).await.unwrap().unwrap(),
-            sv2
-        );
+        assert_eq!(sm_client.remove(&sk2).await.unwrap().unwrap(), sv2);
         assert_eq!(sm_client.len().await.unwrap(), 1);
         assert!(sm_client.get(&sk2).await.unwrap().is_none());
 
@@ -256,7 +261,8 @@ mod test {
         assert_eq!(remote_values_set.len(), 4);
 
         let remote_entries = sm_client.entries().await.unwrap();
-        let remote_entries_set = HashSet::<(String, String)>::from_iter(remote_entries.iter().cloned());
+        let remote_entries_set =
+            HashSet::<(String, String)>::from_iter(remote_entries.iter().cloned());
         assert_eq!(remote_entries_set.len(), 4);
 
         let expected_keys: HashSet<_> = [sk1.clone(), sk2.clone(), sk3.clone(), sk4.clone()]
@@ -273,9 +279,9 @@ mod test {
             (sk3.clone(), sv3.clone()),
             (sk4.clone(), sv4.clone()),
         ]
-            .iter()
-            .cloned()
-            .collect();
+        .iter()
+        .cloned()
+        .collect();
 
         assert_eq!(remote_keys_set.intersection(&expected_keys).count(), 4);
         assert_eq!(remote_values_set.intersection(&expected_values).count(), 4);

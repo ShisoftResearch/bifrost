@@ -349,23 +349,23 @@ async fn server_changed(ch: Arc<ConsistentHashing>, member: Member, action: Acti
                 watch(&member, &action, &*lookup_table, &old_nodes);
             }
         }
-    } 
+    }
 }
 
 #[cfg(test)]
 mod test {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use std::sync::atomic::*;
-    use crate::conshash::ConsistentHashing;
     use crate::conshash::weights::Weights;
-    use crate::membership::member::MemberService;
-    use crate::raft::client::RaftClient;
+    use crate::conshash::ConsistentHashing;
     use crate::membership::client::ObserverClient;
-    use crate::raft::{RaftService, Storage, Options};
-    use crate::rpc::Server;
+    use crate::membership::member::MemberService;
     use crate::membership::server::Membership;
+    use crate::raft::client::RaftClient;
+    use crate::raft::{Options, RaftService, Storage};
+    use crate::rpc::Server;
     use crate::utils::time::async_wait_5_secs;
+    use std::collections::HashMap;
+    use std::sync::atomic::*;
+    use std::sync::Arc;
 
     #[tokio::test(threaded_scheduler)]
     async fn primary() {
@@ -419,9 +419,15 @@ mod test {
 
         let weight_service = Weights::new(&raft_service);
 
-        let ch1 = ConsistentHashing::new(&group_1, &wild_raft_client).await.unwrap();
-        let ch2 = ConsistentHashing::new(&group_2, &wild_raft_client).await.unwrap();
-        let ch3 = ConsistentHashing::new(&group_3, &wild_raft_client).await.unwrap();
+        let ch1 = ConsistentHashing::new(&group_1, &wild_raft_client)
+            .await
+            .unwrap();
+        let ch2 = ConsistentHashing::new(&group_2, &wild_raft_client)
+            .await
+            .unwrap();
+        let ch3 = ConsistentHashing::new(&group_3, &wild_raft_client)
+            .await
+            .unwrap();
 
         ch1.set_weight(&server_1, 1).await.unwrap();
         ch1.set_weight(&server_2, 2).await.unwrap();

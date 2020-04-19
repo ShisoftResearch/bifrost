@@ -8,13 +8,13 @@ use crate::raft::state_machine::master::ExecError;
 use crate::rpc;
 use bifrost_hasher::{hash_bytes, hash_str};
 use futures::future::BoxFuture;
+use serde::{Deserialize, Serialize};
 use std::clone::Clone;
 use std::cmp::max;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::iter::FromIterator;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use serde::{Serialize, Deserialize};
 
 const ORDERING: Ordering = Ordering::Relaxed;
 pub type Client = Arc<AsyncServiceClient>;
@@ -217,9 +217,8 @@ impl RaftClient {
             Err(e) => return Ok(Err(e)),
         };
         let key = self.get_sub_key(sm_id, msg);
-        let wrapper_fn = move |data: Vec<u8>| -> BoxFuture<'static, ()> {
-            f(M::decode_return(&data)).boxed()
-        };
+        let wrapper_fn =
+            move |data: Vec<u8>| -> BoxFuture<'static, ()> { f(M::decode_return(&data)).boxed() };
         let cluster_subs = self
             .execute(
                 CONFIG_SM_ID,
@@ -277,12 +276,7 @@ impl RaftClient {
         }
     }
 
-    async fn query(
-        &self,
-        sm_id: u64,
-        fn_id: u64,
-        data: Vec<u8>,
-    ) -> Result<ExecResult, ExecError> {
+    async fn query(&self, sm_id: u64, fn_id: u64, data: Vec<u8>) -> Result<ExecResult, ExecError> {
         let mut depth = 0;
         loop {
             let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
@@ -300,7 +294,7 @@ impl RaftClient {
                     Ok(res) => match res {
                         ClientQryResponse::LeftBehind => {
                             if depth >= num_members {
-                                return Err(ExecError::TooManyRetry)
+                                return Err(ExecError::TooManyRetry);
                             } else {
                                 depth += 1;
                                 continue;
@@ -313,16 +307,16 @@ impl RaftClient {
                         } => {
                             swap_when_greater(&self.last_log_id, last_log_id);
                             swap_when_greater(&self.last_log_term, last_log_term);
-                            return Ok(data)
+                            return Ok(data);
                         }
                     },
                     _ => return Err(ExecError::Unknown),
                 }
             } else {
-                return Err(ExecError::ServersUnreachable)
+                return Err(ExecError::ServersUnreachable);
             }
         }
-    } 
+    }
 
     fn command(
         &self,
@@ -352,8 +346,7 @@ impl RaftClient {
                         let cmd_res = client
                             .c_command(self.gen_log_entry(sm_id, fn_id, &data))
                             .await;
-                        match cmd_res
-                        {
+                        match cmd_res {
                             Ok(ClientCmdResponse::Success {
                                 data,
                                 last_log_term,
@@ -398,7 +391,8 @@ impl RaftClient {
                 _ => {}
             }
             self.command(sm_id, fn_id, data, depth + 1).await
-        }.boxed()
+        }
+        .boxed()
     }
 
     fn gen_log_entry(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>) -> LogEntry {

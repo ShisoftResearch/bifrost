@@ -1,7 +1,7 @@
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use crc32fast::Hasher;
 use serde::de::DeserializeOwned;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::linked_list::LinkedList;
 use std::fs::{create_dir_all, read_dir, File};

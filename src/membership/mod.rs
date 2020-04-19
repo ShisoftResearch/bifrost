@@ -40,16 +40,16 @@ mod heartbeat_rpc {
 
 #[cfg(test)]
 mod test {
-    use crate::raft::{RaftService, Options, Storage};
-    use crate::rpc::Server;
+    use crate::membership::client::ObserverClient;
+    use crate::membership::member::MemberService;
     use crate::membership::server::Membership;
     use crate::raft::client::RaftClient;
-    use crate::membership::client::ObserverClient;
-    use std::sync::Arc;
-    use std::sync::atomic::*;
-    use crate::membership::member::MemberService;
+    use crate::raft::{Options, RaftService, Storage};
+    use crate::rpc::Server;
     use crate::utils::time::async_wait_5_secs;
     use futures::prelude::*;
+    use std::sync::atomic::*;
+    use std::sync::Arc;
 
     #[tokio::test(threaded_scheduler)]
     async fn primary() {

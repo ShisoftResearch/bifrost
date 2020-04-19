@@ -12,13 +12,13 @@ use bytes::{Buf, BufMut, BytesMut};
 use futures::future::{err, BoxFuture};
 use futures::prelude::*;
 use futures::{future, Future};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::error::Error;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::thread;
-use serde::{Serialize, Deserialize};
-use std::error::Error;
 use std::time::Duration;
 use tokio::time::delay_for;
 
@@ -41,8 +41,12 @@ pub enum RPCError {
 
 pub trait RPCService: Sync + Send {
     fn dispatch(&self, data: BytesMut) -> BoxFuture<Result<BytesMut, RPCRequestError>>;
-    fn register_shortcut_service(&self, service_ptr: usize, server_id: u64, service_id: u64)
-        -> ::std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
+    fn register_shortcut_service(
+        &self,
+        service_ptr: usize,
+        server_id: u64,
+        service_id: u64,
+    ) -> ::std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
 }
 
 pub struct Server {
@@ -90,7 +94,8 @@ fn decode_res(res: io::Result<BytesMut>) -> Result<BytesMut, RPCError> {
 }
 
 pub fn read_u64_head(mut data: BytesMut) -> (u64, BytesMut) {
-    let num = data.get_u64_le(); LittleEndian::read_u64(data.as_ref());
+    let num = data.get_u64_le();
+    LittleEndian::read_u64(data.as_ref());
     (num, data)
 }
 
@@ -105,26 +110,30 @@ impl Server {
     pub async fn listen(server: &Arc<Server>) -> Result<(), Box<dyn Error>> {
         let address = &server.address;
         let server = server.clone();
-        tcp::server::Server::new(address, Arc::new(move |mut data| {
-            let server = server.clone();
-            async move {
-                let (svr_id, data) = read_u64_head(data);
-                let svr_map = server.services.read().await;
-                let service = svr_map.get(&svr_id);
-                match service {
-                    Some(ref service) => {
-                        let svr_res = service.dispatch(data).await;
-                        encode_res(svr_res)
+        tcp::server::Server::new(
+            address,
+            Arc::new(move |mut data| {
+                let server = server.clone();
+                async move {
+                    let (svr_id, data) = read_u64_head(data);
+                    let svr_map = server.services.read().await;
+                    let service = svr_map.get(&svr_id);
+                    match service {
+                        Some(ref service) => {
+                            let svr_res = service.dispatch(data).await;
+                            encode_res(svr_res)
+                        }
+                        None => {
+                            let svr_ids = svr_map.keys().collect::<Vec<_>>();
+                            debug!("Service Id NOT found {}, have {:?}", svr_id, svr_ids);
+                            encode_res(Err(RPCRequestError::ServiceIdNotFound))
+                        }
                     }
-                    None => {
-                        let svr_ids = svr_map.keys().collect::<Vec<_>>();
-                        debug!("Service Id NOT found {}, have {:?}", svr_id, svr_ids);
-                        encode_res(Err(RPCRequestError::ServiceIdNotFound))
-                    },
                 }
-            }
-            .boxed()
-        })).await
+                .boxed()
+            }),
+        )
+        .await
     }
 
     pub async fn listen_and_resume(server: &Arc<Server>) {
@@ -142,7 +151,9 @@ impl Server {
         let service = service.clone();
         if !DISABLE_SHORTCUT {
             let service_ptr = Arc::into_raw(service.clone()) as usize;
-            service.register_shortcut_service(service_ptr, self.server_id, service_id).await;
+            service
+                .register_shortcut_service(service_ptr, self.server_id, service_id)
+                .await;
         } else {
             println!("SERVICE SHORTCUT DISABLED");
         }
@@ -221,20 +232,20 @@ impl ClientPool {
 
 #[cfg(test)]
 mod test {
+    use futures::future::BoxFuture;
+    use serde::{Deserialize, Serialize};
     use std::sync::Arc;
     use std::time::Duration;
-    use serde::{Serialize, Deserialize};
     use tokio::time::delay_for;
-    use futures::future::BoxFuture; 
 
     pub mod simple_service {
 
         use super::*;
 
         service! {
-        rpc hello(name: String) -> String;
-        rpc error(message: String) -> Result<(), String>;
-    }
+            rpc hello(name: String) -> String;
+            rpc error(message: String) -> Result<(), String>;
+        }
 
         struct HelloServer;
 
@@ -273,7 +284,7 @@ mod test {
 
     pub mod struct_service {
         use super::*;
-        use serde::{Serialize, Deserialize};
+        use serde::{Deserialize, Serialize};
 
         #[derive(Serialize, Deserialize, Debug, Clone)]
         pub struct Greeting {
@@ -288,8 +299,8 @@ mod test {
         }
 
         service! {
-        rpc hello(gret: Greeting) -> Respond;
-    }
+            rpc hello(gret: Greeting) -> Respond;
+        }
 
         pub struct HelloServer;
 
@@ -298,7 +309,8 @@ mod test {
                 future::ready(Respond {
                     text: format!("Hello, {}. It is {} now!", gret.name, gret.time),
                     owner: 42,
-                }).boxed()
+                })
+                .boxed()
             }
         }
         dispatch_rpc_service_functions!(HelloServer);
@@ -333,8 +345,8 @@ mod test {
         use super::*;
 
         service! {
-        rpc query_server_id() -> u64;
-    }
+            rpc query_server_id() -> u64;
+        }
 
         struct IdServer {
             id: u64,
@@ -359,7 +371,9 @@ mod test {
                 {
                     let addr = addr.clone();
                     let server = Server::new(&addr); // 0 is service id
-                    server.register_service(id, &Arc::new(IdServer { id: id })).await;
+                    server
+                        .register_service(id, &Arc::new(IdServer { id: id }))
+                        .await;
                     Server::listen_and_resume(&server);
                     id += 1;
                 }
@@ -380,8 +394,8 @@ mod test {
     mod parallel {
         use super::struct_service::*;
         use super::*;
+        use crate::rpc::{RPCClient, Server, DEFAULT_CLIENT_POOL};
         use bifrost_hasher::hash_str;
-        use crate::rpc::{Server, RPCClient, DEFAULT_CLIENT_POOL};
         use futures::prelude::stream::*;
         use futures::FutureExt;
 
@@ -400,43 +414,50 @@ mod test {
 
             println!("Testing parallel RPC reqs");
 
-            let mut futs = (0..100).map(|i| {
-                let service_client = service_client.clone();
-                tokio::spawn(async move {
-                    let response = service_client.hello(Greeting {
-                        name: String::from("John"),
-                        time: i,
-                    });
-                    let res = response.await.unwrap();
-                    let greeting_str = res.text;
-                    println!("SERVER RESPONDED: {}", greeting_str);
-                    assert_eq!(greeting_str, format!("Hello, John. It is {} now!", i));
-                    assert_eq!(42, res.owner);
-                }).boxed()
-            })
-            .collect::<FuturesUnordered<_>>();
-            while futs.next().await.is_some() {};
+            let mut futs = (0..100)
+                .map(|i| {
+                    let service_client = service_client.clone();
+                    tokio::spawn(async move {
+                        let response = service_client.hello(Greeting {
+                            name: String::from("John"),
+                            time: i,
+                        });
+                        let res = response.await.unwrap();
+                        let greeting_str = res.text;
+                        println!("SERVER RESPONDED: {}", greeting_str);
+                        assert_eq!(greeting_str, format!("Hello, John. It is {} now!", i));
+                        assert_eq!(42, res.owner);
+                    })
+                    .boxed()
+                })
+                .collect::<FuturesUnordered<_>>();
+            while futs.next().await.is_some() {}
 
             // test pool
             let server_id = hash_str(&addr);
-            let mut futs = (0..100).map(|i| {
-                let addr = (&addr).clone();
-                tokio::spawn(async move {
-                    let client = DEFAULT_CLIENT_POOL.get_by_id(server_id, move |_| addr).await.unwrap();
-                    let service_client = AsyncServiceClient::new(0, &client);
-                    let response = service_client.hello(Greeting {
-                        name: String::from("John"),
-                        time: i,
-                    });
-                    let res = response.await.unwrap();
-                    let greeting_str = res.text;
-                    println!("SERVER RESPONDED: {}", greeting_str);
-                    assert_eq!(greeting_str, format!("Hello, John. It is {} now!", i));
-                    assert_eq!(42, res.owner);
-                }).boxed()
-            })
-            .collect::<FuturesUnordered<_>>();
-            while futs.next().await.is_some() {};
+            let mut futs = (0..100)
+                .map(|i| {
+                    let addr = (&addr).clone();
+                    tokio::spawn(async move {
+                        let client = DEFAULT_CLIENT_POOL
+                            .get_by_id(server_id, move |_| addr)
+                            .await
+                            .unwrap();
+                        let service_client = AsyncServiceClient::new(0, &client);
+                        let response = service_client.hello(Greeting {
+                            name: String::from("John"),
+                            time: i,
+                        });
+                        let res = response.await.unwrap();
+                        let greeting_str = res.text;
+                        println!("SERVER RESPONDED: {}", greeting_str);
+                        assert_eq!(greeting_str, format!("Hello, John. It is {} now!", i));
+                        assert_eq!(42, res.owner);
+                    })
+                    .boxed()
+                })
+                .collect::<FuturesUnordered<_>>();
+            while futs.next().await.is_some() {}
         }
     }
 }

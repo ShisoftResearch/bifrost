@@ -4,10 +4,10 @@ macro_rules! def_store_number {
         pub mod $m {
             use crate::raft::state_machine::StateMachineCtl;
             use bifrost_hasher::hash_str;
+            use futures::FutureExt;
             use std::sync::Arc;
             use $crate::raft::state_machine::callback::server::SMCallback;
             use $crate::raft::RaftService;
-            use futures::FutureExt;
 
             pub struct Number {
                 pub num: $t,
@@ -163,10 +163,10 @@ macro_rules! def_store_number {
 #[cfg(test)]
 mod test {
     mod u32 {
-        use futures::prelude::*;
         use crate::raft::client::RaftClient;
-        use crate::raft::{DEFAULT_SERVICE_ID, RaftService, Storage, Options};
+        use crate::raft::{Options, RaftService, Storage, DEFAULT_SERVICE_ID};
         use crate::rpc::Server;
+        use futures::prelude::*;
         use U32::client::SMClient;
 
         def_store_number!(U32, u32);
@@ -189,7 +189,9 @@ mod test {
             service.register_state_machine(Box::new(num_sm)).await;
             service.bootstrap().await;
 
-            let client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID).await.unwrap();
+            let client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID)
+                .await
+                .unwrap();
             let sm_client = SMClient::new(sm_id, &client);
             RaftClient::prepare_subscription(&server);
 
@@ -214,24 +216,18 @@ mod test {
             assert_eq!(sm_client.divide_and_get(&4).await.unwrap(), 1);
             assert_eq!(sm_client.swap(&5).await.unwrap(), 1);
             assert_eq!(sm_client.get().await.unwrap(), 5);
-            assert_eq!(
-                sm_client.compare_and_swap(&1, &10).await.unwrap(),
-                5
-            );
+            assert_eq!(sm_client.compare_and_swap(&1, &10).await.unwrap(), 5);
             assert_eq!(sm_client.get().await.unwrap(), 5);
-            assert_eq!(
-                sm_client.compare_and_swap(&5, &11).await.unwrap(),
-                5
-            );
+            assert_eq!(sm_client.compare_and_swap(&5, &11).await.unwrap(), 5);
             assert_eq!(sm_client.get().await.unwrap(), 11);
         }
     }
 
     mod f64 {
-        use futures::prelude::*;
         use crate::raft::client::RaftClient;
-        use crate::raft::{RaftService, DEFAULT_SERVICE_ID, Storage, Options};
+        use crate::raft::{Options, RaftService, Storage, DEFAULT_SERVICE_ID};
         use crate::rpc::Server;
+        use futures::prelude::*;
         use F64::client::SMClient;
 
         def_store_number!(F64, f64);
@@ -253,7 +249,9 @@ mod test {
             service.register_state_machine(Box::new(num_sm)).await;
             service.bootstrap().await;
 
-            let client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID).await.unwrap();
+            let client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID)
+                .await
+                .unwrap();
             let sm_client = SMClient::new(sm_id, &client);
 
             assert_eq!(sm_client.get().await.unwrap(), 0.0);
@@ -265,33 +263,15 @@ mod test {
             assert_eq!(sm_client.minus_and_get(&2.0).await.unwrap(), 0.0);
             assert_eq!(sm_client.get_and_incr().await.unwrap(), 0.0);
             assert_eq!(sm_client.incr_and_get().await.unwrap(), 2.0);
-            assert_eq!(
-                sm_client.get_and_multiply(&2.0).await.unwrap(),
-                2.0
-            );
-            assert_eq!(
-                sm_client.multiply_and_get(&2.0).await.unwrap(),
-                8.0
-            );
+            assert_eq!(sm_client.get_and_multiply(&2.0).await.unwrap(), 2.0);
+            assert_eq!(sm_client.multiply_and_get(&2.0).await.unwrap(), 8.0);
             assert_eq!(sm_client.get_and_divide(&2.0).await.unwrap(), 8.0);
             assert_eq!(sm_client.divide_and_get(&4.0).await.unwrap(), 1.0);
             assert_eq!(sm_client.swap(&5.0).await.unwrap(), 1.0);
             assert_eq!(sm_client.get().await.unwrap(), 5.0);
-            assert_eq!(
-                sm_client
-                    .compare_and_swap(&1.0, &10.0)
-                    .await
-                    .unwrap(),
-                5.0
-            );
+            assert_eq!(sm_client.compare_and_swap(&1.0, &10.0).await.unwrap(), 5.0);
             assert_eq!(sm_client.get().await.unwrap(), 5.0);
-            assert_eq!(
-                sm_client
-                    .compare_and_swap(&5.0, &11.0)
-                    .await
-                    .unwrap(),
-                5.0
-            );
+            assert_eq!(sm_client.compare_and_swap(&5.0, &11.0).await.unwrap(), 5.0);
             assert_eq!(sm_client.get().await.unwrap(), 11.0);
         }
     }

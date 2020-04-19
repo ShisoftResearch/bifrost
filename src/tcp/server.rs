@@ -1,16 +1,16 @@
 use super::STANDALONE_ADDRESS;
 use crate::tcp::shortcut;
+use crate::tcp::shortcut::call;
 use bytes::BytesMut;
 use futures::future::BoxFuture;
 use futures::SinkExt;
 use std::error::Error;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::stream::StreamExt;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
-use std::sync::Arc;
-use crate::tcp::shortcut::call;
 
 pub type RPCFuture = dyn Future<Output = TcpRes>;
 pub type BoxedRPCFuture = Box<RPCFuture>;

@@ -1,9 +1,9 @@
 use crate::raft::state_machine::StateMachineCtl;
 use crate::raft::RaftService;
 use bifrost_plugins::hash_ident;
+use futures::FutureExt;
 use std::collections::HashMap;
 use std::sync::Arc;
-use futures::FutureExt;
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_DHT_WEIGHTS) as u64;
 
@@ -30,7 +30,8 @@ impl StateMachineCmds for Weights {
         future::ready(match self.groups.get(&group) {
             Some(m) => Some(m.clone()),
             None => None,
-        }).boxed()
+        })
+        .boxed()
     }
     fn get_weight(&self, group: u64, id: u64) -> BoxFuture<Option<u64>> {
         future::ready(match self.groups.get(&group) {
@@ -39,7 +40,8 @@ impl StateMachineCmds for Weights {
                 None => None,
             },
             None => None,
-        }).boxed()
+        })
+        .boxed()
     }
 }
 impl StateMachineCtl for Weights {

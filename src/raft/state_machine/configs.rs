@@ -5,10 +5,10 @@ use crate::raft::AsyncServiceClient;
 use crate::rpc;
 use crate::utils::rwlock::*;
 use bifrost_hasher::hash_str;
+use futures::FutureExt;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use futures::FutureExt;
-use serde::{Serialize, Deserialize};
 
 pub const CONFIG_SM_ID: u64 = 1;
 

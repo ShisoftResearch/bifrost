@@ -13,15 +13,15 @@ service! {
 
 #[cfg(test)]
 mod test {
-    use std::sync::atomic::*;
     use crate::raft::client::RaftClient;
-    use std::sync::Arc;
-    use crate::raft::{Storage, RaftService, Options, DEFAULT_SERVICE_ID};
     use crate::raft::state_machine::callback::server::SMCallback;
-    use crate::rpc::Server;
     use crate::raft::state_machine::StateMachineCtl;
+    use crate::raft::{Options, RaftService, Storage, DEFAULT_SERVICE_ID};
+    use crate::rpc::Server;
     use crate::utils::time::async_wait_5_secs;
     use future::FutureExt;
+    use std::sync::atomic::*;
+    use std::sync::Arc;
 
     pub struct Trigger {
         count: u64,
@@ -29,17 +29,20 @@ mod test {
     }
 
     raft_state_machine! {
-    def cmd trigger();
-    def sub on_trigged() -> u64;
-}
+        def cmd trigger();
+        def sub on_trigged() -> u64;
+    }
 
     impl StateMachineCmds for Trigger {
         fn trigger(&mut self) -> BoxFuture<()> {
             self.count += 1;
             async move {
                 self.callback
-                    .notify(commands::on_trigged::new(), self.count).await.unwrap();
-            }.boxed()
+                    .notify(commands::on_trigged::new(), self.count)
+                    .await
+                    .unwrap();
+            }
+            .boxed()
         }
     }
 
@@ -51,11 +54,10 @@ mod test {
         fn snapshot(&self) -> Option<Vec<u8>> {
             None
         }
-        fn recover(&mut self, data: Vec<u8>) ->  BoxFuture<()> {
+        fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
             future::ready(()).boxed()
         }
     }
-
 
     #[tokio::test(threaded_scheduler)]
     async fn dummy() {
@@ -72,7 +74,9 @@ mod test {
             callback: SMCallback::new(10, raft_service.clone()).await,
         };
         let sm_id = dummy_sm.id();
-        server.register_service(DEFAULT_SERVICE_ID, &raft_service).await;
+        server
+            .register_service(DEFAULT_SERVICE_ID, &raft_service)
+            .await;
         Server::listen_and_resume(&server);
         RaftService::start(&raft_service).await;
         raft_service
@@ -82,7 +86,9 @@ mod test {
 
         async_wait_5_secs().await;
 
-        let raft_client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID).await.unwrap();
+        let raft_client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID)
+            .await
+            .unwrap();
         let sm_client = Arc::new(client::SMClient::new(sm_id, &raft_client));
         let loops = 10;
         let counter = Arc::new(AtomicUsize::new(0));
