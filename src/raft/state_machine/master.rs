@@ -57,11 +57,12 @@ impl StateMachineCtl for MasterStateMachine {
         let data = bincode::serialize(&sms).unwrap();
         Some(data)
     }
-    fn recover(&mut self, data: Vec<u8>) {
+    fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
         let mut sms: SnapshotDataItems = bincode::deserialize(data.as_slice()).unwrap();
         for (sm_id, snapshot) in sms {
             self.snapshots.insert(sm_id, snapshot);
         }
+        future::ready(()).boxed()
     }
 }
 

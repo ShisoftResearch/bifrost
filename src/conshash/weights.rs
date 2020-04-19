@@ -50,8 +50,9 @@ impl StateMachineCtl for Weights {
     fn snapshot(&self) -> Option<Vec<u8>> {
         Some(bincode::serialize(&self.groups).unwrap())
     }
-    fn recover(&mut self, data: Vec<u8>) {
+    fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
         self.groups = bincode::deserialize(data.as_slice()).unwrap();
+        future::ready(()).boxed()
     }
 }
 impl Weights {

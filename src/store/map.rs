@@ -104,8 +104,9 @@ macro_rules! def_store_hash_map {
                 fn snapshot(&self) -> Option<Vec<u8>> {
                     Some($crate::utils::bincode::serialize(&self.map))
                 }
-                fn recover(&mut self, data: Vec<u8>) {
+                fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
                     self.map = $crate::utils::bincode::deserialize(&data);
+                    future::ready(()).boxed()
                 }
                 fn id(&self) -> u64 {
                     self.id

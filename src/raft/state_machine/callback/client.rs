@@ -4,7 +4,6 @@ use crate::utils::time::get_time;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use std::collections::HashMap;
-use std::marker::Unpin;
 use std::sync::Arc;
 
 trait SubFunc = Fn(Vec<u8>) -> BoxFuture<'static, ()>;

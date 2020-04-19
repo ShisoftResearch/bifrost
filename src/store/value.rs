@@ -36,8 +36,9 @@ macro_rules! def_store_value {
                 fn snapshot(&self) -> Option<Vec<u8>> {
                     Some($crate::utils::bincode::serialize(&self.val))
                 }
-                fn recover(&mut self, data: Vec<u8>) {
+                fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
                     self.val = $crate::utils::bincode::deserialize(&data);
+                    future::ready(()).boxed()
                 }
                 fn id(&self) -> u64 {
                     self.id

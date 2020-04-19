@@ -15,7 +15,6 @@ use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use rand;
 use rand::Rng;
-use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::collections::Bound::{Included, Unbounded};
 use std::collections::{BTreeMap, HashMap};
@@ -101,7 +100,7 @@ type LogEntries = Vec<LogEntry>;
 type LogsMap = BTreeMap<u64, LogEntry>;
 
 service! {
-    rpc append_entries(term: u64, leaderId: u64, prev_log_id: u64, prev_log_term: u64, entries: Option<LogEntries>, leader_commit: u64) -> (u64, AppendEntriesResult);
+    rpc append_entries(term: u64, leader_id: u64, prev_log_id: u64, prev_log_term: u64, entries: Option<LogEntries>, leader_commit: u64) -> (u64, AppendEntriesResult);
     rpc request_vote(term: u64, candidate_id: u64, last_log_id: u64, last_log_term: u64) -> ((u64, u64), bool); // term, voteGranted
     rpc install_snapshot(term: u64, leader_id: u64, last_included_index: u64, last_included_term: u64, data: Vec<u8>) -> u64;
     rpc c_command(entry: LogEntry) -> ClientCmdResponse;
@@ -297,11 +296,22 @@ impl RaftService {
     }
     pub async fn start(server: &Arc<RaftService>) -> bool {
         let server_address = server.options.address.clone();
-        info!("Waiting for server to be initialized");
+        info!("Waiting for raft server to be initialized");
         {
             let meta = server.meta.write().await;
             let mut sm = meta.state_machine.write().await;
-            sm.configs.new_member(server_address.clone()).await;
+            let mut inited = false;
+            let start_time = get_time();
+            while get_time() < start_time + 5000 {
+                //waiting for 5 secs
+                if sm.configs.new_member(server_address.clone()).await {
+                    inited = true;
+                    break;
+                }
+            }
+            if !inited {
+                return false;
+            }
         }
         let checker_ref = server.clone();
         tokio::spawn(async {
@@ -615,43 +625,60 @@ impl RaftService {
         if let Membership::Leader(ref leader_meta) = meta.membership {
             let leader_id = meta.leader_id;
             debug_assert_eq!(self.id, leader_id);
-            let leader_meta = leader_meta.read().await;
             let mut heartbeat_futs = FuturesUnordered::new();
-            let member_sm = meta.state_machine.read().await;
-            let ref members = member_sm.configs.members;
-            for member in members.values() {
-                let member_id = member.id;
-                if member_id == self.id {
-                    continue;
+            // Send out heartbeats
+            {
+                let leader_meta = leader_meta.read().await;
+                let member_sm = meta.state_machine.read().await;
+                let ref members = member_sm.configs.members;
+                for member in members.values() {
+                    let member_id = member.id;
+                    if member_id == self.id {
+                        continue;
+                    }
+                    let follower = if let Some(follower) = leader_meta.followers.get(&member_id) {
+                        follower
+                    } else {
+                        debug!(
+                            "follower not found, {}, {}",
+                            member_id,
+                            leader_meta.followers.len()
+                        ); //TODO: remove after debug
+                        continue;
+                    };
+                    // get a send follower task without await
+                    let heartbeat_fut = Self::send_follower_heartbeat(
+                        meta.commit_index,
+                        meta.term,
+                        meta.leader_id,
+                        meta.last_applied,
+                        meta.state_machine.clone(),
+                        meta.logs.clone(),
+                        follower.clone(),
+                        member.rpc.clone(),
+                        member_id
+                    ).boxed();
+                    let task_spawned = tokio::spawn(heartbeat_fut);
+                    let timeout = 2000;
+                    let task_with_timeout = time::timeout(Duration::from_millis(timeout), task_spawned);
+                    heartbeat_futs.push(task_with_timeout);
                 }
-                let follower = if let Some(follower) = leader_meta.followers.get(&member_id) {
-                    follower
-                } else {
-                    debug!(
-                        "follower not found, {}, {}",
-                        member_id,
-                        leader_meta.followers.len()
-                    ); //TODO: remove after debug
-                    continue;
-                };
-                // get a send follower task without await
-                let heartbeat_fut = Box::pin(self.send_follower_heartbeat(meta, follower, member.rpc.clone(), member_id));
-                let task_spawned = heartbeat_fut; // tokio::spawn(heartbeat_fut);
-                let timeout = 2000;
-                let task_with_timeout = time::timeout(Duration::from_millis(timeout), task_spawned);
-                heartbeat_futs.push(task_with_timeout);
             }
-            let members = heartbeat_futs.len();
+            let followers = heartbeat_futs.len();
+            if followers <= 0 {
+                // Early quit if no followers
+                return true;
+            }
             if let (Some(log_id), &Membership::Leader(ref leader_meta)) = (log_id, &meta.membership) {
                 let mut leader_meta = leader_meta.write().await;
                 let mut updated_followers = 0;
                 while let Some(heartbeat_res) = heartbeat_futs.next().await {
-                    if let Ok(last_matched_id) = heartbeat_res {
+                    if let Ok(Ok(last_matched_id)) = heartbeat_res {
                         // adaptive
                         //println!("{}, {}", last_matched_id, log_id);
                         if last_matched_id >= log_id {
                             updated_followers += 1;
-                            if is_majority(members as u64, updated_followers) {
+                            if is_majority(followers as u64, updated_followers) {
                                 return true;
                             }
                         }
@@ -669,20 +696,24 @@ impl RaftService {
     }
 
     async fn send_follower_heartbeat(
-        &self,
-        meta: &RwLockWriteGuard<'_, RaftMeta>,
-        follower: &Mutex<FollowerStatus>,
+        commit_index: u64,
+        term: u64,
+        leader_id: u64,
+        last_applied: u64,
+        master_sm: Arc<RwLock<MasterStateMachine>>,
+        logs: Arc<RwLock<LogsMap>>,
+        follower: Arc<Mutex<FollowerStatus>>,
         rpc: Arc<AsyncServiceClient>,
         member_id: u64
     ) -> u64 {
-        let commit_index = meta.commit_index;
-        let term = meta.term;
-        let leader_id = meta.leader_id;
+        // let commit_index = meta.commit_index;
+        // let term = meta.term;
+        // let leader_id = meta.leader_id;
 
-        let meta_term = meta.term;
-        let meta_last_applied = meta.last_applied;
-        let master_sm = &meta.state_machine;
-        let logs = &meta.logs;
+        // let meta_term = meta.term;
+        // let meta_last_applied = meta.last_applied;
+        // let master_sm = &meta.state_machine;
+        // let logs = &meta.logs;
 
         let mut follower = follower.lock().await;
         let logs = logs.read().await;
@@ -716,7 +747,7 @@ impl RaftService {
                         debug!("Taking snapshot of all state machines and install them on follower {}", member_id);
                         let master_sm = master_sm.read().await;
                         let snapshot = master_sm.snapshot().unwrap();
-                        rpc.install_snapshot(meta_term, leader_id, meta_last_applied, meta_term, snapshot).await.unwrap();
+                        rpc.install_snapshot(term, leader_id, last_applied, term, snapshot).await.unwrap();
                     }
                     let follower_last_entry = logs.get(&follower_last_log_id);
                     match follower_last_entry {
@@ -738,7 +769,7 @@ impl RaftService {
                 commit_index
             ).await;
             match append_result {
-                Ok((follower_term, result)) => {
+                Ok((_follower_term, result)) => {
                     match result {
                         AppendEntriesResult::Ok => {
                             debug!("log updated");
@@ -751,7 +782,7 @@ impl RaftService {
                             debug!("log mismatch, {}", follower.next_index);
                             follower.next_index -= 1;
                         },
-                        AppendEntriesResult::TermOut(actual_leader_id) => {
+                        AppendEntriesResult::TermOut(_actual_leader_id) => {
                             break;
                         }
                     }
@@ -789,7 +820,7 @@ impl RaftService {
         entry: &mut LogEntry,
     ) -> (u64, u64) {
         let mut logs = meta.logs.write().await;
-        let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
+        let (last_log_id, _last_log_term) = get_last_log_info!(self, logs);
         let new_log_id = last_log_id + 1;
         let new_log_term = meta.term;
         entry.term = new_log_term;
@@ -803,7 +834,7 @@ impl RaftService {
         &'a self,
         meta: &'a RwLockWriteGuard<'a, RaftMeta>,
         mut logs: RwLockWriteGuard<'a, LogsMap>,
-    ) {
+    ) -> io::Result<()> {
         let (last_log_id, _) = get_last_log_info!(self, logs);
         let expecting_oldest_log = if last_log_id > MAX_LOG_CAPACITY as u64 {
             last_log_id - MAX_LOG_CAPACITY as u64
@@ -827,7 +858,7 @@ impl RaftService {
                 };
                 storage
                     .snapshot
-                    .write_all(bincode::serialize(&snapshot).unwrap().as_slice());
+                    .write_all(bincode::serialize(&snapshot).unwrap().as_slice())?;
                 storage.snapshot.sync_all().unwrap();
             }
         }
@@ -835,9 +866,10 @@ impl RaftService {
             let mut storage = storage.write().await;
             let logs_data = bincode::serialize(&*meta.logs.read().await).unwrap();
             // TODO: async file system calls
-            storage.logs.write_all(logs_data.as_slice());
+            storage.logs.write_all(logs_data.as_slice())?;
             storage.logs.sync_all().unwrap();
         }
+        Ok(())
     }
 
     async fn try_sync_log_to_followers<'a>(
@@ -894,7 +926,7 @@ impl Service for RaftService {
                     self.become_follower(&mut meta, term, leader_id);
                 }
                 if prev_log_id > 0 {
-                    check_commit(&mut meta);
+                    check_commit(&mut meta).await;
                     let mut logs = meta.logs.write().await;
                     //RI, 2
                     let contains_prev_log = logs.contains_key(&prev_log_id);
@@ -921,7 +953,6 @@ impl Service for RaftService {
                 let mut last_new_entry = std::u64::MAX;
                 {
                     let mut logs = meta.logs.write().await;
-                    let mut leader_commit = leader_commit;
                     if let Some(ref entries) = entries {
                         // entry not empty
                         for entry in entries {
@@ -933,12 +964,12 @@ impl Service for RaftService {
                     } else if !logs.is_empty() {
                         last_new_entry = logs.values().last().unwrap().id;
                     }
-                    self.logs_post_processing(&meta, logs);
+                    self.logs_post_processing(&meta, logs).await;
                 }
                 if leader_commit > meta.commit_index {
                     //RI, 5
                     meta.commit_index = min(leader_commit, last_new_entry);
-                    check_commit(&mut meta);
+                    check_commit(&mut meta).await;
                 }
                 (meta.term, AppendEntriesResult::Ok)
             } else {
@@ -962,7 +993,7 @@ impl Service for RaftService {
             let vote_for = meta.vote_for;
             let mut vote_granted = false;
             if term > meta.term {
-                check_commit(&mut meta);
+                check_commit(&mut meta).await;
                 let logs = meta.logs.read().await;
                 let conf_sm = &meta.state_machine.read().await.configs;
                 let candidate_valid = conf_sm.member_existed(candidate_id);
@@ -1018,7 +1049,7 @@ impl Service for RaftService {
             let mut meta = self.write_meta().await;
             let term_ok = self.check_term(&mut meta, term, leader_id);
             if term_ok {
-                check_commit(&mut meta);
+                check_commit(&mut meta).await;
             }
             meta.state_machine.write().await.recover(data);
             meta.term = last_included_term;
@@ -1032,13 +1063,13 @@ impl Service for RaftService {
 
     fn c_command(&self, entry: LogEntry) -> BoxFuture<ClientCmdResponse> {
         async move {
-            let mut meta = self.write_meta().await;
+            let meta = self.write_meta().await;
             let mut entry = entry;
             if !is_leader(&meta) {
                 return ClientCmdResponse::NotLeader(meta.leader_id);
             }
             let (new_log_id, new_log_term) = self.leader_append_log(&meta, &mut entry).await;
-            let mut data = match entry.sm_id {
+            let data = match entry.sm_id {
                 // special treats for membership changes
                 CONFIG_SM_ID => Some(
                     self.try_sync_config_to_followers(meta, &entry, new_log_id)
@@ -1064,7 +1095,7 @@ impl Service for RaftService {
 
     fn c_query(&self, entry: LogEntry) -> BoxFuture<ClientQryResponse> {
         async move {
-            let mut meta = self.meta.read().await;
+            let meta = self.meta.read().await;
             let logs = meta.logs.read().await;
             let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
             if entry.term > last_log_term || entry.id > last_log_id {
@@ -1108,7 +1139,7 @@ impl StorageEntity {
         Ok(match &opts.storage {
             &Storage::DISK(ref dir) => {
                 let base_path = Path::new(dir);
-                fs::create_dir_all(base_path);
+                let _ = fs::create_dir_all(base_path);
                 let log_path = base_path.with_file_name("log.dat");
                 let snapshot_path = base_path.with_file_name("snapshot.dat");
                 let mut open_opts = OpenOptions::new();
@@ -1147,6 +1178,7 @@ mod test {
 
     #[tokio::test(threaded_scheduler)]
     async fn server_membership() {
+        env_logger::try_init();
         let s1_addr = String::from("127.0.0.1:2001");
         let s2_addr = String::from("127.0.0.1:2002");
         let s3_addr = String::from("127.0.0.1:2003");
@@ -1160,7 +1192,8 @@ mod test {
         Server::listen_and_resume(&server1);
         assert!(RaftService::start(&service1).await);
         service1.bootstrap().await;
-        assert_eq!(service1.num_members().await, 1);
+        let num_members = service1.num_members().await;
+        assert_eq!(num_members, 1);
         let service2 = RaftService::new(Options {
             storage: Storage::default(),
             address: s2_addr.clone(),
@@ -1216,6 +1249,7 @@ mod test {
 
     #[tokio::test(threaded_scheduler)]
     async fn log_replication() {
+        env_logger::try_init();
         let s1_addr = String::from("127.0.0.1:2004");
         let s2_addr = String::from("127.0.0.1:2005");
         let s3_addr = String::from("127.0.0.1:2006");

@@ -110,9 +110,9 @@ impl StateMachineCtl for Configures {
         }
         Some(bincode::serialize(&snapshot).unwrap())
     }
-    fn recover(&mut self, data: Vec<u8>) {
+    fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
         let snapshot: ConfigSnapshot = bincode::deserialize(&data).unwrap();
-        self.recover_members(&snapshot.members)
+        self.recover_members(snapshot.members).boxed()
     }
 }
 
@@ -124,18 +124,18 @@ impl Configures {
             subscriptions: Arc::new(RwLock::new(Subscriptions::new())),
         }
     }
-    fn recover_members(&mut self, snapshot: &MemberConfigSnapshot) {
+    async fn recover_members(&mut self, snapshot: MemberConfigSnapshot) {
         let mut curr_members: MemberConfigSnapshot = HashSet::with_capacity(self.members.len());
         for (_, member) in self.members.iter() {
             curr_members.insert(member.address.clone());
         }
-        let to_del = curr_members.difference(snapshot);
+        let to_del = curr_members.difference(&snapshot);
         let to_add = snapshot.difference(&curr_members);
         for addr in to_del {
-            self.del_member(addr.clone());
+            self.del_member(addr.clone()).await;
         }
         for addr in to_add {
-            self.new_member(addr.clone());
+            self.new_member(addr.clone()).await;
         }
     }
     pub async fn new_member(&mut self, address: String) -> bool {

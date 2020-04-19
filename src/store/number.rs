@@ -123,8 +123,9 @@ macro_rules! def_store_number {
                 fn snapshot(&self) -> Option<Vec<u8>> {
                     Some($crate::utils::bincode::serialize(&self.num))
                 }
-                fn recover(&mut self, data: Vec<u8>) {
+                fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
                     self.num = $crate::utils::bincode::deserialize(&data);
+                    future::ready(()).boxed()
                 }
                 fn id(&self) -> u64 {
                     self.id

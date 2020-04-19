@@ -599,7 +599,8 @@ impl StateMachineCtl for Membership {
         //Some(serialize!(&self.map))
         None // TODO: Backup members
     }
-    fn recover(&mut self, data: Vec<u8>) {
+    fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
+        future::ready(()).boxed()
         //self.map = deserialize!(&data);
     }
 }

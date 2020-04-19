@@ -322,7 +322,7 @@ impl RaftClient {
                 return Err(ExecError::ServersUnreachable)
             }
         }
-    }
+    } 
 
     fn command(
         &self,
@@ -349,9 +349,10 @@ impl RaftClient {
                 }
                 match self.current_leader_client().await {
                     Some((leader_id, client)) => {
-                        match client
+                        let cmd_res = client
                             .c_command(self.gen_log_entry(sm_id, fn_id, &data))
-                            .await
+                            .await;
+                        match cmd_res
                         {
                             Ok(ClientCmdResponse::Success {
                                 data,
