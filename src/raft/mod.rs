@@ -1281,17 +1281,17 @@ mod test {
         info!("Starting server 2");
         let server2 = Server::new(&s2_addr);
         info!("Register raft service for server 2");
+        let service2 = RaftService::new(Options {
+            storage: Storage::default(),
+            address: s2_addr.clone(),
+            service_id: DEFAULT_SERVICE_ID,
+        });
         server2
             .register_service(DEFAULT_SERVICE_ID, &service2)
             .await;
         info!("Listening server 2");
         Server::listen_and_resume(&server2).await;
         info!("Start raft service for server 2");
-        let service2 = RaftService::new(Options {
-            storage: Storage::default(),
-            address: s2_addr.clone(),
-            service_id: DEFAULT_SERVICE_ID,
-        });
         assert!(RaftService::start(&service2).await);
         info!("Server 2 join with server 1");
         let join_result = service2.join(&vec![s1_addr.clone()]).await;
@@ -1349,6 +1349,7 @@ mod test {
     #[tokio::test(threaded_scheduler)]
     async fn log_replication() {
         env_logger::try_init();
+        info!("Testing log replications");
         let s1_addr = String::from("127.0.0.1:2004");
         let s2_addr = String::from("127.0.0.1:2005");
         let s3_addr = String::from("127.0.0.1:2006");
@@ -1379,50 +1380,74 @@ mod test {
             address: s5_addr.clone(),
             service_id: DEFAULT_SERVICE_ID,
         });
-
+        info!("Start server 1");
         let server1 = Server::new(&s1_addr);
+        info!("Register raft service for server 1");
         server1
             .register_service(DEFAULT_SERVICE_ID, &service1)
             .await;
+        info!("Listen server 1");
         Server::listen_and_resume(&server1).await;
+        info!("Starting raft service for server 1");
         assert!(RaftService::start(&service1).await);
+        info!("Bootstrap raft for server 1");
         service1.bootstrap().await;
 
+        info!("Starting server 2");
         let server2 = Server::new(&s2_addr);
+        info!("Listening server 2");
+        Server::listen_and_resume(&server2).await;
+        info!("Register raft service for server 2");
         server2
             .register_service(DEFAULT_SERVICE_ID, &service2)
             .await;
-        Server::listen_and_resume(&server2).await;
+        info!("Start raft service for server 2");
         assert!(RaftService::start(&service2).await);
+        info!("Server 2 join cluster");
         let join_result = service2.join(&vec![s1_addr.clone(), s2_addr.clone()]).await;
         join_result.unwrap();
 
+        info!("Starting server 3");
         let server3 = Server::new(&s3_addr);
+        info!("Register raft service for server 3");
         server3
             .register_service(DEFAULT_SERVICE_ID, &service3)
             .await;
+        info!("Listening for server 3");
         Server::listen_and_resume(&server3).await;
+        info!("Starting raft service for server 3");
         assert!(RaftService::start(&service3).await);
+        info!("Server 3 join the cluster");
         let join_result = service3.join(&vec![s1_addr.clone(), s2_addr.clone()]).await;
         join_result.unwrap();
 
+        info!("Starting server 4");
         let server4 = Server::new(&s4_addr);
+        info!("Register raft service for server 4");
         server4
             .register_service(DEFAULT_SERVICE_ID, &service4)
             .await;
+        info!("Listening for server 4");
         Server::listen_and_resume(&server4).await;
+        info!("Starting raft service for server 4");
         assert!(RaftService::start(&service4).await);
+        info!("Server 4 join cluster");
         let join_result = service4
             .join(&vec![s1_addr.clone(), s2_addr.clone(), s3_addr.clone()])
             .await;
         join_result.unwrap();
 
+        info!("Starting server 5");
         let server5 = Server::new(&s5_addr);
+        info!("Register raft service for server 5");
         server5
             .register_service(DEFAULT_SERVICE_ID, &service5)
             .await;
+        info!("Listening for server 5");
         Server::listen_and_resume(&server5).await;
+        info!("Starting raft service for server 5");
         assert!(RaftService::start(&service5).await);
+        info!("Server 5 join cluster");
         let join_result = service5
             .join(&vec![
                 s1_addr.clone(),
@@ -1433,8 +1458,10 @@ mod test {
             .await;
         join_result.unwrap();
 
+        info!("Waiting for seconds for consistency check");
         async_wait_secs().await; // wait for membership replication to take effect
 
+        info!("Number of logs should be the same");
         assert_eq!(service1.num_logs().await, service2.num_logs().await);
         assert_eq!(service2.num_logs().await, service3.num_logs().await);
         assert_eq!(service3.num_logs().await, service4.num_logs().await);
@@ -1443,6 +1470,7 @@ mod test {
 
         async_wait_secs().await;
 
+        info!("All servers should have the same leader id on record");
         assert_eq!(service1.leader_id().await, service1.id);
         assert_eq!(service2.leader_id().await, service1.id);
         assert_eq!(service3.leader_id().await, service1.id);
