@@ -46,7 +46,8 @@ pub trait RaftMsg<R>: Send + Sync {
     fn decode_return(data: &Vec<u8>) -> R;
 }
 
-const CHECKER_MS: i64 = 500;
+const CHECKER_MS: i64 = 200;
+const HEARTBEAT_MS: i64 = 600;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LogEntry {
@@ -118,7 +119,7 @@ fn gen_rand(lower: i64, higher: i64) -> i64 {
 }
 
 fn gen_timeout() -> i64 {
-    gen_rand(2000, 5000)
+    gen_rand(10000, 15000)
 }
 
 struct FollowerStatus {
@@ -333,11 +334,17 @@ impl RaftService {
                         let expected_ends = start_time + CHECKER_MS;
                         {
                             let mut meta = server.meta.write().await; //WARNING: Reentering not supported
+                            let current_time = get_time();
                             let action = match meta.membership {
-                                Membership::Leader(_) => CheckerAction::SendHeartbeat,
+                                Membership::Leader(_) => {
+                                    if current_time >= meta.last_checked + HEARTBEAT_MS {
+                                        CheckerAction::SendHeartbeat
+                                    } else {
+                                        CheckerAction::None
+                                    }
+                                },
                                 Membership::Follower | Membership::Candidate => {
                                     debug_assert!(meta.timeout > 100);
-                                    let current_time = get_time();
                                     let timeout_time = meta.last_checked + meta.timeout;
                                     let time_remains = timeout_time - current_time;
                                     if meta.vote_for == None && time_remains < 0 {
@@ -834,7 +841,7 @@ impl RaftService {
             match append_result {
                 Ok((_follower_term, result)) => match result {
                     AppendEntriesResult::Ok => {
-                        debug!("log updated: {}", member_id);
+                        debug!("Log updated to follower: {}", member_id);
                         if let Some(last_entries_id) = last_entries_id {
                             follower.next_index = last_entries_id + 1;
                             follower.match_index = last_entries_id;
@@ -842,7 +849,7 @@ impl RaftService {
                     }
                     AppendEntriesResult::LogMismatch => {
                         debug!(
-                            "log mismatch, {}, member id {}",
+                            "Log mismatch in follower, {}, member id {}",
                             follower.next_index, member_id
                         );
                         follower.next_index -= 1;
@@ -1460,6 +1467,8 @@ mod test {
 
         info!("Waiting for seconds for consistency check");
         async_wait_secs().await; // wait for membership replication to take effect
+        async_wait_secs().await;
+        async_wait_secs().await;
 
         info!("Number of logs should be the same");
         assert_eq!(service1.num_logs().await, service2.num_logs().await);
@@ -1468,7 +1477,6 @@ mod test {
         assert_eq!(service4.num_logs().await, service5.num_logs().await);
         assert_eq!(service5.num_logs().await, 4); // check all logs replicated
 
-        async_wait_secs().await;
 
         info!("All servers should have the same leader id on record");
         assert_eq!(service1.leader_id().await, service1.id);
