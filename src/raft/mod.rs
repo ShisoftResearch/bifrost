@@ -111,6 +111,8 @@ service! {
     rpc c_query(entry: LogEntry) -> ClientQryResponse;
     rpc c_server_cluster_info() -> ClientClusterInfo;
     rpc c_put_offline() -> bool;
+    rpc c_have_state_machine(id: u64) -> bool;
+    rpc c_ping();
 }
 
 fn gen_rand(lower: i64, higher: i64) -> i64 {
@@ -396,6 +398,18 @@ impl RaftService {
         Server::listen_and_resume(&server).await;
         server.register_service(svr_id, &service).await;
         (RaftService::start(&service).await, service, server)
+    }
+    pub async fn probe_and_join(&self, servers: &Vec<String>) -> Result<bool, ExecError> {
+        debug!("Probing and try to join servers: {:?}", servers);
+        let is_first_node = !RaftClient::probe_servers(servers, &self.options.address, self.options.service_id).await;
+        if is_first_node {
+            debug!("There is no live node in the server list, will bootstrap");
+            self.bootstrap().await;
+            Ok(false)
+        } else {
+            debug!("There are some live nodes, will join them");
+            self.join(servers).await
+        }
     }
     pub async fn bootstrap(&self) {
         let mut meta = self.write_meta().await;
@@ -1204,6 +1218,18 @@ impl Service for RaftService {
     fn c_put_offline(&self) -> BoxFuture<bool> {
         self.leave().boxed()
     }
+
+    fn c_have_state_machine(&self, id: u64) -> BoxFuture<bool> {
+        async move {
+            let meta = self.meta.read().await;
+            let sm = meta.state_machine.read().await;
+            sm.has_sub(&id)
+        }.boxed()
+    }
+
+    fn c_ping(&self) -> BoxFuture<()> {
+        future::ready(()).boxed()
+    }
 }
 
 pub struct RaftStateMachine {
@@ -1392,6 +1418,12 @@ mod test {
             address: s5_addr.clone(),
             service_id: DEFAULT_SERVICE_ID,
         });
+        let server_list = vec![
+            s1_addr.clone(),
+            s2_addr.clone(),
+            s3_addr.clone(),
+            s4_addr.clone(),
+        ];
         info!("Start server 1");
         let server1 = Server::new(&s1_addr);
         info!("Register raft service for server 1");
@@ -1403,7 +1435,7 @@ mod test {
         info!("Starting raft service for server 1");
         assert!(RaftService::start(&service1).await);
         info!("Bootstrap raft for server 1");
-        service1.bootstrap().await;
+        assert_eq!(service1.probe_and_join(&server_list).await.unwrap(), false);
 
         info!("Starting server 2");
         let server2 = Server::new(&s2_addr);
@@ -1416,7 +1448,7 @@ mod test {
         info!("Start raft service for server 2");
         assert!(RaftService::start(&service2).await);
         info!("Server 2 join cluster");
-        let join_result = service2.join(&vec![s1_addr.clone(), s2_addr.clone()]).await;
+        let join_result = service2.probe_and_join(&server_list).await;
         join_result.unwrap();
 
         info!("Starting server 3");
@@ -1430,7 +1462,7 @@ mod test {
         info!("Starting raft service for server 3");
         assert!(RaftService::start(&service3).await);
         info!("Server 3 join the cluster");
-        let join_result = service3.join(&vec![s1_addr.clone(), s2_addr.clone()]).await;
+        let join_result = service3.probe_and_join(&server_list).await;
         join_result.unwrap();
 
         info!("Starting server 4");
@@ -1444,9 +1476,7 @@ mod test {
         info!("Starting raft service for server 4");
         assert!(RaftService::start(&service4).await);
         info!("Server 4 join cluster");
-        let join_result = service4
-            .join(&vec![s1_addr.clone(), s2_addr.clone(), s3_addr.clone()])
-            .await;
+        let join_result = service4.probe_and_join(&server_list).await;
         join_result.unwrap();
 
         info!("Starting server 5");
@@ -1460,14 +1490,7 @@ mod test {
         info!("Starting raft service for server 5");
         assert!(RaftService::start(&service5).await);
         info!("Server 5 join cluster");
-        let join_result = service5
-            .join(&vec![
-                s1_addr.clone(),
-                s2_addr.clone(),
-                s3_addr.clone(),
-                s4_addr.clone(),
-            ])
-            .await;
+        let join_result = service5.probe_and_join(&server_list).await;
         join_result.unwrap();
 
         info!("Waiting for seconds for consistency check");

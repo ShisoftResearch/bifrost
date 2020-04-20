@@ -134,6 +134,9 @@ impl MasterStateMachine {
     pub fn clear_subs(&mut self) {
         self.subs.clear()
     }
+    pub fn has_sub(&self, id: &u64) -> bool {
+        self.subs.contains_key(&id)
+    }
 }
 
 impl Error for ExecError {}

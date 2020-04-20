@@ -71,7 +71,7 @@ impl RaftClient {
             service_id,
         };
         client
-            .update_info(HashSet::from_iter(servers.iter().cloned()))
+            .update_info(servers)
             .await?;
         Ok(Arc::new(client))
     }
@@ -88,13 +88,13 @@ impl RaftClient {
 
     async fn cluster_info<'a>(
         &'a self,
-        servers: HashSet<String>,
+        servers: &Vec<String>,
     ) -> (Option<ClientClusterInfo>, RwLockWriteGuard<'a, Members>) {
         let mut members = self.members.write().await;
         for server_addr in servers {
-            let id = hash_str(&server_addr);
+            let id = hash_str(server_addr);
             if !members.clients.contains_key(&id) {
-                match rpc::DEFAULT_CLIENT_POOL.get(&server_addr).await {
+                match rpc::DEFAULT_CLIENT_POOL.get(server_addr).await {
                     Ok(client) => {
                         members
                             .clients
@@ -120,7 +120,7 @@ impl RaftClient {
         return (None, members);
     }
 
-    async fn update_info(&self, servers: HashSet<String>) -> Result<(), ClientError> {
+    async fn update_info(&self, servers: &Vec<String>) -> Result<(), ClientError> {
         let (cluster_info, mut members) = self.cluster_info(servers).await;
         match cluster_info {
             Some(info) => {
@@ -154,6 +154,39 @@ impl RaftClient {
             }
             None => Err(ClientError::ServerUnreachable),
         }
+    }
+
+    pub async fn probe_servers(servers: &Vec<String>, server_address: &String, service_id: u64) -> bool {
+        servers.iter().map(|peer_addr| {
+            future_timeout(
+                Duration::from_secs(2),
+                async move {
+                    if peer_addr == server_address {
+                        // Should not include the server we are running
+                        return false;
+                    }
+                    match rpc::DEFAULT_CLIENT_POOL.get(peer_addr).await {
+                        Ok(client) => {
+                            let client = AsyncServiceClient::new(service_id, &client);
+                            let check_res = client.c_ping().await;
+                            check_res.is_ok()
+                        }
+                        Err(_) => {
+                            false
+                        }
+                    }
+                }
+            )
+        })
+        .collect::<FuturesUnordered<_>>()
+        .collect::<Vec<_>>()
+        .await
+        .into_iter().any(|r| {
+            match r {
+                Ok(true) => true,
+                _ => false
+            }
+        })
     }
 
     pub async fn execute<R, M>(&self, sm_id: u64, msg: M) -> Result<R, ExecError>
@@ -427,9 +460,9 @@ impl RaftClient {
         {
             let servers = {
                 let members = self.members.read().await;
-                HashSet::from_iter(members.id_map.values().cloned())
+                Vec::from_iter(members.id_map.values().cloned())
             };
-            self.update_info(servers).await;
+            self.update_info(&servers).await;
             let leader_id = self.leader_id.load(ORDERING);
             let members = self.members.read().await;
             if let Some(client) = members.clients.get(&leader_id) {
