@@ -564,9 +564,11 @@ impl RaftService {
         //        println!("Meta write locked acquired for {}ms for {}, leader {}", acq_time, self.id, lock_mon.leader_id);
         lock_mon.await
     }
+
     pub async fn read_meta(&self) -> RwLockReadGuard<'_, RaftMeta> {
         self.meta.read().await
     }
+
     async fn become_candidate<'a>(&'a self, meta: &'a mut RwLockWriteGuard<'_, RaftMeta>) {
         self.reset_last_checked(meta);
         let term = meta.term;
@@ -1349,7 +1351,10 @@ mod test {
         info!("Leader (server 1) leave the cluster");
         assert!(service1.leave().await);
 
-        async_wait_secs().await; // there will be some unavailability in leader transaction
+        // there will be some unavailability in leader transaction
+        async_wait_secs().await;
+        async_wait_secs().await;
+        async_wait_secs().await;
         assert_eq!(service3.num_members().await, 1);
     }
 
