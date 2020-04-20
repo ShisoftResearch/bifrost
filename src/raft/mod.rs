@@ -344,7 +344,7 @@ impl RaftService {
                                     } else {
                                         CheckerAction::None
                                     }
-                                },
+                                }
                                 Membership::Follower | Membership::Candidate => {
                                     debug_assert!(meta.timeout > 100);
                                     let timeout_time = meta.last_checked + meta.timeout;
@@ -401,7 +401,9 @@ impl RaftService {
     }
     pub async fn probe_and_join(&self, servers: &Vec<String>) -> Result<bool, ExecError> {
         debug!("Probing and try to join servers: {:?}", servers);
-        let is_first_node = !RaftClient::probe_servers(servers, &self.options.address, self.options.service_id).await;
+        let is_first_node =
+            !RaftClient::probe_servers(servers, &self.options.address, self.options.service_id)
+                .await;
         if is_first_node {
             debug!("There is no live node in the server list, will bootstrap");
             self.bootstrap().await;
@@ -1224,7 +1226,8 @@ impl Service for RaftService {
             let meta = self.meta.read().await;
             let sm = meta.state_machine.read().await;
             sm.has_sub(&id)
-        }.boxed()
+        }
+        .boxed()
     }
 
     fn c_ping(&self) -> BoxFuture<()> {
@@ -1504,7 +1507,6 @@ mod test {
         assert_eq!(service3.num_logs().await, service4.num_logs().await);
         assert_eq!(service4.num_logs().await, service5.num_logs().await);
         assert_eq!(service5.num_logs().await, 4); // check all logs replicated
-
 
         info!("All servers should have the same leader id on record");
         assert_eq!(service1.leader_id().await, service1.id);

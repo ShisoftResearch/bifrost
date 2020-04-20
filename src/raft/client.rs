@@ -70,9 +70,7 @@ impl RaftClient {
             last_log_term: AtomicU64::new(0),
             service_id,
         };
-        client
-            .update_info(servers)
-            .await?;
+        client.update_info(servers).await?;
         Ok(Arc::new(client))
     }
     pub async fn prepare_subscription(server: &Arc<rpc::Server>) -> Option<()> {
@@ -156,11 +154,15 @@ impl RaftClient {
         }
     }
 
-    pub async fn probe_servers(servers: &Vec<String>, server_address: &String, service_id: u64) -> bool {
-        servers.iter().map(|peer_addr| {
-            future_timeout(
-                Duration::from_secs(2),
-                async move {
+    pub async fn probe_servers(
+        servers: &Vec<String>,
+        server_address: &String,
+        service_id: u64,
+    ) -> bool {
+        servers
+            .iter()
+            .map(|peer_addr| {
+                future_timeout(Duration::from_secs(2), async move {
                     if peer_addr == server_address {
                         // Should not include the server we are running
                         return false;
@@ -171,22 +173,18 @@ impl RaftClient {
                             let check_res = client.c_ping().await;
                             check_res.is_ok()
                         }
-                        Err(_) => {
-                            false
-                        }
+                        Err(_) => false,
                     }
-                }
-            )
-        })
-        .collect::<FuturesUnordered<_>>()
-        .collect::<Vec<_>>()
-        .await
-        .into_iter().any(|r| {
-            match r {
+                })
+            })
+            .collect::<FuturesUnordered<_>>()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .any(|r| match r {
                 Ok(true) => true,
-                _ => false
-            }
-        })
+                _ => false,
+            })
     }
 
     pub async fn execute<R, M>(&self, sm_id: u64, msg: M) -> Result<R, ExecError>
