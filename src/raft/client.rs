@@ -105,15 +105,22 @@ impl RaftClient {
                     }
                 }
             }
-            if let Ok(info) = members
+            let info_res = members
                 .clients
                 .get(&id)
                 .unwrap()
                 .c_server_cluster_info()
-                .await
-            {
-                if info.leader_id != 0 {
-                    return (Some(info), members);
+                .await;
+            match info_res {
+                Ok(info) => {
+                    if info.leader_id != 0 {
+                        return (Some(info), members);
+                    } else {
+                        debug!("Discovered zero leader id from {}", server_addr);
+                    }
+                },
+                Err(e) => {
+                    debug!("Error on getting cluster info from {}, {:?}", server_addr, e);
                 }
             }
         }
