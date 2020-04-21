@@ -95,7 +95,6 @@ fn decode_res(res: io::Result<BytesMut>) -> Result<BytesMut, RPCError> {
 
 pub fn read_u64_head(mut data: BytesMut) -> (u64, BytesMut) {
     let num = data.get_u64_le();
-    LittleEndian::read_u64(data.as_ref());
     (num, data)
 }
 
