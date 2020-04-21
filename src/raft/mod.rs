@@ -821,7 +821,6 @@ impl RaftService {
                 // extract follower last log info
                 // assumed log ids are sequence of integers
                 let follower_last_log_id = if follower.next_index == 0 {
-                    debug_assert!(logs.is_empty());
                     0
                 } else {
                     follower.next_index - 1
