@@ -47,7 +47,7 @@ pub trait RaftMsg<R>: Send + Sync {
 }
 
 const CHECKER_MS: i64 = 200;
-const HEARTBEAT_MS: i64 = 600;
+const HEARTBEAT_MS: i64 = 1000;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LogEntry {
@@ -366,7 +366,7 @@ impl RaftService {
                             };
                             match action {
                                 CheckerAction::SendHeartbeat => {
-                                    server.send_followers_heartbeat(&mut meta, None).await;
+                                    server.send_followers_heartbeat(&mut meta, None, false).await;
                                 }
                                 CheckerAction::BecomeCandidate => {
                                     server.become_candidate(&mut meta).await;
@@ -478,7 +478,7 @@ impl RaftService {
         }
         let mut meta = self.write_meta().await;
         if is_leader(&meta) {
-            if !self.send_followers_heartbeat(&mut meta, None).await {
+            if !self.send_followers_heartbeat(&mut meta, None, true).await {
                 return false;
             }
         }
@@ -687,8 +687,18 @@ impl RaftService {
         &self,
         meta: &mut RwLockWriteGuard<'a, RaftMeta>,
         log_id: Option<u64>,
+        no_delay: bool
     ) -> bool {
-        debug!("Sending followers heartbeat");
+        let now = get_time();
+        if meta.last_checked + HEARTBEAT_MS > now {
+            if no_delay {
+                debug!("Issuing delayed heartbeat");
+            } else {
+                debug!("Block throttled heartbeat");
+                return false;
+            }
+        }
+        trace!("Sending followers heartbeat");
         if let Membership::Leader(ref leader_meta) = meta.membership {
             let leader_id = meta.leader_id;
             debug_assert_eq!(self.id, leader_id);
@@ -787,7 +797,7 @@ impl RaftService {
         // let meta_last_applied = meta.last_applied;
         // let master_sm = &meta.state_machine;
         // let logs = &meta.logs;
-        debug!("Sending follower heartbeat to {}", member_id);
+        trace!("Sending follower heartbeat to {}", member_id);
         let mut follower = follower.lock().await;
         let logs = logs.read().await;
         let mut is_retry = false;
@@ -806,7 +816,7 @@ impl RaftService {
             };
             if is_retry && entries.is_none() {
                 // break when retry and there is no entry
-                debug!(
+                trace!(
                     "Stop retry when entry is empty, {}, member id {}",
                     follower.next_index, member_id
                 );
@@ -863,7 +873,7 @@ impl RaftService {
             match append_result {
                 Ok((_follower_term, result)) => match result {
                     AppendEntriesResult::Ok => {
-                        debug!("Log updated to follower: {}", member_id);
+                        trace!("Log updated to follower: {}", member_id);
                         if let Some(last_entries_id) = last_entries_id {
                             follower.next_index = last_entries_id + 1;
                             follower.match_index = last_entries_id;
@@ -904,7 +914,7 @@ impl RaftService {
         return true;
     }
     fn reset_last_checked(&self, meta: &mut RwLockWriteGuard<RaftMeta>) {
-        debug!(
+        trace!(
             "Reset last checked. Elapsed: {}, id: {}, term: {}",
             get_time() - meta.last_checked,
             self.id,
@@ -980,7 +990,7 @@ impl RaftService {
     ) -> Option<ExecResult> {
         debug!("Sync logs to followers");
         if self
-            .send_followers_heartbeat(&mut meta, Some(new_log_id))
+            .send_followers_heartbeat(&mut meta, Some(new_log_id), true)
             .await
         {
             meta.commit_index = new_log_id;
@@ -1006,7 +1016,7 @@ impl RaftService {
             let ref members = member_sm.configs.members;
             self.reload_leader_meta(members, &mut leader_meta, new_log_id);
         }
-        self.send_followers_heartbeat(&mut meta, Some(new_log_id))
+        self.send_followers_heartbeat(&mut meta, Some(new_log_id), true)
             .await;
         data
     }
@@ -1119,7 +1129,7 @@ impl Service for RaftService {
                     }
                 } else {
                     debug!(
-                        "{} VOTE FOR: {}, not granted, candidate valid: {}, voted fot {:?}",
+                        "{} VOTE FOR: {}, not granted, candidate valid: {}, voted for {:?}",
                         self.id,
                         candidate_id,
                         candidate_valid,
