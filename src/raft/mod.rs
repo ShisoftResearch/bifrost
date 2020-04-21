@@ -1119,10 +1119,11 @@ impl Service for RaftService {
                     }
                 } else {
                     debug!(
-                        "{} VOTE FOR: {}, not granted due to voted for {}",
+                        "{} VOTE FOR: {}, not granted, candidate valid: {}, voted fot {:?}",
                         self.id,
                         candidate_id,
-                        vote_for.unwrap()
+                        candidate_valid,
+                        vote_for
                     );
                 }
             } else {
