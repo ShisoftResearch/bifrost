@@ -1534,29 +1534,38 @@ mod test {
 
         raft_state_machine! {
             def qry answer_to_the_universe(name: String) -> String;
+            def cmd take_a_shot(num: i32) -> i32;
+        }
+
+        struct SM {
+            shots: i32
+        }
+        impl StateMachineCmds for SM {
+            fn answer_to_the_universe<'a>(&'a self, name: String) -> BoxFuture<'_, String> {
+                future::ready(format!("{}, the answer is 42", name)).boxed()
+            }
+
+            fn take_a_shot(&mut self, num: i32) -> BoxFuture<i32> {
+                self.shots -= num;
+                future::ready(self.shots).boxed()
+            }
+        }
+        impl StateMachineCtl for SM {
+            raft_sm_complete!();
+            fn id(&self) -> u64 {
+                15
+            }
+            fn snapshot(&self) -> Option<Vec<u8>> {
+                None
+            }
+            fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
+                future::ready(()).boxed()
+            }
         }
     
         #[tokio::test(threaded_scheduler)]
-        async fn query() {
+        async fn query_and_command() {
             env_logger::try_init();
-            struct SM;
-            impl StateMachineCmds for SM {
-                fn answer_to_the_universe<'a>(&'a self, name: String) -> BoxFuture<'_, String> {
-                    future::ready(format!("{}, the answer is 42", name)).boxed()
-                }
-            }
-            impl StateMachineCtl for SM {
-                raft_sm_complete!();
-                fn id(&self) -> u64 {
-                    15
-                }
-                fn snapshot(&self) -> Option<Vec<u8>> {
-                    None
-                }
-                fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
-                    future::ready(()).boxed()
-                }
-            }
             println!("TESTING CALLBACK");
             let addr = String::from("127.0.0.1:2009");
             let raft_service = RaftService::new(Options {
@@ -1564,15 +1573,16 @@ mod test {
                 address: addr.clone(),
                 service_id: DEFAULT_SERVICE_ID,
             });
+            let sm = SM { shots: 10 };
             let server = Server::new(&addr);
-            let sm_id = SM.id();
+            let sm_id = sm.id();
             server
                 .register_service(DEFAULT_SERVICE_ID, &raft_service)
                 .await;
             Server::listen_and_resume(&server).await;
             RaftService::start(&raft_service).await;
             raft_service
-                .register_state_machine(Box::new(SM))
+                .register_state_machine(Box::new(sm))
                 .await;
             raft_service.bootstrap().await;
     
@@ -1583,6 +1593,7 @@ mod test {
                 .unwrap();
             let sm_client = client::SMClient::new(sm_id, &raft_client);
             assert_eq!(sm_client.answer_to_the_universe(&"Alice".to_string()).await.unwrap(), "Alice, the answer is 42");
+            assert_eq!(sm_client.take_a_shot(&2).await.unwrap(), 8);
         }
     }
 }
