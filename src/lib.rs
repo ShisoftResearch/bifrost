@@ -7,11 +7,11 @@
 #![feature(proc_macro_hygiene)]
 #![feature(trait_alias)]
 
-#[cfg(disable_shortcut)]
+// #[cfg(disable_shortcut)]
 pub static DISABLE_SHORTCUT: bool = true;
 
-#[cfg(not(disable_shortcut))]
-pub static DISABLE_SHORTCUT: bool = false;
+// #[cfg(not(disable_shortcut))]
+// pub static DISABLE_SHORTCUT: bool = false;
 
 #[macro_use]
 pub mod utils;

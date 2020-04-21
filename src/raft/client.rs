@@ -88,6 +88,7 @@ impl RaftClient {
         &'a self,
         servers: &Vec<String>,
     ) -> (Option<ClientClusterInfo>, RwLockWriteGuard<'a, Members>) {
+        debug!("Getting server info for {:?}", servers);
         let mut members = self.members.write().await;
         for server_addr in servers {
             let id = hash_str(server_addr);
@@ -98,7 +99,8 @@ impl RaftClient {
                             .clients
                             .insert(id, AsyncServiceClient::new(self.service_id, &client));
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        warn!("Cannot find server info from {}, {}", server_addr, e);
                         continue;
                     }
                 }
@@ -115,6 +117,7 @@ impl RaftClient {
                 }
             }
         }
+        warn!("Cannot find anything useful from list: {:?}", servers);
         return (None, members);
     }
 
@@ -150,7 +153,10 @@ impl RaftClient {
                 self.leader_id.store(info.leader_id, ORDERING);
                 Ok(())
             }
-            None => Err(ClientError::ServerUnreachable),
+            None => {
+                debug!("Cannot update info, cannot get cluster info");
+                Err(ClientError::ServerUnreachable)
+            },
         }
     }
 
