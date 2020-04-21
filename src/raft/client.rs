@@ -121,7 +121,7 @@ impl RaftClient {
                             return (Some(info), members);
                         } else {
                             debug!("Discovered zero leader id from {}", server_addr);
-                            continue;
+                            found_zero_leader = true;
                         }
                     },
                     Err(e) => {
