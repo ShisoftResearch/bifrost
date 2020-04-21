@@ -377,7 +377,13 @@ impl RaftClient {
                     },
                     Err(e) => {
                         debug!("Got unknown error on query: {:?}", e);
-                        return Err(ExecError::Unknown)
+                        if depth >= num_members {
+                            return Err(ExecError::Unknown)
+                        } else {
+                            debug_assert!("Retry query");
+                            depth += 1;
+                            continue;
+                        }
                     },
                 }
             } else {
