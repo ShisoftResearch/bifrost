@@ -2,8 +2,7 @@
 pub mod proto;
 
 use crate::tcp::client::Client;
-use crate::utils::mutex::Mutex;
-use crate::utils::rwlock::RwLock;
+use async_std::sync::*;
 use crate::{tcp, DISABLE_SHORTCUT};
 use bifrost_hasher::hash_str;
 use byteorder::{ByteOrder, LittleEndian};

@@ -4,8 +4,7 @@ use self::state_machine::master::{ExecError, ExecResult, MasterStateMachine, Sub
 use self::state_machine::OpType;
 use crate::raft::client::RaftClient;
 use crate::raft::state_machine::StateMachineCtl;
-use crate::utils::mutex::*;
-use crate::utils::rwlock::*;
+use async_std::sync::*;
 use crate::utils::time::get_time;
 use async_std::future::timeout as future_timeout;
 use bifrost_hasher::hash_str;
@@ -37,17 +36,13 @@ pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_RAFT_DEFAULT_SERVICE) a
 const MAX_LOG_CAPACITY: usize = 10;
 const THREAD_POOL_SIZE: usize = 10;
 
-def_bindings! {
-    bind val IS_LEADER: bool = false;
-}
-
 pub trait RaftMsg<R>: Send + Sync {
     fn encode(self) -> (u64, OpType, Vec<u8>);
     fn decode_return(data: &Vec<u8>) -> R;
 }
 
-const CHECKER_MS: i64 = 100;
-const HEARTBEAT_MS: i64 = 500;
+const CHECKER_MS: i64 = 150;
+const HEARTBEAT_MS: i64 = 600;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LogEntry {
@@ -239,9 +234,7 @@ async fn commit_command<'a>(
     meta: &'a RwLockWriteGuard<'a, RaftMeta>,
     entry: &'a LogEntry,
 ) -> ExecResult {
-    with_bindings!(IS_LEADER: is_leader(meta) => {
-        meta.state_machine.write().await.commit_cmd(&entry).await
-    })
+    meta.state_machine.write().await.commit_cmd(&entry).await
 }
 
 fn is_leader(meta: &RwLockWriteGuard<RaftMeta>) -> bool {
@@ -436,6 +429,7 @@ impl RaftService {
             let members = client.execute(CONFIG_SM_ID, member_address::new()).await;
             debug!("Updating local meta by acquiring lock: {}", self.id);
             let mut meta = self.write_meta().await;
+            debug!("Local meta lock acquired: {}", self.id);
             if let Ok(members) = members {
                 debug!("We have following members for {}: {:?}", self.id, members);
                 for member in members {
@@ -574,11 +568,7 @@ impl RaftService {
         }
     }
     async fn write_meta<'a>(&'a self) -> RwLockWriteGuard<'a, RaftMeta> {
-        //        let t = get_time();
-        let lock_mon = self.meta.write();
-        //        let acq_time = get_time() - t;
-        //        println!("Meta write locked acquired for {}ms for {}, leader {}", acq_time, self.id, lock_mon.leader_id);
-        lock_mon.await
+        self.meta.write().await
     }
 
     pub async fn read_meta(&self) -> RwLockReadGuard<'_, RaftMeta> {

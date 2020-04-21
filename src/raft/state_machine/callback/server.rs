@@ -1,8 +1,8 @@
 use super::super::OpType;
 use super::*;
-use crate::raft::{RaftMsg, RaftService, IS_LEADER};
+use crate::raft::{RaftMsg, RaftService};
 use crate::rpc;
-use crate::utils::rwlock::RwLock;
+use async_std::sync::*;
 use bifrost_hasher::{hash_bytes, hash_str};
 use futures::stream::FuturesUnordered;
 use serde;
@@ -157,9 +157,10 @@ impl SMCallback {
         R: serde::Serialize + Send + Sync + Clone + Any + Unpin + 'static,
         M: RaftMsg<R> + 'static,
     {
-        if !IS_LEADER.get() {
-            return Err(NotifyError::IsNotLeader);
-        }
+        unimplemented!("Find a way to check is leader");
+        // if !IS_LEADER.get() {
+        //     return Err(NotifyError::IsNotLeader);
+        // }
         let (fn_id, op_type, pattern_data) = msg.encode();
         return match op_type {
             OpType::SUBSCRIBE => {

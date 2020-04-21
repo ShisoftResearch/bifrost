@@ -1,5 +1,5 @@
 use crate::tcp::server::{TcpReq, TcpRes};
-use crate::utils::rwlock::*;
+use async_std::sync::*;
 use bifrost_hasher::hash_str;
 use bytes::BytesMut;
 use std::collections::BTreeMap;

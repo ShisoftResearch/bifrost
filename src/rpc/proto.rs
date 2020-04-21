@@ -102,8 +102,8 @@ macro_rules! service {
 
         lazy_static! {
             pub static ref RPC_SVRS:
-            crate::utils::rwlock::RwLock<::std::collections::BTreeMap<(u64, u64), Arc<dyn Service>>>
-            = crate::utils::rwlock::RwLock::new(::std::collections::BTreeMap::new());
+            async_std::sync::RwLock<::std::collections::BTreeMap<(u64, u64), Arc<dyn Service>>>
+            = async_std::sync::RwLock::new(::std::collections::BTreeMap::new());
         }
 
         pub trait Service : RPCService {

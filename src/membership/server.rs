@@ -6,7 +6,7 @@ use crate::raft::state_machine::callback::server::{notify as cb_notify, SMCallba
 use crate::raft::state_machine::StateMachineCtl;
 use crate::raft::{LogEntry, RaftMsg, RaftService, Service as raft_svr_trait};
 use crate::rpc::Server;
-use crate::utils::rwlock::*;
+use async_std::sync::*;
 use crate::utils::time;
 use bifrost_hasher::hash_str;
 use futures::prelude::future::*;
