@@ -93,6 +93,7 @@ impl RaftClient {
         let mut members = self.members.write().await;
         let mut attempt_remains: i32 = 10;
         loop {
+            let mut found_zero_leader = true;
             for server_addr in servers {
                 let id = hash_str(server_addr);
                 if !members.clients.contains_key(&id) {
@@ -118,27 +119,29 @@ impl RaftClient {
                     Ok(info) => {
                         if info.leader_id != 0 {
                             return (Some(info), members);
-                        } else if attempt_remains > 0 {
-                            debug!("Discovered zero leader id from {}, retry...{}", server_addr, attempt_remains);
-                            // We found an uninitialized node, should try again
-                            // Random sleep
-
-                            let delay_sec = {
-                                let mut rng = rand::thread_rng();
-                                rng.gen_range(1, 10)
-                            };
-                            delay_for(Duration::from_secs(delay_sec)).await;
-                            attempt_remains -= 1;
-                            continue;
                         } else {
-                            debug!("Continuously getting zero leader id from {}, give up", server_addr);
-                            break;
+                            debug!("Discovered zero leader id from {}", server_addr);
+                            continue;
                         }
                     },
                     Err(e) => {
                         debug!("Error on getting cluster info from {}, {:?}", server_addr, e);
                     }
                 }
+            }
+            if found_zero_leader && attempt_remains > 0 {
+                // We found an uninitialized node, should try again
+                // Random sleep
+                let delay_sec = {
+                    let mut rng = rand::thread_rng();
+                    rng.gen_range(1, 10)
+                };
+                delay_for(Duration::from_secs(delay_sec)).await;
+                attempt_remains -= 1;
+                continue;
+            } else if found_zero_leader && attempt_remains <= 0 {
+                debug!("Continuously getting zero leader id, give up");
+                break;
             }
         }
         warn!("Cannot find anything useful from list: {:?}", servers);
