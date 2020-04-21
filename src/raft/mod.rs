@@ -820,7 +820,12 @@ impl RaftService {
             let (follower_last_log_id, follower_last_log_term) = {
                 // extract follower last log info
                 // assumed log ids are sequence of integers
-                let follower_last_log_id = follower.next_index - 1;
+                let follower_last_log_id = if follower.next_index == 0 {
+                    debug_assert!(logs.is_empty());
+                    0
+                } else {
+                    follower.next_index - 1
+                };
                 if follower_last_log_id == 0 || logs.is_empty() {
                     (0, 0) // 0 represents there is no logs in the leader
                 } else {
