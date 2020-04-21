@@ -119,7 +119,7 @@ fn gen_timeout() -> i64 {
     gen_rand(10000, 15000)
 }
 
-struct qFollowerStatus {
+struct FollowerStatus {
     next_index: u64,
     match_index: u64,
 }

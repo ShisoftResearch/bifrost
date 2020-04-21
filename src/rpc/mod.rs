@@ -344,8 +344,16 @@ mod test {
 
         use super::*;
 
+        #[derive(Serialize, Deserialize)]
+        struct ComplexAnswer{
+            name: String,
+            id: u64,
+            req: Option<String>
+        }
+
         service! {
             rpc query_server_id() -> u64;
+            rpc query_answer(req: Option<String>) -> ComplexAnswer;
         }
 
         struct IdServer {
@@ -354,6 +362,14 @@ mod test {
         impl Service for IdServer {
             fn query_server_id(&self) -> BoxFuture<u64> {
                 future::ready(self.id).boxed()
+            }
+
+            fn query_answer(&self, req: Option<String>) -> BoxFuture<ComplexAnswer> {
+                future::ready(ComplexAnswer {
+                    name: format!("Server for {:?}", req),
+                    id: self.id,
+                    req
+                }).boxed()
             }
         }
         dispatch_rpc_service_functions!(IdServer);
@@ -386,6 +402,9 @@ mod test {
                 let id_res = service_client.query_server_id().await;
                 let id_un = id_res.unwrap();
                 assert_eq!(id_un, id);
+                let user_str = format!("User {}", id);
+                let complex = service_client.query_answer(Some(user_str.to_string())).await.unwrap();
+                assert_eq!(complex.req, Some(user_str));
                 id += 1;
             }
         }
