@@ -875,7 +875,11 @@ impl RaftService {
                             "Log mismatch in follower, {}, member id {}",
                             follower.next_index, member_id
                         );
-                        follower.next_index -= 1;
+                        if follower.next_index > 0 {
+                            follower.next_index -= 1;
+                        } else {
+                            debug!("Log mismatching index is zero");
+                        }
                     }
                     AppendEntriesResult::TermOut(_actual_leader_id) => {
                         break;
