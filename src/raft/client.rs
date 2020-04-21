@@ -375,7 +375,10 @@ impl RaftClient {
                             return Ok(data);
                         }
                     },
-                    _ => return Err(ExecError::Unknown),
+                    Err(e) => {
+                        debug!("Got unknown error on query: {:?}", e);
+                        return Err(ExecError::Unknown)
+                    },
                 }
             } else {
                 return Err(ExecError::ServersUnreachable);
