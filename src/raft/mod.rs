@@ -661,6 +661,7 @@ impl RaftService {
     }
 
     async fn become_leader(&self, meta: &mut RwLockWriteGuard<'_, RaftMeta>, last_log_id: u64) {
+        debug!("Server {} become leader, term {}", self.options.service_id, meta.term);
         let leader_meta = RwLock::new(LeaderMeta::new());
         {
             let mut guard = leader_meta.write().await;
