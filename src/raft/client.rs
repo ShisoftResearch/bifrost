@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::iter::FromIterator;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tokio::time::delay_for;
 
 const ORDERING: Ordering = Ordering::Relaxed;
 pub type Client = Arc<AsyncServiceClient>;
@@ -90,37 +91,53 @@ impl RaftClient {
     ) -> (Option<ClientClusterInfo>, RwLockWriteGuard<'a, Members>) {
         debug!("Getting server info for {:?}", servers);
         let mut members = self.members.write().await;
-        for server_addr in servers {
-            let id = hash_str(server_addr);
-            if !members.clients.contains_key(&id) {
-                match rpc::DEFAULT_CLIENT_POOL.get(server_addr).await {
-                    Ok(client) => {
-                        members
-                            .clients
-                            .insert(id, AsyncServiceClient::new(self.service_id, &client));
-                    }
-                    Err(e) => {
-                        warn!("Cannot find server info from {}, {}", server_addr, e);
-                        continue;
+        let mut attempt_remains: i32 = 10;
+        loop {
+            for server_addr in servers {
+                let id = hash_str(server_addr);
+                if !members.clients.contains_key(&id) {
+                    match rpc::DEFAULT_CLIENT_POOL.get(server_addr).await {
+                        Ok(client) => {
+                            members
+                                .clients
+                                .insert(id, AsyncServiceClient::new(self.service_id, &client));
+                        }
+                        Err(e) => {
+                            warn!("Cannot find server info from {}, {}", server_addr, e);
+                            continue;
+                        }
                     }
                 }
-            }
-            let info_res = members
-                .clients
-                .get(&id)
-                .unwrap()
-                .c_server_cluster_info()
-                .await;
-            match info_res {
-                Ok(info) => {
-                    if info.leader_id != 0 {
-                        return (Some(info), members);
-                    } else {
-                        debug!("Discovered zero leader id from {}", server_addr);
+                let info_res = members
+                    .clients
+                    .get(&id)
+                    .unwrap()
+                    .c_server_cluster_info()
+                    .await;
+                match info_res {
+                    Ok(info) => {
+                        if info.leader_id != 0 {
+                            return (Some(info), members);
+                        } else if attempt_remains > 0 {
+                            debug!("Discovered zero leader id from {}, retry...{}", server_addr, attempt_remains);
+                            // We found an uninitialized node, should try again
+                            // Random sleep
+
+                            let delay_sec = {
+                                let mut rng = rand::thread_rng();
+                                rng.gen_range(1, 10)
+                            };
+                            delay_for(Duration::from_secs(delay_sec)).await;
+                            attempt_remains -= 1;
+                            continue;
+                        } else {
+                            debug!("Continuously getting zero leader id from {}, give up", server_addr);
+                            break;
+                        }
+                    },
+                    Err(e) => {
+                        debug!("Error on getting cluster info from {}, {:?}", server_addr, e);
                     }
-                },
-                Err(e) => {
-                    debug!("Error on getting cluster info from {}, {:?}", server_addr, e);
                 }
             }
         }
