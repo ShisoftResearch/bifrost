@@ -358,6 +358,7 @@ impl RaftClient {
                 match res {
                     Ok(res) => match res {
                         ClientQryResponse::LeftBehind => {
+                            debug!("Found left behind record...{}", depth);
                             if depth >= num_members {
                                 return Err(ExecError::TooManyRetry);
                             } else {
@@ -380,7 +381,7 @@ impl RaftClient {
                         if depth >= num_members {
                             return Err(ExecError::Unknown)
                         } else {
-                            debug_assert!("Retry query");
+                            debug!("Retry query...{}", depth);
                             depth += 1;
                             continue;
                         }
