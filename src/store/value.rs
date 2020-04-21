@@ -37,7 +37,7 @@ macro_rules! def_store_value {
                     Some($crate::utils::bincode::serialize(&self.val))
                 }
                 fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
-                    self.val = $crate::utils::bincode::deserialize(&data);
+                    self.val = $crate::utils::bincode::deserialize(&data).unwrap();
                     future::ready(()).boxed()
                 }
                 fn id(&self) -> u64 {
