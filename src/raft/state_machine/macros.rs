@@ -214,7 +214,7 @@ macro_rules! raft_state_machine {
                             raft_dispatch_cmd!($smt $fn_name self data( $( $arg : $in_ ),* ))
                         }),*
                         _ => {
-                            debug!("Undefined function id: {}", fn_id);
+                            debug!("Undefined function id: {}. We have {}", fn_id, concat!(stringify!($($fn_name),*)));
                             None
                         }
                     }
