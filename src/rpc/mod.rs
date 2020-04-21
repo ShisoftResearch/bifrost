@@ -30,6 +30,7 @@ lazy_static! {
 pub enum RPCRequestError {
     FunctionIdNotFound,
     ServiceIdNotFound,
+    BadRequest,
     Other,
 }
 
@@ -37,6 +38,7 @@ pub enum RPCRequestError {
 pub enum RPCError {
     IOError(io::Error),
     RequestError(RPCRequestError),
+    CannotDecode
 }
 
 pub trait RPCService: Sync + Send {

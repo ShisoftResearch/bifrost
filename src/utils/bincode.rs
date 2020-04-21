@@ -11,12 +11,9 @@ where
     }
 }
 
-pub fn deserialize<'a, T>(data: &'a [u8]) -> T
+pub fn deserialize<'a, T>(data: &'a [u8]) -> Option<T>
 where
     T: serde::Deserialize<'a>,
 {
-    match bincode::deserialize(data) {
-        Ok(data) => data,
-        Err(e) => panic!("Cannot deserialize: {:?}, data len: {}", e, data.len()),
-    }
+    bincode::deserialize(data).ok()
 }
