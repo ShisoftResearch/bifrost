@@ -132,6 +132,7 @@ impl RaftClient {
             if found_zero_leader && attempt_remains > 0 {
                 // We found an uninitialized node, should try again
                 // Random sleep
+                debug!("This fail attempt have zero leader id, retry...{}", attempt_remains);
                 let delay_sec = {
                     let mut rng = rand::thread_rng();
                     rng.gen_range(1, 10)
