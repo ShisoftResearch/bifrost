@@ -1289,6 +1289,8 @@ mod test {
     use crate::raft::{Options, RaftService, Storage, DEFAULT_SERVICE_ID};
     use crate::rpc::Server;
     use crate::utils::time::async_wait_secs;
+    use futures::FutureExt;
+    use crate::raft::state_machine::StateMachineCtl;
 
     #[tokio::test(threaded_scheduler)]
     async fn startup() {
@@ -1524,5 +1526,63 @@ mod test {
         assert_eq!(service3.leader_id().await, service1.id);
         assert_eq!(service4.leader_id().await, service1.id);
         assert_eq!(service5.leader_id().await, service1.id);
+    }
+
+    mod state_machine {
+        use super::*;
+        use crate::raft::client::RaftClient;
+
+        raft_state_machine! {
+            def qry answer_to_the_universe(name: String) -> String;
+        }
+    
+        #[tokio::test(threaded_scheduler)]
+        async fn query() {
+            env_logger::try_init();
+            struct SM;
+            impl StateMachineCmds for SM {
+                fn answer_to_the_universe<'a>(&'a self, name: String) -> BoxFuture<'_, String> {
+                    future::ready(format!("{}, the answer is 42", name)).boxed()
+                }
+            }
+            impl StateMachineCtl for SM {
+                raft_sm_complete!();
+                fn id(&self) -> u64 {
+                    15
+                }
+                fn snapshot(&self) -> Option<Vec<u8>> {
+                    None
+                }
+                fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
+                    future::ready(()).boxed()
+                }
+            }
+            println!("TESTING CALLBACK");
+            let addr = String::from("127.0.0.1:2009");
+            let raft_service = RaftService::new(Options {
+                storage: Storage::default(),
+                address: addr.clone(),
+                service_id: DEFAULT_SERVICE_ID,
+            });
+            let server = Server::new(&addr);
+            let sm_id = SM.id();
+            server
+                .register_service(DEFAULT_SERVICE_ID, &raft_service)
+                .await;
+            Server::listen_and_resume(&server).await;
+            RaftService::start(&raft_service).await;
+            raft_service
+                .register_state_machine(Box::new(SM))
+                .await;
+            raft_service.bootstrap().await;
+    
+            async_wait_secs().await;
+    
+            let raft_client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID)
+                .await
+                .unwrap();
+            let sm_client = client::SMClient::new(sm_id, &raft_client);
+            assert_eq!(sm_client.answer_to_the_universe(&"Alice".to_string()).await.unwrap(), "Alice, the answer is 42");
+        }
     }
 }
