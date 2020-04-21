@@ -119,7 +119,7 @@ fn gen_timeout() -> i64 {
     gen_rand(10000, 15000)
 }
 
-struct FollowerStatus {
+struct qFollowerStatus {
     next_index: u64,
     match_index: u64,
 }
@@ -872,8 +872,8 @@ impl RaftService {
                     }
                     AppendEntriesResult::LogMismatch => {
                         debug!(
-                            "Log mismatch in follower, {}, member id {}",
-                            follower.next_index, member_id
+                            "Log mismatch in follower {}, index {}",
+                            member_id, follower.next_index
                         );
                         if follower.next_index > 0 {
                             follower.next_index -= 1;
@@ -1531,6 +1531,9 @@ mod test {
     mod state_machine {
         use super::*;
         use crate::raft::client::RaftClient;
+        use futures::stream::FuturesUnordered;
+        use std::time::Duration;
+        use crate::utils::time::async_wait;
 
         raft_state_machine! {
             def qry answer_to_the_universe(name: String) -> String;
@@ -1595,5 +1598,53 @@ mod test {
             assert_eq!(sm_client.answer_to_the_universe(&"Alice".to_string()).await.unwrap(), "Alice, the answer is 42");
             assert_eq!(sm_client.take_a_shot(&2).await.unwrap(), 8);
         }
+
+        #[tokio::test(threaded_scheduler)]
+        async fn multi_server_command() {
+            env_logger::try_init();
+            // 5 servers
+            let addresses: Vec<_> = vec![
+                "127.0.0.1:2010",
+                "127.0.0.1:2011",
+                "127.0.0.1:2012",
+                "127.0.0.1:2013",
+                "127.0.0.1:2014",
+            ]
+            .into_iter()
+            .map(|addr| addr.to_string())
+            .collect();
+            let raft_services = addresses
+                .iter()
+                .map(|addr| {
+                    let addr = addr.clone();
+                    async move {
+                        let raft_service = RaftService::new(Options {
+                            storage: Storage::default(),
+                            address: addr.clone(),
+                            service_id: DEFAULT_SERVICE_ID,
+                        });
+                        let sm = SM { shots: 10 };
+                        let server = Server::new(&addr);
+                        server
+                            .register_service(DEFAULT_SERVICE_ID, &raft_service)
+                            .await;
+                        Server::listen_and_resume(&server).await;
+                        RaftService::start(&raft_service).await;
+                        raft_service
+                            .register_state_machine(Box::new(sm))
+                            .await;
+                        raft_service
+                    }
+                })
+                .collect::<FuturesUnordered<_>>()
+                .collect::<Vec<_>>()
+                .await;
+            raft_services[0].bootstrap().await;
+            for i in 1..raft_services.len() {
+                raft_services[i].join(&addresses).await.unwrap();
+            }
+            info!("Waiting cluster to be stable");
+            async_wait(Duration::from_secs(5)).await;
+        } 
     }
 }
