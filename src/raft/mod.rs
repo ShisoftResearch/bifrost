@@ -41,8 +41,8 @@ pub trait RaftMsg<R>: Send + Sync {
     fn decode_return(data: &Vec<u8>) -> R;
 }
 
-const CHECKER_MS: i64 = 150;
-const HEARTBEAT_MS: i64 = 600;
+const CHECKER_MS: i64 = 100;
+const HEARTBEAT_MS: i64 = 500;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LogEntry {
