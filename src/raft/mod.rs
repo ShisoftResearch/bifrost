@@ -1534,9 +1534,11 @@ mod test {
         use futures::stream::FuturesUnordered;
         use std::time::Duration;
         use crate::utils::time::async_wait;
+        use std::sync::Arc;
 
         raft_state_machine! {
             def qry answer_to_the_universe(name: String) -> String;
+            def qry get_shot() -> i32;
             def cmd take_a_shot(num: i32) -> i32;
         }
 
@@ -1550,6 +1552,10 @@ mod test {
 
             fn take_a_shot(&mut self, num: i32) -> BoxFuture<i32> {
                 self.shots -= num;
+                info!("Shot...{}...now...{}", num, self.shots);
+                future::ready(self.shots).boxed()
+            }
+            fn get_shot(&self) -> BoxFuture<i32> {
                 future::ready(self.shots).boxed()
             }
         }
@@ -1644,6 +1650,20 @@ mod test {
                 raft_services[i].join(&addresses).await.unwrap();
             }
             info!("Waiting cluster to be stable");
+            async_wait(Duration::from_secs(5)).await;
+            let raft_client = RaftClient::new(&addresses, DEFAULT_SERVICE_ID)
+                .await
+                .unwrap();
+            let sm_client = Arc::new(client::SMClient::new(15, &raft_client));
+            info!("Mass command");
+            for _ in 0..100 {
+                sm_client.take_a_shot(&-1).await.unwrap();
+            }
+            async_wait(Duration::from_secs(5)).await;
+            info!("Mass query");
+            for i in 0..100 {
+                assert_eq!(sm_client.get_shot().await.unwrap(), 110, "fail at test {}", i);
+            }
             async_wait(Duration::from_secs(5)).await;
         } 
     }

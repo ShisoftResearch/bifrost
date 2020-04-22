@@ -346,7 +346,7 @@ mod test {
         use super::*;
 
         #[derive(Serialize, Deserialize, Clone)]
-        struct ComplexAnswer{
+        pub struct ComplexAnswer{
             name: String,
             id: u64,
             req: Option<String>

@@ -15,5 +15,11 @@ pub fn deserialize<'a, T>(data: &'a [u8]) -> Option<T>
 where
     T: serde::Deserialize<'a>,
 {
-    bincode::deserialize(data).ok()
+    match bincode::deserialize(data) {
+        Ok(obj) => Some(obj),
+        Err(e) => {
+            warn!("Error on decoding data for type '{}'", unsafe { std::intrinsics::type_name::<T>() });
+            None
+        }
+    }
 }

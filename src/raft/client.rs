@@ -373,6 +373,9 @@ impl RaftClient {
                         } => {
                             swap_when_greater(&self.last_log_id, last_log_id);
                             swap_when_greater(&self.last_log_term, last_log_term);
+                            if depth > 0 {
+                                warn!("Retry successful...{}", depth);
+                            }
                             return Ok(data);
                         }
                     },
