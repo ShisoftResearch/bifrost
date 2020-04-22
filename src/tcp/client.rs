@@ -82,9 +82,8 @@ impl Client {
                 senders.insert(msg_id, tx);
                 rx
             };
-            let rec = tokio::spawn(async { rx.await.unwrap() });
-            let send_result = transport.send(frame.freeze()).await;
-            Ok(rec.await.unwrap())
+            transport.send(frame.freeze()).await?;
+            Ok(rx.await.unwrap())
         } else {
             Ok(shortcut::call(self.server_id, msg).await?)
         }
