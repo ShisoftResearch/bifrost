@@ -1,7 +1,7 @@
 use super::STANDALONE_ADDRESS;
 use crate::tcp::shortcut;
 use crate::tcp::shortcut::call;
-use bytes::BytesMut;
+use bytes::{BytesMut, BufMut, Bytes, Buf};
 use futures::future::BoxFuture;
 use futures::SinkExt;
 use std::error::Error;
@@ -38,21 +38,26 @@ impl Server {
                             let mut transport = Framed::new(socket, LengthDelimitedCodec::new());
                             while let Some(result) = transport.next().await {
                                 match result {
-                                    Ok(data) => {
-                                        let res = callback(data).await;
+                                    Ok(mut data) => {
+                                        let msg_id = data.get_u64_le();
+                                        let call_back_data = callback(data).await;
+                                        let mut res = BytesMut::with_capacity(8 + call_back_data.len());
+                                        // debug!("Received TCP message {}", msg_id);
+                                        res.put_u64_le(msg_id);
+                                        res.extend_from_slice(call_back_data.as_ref());
                                         if let Err(e) = transport.send(res.freeze()).await {
-                                            println!("Error on TCP callback {:?}", e);
+                                            error!("Error on TCP callback {:?}", e);
                                         }
                                     }
                                     Err(e) => {
-                                        println!("error on decoding from socket; error = {:?}", e);
+                                        error!("error on decoding from socket; error = {:?}", e);
                                     }
                                 }
                             }
                             // The connection will be closed at this point as `lines.next()` has returned `None`.
                         });
                     }
-                    Err(e) => println!("error accepting socket; error = {:?}", e),
+                    Err(e) => error!("error accepting socket; error = {:?}", e),
                 }
             }
         }

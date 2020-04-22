@@ -52,10 +52,10 @@ macro_rules! raft_fn_op_type {
 #[macro_export]
 macro_rules! raft_dispatch_fn {
     ($fn_name:ident $s: ident $d: ident ( $( $arg:ident : $in_:ty ),* )) => {{
-        let decoded: ($($in_,)*) = $crate::utils::bincode::deserialize($d).unwrap();
+        let decoded: ($($in_,)*) = $crate::utils::serde::deserialize($d).unwrap();
         let ($($arg,)*) = decoded;
         let f_result = $s.$fn_name($($arg),*).await;
-        Some($crate::utils::bincode::serialize(&f_result))
+        Some($crate::utils::serde::serialize(&f_result))
     }};
 }
 
@@ -177,14 +177,14 @@ macro_rules! raft_state_machine {
                         )
                     }
                     fn decode_return(data: &Vec<u8>) -> $out {
-                        $crate::utils::bincode::deserialize(data).unwrap()
+                        $crate::utils::serde::deserialize(data).unwrap()
                     }
                 }
                 impl $fn_name {
                     pub fn new($($arg:&$in_),*) -> $fn_name {
                         let req_data = ($($arg,)*);
                         $fn_name {
-                            data: $crate::utils::bincode::serialize(&req_data)
+                            data: $crate::utils::serde::serialize(&req_data)
                         }
                     }
                 }

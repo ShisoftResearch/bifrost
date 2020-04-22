@@ -81,7 +81,7 @@ fn decode_res(res: io::Result<BytesMut>) -> Result<BytesMut, RPCError> {
         Ok(mut res) => {
             if res[0] == 0u8 {
                 res.advance(1);
-                Ok(res)
+                Ok(res.split())
             } else {
                 match res[0] {
                     1u8 => Err(RPCError::RequestError(RPCRequestError::FunctionIdNotFound)),
@@ -176,9 +176,9 @@ pub struct RPCClient {
 }
 
 pub fn prepend_u64(num: u64, data: BytesMut) -> BytesMut {
-    let mut bytes = BytesMut::with_capacity(8);
+    let mut bytes = BytesMut::with_capacity(8 + data.len());
     bytes.put_u64_le(num);
-    bytes.unsplit(data);
+    bytes.extend_from_slice(data.as_ref());
     bytes
 }
 
@@ -189,8 +189,9 @@ impl RPCClient {
         data: BytesMut,
     ) -> Result<BytesMut, RPCError> {
         let mut client = self.client.lock().await;
-        let bytes = prepend_u64(svr_id, data);
-        decode_res(Client::send_msg(Pin::new(&mut *client), bytes).await)
+        let payload = prepend_u64(svr_id, data);
+        let res = client.send_msg(payload).await;
+        decode_res(res)
     }
     pub async fn new_async(addr: &String) -> io::Result<Arc<RPCClient>> {
         let client = tcp::client::Client::connect(addr).await?;

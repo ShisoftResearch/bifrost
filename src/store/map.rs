@@ -106,10 +106,10 @@ macro_rules! def_store_hash_map {
             impl StateMachineCtl for Map {
                 raft_sm_complete!();
                 fn snapshot(&self) -> Option<Vec<u8>> {
-                    Some($crate::utils::bincode::serialize(&self.map))
+                    Some($crate::utils::serde::serialize(&self.map))
                 }
                 fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
-                    self.map = $crate::utils::bincode::deserialize(&data).unwrap();
+                    self.map = $crate::utils::serde::deserialize(&data).unwrap();
                     future::ready(()).boxed()
                 }
                 fn id(&self) -> u64 {

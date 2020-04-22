@@ -50,10 +50,10 @@ impl StateMachineCtl for Weights {
         self.id
     }
     fn snapshot(&self) -> Option<Vec<u8>> {
-        Some(bincode::serialize(&self.groups).unwrap())
+        Some(crate::utils::serde::serialize(&self.groups))
     }
     fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
-        self.groups = bincode::deserialize(data.as_slice()).unwrap();
+        self.groups = crate::utils::serde::deserialize(data.as_slice()).unwrap();
         future::ready(()).boxed()
     }
 }

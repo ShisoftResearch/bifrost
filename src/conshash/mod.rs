@@ -9,7 +9,7 @@ use crate::conshash::weights::DEFAULT_SERVICE_ID;
 use crate::membership::client::{Member, ObserverClient as MembershipClient};
 use crate::raft::client::{RaftClient, SubscriptionError, SubscriptionReceipt};
 use crate::raft::state_machine::master::ExecError;
-use crate::utils::bincode::serialize;
+use crate::utils::serde::serialize;
 use async_std::sync::*;
 use bifrost_hasher::{hash_bytes, hash_str};
 

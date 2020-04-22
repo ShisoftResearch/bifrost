@@ -267,8 +267,8 @@ impl RaftService {
             let mut log_data = vec![];
             storage.snapshot.read_to_end(&mut snapshot_data).unwrap();
             storage.logs.read_to_end(&mut log_data).unwrap();
-            let snapshot: SnapshotEntity = bincode::deserialize(snapshot_data.as_slice()).unwrap();
-            logs = bincode::deserialize(log_data.as_slice()).unwrap();
+            let snapshot: SnapshotEntity = crate::utils::serde::deserialize(snapshot_data.as_slice()).unwrap();
+            logs = crate::utils::serde::deserialize(log_data.as_slice()).unwrap();
             term = snapshot.term;
             commit_index = snapshot.commit_index;
             last_applied = snapshot.last_applied;
@@ -963,13 +963,13 @@ impl RaftService {
                 };
                 storage
                     .snapshot
-                    .write_all(bincode::serialize(&snapshot).unwrap().as_slice())?;
+                    .write_all(crate::utils::serde::serialize(&snapshot).as_slice())?;
                 storage.snapshot.sync_all().unwrap();
             }
         }
         if let Some(ref storage) = meta.storage {
             let mut storage = storage.write().await;
-            let logs_data = bincode::serialize(&*meta.logs.read().await).unwrap();
+            let logs_data = crate::utils::serde::serialize(&*meta.logs.read().await);
             // TODO: async file system calls
             storage.logs.write_all(logs_data.as_slice())?;
             storage.logs.sync_all().unwrap();

@@ -34,10 +34,10 @@ macro_rules! def_store_value {
             impl StateMachineCtl for Value {
                 raft_sm_complete!();
                 fn snapshot(&self) -> Option<Vec<u8>> {
-                    Some($crate::utils::bincode::serialize(&self.val))
+                    Some($crate::utils::serde::serialize(&self.val))
                 }
                 fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
-                    self.val = $crate::utils::bincode::deserialize(&data).unwrap();
+                    self.val = $crate::utils::serde::deserialize(&data).unwrap();
                     future::ready(()).boxed()
                 }
                 fn id(&self) -> u64 {

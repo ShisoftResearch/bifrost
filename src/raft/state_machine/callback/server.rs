@@ -189,7 +189,7 @@ impl SMCallback {
                                     if let Some(subscriber) =
                                         svr_subs.subscribers.get(&subscriber_id)
                                     {
-                                        let data = bincode::serialize(&*message).unwrap();
+                                        let data = crate::utils::serde::serialize(&*message);
                                         let client = &subscriber.client;
                                         Ok(client.notify(key, data).await)
                                     } else {

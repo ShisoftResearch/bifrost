@@ -108,10 +108,10 @@ impl StateMachineCtl for Configures {
         for (_, member) in self.members.iter() {
             snapshot.members.insert(member.address.clone());
         }
-        Some(bincode::serialize(&snapshot).unwrap())
+        Some(crate::utils::serde::serialize(&snapshot))
     }
     fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
-        let snapshot: ConfigSnapshot = bincode::deserialize(&data).unwrap();
+        let snapshot: ConfigSnapshot = crate::utils::serde::deserialize(&data).unwrap();
         self.recover_members(snapshot.members).boxed()
     }
 }

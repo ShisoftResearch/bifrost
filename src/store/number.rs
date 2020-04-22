@@ -121,10 +121,10 @@ macro_rules! def_store_number {
             impl StateMachineCtl for Number {
                 raft_sm_complete!();
                 fn snapshot(&self) -> Option<Vec<u8>> {
-                    Some($crate::utils::bincode::serialize(&self.num))
+                    Some($crate::utils::serde::serialize(&self.num))
                 }
                 fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
-                    self.num = $crate::utils::bincode::deserialize(&data).unwrap();
+                    self.num = $crate::utils::serde::deserialize(&data).unwrap();
                     future::ready(()).boxed()
                 }
                 fn id(&self) -> u64 {

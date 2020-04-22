@@ -6,18 +6,26 @@ use crate::DISABLE_SHORTCUT;
 use bifrost_hasher::hash_str;
 
 use crate::tcp::server::{TcpReq, TcpRes};
-use bytes::BytesMut;
+use bytes::{BytesMut, BufMut, Bytes, Buf};
 use futures::SinkExt;
 use std::future::Future;
 use std::pin::Pin;
 use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::stream::{Stream, StreamExt};
 use tokio::time;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
+use tokio::sync::mpsc::*;
+use futures::prelude::*;
+use futures::stream::SplitSink;
+use std::collections::HashMap;
+use tokio::sync::mpsc;
 
 pub struct Client {
+    //client: Option<SplitSink<Bytes>>,
     client: Option<Framed<TcpStream, LengthDelimitedCodec>>,
+    msg_counter: u64,
+    token_rx: mpsc::Receiver<()>,
+    token_tx: mpsc::Sender<()>,
     pub server_id: u64,
 }
 
@@ -34,28 +42,47 @@ impl Client {
                         "STANDALONE server is not found",
                     ));
                 }
-                Some(time::timeout(timeout, TcpStream::connect(address)).await??)
+                let socket = time::timeout(timeout, TcpStream::connect(address)).await??;
+                Some(Framed::new(socket, LengthDelimitedCodec::new()))
             }
         };
+        let (mut token_tx, token_rx) = mpsc::channel(1);
+        token_tx.send(()).await;
         Ok(Client {
-            client: client.map(|socket| Framed::new(socket, LengthDelimitedCodec::new())),
+            client,
             server_id,
+            token_tx,
+            token_rx,
+            msg_counter: 0
         })
     }
     pub async fn connect(address: &String) -> io::Result<Self> {
         Client::connect_with_timeout(address, Duration::from_secs(5)).await
     }
-    pub async fn send_msg(mut self: Pin<&mut Self>, msg: TcpReq) -> io::Result<BytesMut> {
+    pub async fn send_msg(&mut self, msg: TcpReq) -> io::Result<BytesMut> {
         if let Some(ref mut transport) = self.client {
-            transport.send(msg.freeze()).await?;
+            self.token_rx.recv().await;
+            let mut frame = BytesMut::with_capacity(8 + msg.len());
+            let msg_id = self.msg_counter;
+            frame.put_u64_le(msg_id);
+            frame.extend_from_slice(msg.as_ref());
+            self.msg_counter += 1;
+            transport.send(frame.freeze()).await?;
             while let Some(res) = transport.next().await {
-                return res.map_err(|e| {
-                    io::Error::new(
+                self.token_tx.send(()).await;
+                match res {
+                    Err(e) => return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("Cannot decode data: {:?}", e),
-                    )
-                });
+                    )),
+                    Ok(mut data) => {
+                        let res_msg_id = data.get_u64_le();
+                        assert_eq!(res_msg_id, msg_id);
+                        return Ok(data)
+                    }
+                }
             }
+            self.token_tx.send(()).await;
             Err(io::Error::new(io::ErrorKind::NotConnected, ""))
         } else {
             Ok(shortcut::call(self.server_id, msg).await?)

@@ -348,11 +348,13 @@ impl RaftClient {
             let members = self.members.read().await;
             let num_members = members.clients.len();
             if num_members >= 1 {
-                let res = members
+                let node_index = pos as usize % num_members;
+                let rpc_client = members
                     .clients
                     .values()
-                    .nth(pos as usize % num_members)
-                    .unwrap()
+                    .nth(node_index)
+                    .unwrap();
+                let res = rpc_client
                     .c_query(self.gen_log_entry(sm_id, fn_id, &data))
                     .await;
                 match res {
@@ -380,7 +382,7 @@ impl RaftClient {
                         }
                     },
                     Err(e) => {
-                        error!("Got unknown error on query: {:?}", e);
+                        error!("Got unknown error on query: {:?}, server {}", e, rpc_client.client.address);
                         if depth >= num_members {
                             return Err(ExecError::Unknown)
                         } else {
