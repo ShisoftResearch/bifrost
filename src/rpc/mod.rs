@@ -356,6 +356,7 @@ mod test {
             rpc query_server_id() -> u64;
             rpc query_answer(req: Option<String>) -> ComplexAnswer;
             rpc large_query(req: Option<String>) -> Vec<ComplexAnswer>;
+            rpc large_req(req: Vec<ComplexAnswer>, req2: Vec<ComplexAnswer>) -> Vec<ComplexAnswer>;
         }
 
         struct IdServer {
@@ -384,6 +385,11 @@ mod test {
                     })
                 };
                 future::ready(res).boxed()
+            }
+
+            fn large_req(&self, mut req: Vec<ComplexAnswer>, mut req2: Vec<ComplexAnswer>) -> BoxFuture<Vec<ComplexAnswer>> {
+                req.append(&mut req2);
+                future::ready(req).boxed()
             }
         }
         dispatch_rpc_service_functions!(IdServer);
@@ -421,6 +427,8 @@ mod test {
                 let large = service_client.large_query(Some(user_str.to_string())).await.unwrap();
                 assert_eq!(large.len(), 1024);
                 assert_eq!(complex.req, Some(user_str));
+                let large_req = service_client.large_req(large.clone(), large).await.unwrap();
+                assert_eq!(large_req.len(), 1024 * 2);
                 id += 1;
             }
         }
