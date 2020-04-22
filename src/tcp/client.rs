@@ -18,20 +18,21 @@ use tokio::sync::mpsc::*;
 use futures::prelude::*;
 use futures::stream::SplitSink;
 use std::collections::HashMap;
-use tokio::sync::mpsc;
+use parking_lot::Mutex as SyncMutex;
+use tokio::sync::oneshot;
 
 pub struct Client {
     //client: Option<SplitSink<Bytes>>,
-    client: Option<Framed<TcpStream, LengthDelimitedCodec>>,
+    client: Option<SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>>,
     msg_counter: u64,
-    token_rx: mpsc::Receiver<()>,
-    token_tx: mpsc::Sender<()>,
+    senders: Arc<SyncMutex<HashMap<u64, oneshot::Sender<BytesMut>>>>,
     pub server_id: u64,
 }
 
 impl Client {
     pub async fn connect_with_timeout(address: &String, timeout: Duration) -> io::Result<Self> {
         let server_id = hash_str(address);
+        let senders = Arc::new(SyncMutex::new(HashMap::new()));
         let client = {
             if !DISABLE_SHORTCUT && shortcut::is_local(server_id).await {
                 None
@@ -43,16 +44,25 @@ impl Client {
                     ));
                 }
                 let socket = time::timeout(timeout, TcpStream::connect(address)).await??;
-                Some(Framed::new(socket, LengthDelimitedCodec::new()))
+                let transport = Framed::new(socket, LengthDelimitedCodec::new());
+                let (writer, mut reader) = transport.split();
+                let cloned_senders = senders.clone();
+                tokio::spawn(async move {
+                    while let Some(res) = reader.next().await {
+                        if let Ok(mut data) = res {
+                            let res_msg_id = data.get_u64_le();
+                            let sender: oneshot::Sender<BytesMut> = cloned_senders.lock().remove(&res_msg_id).unwrap();
+                            sender.send(data).unwrap();
+                        }
+                    }
+                });
+                Some(writer)
             }
         };
-        let (mut token_tx, token_rx) = mpsc::channel(1);
-        token_tx.send(()).await;
         Ok(Client {
             client,
             server_id,
-            token_tx,
-            token_rx,
+            senders,
             msg_counter: 0
         })
     }
@@ -61,29 +71,20 @@ impl Client {
     }
     pub async fn send_msg(&mut self, msg: TcpReq) -> io::Result<BytesMut> {
         if let Some(ref mut transport) = self.client {
-            self.token_rx.recv().await;
             let mut frame = BytesMut::with_capacity(8 + msg.len());
-            let msg_id = self.msg_counter;
-            frame.put_u64_le(msg_id);
-            frame.extend_from_slice(msg.as_ref());
-            self.msg_counter += 1;
-            transport.send(frame.freeze()).await?;
-            while let Some(res) = transport.next().await {
-                self.token_tx.send(()).await;
-                match res {
-                    Err(e) => return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("Cannot decode data: {:?}", e),
-                    )),
-                    Ok(mut data) => {
-                        let res_msg_id = data.get_u64_le();
-                        assert_eq!(res_msg_id, msg_id);
-                        return Ok(data)
-                    }
-                }
-            }
-            self.token_tx.send(()).await;
-            Err(io::Error::new(io::ErrorKind::NotConnected, ""))
+            let rx = {
+                let mut senders = self.senders.lock();
+                let msg_id = self.msg_counter;
+                frame.put_u64_le(msg_id);
+                frame.extend_from_slice(msg.as_ref());
+                self.msg_counter += 1;
+                let (tx, rx) = oneshot::channel();
+                senders.insert(msg_id, tx);
+                rx
+            };
+            let rec = tokio::spawn(async { rx.await.unwrap() });
+            let send_result = transport.send(frame.freeze()).await;
+            Ok(rec.await.unwrap())
         } else {
             Ok(shortcut::call(self.server_id, msg).await?)
         }

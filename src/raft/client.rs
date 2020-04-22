@@ -196,7 +196,7 @@ impl RaftClient {
         servers
             .iter()
             .map(|peer_addr| {
-                future_timeout(Duration::from_secs(2), async move {
+                timeout(Duration::from_secs(2), async move {
                     if peer_addr == server_address {
                         // Should not include the server we are running
                         return false;
