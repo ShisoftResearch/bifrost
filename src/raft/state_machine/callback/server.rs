@@ -65,7 +65,7 @@ impl Subscriptions {
                 Subscriber {
                     session_id,
                     client: {
-                        if let Ok(client) = RPCClient::new_async(address).await {
+                        if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(address).await {
                             AsyncServiceClient::new(sub_service_id, &client)
                         } else {
                             return Err(());

@@ -49,7 +49,7 @@ impl StateMachineCmds for Configures {
             let addr = address.clone();
             let id = hash_str(&addr);
             if !self.members.contains_key(&id) {
-                match RPCClient::new_async(&address).await {
+                match rpc::DEFAULT_CLIENT_POOL.get(&address).await {
                     Ok(client) => {
                         self.members.insert(
                             id,

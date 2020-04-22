@@ -375,7 +375,7 @@ impl RaftService {
                 let time_to_sleep = expected_ends - end_time - 1;
                 if time_to_sleep > 0 {
                     // Use thread sleep here because we want system scheduler for precision
-                    delay_for(Duration::from_millis(time_to_sleep as u64));
+                    delay_for(Duration::from_millis(time_to_sleep as u64)).await;
                 }
             }
         });
