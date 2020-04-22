@@ -37,7 +37,7 @@ pub enum RPCRequestError {
 pub enum RPCError {
     IOError(io::Error),
     RequestError(RPCRequestError),
-    CannotDecode
+    ClientCannotDecodeResponse
 }
 
 pub trait RPCService: Sync + Send {
@@ -118,6 +118,7 @@ impl Server {
                     let (svr_id, data) = read_u64_head(data);
                     let svr_map = server.services.read().await;
                     let service = svr_map.get(&svr_id);
+                    trace!("Processing request for service {}", svr_id);
                     match service {
                         Some(ref service) => {
                             let svr_res = service.dispatch(data).await;
@@ -344,7 +345,7 @@ mod test {
 
         use super::*;
 
-        #[derive(Serialize, Deserialize)]
+        #[derive(Serialize, Deserialize, Clone)]
         struct ComplexAnswer{
             name: String,
             id: u64,
@@ -354,6 +355,7 @@ mod test {
         service! {
             rpc query_server_id() -> u64;
             rpc query_answer(req: Option<String>) -> ComplexAnswer;
+            rpc large_query(req: Option<String>) -> Vec<ComplexAnswer>;
         }
 
         struct IdServer {
@@ -370,6 +372,18 @@ mod test {
                     id: self.id,
                     req
                 }).boxed()
+            }
+
+            fn large_query(&self, req: Option<String>) -> BoxFuture<Vec<ComplexAnswer>> {
+                let mut res = vec![];
+                for i in 0..1024 {
+                    res.push(ComplexAnswer {
+                        name: format!("Server for {:?}", &req),
+                        id: i,
+                        req: req.clone()
+                    })
+                };
+                future::ready(res).boxed()
             }
         }
         dispatch_rpc_service_functions!(IdServer);
@@ -404,6 +418,8 @@ mod test {
                 assert_eq!(id_un, id);
                 let user_str = format!("User {}", id);
                 let complex = service_client.query_answer(Some(user_str.to_string())).await.unwrap();
+                let large = service_client.large_query(Some(user_str.to_string())).await.unwrap();
+                assert_eq!(large.len(), 1024);
                 assert_eq!(complex.req, Some(user_str));
                 id += 1;
             }

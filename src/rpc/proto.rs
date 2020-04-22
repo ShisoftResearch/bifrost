@@ -163,7 +163,7 @@ macro_rules! service {
                             if let Some(data) = $crate::utils::bincode::deserialize(&res_bytes) {
                                 Ok(data)
                             } else {
-                                Err(RPCError::CannotDecode)
+                                Err(RPCError::ClientCannotDecodeResponse)
                             }
                         } else {
                             Err(res_bytes.err().unwrap())
