@@ -97,7 +97,7 @@ impl RaftClient {
             for server_addr in servers {
                 let id = hash_str(server_addr);
                 if !members.clients.contains_key(&id) {
-                    match rpc::DEFAULT_CLIENT_POOL.get(server_addr).await {
+                    match RPCClient::new_async(server_addr).await {
                         Ok(client) => {
                             members
                                 .clients
@@ -171,7 +171,7 @@ impl RaftClient {
                 for id in remote_ids.difference(&connected_ids) {
                     let addr = members.id_map.get(id).unwrap().clone();
                     if !members.clients.contains_key(id) {
-                        if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(&addr).await {
+                        if let Ok(client) = RPCClient::new_async(&addr).await {
                             members
                                 .clients
                                 .insert(*id, AsyncServiceClient::new(self.service_id, &client));
@@ -201,7 +201,7 @@ impl RaftClient {
                         // Should not include the server we are running
                         return false;
                     }
-                    match rpc::DEFAULT_CLIENT_POOL.get(peer_addr).await {
+                    match RPCClient::new_async(peer_addr).await {
                         Ok(client) => {
                             let client = AsyncServiceClient::new(service_id, &client);
                             let check_res = client.c_ping().await;
