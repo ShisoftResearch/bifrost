@@ -101,7 +101,9 @@ impl StorageEntity {
     ) -> io::Result<()> {
         if let Some(f) = &mut self.logs {
             debug!("Append logs to disk");
+            let was_last_term = self.last_term;
             let mut counter = 0;
+            let mut terms_appended = vec![];
             for (term, log) in logs.range((Excluded(self.last_term), Unbounded)) {
                 let entry = DiskLogEntry {
                     term: *term,
@@ -113,10 +115,11 @@ impl StorageEntity {
                 f.write(&(entry_data.len() as u64).to_le_bytes()).await?;
                 f.write(entry_data.as_slice()).await?;
                 self.last_term = *term;
+                terms_appended.push(self.last_term);
             }
             f.sync_all().await?;
             counter += 1;
-            debug!("Appended and persisted {} logs", counter);
+            debug!("Appended and persisted {} logs, was {}, appended {:?}", counter, was_last_term, terms_appended);
         }
         Ok(())
     }
