@@ -88,55 +88,62 @@ impl RaftClient {
     async fn cluster_info<'a>(
         &'a self,
         servers: &Vec<String>,
-    ) -> (Option<ClientClusterInfo>, RwLockWriteGuard<'a, Members>) {
+    ) -> Option<ClientClusterInfo> {
         debug!("Getting server info for {:?}", servers);
-        let mut members = self.members.write().await;
         let mut attempt_remains: i32 = 10;
         loop {
+            debug!("Trying to get cluster info, attempt...{}", attempt_remains);
             let mut found_zero_leader = true;
-            for server_addr in servers {
-                let id = hash_str(server_addr);
-                debug!("Checking server info on {}", server_addr);
-                if !members.clients.contains_key(&id) {
-                    match rpc::DEFAULT_CLIENT_POOL.get(server_addr).await {
-                        Ok(client) => {
-                            debug!("Added server info on {} to members", server_addr);
-                            members
-                                .clients
-                                .insert(id, AsyncServiceClient::new(self.service_id, &client));
-                            debug!("Member {} added", server_addr);
+            let mut futs: FuturesUnordered<_> = servers
+                .iter()
+                .map(|server_addr| {
+                    let id = hash_str(server_addr);
+                    let server_addr = server_addr.clone();
+                    async move {
+                        let mut members = self.members.write().await;
+                        debug!("Checking server info on {}", server_addr);
+                        if !members.clients.contains_key(&id) {
+                            match rpc::DEFAULT_CLIENT_POOL.get(&server_addr).await {
+                                Ok(client) => {
+                                    debug!("Added server info on {} to members", server_addr);
+                                    members
+                                        .clients
+                                        .insert(id, AsyncServiceClient::new(self.service_id, &client));
+                                    debug!("Member {} added", server_addr);
+                                }
+                                Err(e) => {
+                                    warn!("Cannot find server info from {}, {}", server_addr, e);
+                                    return None;
+                                }
+                            }
                         }
-                        Err(e) => {
-                            warn!("Cannot find server info from {}, {}", server_addr, e);
-                            continue;
+                        debug!("Getting server info from {}", server_addr);
+                        let info_res = members
+                            .clients
+                            .get(&id)
+                            .unwrap()
+                            .c_server_cluster_info().await;
+                        match info_res {
+                            Ok(info) => {
+                                if info.leader_id != 0 {
+                                    debug!("Found server info with leader id {}", info.leader_id);
+                                    return Some(info);
+                                } else {
+                                    debug!("Discovered zero leader id from {}", server_addr);
+                                    found_zero_leader = true;
+                                    return None
+                                }
+                            },
+                            Err(e) => {
+                                debug!("Error on getting cluster info from {}, {:?}", server_addr, e);
+                                return None
+                            }
                         }
                     }
-                }
-                debug!("Getting server info from {}", server_addr);
-                let info_res = timeout(
-                    Duration::from_secs(2),
-                    members
-                        .clients
-                        .get(&id)
-                        .unwrap()
-                        .c_server_cluster_info()).await;
-                match info_res {
-                    Ok(Ok(info)) => {
-                        if info.leader_id != 0 {
-                            debug!("Found server info with leader id {}", info.leader_id);
-                            return (Some(info), members);
-                        } else {
-                            debug!("Discovered zero leader id from {}", server_addr);
-                            found_zero_leader = true;
-                        }
-                    },
-                    Ok(Err(e)) => {
-                        debug!("Error on getting cluster info from {}, {:?}", server_addr, e);
-                    },
-                    Err(e) => {
-                        debug!("Timeout, elapsed {:?}", e);
-                    }
-                }
+                })
+                .collect();
+            while let Some(Some(info)) = futs.next().await {
+                return Some(info);
             }
             if found_zero_leader && attempt_remains > 0 {
                 // We found an uninitialized node, should try again
@@ -155,13 +162,14 @@ impl RaftClient {
             }
         }
         warn!("Cannot find anything useful from list: {:?}", servers);
-        return (None, members);
+        return None;
     }
 
     async fn update_info(&self, servers: &Vec<String>) -> Result<(), ClientError> {
-        let (cluster_info, mut members) = self.cluster_info(servers).await;
+        let cluster_info = self.cluster_info(servers).await;
         match cluster_info {
             Some(info) => {
+                let mut members = self.members.write().await;
                 let remote_members = info.members;
                 let mut remote_ids = HashSet::with_capacity(remote_members.len());
                 members.id_map.clear();
