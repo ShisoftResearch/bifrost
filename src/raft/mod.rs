@@ -404,6 +404,23 @@ impl RaftService {
         };
         self.become_leader(&mut meta, last_log_id).await;
     }
+    pub async fn conservative_bootstrap(&self, servers: &Vec<String>) {
+        let meta = self.meta.read().await;
+        debug!("Conservative bootstrap, checking storage");
+        if let Some(storage) = &meta.storage {
+            debug!("There are storage, checking last term");
+            if storage.lock().await.last_term > 0 {
+                debug!("There are logged term, will probe and join or bootstrap");
+                self.probe_and_join(servers).await;
+            } else {
+                debug!("Log is empty, bootstrap");
+                self.bootstrap().await;
+            }
+        } else {
+            debug!("No storage, will probe and join or bootstrap");
+            self.probe_and_join(servers).await;
+        }
+    }
     pub async fn join(&self, servers: &Vec<String>) -> Result<bool, ExecError> {
         debug!("Trying to join cluster with id {}", self.id);
         let client = RaftClient::new(servers, self.options.service_id).await;

@@ -23,9 +23,9 @@ pub struct DiskOptions {
 }
 
 pub struct StorageEntity {
-    logs: Option<File>,
-    snapshot: Option<File>,
-    last_term: u64
+    pub logs: Option<File>,
+    pub snapshot: Option<File>,
+    pub last_term: u64
 }
 
 #[derive(Serialize, Deserialize)]
