@@ -414,6 +414,7 @@ impl RaftService {
                 self.probe_and_join(servers).await;
             } else {
                 debug!("Log is empty, bootstrap");
+                drop(meta);
                 self.bootstrap().await;
             }
         } else {
