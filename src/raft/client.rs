@@ -111,14 +111,15 @@ impl RaftClient {
                         }
                     }
                 }
-                let info_res = members
-                    .clients
-                    .get(&id)
-                    .unwrap()
-                    .c_server_cluster_info()
-                    .await;
+                let info_res = timeout(
+                    Duration::from_secs(2),
+                    members
+                        .clients
+                        .get(&id)
+                        .unwrap()
+                        .c_server_cluster_info()).await;
                 match info_res {
-                    Ok(info) => {
+                    Ok(Ok(info)) => {
                         if info.leader_id != 0 {
                             debug!("Found server info with leader id {}", info.leader_id);
                             return (Some(info), members);
@@ -127,8 +128,11 @@ impl RaftClient {
                             found_zero_leader = true;
                         }
                     },
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         debug!("Error on getting cluster info from {}, {:?}", server_addr, e);
+                    },
+                    Err(e) => {
+                        debug!("Timeout, elapsed {:?}", e);
                     }
                 }
             }
