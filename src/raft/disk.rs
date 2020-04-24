@@ -120,7 +120,7 @@ impl StorageEntity {
             }
             if counter > 0 {
                 f.sync_all().await?;
-                debug!("Appended and persisted {} logs, was {}, appended {:?}", counter, was_last_term, terms_appended);q
+                debug!("Appended and persisted {} logs, was {}, appended {:?}", counter, was_last_term, terms_appended);
             }
         }
         Ok(())
