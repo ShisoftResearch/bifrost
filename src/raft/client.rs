@@ -118,25 +118,29 @@ impl RaftClient {
                             }
                         }
                         debug!("Getting server info from {}", server_addr);
-                        let info_res = members
-                            .clients
-                            .get(&id)
-                            .unwrap()
-                            .c_server_cluster_info().await;
-                        match info_res {
+                        let member_client = members.clients.get(&id);
+                        debug!("Checking server client {}", server_addr);
+                        if member_client.is_none() {
+                            debug!("Server not found, skip {}", server_addr);
+                            return None;
+                        }
+                        debug!("Invoking server_cluster_info on {}", server_addr);
+                        let info_res = member_client.unwrap().c_server_cluster_info().await;
+                        debug!("Checking response from {}", server_addr);
+                        return match info_res {
                             Ok(info) => {
                                 if info.leader_id != 0 {
                                     debug!("Found server info with leader id {}", info.leader_id);
-                                    return Some(info);
+                                    Some(info)
                                 } else {
                                     debug!("Discovered zero leader id from {}", server_addr);
                                     found_zero_leader = true;
-                                    return None
+                                    None
                                 }
                             },
                             Err(e) => {
                                 debug!("Error on getting cluster info from {}, {:?}", server_addr, e);
-                                return None
+                                None
                             }
                         }
                     }

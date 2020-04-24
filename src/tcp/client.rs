@@ -44,7 +44,7 @@ impl Client {
                         "STANDALONE server is not found",
                     ));
                 }
-                let socket = time::timeout(timeout.clone(), TcpStream::connect(address)).await??;
+                let socket = time::timeout(timeout, TcpStream::connect(address)).await??;
                 let transport = Framed::new(socket, LengthDelimitedCodec::new());
                 let (writer, mut reader) = transport.split();
                 let cloned_senders = senders.clone();
@@ -84,8 +84,8 @@ impl Client {
                 senders.insert(msg_id, tx);
                 rx
             };
-            time::timeout(self.timeout.clone(), transport.send(frame.freeze())).await??;
-            Ok(time::timeout(self.timeout.clone(), rx).await?.unwrap())
+            time::timeout(self.timeout, transport.send(frame.freeze())).await??;
+            Ok(time::timeout(self.timeout, rx).await?.unwrap())
         } else {
             Ok(shortcut::call(self.server_id, msg).await?)
         }
