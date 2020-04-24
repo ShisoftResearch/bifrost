@@ -100,10 +100,11 @@ impl RaftClient {
                 if !members.clients.contains_key(&id) {
                     match rpc::DEFAULT_CLIENT_POOL.get(server_addr).await {
                         Ok(client) => {
-                            debug!("Added server info on {}", server_addr);
+                            debug!("Added server info on {} to members", server_addr);
                             members
                                 .clients
                                 .insert(id, AsyncServiceClient::new(self.service_id, &client));
+                            debug!("Member {} added", server_addr);
                         }
                         Err(e) => {
                             warn!("Cannot find server info from {}, {}", server_addr, e);
@@ -111,6 +112,7 @@ impl RaftClient {
                         }
                     }
                 }
+                debug!("Getting server info from {}", server_addr);
                 let info_res = timeout(
                     Duration::from_secs(2),
                     members

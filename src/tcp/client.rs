@@ -26,6 +26,7 @@ pub struct Client {
     client: Option<SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>>,
     msg_counter: u64,
     senders: Arc<SyncMutex<HashMap<u64, oneshot::Sender<BytesMut>>>>,
+    timeout: Duration,
     pub server_id: u64,
 }
 
@@ -43,7 +44,7 @@ impl Client {
                         "STANDALONE server is not found",
                     ));
                 }
-                let socket = time::timeout(timeout, TcpStream::connect(address)).await??;
+                let socket = time::timeout(timeout.clone(), TcpStream::connect(address)).await??;
                 let transport = Framed::new(socket, LengthDelimitedCodec::new());
                 let (writer, mut reader) = transport.split();
                 let cloned_senders = senders.clone();
@@ -63,11 +64,12 @@ impl Client {
             client,
             server_id,
             senders,
+            timeout,
             msg_counter: 0
         })
     }
     pub async fn connect(address: &String) -> io::Result<Self> {
-        Client::connect_with_timeout(address, Duration::from_secs(5)).await
+        Client::connect_with_timeout(address, Duration::from_secs(2)).await
     }
     pub async fn send_msg(&mut self, msg: TcpReq) -> io::Result<BytesMut> {
         if let Some(ref mut transport) = self.client {
@@ -82,8 +84,8 @@ impl Client {
                 senders.insert(msg_id, tx);
                 rx
             };
-            transport.send(frame.freeze()).await?;
-            Ok(rx.await.unwrap())
+            time::timeout(self.timeout.clone(), transport.send(frame.freeze())).await??;
+            Ok(time::timeout(self.timeout.clone(), rx).await?.unwrap())
         } else {
             Ok(shortcut::call(self.server_id, msg).await?)
         }
