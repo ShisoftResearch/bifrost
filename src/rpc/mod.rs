@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tokio::time::delay_for;
+use tokio::time::*;
 
 lazy_static! {
     pub static ref DEFAULT_CLIENT_POOL: ClientPool = ClientPool::new();
@@ -225,7 +226,7 @@ impl ClientPool {
             let client = clients.get(&server_id).unwrap().clone();
             Ok(client)
         } else {
-            let mut client = RPCClient::new_async(&addr_fn(server_id)).await?;
+            let client = timeout(Duration::from_secs(5), RPCClient::new_async(&addr_fn(server_id))).await??;
             clients.insert(server_id, client.clone());
             Ok(client)
         }

@@ -96,9 +96,11 @@ impl RaftClient {
             let mut found_zero_leader = true;
             for server_addr in servers {
                 let id = hash_str(server_addr);
+                debug!("Checking server info on {}", server_addr);
                 if !members.clients.contains_key(&id) {
                     match rpc::DEFAULT_CLIENT_POOL.get(server_addr).await {
                         Ok(client) => {
+                            debug!("Added server info on {}", server_addr);
                             members
                                 .clients
                                 .insert(id, AsyncServiceClient::new(self.service_id, &client));
@@ -118,6 +120,7 @@ impl RaftClient {
                 match info_res {
                     Ok(info) => {
                         if info.leader_id != 0 {
+                            debug!("Found server info with leader id {}", info.leader_id);
                             return (Some(info), members);
                         } else {
                             debug!("Discovered zero leader id from {}", server_addr);
