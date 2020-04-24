@@ -29,13 +29,14 @@ use std::{fs, thread};
 use tokio::prelude::*;
 use tokio::runtime;
 use tokio::time::*;
+use crate::raft::disk::*;
 
 #[macro_use]
 pub mod state_machine;
 pub mod client;
+pub mod disk;
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_RAFT_DEFAULT_SERVICE) as u64;
-const MAX_LOG_CAPACITY: usize = 10;
 const THREAD_POOL_SIZE: usize = 10;
 
 pub trait RaftMsg<R>: Send + Sync {
@@ -159,13 +160,13 @@ pub struct RaftMeta {
     commit_index: u64,
     last_applied: u64,
     leader_id: u64,
-    storage: Option<Arc<RwLock<StorageEntity>>>,
+    storage: Option<Arc<Mutex<StorageEntity>>>,
 }
 
 #[derive(Clone)]
 pub enum Storage {
     MEMORY,
-    DISK(String),
+    DISK(DiskOptions),
 }
 
 impl Storage {
@@ -179,11 +180,6 @@ pub struct Options {
     pub storage: Storage,
     pub address: String,
     pub service_id: u64,
-}
-
-struct StorageEntity {
-    logs: File,
-    snapshot: File,
 }
 
 pub struct RaftService {
@@ -256,26 +252,21 @@ impl RaftService {
     pub fn new(opts: Options) -> Arc<RaftService> {
         let server_address = opts.address.clone();
         let server_id = hash_str(&server_address);
-        let mut storage_entity = StorageEntity::new_with_options(&opts).unwrap();
 
         let mut term = 0;
         let mut logs = BTreeMap::new();
         let mut commit_index = 0;
         let mut last_applied = 0;
-        let mut master_sm = MasterStateMachine::new(opts.service_id);
 
-        if let &mut Some(ref mut storage) = &mut storage_entity {
-            let mut snapshot_data = vec![];
-            let mut log_data = vec![];
-            storage.snapshot.read_to_end(&mut snapshot_data).unwrap();
-            storage.logs.read_to_end(&mut log_data).unwrap();
-            let snapshot: SnapshotEntity = crate::utils::serde::deserialize(snapshot_data.as_slice()).unwrap();
-            logs = crate::utils::serde::deserialize(log_data.as_slice()).unwrap();
-            term = snapshot.term;
-            commit_index = snapshot.commit_index;
-            last_applied = snapshot.last_applied;
-            master_sm.recover(snapshot.snapshot);
-        }
+        let mut storage_entity = StorageEntity::new_with_options(
+            &opts,
+            &mut term,
+            &mut commit_index,
+            &mut last_applied,
+            &mut logs
+        ).unwrap();
+
+        let mut master_sm = MasterStateMachine::new(opts.service_id);
 
         let server_obj = RaftService {
             meta: RwLock::new(RaftMeta {
@@ -289,13 +280,13 @@ impl RaftService {
                 commit_index,
                 last_applied,
                 leader_id: 0,
-                storage: storage_entity.map(|e| Arc::new(RwLock::new(e)))
+                storage: storage_entity.map(|e| Arc::new(Mutex::new(e)))
             }),
             id: server_id,
             options: opts,
             rt: runtime::Builder::new()
                 .enable_all()
-                .num_threads(10)
+                .core_threads(10)
                 .thread_name("raft-server")
                 .threaded_scheduler()
                 .build()
@@ -939,39 +930,9 @@ impl RaftService {
         meta: &'a RwLockWriteGuard<'a, RaftMeta>,
         mut logs: RwLockWriteGuard<'a, LogsMap>,
     ) -> io::Result<()> {
-        let (last_log_id, _) = get_last_log_info!(self, logs);
-        let expecting_oldest_log = if last_log_id > MAX_LOG_CAPACITY as u64 {
-            last_log_id - MAX_LOG_CAPACITY as u64
-        } else {
-            0
-        };
-        let double_cap = MAX_LOG_CAPACITY << 1;
-        if logs.len() > double_cap && meta.last_applied > expecting_oldest_log {
-            debug!("trim logs");
-            while logs.len() > MAX_LOG_CAPACITY {
-                let first_key = *logs.iter().next().unwrap().0;
-                logs.remove(&first_key).unwrap();
-            }
-            if let Some(ref storage) = meta.storage {
-                let mut storage = storage.write().await;
-                let snapshot = SnapshotEntity {
-                    term: meta.term,
-                    commit_index: meta.commit_index,
-                    last_applied: meta.last_applied,
-                    snapshot: meta.state_machine.read().await.snapshot().unwrap(),
-                };
-                storage
-                    .snapshot
-                    .write_all(crate::utils::serde::serialize(&snapshot).as_slice())?;
-                storage.snapshot.sync_all().unwrap();
-            }
-        }
-        if let Some(ref storage) = meta.storage {
-            let mut storage = storage.write().await;
-            let logs_data = crate::utils::serde::serialize(&*meta.logs.read().await);
-            // TODO: async file system calls
-            storage.logs.write_all(logs_data.as_slice())?;
-            storage.logs.sync_all().unwrap();
+        if let Some(storage_mutex) = &meta.storage {
+            let mut storage = storage_mutex.lock().await;
+            storage.post_processing(meta, logs).await?;
         }
         Ok(())
     }
@@ -1255,30 +1216,6 @@ impl RaftStateMachine {
             id: hash_str(name),
             name: name.clone(),
         }
-    }
-}
-
-impl StorageEntity {
-    pub fn new_with_options(opts: &Options) -> io::Result<Option<Self>> {
-        Ok(match &opts.storage {
-            &Storage::DISK(ref dir) => {
-                let base_path = Path::new(dir);
-                let _ = fs::create_dir_all(base_path);
-                let log_path = base_path.with_file_name("log.dat");
-                let snapshot_path = base_path.with_file_name("snapshot.dat");
-                let mut open_opts = OpenOptions::new();
-                open_opts
-                    .write(true)
-                    .create(true)
-                    .read(true)
-                    .truncate(false);
-                Some(Self {
-                    logs: open_opts.open(log_path.as_path())?,
-                    snapshot: open_opts.open(snapshot_path.as_path())?,
-                })
-            }
-            _ => None,
-        })
     }
 }
 
