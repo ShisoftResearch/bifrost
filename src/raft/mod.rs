@@ -411,6 +411,7 @@ impl RaftService {
             debug!("There are storage, checking last term");
             if storage.lock().await.last_term > 0 {
                 debug!("There are logged term, will probe and join or bootstrap");
+                drop(meta);
                 self.probe_and_join(servers).await;
             } else {
                 debug!("Log is empty, bootstrap");
@@ -419,6 +420,7 @@ impl RaftService {
             }
         } else {
             debug!("No storage, will probe and join or bootstrap");
+            drop(meta);
             self.probe_and_join(servers).await;
         }
     }
