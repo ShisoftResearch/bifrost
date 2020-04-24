@@ -116,10 +116,12 @@ impl StorageEntity {
                 f.write(entry_data.as_slice()).await?;
                 self.last_term = *term;
                 terms_appended.push(self.last_term);
+                counter += 1;
             }
-            f.sync_all().await?;
-            counter += 1;
-            debug!("Appended and persisted {} logs, was {}, appended {:?}", counter, was_last_term, terms_appended);
+            if counter > 0 {
+                f.sync_all().await?;
+                debug!("Appended and persisted {} logs, was {}, appended {:?}", counter, was_last_term, terms_appended);q
+            }
         }
         Ok(())
     }
