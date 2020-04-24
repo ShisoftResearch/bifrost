@@ -100,7 +100,6 @@ impl StorageEntity {
         logs: &'a RwLockWriteGuard<'a, LogsMap>,
     ) -> io::Result<()> {
         if let Some(f) = &mut self.logs {
-            debug!("Append logs to disk");
             let was_last_term = self.last_term;
             let mut counter = 0;
             let mut terms_appended = vec![];
