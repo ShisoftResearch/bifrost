@@ -60,6 +60,7 @@ impl StorageEntity {
                     logs: if options.append_logs {
                         let mut log_file = open_opts.open(log_path.as_path())?;
                         let mut len_buf = [0u8; 8];
+                        let mut counter = 0;
                         loop {
                             if log_file.read_exact(&mut len_buf).is_err() {
                                 break;
@@ -74,7 +75,9 @@ impl StorageEntity {
                             *commit_index = entry.commit_index;
                             *last_applied = entry.last_applied;
                             logs.insert(entry.term, entry.log);
+                            counter += 1;
                         }
+                        debug!("Recovered {} raft logs", counter);
                         Some(File::from_std(log_file))
                     } else {
                         None
@@ -97,6 +100,8 @@ impl StorageEntity {
         logs: &'a RwLockWriteGuard<'a, LogsMap>,
     ) -> io::Result<()> {
         if let Some(f) = &mut self.logs {
+            debug!("Append logs to disk");
+            let mut counter = 0;
             for (term, log) in logs.range((Excluded(self.last_term), Unbounded)) {
                 let entry = DiskLogEntry {
                     term: *term,
@@ -110,6 +115,8 @@ impl StorageEntity {
                 self.last_term = *term;
             }
             f.sync_all().await?;
+            counter += 1;
+            debug!("Appended and persisted {} logs", counter);
         }
         Ok(())
     }
