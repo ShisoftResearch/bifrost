@@ -94,7 +94,7 @@ impl RaftClient {
         debug!("Getting server info for {:?}", servers);
         let mut attempt_remains: i32 = 10;
         loop {
-            debug!("Trying to get cluster info, attempt from {}...{}", servers, attempt_remains);
+            debug!("Trying to get cluster info, attempt from {:?}...{}", servers, attempt_remains);
             let mut found_zero_leader = true;
             let mut futs: FuturesUnordered<_> = servers
                 .iter()
