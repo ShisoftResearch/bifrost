@@ -1,4 +1,6 @@
 use std::any::Any;
+use std::sync::Arc;
+use crate::raft::client::RaftClient;
 
 pub enum Storage {
     MEMORY,
@@ -30,6 +32,10 @@ pub trait StateMachineCtl: Sync + Send + Any {
 
 pub trait OpTypes {
     fn op_type(&self, fn_id: u64) -> Option<OpType>;
+}
+
+pub trait StateMachineClient {
+    fn new_instance(sm_id: u64, client: &Arc<RaftClient>) -> Self;
 }
 
 #[macro_use]

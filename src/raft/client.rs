@@ -16,6 +16,8 @@ use std::iter::FromIterator;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::time::delay_for;
+use async_std::sync::*;
+use crate::raft::state_machine::StateMachineClient;
 
 const ORDERING: Ordering = Ordering::Relaxed;
 pub type Client = Arc<AsyncServiceClient>;
@@ -558,6 +560,44 @@ fn swap_when_greater(atomic: &AtomicU64, value: u64) {
             return;
         } else {
             orig_num = actual;
+        }
+    }
+}
+
+pub struct CachedStateMachine<T: StateMachineClient> {
+    server_list: Vec<String>,
+    raft_service_id: u64,
+    state_machine_id: u64,
+    cache: RwLock<Option<Arc<T>>>
+}
+
+impl <T: StateMachineClient> CachedStateMachine<T> {
+    pub fn new(server_list: Vec<String>, raft_service_id: u64, state_machine_id: u64) -> Self {
+        Self {
+            server_list,
+            raft_service_id,
+            state_machine_id,
+            cache: RwLock::new(None)
+        }
+    }
+    pub async fn get(&self) -> Arc<T> {
+        loop {
+            {
+                let client = self.cache.read().await;
+                if let Some(cache) = &*client {
+                    return (*cache).clone();
+                }
+            }
+            {
+                let mut place_holder = self.cache.write().await;
+                if place_holder.is_none() {
+                    let raft_client = RaftClient::new(&self.server_list, self.raft_service_id)
+                        .await
+                        .unwrap();
+                    // Create a client for the state machine on the raft service
+                    *place_holder = Some(Arc::new(T::new_instance(self.state_machine_id, &raft_client)))
+                }
+            }
         }
     }
 }
