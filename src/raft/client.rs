@@ -462,12 +462,13 @@ impl RaftClient {
                                 swap_when_greater(&self.last_log_term, last_log_term);
                                 return Ok(data);
                             }
-                            Ok(ClientCmdResponse::NotLeader(leader_id)) => {
-                                if leader_id == 0 {
+                            Ok(ClientCmdResponse::NotLeader(new_leader_id)) => {
+                                if new_leader_id == 0 || leader_id == leader_id {
+                                    debug!("CLIENT: NOT LEADER, SUGGESTION NOT USEFUL, PROBE. GOT: {}", new_leader_id);
                                     FailureAction::SwitchLeader
                                 } else {
-                                    debug!("CLIENT: NOT LEADER, REMOTE SUGGEST SWITCH TO {}", leader_id);
-                                    self.leader_id.store(leader_id, ORDERING);
+                                    debug!("CLIENT: NOT LEADER, REMOTE SUGGEST SWITCH TO {}", new_leader_id);
+                                    self.leader_id.store(new_leader_id, ORDERING);
                                     FailureAction::NotLeader
                                 }
                             }
