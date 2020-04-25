@@ -572,9 +572,10 @@ pub struct CachedStateMachine<T: StateMachineClient> {
 }
 
 impl <T: StateMachineClient> CachedStateMachine<T> {
-    pub fn new(server_list: Vec<String>, raft_service_id: u64, state_machine_id: u64) -> Self {
+    pub fn new(server_list: &Vec<String>, raft_service_id: u64, state_machine_id: u64) -> Self {
+        debug!("Construct cached state machine for list {:?}, service id {}, state machine {}", server_list, raft_service_id, state_machine_id);
         Self {
-            server_list,
+            server_list: server_list.clone(),
             raft_service_id,
             state_machine_id,
             cache: RwLock::new(None)
@@ -591,6 +592,7 @@ impl <T: StateMachineClient> CachedStateMachine<T> {
             {
                 let mut place_holder = self.cache.write().await;
                 if place_holder.is_none() {
+                    debug!("Creating state machine client instance, service {}, state machine id {}", self.raft_service_id, self.state_machine_id);
                     let raft_client = RaftClient::new(&self.server_list, self.raft_service_id)
                         .await
                         .unwrap();
