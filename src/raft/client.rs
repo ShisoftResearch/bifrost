@@ -255,7 +255,7 @@ impl RaftClient {
         let (fn_id, op, req_data) = msg.encode();
         let response = match op {
             OpType::QUERY => self.query(sm_id, fn_id, req_data).await,
-            OpType::COMMAND | OpType::SUBSCRIBE => self.command(sm_id, fn_id, req_data, 0).await,
+            OpType::COMMAND | OpType::SUBSCRIBE => self.command(sm_id, fn_id, req_data).await,
         };
         match response {
             Ok(data) => match data {
@@ -424,14 +424,14 @@ impl RaftClient {
         }
     }
 
-    fn command(
+    async fn command(
         &self,
         sm_id: u64,
         fn_id: u64,
-        data: Vec<u8>,
-        depth: usize,
-    ) -> BoxFuture<Result<ExecResult, ExecError>> {
-        async move {
+        data: Vec<u8>
+    ) -> Result<ExecResult, ExecError> {
+        let mut depth = 0;
+        loop {
             enum FailureAction {
                 SwitchLeader,
                 NotCommitted,
@@ -454,25 +454,26 @@ impl RaftClient {
                             .await;
                         match cmd_res {
                             Ok(ClientCmdResponse::Success {
-                                data,
-                                last_log_term,
-                                last_log_id,
-                            }) => {
+                                   data,
+                                   last_log_term,
+                                   last_log_id,
+                               }) => {
                                 swap_when_greater(&self.last_log_id, last_log_id);
                                 swap_when_greater(&self.last_log_term, last_log_term);
                                 return Ok(data);
                             }
                             Ok(ClientCmdResponse::NotLeader(leader_id)) => {
-                                self.leader_id.store(leader_id, ORDERING);
-                                FailureAction::NotLeader
+                                if leader_id == 0 {
+                                    FailureAction::SwitchLeader
+                                } else {
+                                    debug!("CLIENT: NOT LEADER, REMOTE SUGGEST SWITCH TO {}", leader_id);
+                                    self.leader_id.store(leader_id, ORDERING);
+                                    FailureAction::NotLeader
+                                }
                             }
                             Ok(ClientCmdResponse::NotCommitted) => FailureAction::NotCommitted,
                             Err(e) => {
-                                debug!("CLIENT: E1 - {} - {:?}", leader_id, e);
-                                FailureAction::SwitchLeader // need switch server for leader
-                            }
-                            Err(e) => {
-                                debug!("CLIENT: E2 - {} - {:?}", leader_id, e);
+                                debug!("CLIENT: ERROR - {} - {:?}", leader_id, e);
                                 FailureAction::SwitchLeader // need switch server for leader
                             }
                         }
@@ -482,6 +483,7 @@ impl RaftClient {
             }; //
             match failure {
                 FailureAction::SwitchLeader => {
+                    debug!("Switch leader by probing");
                     let members = self.members.read().await;
                     let num_members = members.clients.len();
                     let pos = self.qry_meta.pos.load(ORDERING);
@@ -496,9 +498,8 @@ impl RaftClient {
                 }
                 _ => {}
             }
-            self.command(sm_id, fn_id, data, depth + 1).await
+            depth += 1;
         }
-        .boxed()
     }
 
     fn gen_log_entry(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>) -> LogEntry {
@@ -516,6 +517,7 @@ impl RaftClient {
     pub async fn leader_client(&self) -> Option<(u64, Client)> {
         let members = self.members.read().await;
         let leader_id = self.leader_id();
+        debug!("Leader id for client: {}", leader_id);
         if let Some(client) = members.clients.get(&leader_id) {
             Some((leader_id, client.clone()))
         } else {

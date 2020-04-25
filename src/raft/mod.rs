@@ -1169,7 +1169,13 @@ impl Service for RaftService {
             let meta = self.write_meta().await;
             let mut entry = entry;
             if !is_leader(&meta) {
-                return ClientCmdResponse::NotLeader(meta.leader_id);
+                debug!("Command sent to non-leader node, {}, should be {}", self.id, meta.leader_id);
+                return if meta.leader_id == self.id {
+                    debug!("Found outdated leader id, will return 0");
+                    ClientCmdResponse::NotLeader(0)
+                } else {
+                    ClientCmdResponse::NotLeader(meta.leader_id)
+                }
             }
             let (new_log_id, new_log_term) = self.leader_append_log(&meta, &mut entry).await;
             let data = match entry.sm_id {
@@ -1619,7 +1625,7 @@ mod test {
                 raft_services[i].join(&addresses).await.unwrap();
             }
             info!("Waiting cluster to be stable");
-            async_wait(Duration::from_secs(5)).await;
+            async_wait(Duration::from_secs(2)).await;
             let raft_client = RaftClient::new(&addresses, DEFAULT_SERVICE_ID)
                 .await
                 .unwrap();
@@ -1633,7 +1639,35 @@ mod test {
             for i in 0..100 {
                 assert_eq!(sm_client.get_shot().await.unwrap(), 110, "fail at test {}", i);
             }
+            info!("Tests after leader transfer");
+            info!("Leader should be consistent");
+            for svr in &raft_services {
+                assert_eq!(svr.leader_id().await, raft_services[0].id);
+            }
+            // Leader leave
+            debug!("Leader leave cluster");
+            raft_services[0].leave().await;
             async_wait(Duration::from_secs(5)).await;
+            debug!("Leader should be changed");
+            let new_leader = raft_services[1].leader_id().await;
+            for (i, svr) in raft_services.iter().enumerate() {
+                if svr.id == raft_services[0].id {
+                    continue;
+                }
+                assert_ne!(svr.leader_id().await, raft_services[0].id, "id {} at node {}", i, svr.id);
+                assert_eq!(svr.leader_id().await, new_leader);
+            }
+            info!("Now we have leader {}", new_leader);
+            info!("Mass command");
+            for i in 0..10 {
+                let res = sm_client.take_a_shot(&1).await;
+                assert!(res.is_ok(), "{:?} at {}", res, i);
+            }
+            async_wait(Duration::from_secs(5)).await;
+            info!("Mass query");
+            for i in 0..100 {
+                assert_eq!(sm_client.get_shot().await.unwrap(), 100, "fail at test {}", i);
+            }
         } 
     }
 }

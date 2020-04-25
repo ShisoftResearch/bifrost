@@ -74,7 +74,7 @@ impl StorageEntity {
                             *term = entry.term;
                             *commit_index = entry.commit_index;
                             *last_applied = entry.last_applied;
-                            logs.insert(entry.term, entry.log);
+                            logs.insert(entry.log.id, entry.log);
                             counter += 1;
                         }
                         debug!("Recovered {} raft logs", counter);
