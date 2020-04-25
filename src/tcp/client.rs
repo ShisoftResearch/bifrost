@@ -44,10 +44,12 @@ impl Client {
                         "STANDALONE server is not found",
                     ));
                 }
+                debug!("Create socket on {}", address);
                 let socket = time::timeout(timeout, TcpStream::connect(address)).await??;
                 let transport = Framed::new(socket, LengthDelimitedCodec::new());
                 let (writer, mut reader) = transport.split();
                 let cloned_senders = senders.clone();
+                debug!("Streaming messages for {}", address);
                 tokio::spawn(async move {
                     while let Some(res) = reader.next().await {
                         if let Ok(mut data) = res {
@@ -56,6 +58,7 @@ impl Client {
                             sender.send(data).unwrap();
                         }
                     }
+                    debug!("Stream from {} broken");
                 });
                 Some(writer)
             }
