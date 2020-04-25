@@ -60,7 +60,7 @@ impl Client {
                             sender.send(data).unwrap();
                         }
                     }
-                    debug!("Stream from {} broken");
+                    debug!("Stream from {} broken", address);
                 });
                 Some(writer)
             }
