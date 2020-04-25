@@ -34,8 +34,10 @@ impl Client {
     pub async fn connect_with_timeout(address: &String, timeout: Duration) -> io::Result<Self> {
         let server_id = hash_str(address);
         let senders = Arc::new(SyncMutex::new(HashMap::new()));
+        debug!("TCP connect to {}, server id {}, timeout {}ms", address, server_id, timeout.as_millis());
         let client = {
             if !DISABLE_SHORTCUT && shortcut::is_local(server_id).await {
+                debug!("Local connection, using shortcut");
                 None
             } else {
                 if address.eq(&STANDALONE_ADDRESS) {

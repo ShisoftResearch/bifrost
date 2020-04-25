@@ -103,6 +103,7 @@ impl RaftClient {
                         let mut members = self.members.write().await;
                         debug!("Checking server info on {}", server_addr);
                         if !members.clients.contains_key(&id) {
+                            debug!("Connecting to node {}", server_addr);
                             match RPCClient::new_async(&server_addr).await {
                                 Ok(client) => {
                                     debug!("Added server info on {} to members", server_addr);
