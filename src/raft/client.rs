@@ -94,7 +94,7 @@ impl RaftClient {
         debug!("Getting server info for {:?}", servers);
         let mut attempt_remains: i32 = 10;
         loop {
-            debug!("Trying to get cluster info, attempt...{}", attempt_remains);
+            debug!("Trying to get cluster info, attempt from {}...{}", servers, attempt_remains);
             let mut found_zero_leader = true;
             let mut futs: FuturesUnordered<_> = servers
                 .iter()
@@ -149,8 +149,10 @@ impl RaftClient {
                     }
                 })
                 .collect();
-            while let Some(Some(info)) = futs.next().await {
-                return Some(info);
+            while let Some(res) = futs.next().await {
+                if let Some(info) = res {
+                    return Some(info);
+                }
             }
             if found_zero_leader && attempt_remains > 0 {
                 // We found an uninitialized node, should try again
