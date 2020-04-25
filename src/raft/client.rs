@@ -443,7 +443,7 @@ impl RaftClient {
                 if depth > 0 {
                     let members = self.members.read().await;
                     let num_members = members.clients.len();
-                    if depth >= max(num_members, 5) {
+                    if depth >= max(num_members + 1, 5) {
                         return Err(ExecError::TooManyRetry);
                     };
                 }
@@ -487,15 +487,14 @@ impl RaftClient {
                     debug!("Switch leader by probing");
                     let members = self.members.read().await;
                     let num_members = members.clients.len();
-                    let pos = self.qry_meta.pos.load(ORDERING);
                     let leader_id = self.leader_id.load(ORDERING);
-                    let index = members
+                    let new_leader_id = members
                         .clients
                         .keys()
-                        .nth(pos as usize % num_members)
+                        .nth(depth as usize % num_members)
                         .unwrap();
-                    self.leader_id.compare_and_swap(leader_id, *index, ORDERING);
-                    debug!("CLIENT: Switch leader");
+                    self.leader_id.compare_and_swap(leader_id, *new_leader_id, ORDERING);
+                    debug!("CLIENT: Switch leader {}", new_leader_id);
                 }
                 _ => {}
             }
