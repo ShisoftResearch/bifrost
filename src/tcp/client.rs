@@ -52,6 +52,7 @@ impl Client {
                 let (writer, mut reader) = transport.split();
                 let cloned_senders = senders.clone();
                 debug!("Streaming messages for {}", address);
+                let address = address.clone();
                 tokio::spawn(async move {
                     while let Some(res) = reader.next().await {
                         if let Ok(mut data) = res {
@@ -60,7 +61,7 @@ impl Client {
                             sender.send(data).unwrap();
                         }
                     }
-                    debug!("Stream from {} broken", address);
+                    debug!("Stream from TCP server {} broken", address);
                 });
                 Some(writer)
             }
