@@ -44,8 +44,8 @@ pub trait RaftMsg<R>: Send + Sync {
     fn decode_return(data: &Vec<u8>) -> R;
 }
 
-const CHECKER_MS: i64 = 100;
-const HEARTBEAT_MS: i64 = 500;
+const CHECKER_MS: i64 = 50;
+const HEARTBEAT_MS: i64 = 200;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LogEntry {
@@ -119,7 +119,7 @@ fn gen_rand(lower: i64, higher: i64) -> i64 {
 }
 
 fn gen_timeout() -> i64 {
-    gen_rand(10000, 15000)
+    gen_rand(2000, 5000)
 }
 
 struct FollowerStatus {
@@ -225,7 +225,10 @@ async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
 }
 
 fn is_majority(members: u64, granted: u64) -> bool {
-    granted >= members / 2
+    let required = members / 2 + 1;
+    let majority = granted >= (required);
+    debug!("Members {} granted {}, is majority: {}", members, granted, majority);
+    majority
 }
 
 async fn commit_command<'a>(
@@ -338,9 +341,8 @@ impl RaftService {
                                 // TODO: in my test sometimes timeout_elapsed may go 1 for no reason, require investigation
                                 //Timeout, require election
                                 debug!(
-                                "TIMEOUT!!! GOING TO CANDIDATE!!! {}, time remains {}ms",
-                                server.id, time_remains
-                            );
+                                "LEADER {} TIMEOUT!!! GOING TO CANDIDATE!!! {}, time remains {}ms",
+                                meta.leader_id, server.id, time_remains);
                                 CheckerAction::BecomeCandidate
                             } else {
                                 CheckerAction::None
@@ -586,13 +588,14 @@ impl RaftService {
     }
 
     async fn become_candidate<'a>(&'a self, meta: &'a mut RwLockWriteGuard<'_, RaftMeta>) {
+        let server_id = self.id;
+        debug!("{} become candidate", server_id);
         self.reset_last_checked(meta);
         let term = meta.term;
         alter_term(meta, term + 1);
-        meta.vote_for = Some(self.id);
+        meta.vote_for = Some(server_id);
         self.switch_membership(meta, Membership::Candidate);
         let term = meta.term;
-        let server_id = self.id;
         let (last_log_id, last_log_term) = {
             let logs = meta.logs.read().await;
             get_last_log_info!(self, logs)
@@ -612,6 +615,7 @@ impl RaftService {
                 .map(|(rpc, member_id)| {
                     let vote_fut = async move {
                         if member_id == server_id {
+                            debug!("Member {} vote for itself", member_id);
                             RequestVoteResponse::Granted
                         } else {
                             if let Ok(((remote_term, remote_leader_id), vote_granted)) = rpc
@@ -619,19 +623,24 @@ impl RaftService {
                                 .await
                             {
                                 if vote_granted {
+                                    debug!("Member {} received one vote from {}", server_id, member_id);
                                     RequestVoteResponse::Granted
                                 } else if remote_term > term {
+                                    debug!("Member {} is term out, by {}. Now leader is {}, term {}",
+                                           server_id, member_id, remote_leader_id, remote_term);
                                     RequestVoteResponse::TermOut(remote_term, remote_leader_id)
                                 } else {
+                                    debug!("Member {} did not get vote from {}", server_id, member_id);
                                     RequestVoteResponse::NotGranted
                                 }
                             } else {
+                                debug!("Member {} request vote failed from {}", server_id, member_id);
                                 RequestVoteResponse::NotGranted // default for request failure
                             }
                         }
                     };
                     timeout(
-                        Duration::from_millis(2000),
+                        Duration::from_millis(1500),
                         self.rt.spawn(vote_fut),
                     )
                 })
@@ -651,7 +660,9 @@ impl RaftService {
                     }
                     Ok(RequestVoteResponse::Granted) => {
                         granted += 1;
+                        debug!("Member {} received {} votes in for now", server_id, granted);
                         if is_majority(num_members as u64, granted) {
+                            debug!("Member {} become leader for received majority votes", server_id);
                             self.become_leader(meta, last_log_id).await;
                             break;
                         }
@@ -660,7 +671,7 @@ impl RaftService {
                 }
             }
         }
-        debug!("GRANTED: {}/{}", granted, num_members);
+        debug!("GRANTED {}: {}/{}", self.id, granted, num_members);
         return;
     }
 
@@ -671,7 +682,7 @@ impl RaftService {
     }
 
     async fn become_leader(&self, meta: &mut RwLockWriteGuard<'_, RaftMeta>, last_log_id: u64) {
-        debug!("Server {} become leader, term {}", self.options.service_id, meta.term);
+        debug!("Server {} become leader, term {}", self.id, meta.term);
         let leader_meta = RwLock::new(LeaderMeta::new());
         {
             let mut guard = leader_meta.write().await;
@@ -1336,17 +1347,19 @@ mod test {
         async_wait_secs().await;
 
         // test remove member
-        info!("Server 2 is leaving");
-        assert!(service2.leave().await);
+        info!("Server 1 ({}) is leaving", service1.id);
+        assert!(service1.leave().await);
+
+        async_wait_secs().await;
+
         info!("Check number of servers, should be 2");
-        assert_eq!(service1.num_members().await, 2);
+        assert_eq!(service2.num_members().await, 2);
         assert_eq!(service3.num_members().await, 2);
 
-        //test remove leader
-        info!("Ensuring leader is server 1");
-        assert_eq!(service1.leader_id().await, service1.id);
-        info!("Leader (server 1) leave the cluster");
-        assert!(service1.leave().await);
+        async_wait_secs().await;
+
+        info!("Server 2 ({}) is leaving", server2.server_id);
+        assert!(service2.leave().await);
 
         // there will be some unavailability in leader transaction
         async_wait_secs().await;
