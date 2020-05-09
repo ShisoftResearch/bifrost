@@ -430,15 +430,15 @@ impl RaftClient {
         fn_id: u64,
         data: Vec<u8>
     ) -> Result<ExecResult, ExecError> {
+        enum FailureAction {
+            SwitchLeader,
+            NotCommitted,
+            UpdateInfo,
+            NotLeader,
+            Retry,
+        }
         let mut depth = 0;
         loop {
-            enum FailureAction {
-                SwitchLeader,
-                NotCommitted,
-                UpdateInfo,
-                NotLeader,
-                Retry,
-            }
             let failure = {
                 if depth > 0 {
                     let members = self.members.read().await;
