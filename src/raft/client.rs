@@ -78,12 +78,12 @@ impl RaftClient {
     }
     pub async fn prepare_subscription(server: &Arc<rpc::Server>) -> Option<()> {
         let mut callback = CALLBACK.write().await;
-        if callback.is_none() {
+        return if callback.is_none() {
             let sub_service = SubscriptionService::initialize(&server).await;
             *callback = Some(sub_service.clone());
-            return Some(());
+            Some(())
         } else {
-            return None;
+            None
         }
     }
 
@@ -106,7 +106,7 @@ impl RaftClient {
                         debug!("Checking server info on {}", server_addr);
                         if !members.clients.contains_key(&id) {
                             debug!("Connecting to node {}", server_addr);
-                            match RPCClient::new_async(&server_addr).await {
+                            match rpc::DEFAULT_CLIENT_POOL.get(&server_addr).await {
                                 Ok(client) => {
                                     debug!("Added server info on {} to members", server_addr);
                                     members
@@ -197,7 +197,7 @@ impl RaftClient {
                 for id in remote_ids.difference(&connected_ids) {
                     let addr = members.id_map.get(id).unwrap().clone();
                     if !members.clients.contains_key(id) {
-                        if let Ok(client) = RPCClient::new_async(&addr).await {
+                        if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(&addr).await {
                             members
                                 .clients
                                 .insert(*id, AsyncServiceClient::new(self.service_id, &client));
@@ -227,7 +227,7 @@ impl RaftClient {
                         // Should not include the server we are running
                         return false;
                     }
-                    match RPCClient::new_async(peer_addr).await {
+                    match rpc::DEFAULT_CLIENT_POOL.get(peer_addr).await {
                         Ok(client) => {
                             let client = AsyncServiceClient::new(service_id, &client);
                             let check_res = client.c_ping().await;

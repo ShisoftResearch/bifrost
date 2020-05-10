@@ -61,6 +61,7 @@ mod test {
 
     #[tokio::test(threaded_scheduler)]
     async fn dummy() {
+        env_logger::try_init();
         println!("TESTING CALLBACK");
         let addr = String::from("127.0.0.1:2110");
         let raft_service = RaftService::new(Options {

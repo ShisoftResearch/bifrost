@@ -117,17 +117,15 @@ impl Server {
                 let server = server.clone();
                 async move {
                     let (svr_id, data) = read_u64_head(data);
-                    let svr_map = server.services.read().await;
-                    let service = svr_map.get(&svr_id);
+                    let service = server.services.read().await.get(&svr_id).cloned();
                     trace!("Processing request for service {}", svr_id);
                     match service {
-                        Some(ref service) => {
+                        Some(service) => {
                             let svr_res = service.dispatch(data).await;
                             encode_res(svr_res)
                         }
                         None => {
-                            let svr_ids = svr_map.keys().collect::<Vec<_>>();
-                            debug!("Service Id NOT found {}, have {:?}", svr_id, svr_ids);
+                            debug!("Service Id NOT found {}", svr_id);
                             encode_res(Err(RPCRequestError::ServiceIdNotFound))
                         }
                     }
@@ -171,7 +169,7 @@ impl Server {
 }
 
 pub struct RPCClient {
-    client: Mutex<tcp::client::Client>,
+    client: tcp::client::Client,
     pub server_id: u64,
     pub address: String,
 }
@@ -189,7 +187,7 @@ impl RPCClient {
         svr_id: u64,
         data: BytesMut,
     ) -> Result<BytesMut, RPCError> {
-        let mut client = self.client.lock().await;
+        let client = &self.client;
         let payload = prepend_u64(svr_id, data);
         let res = client.send_msg(payload).await;
         decode_res(res)
@@ -198,7 +196,7 @@ impl RPCClient {
         let client = tcp::client::Client::connect(addr).await?;
         Ok(Arc::new(RPCClient {
             server_id: client.server_id,
-            client: Mutex::new(client),
+            client,
             address: addr.clone(),
         }))
     }

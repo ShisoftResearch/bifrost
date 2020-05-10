@@ -18,13 +18,16 @@ use tokio::sync::mpsc::*;
 use futures::prelude::*;
 use futures::stream::SplitSink;
 use std::collections::HashMap;
-use parking_lot::Mutex as SyncMutex;
+use parking_lot::{Mutex as SyncMutex};
+use async_std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
 use tokio::sync::oneshot;
+use std::sync::atomic::Ordering::Relaxed;
 
 pub struct Client {
     //client: Option<SplitSink<Bytes>>,
-    client: Option<SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>>,
-    msg_counter: u64,
+    client: Option<Mutex<SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>>>,
+    msg_counter: AtomicU64,
     senders: Arc<SyncMutex<HashMap<u64, oneshot::Sender<BytesMut>>>>,
     timeout: Duration,
     pub server_id: u64,
@@ -57,13 +60,14 @@ impl Client {
                     while let Some(res) = reader.next().await {
                         if let Ok(mut data) = res {
                             let res_msg_id = data.get_u64_le();
+                            debug!("Received msg for {}, size {}", res_msg_id, data.len());
                             let sender: oneshot::Sender<BytesMut> = cloned_senders.lock().remove(&res_msg_id).unwrap();
                             sender.send(data).unwrap();
                         }
                     }
                     debug!("Stream from TCP server {} broken", address);
                 });
-                Some(writer)
+                Some(Mutex::new(writer))
             }
         };
         Ok(Client {
@@ -71,26 +75,27 @@ impl Client {
             server_id,
             senders,
             timeout,
-            msg_counter: 0
+            msg_counter: AtomicU64::new(0)
         })
     }
     pub async fn connect(address: &String) -> io::Result<Self> {
         Client::connect_with_timeout(address, Duration::from_secs(2)).await
     }
-    pub async fn send_msg(&mut self, msg: TcpReq) -> io::Result<BytesMut> {
-        if let Some(ref mut transport) = self.client {
+    pub async fn send_msg(&self, msg: TcpReq) -> io::Result<BytesMut> {
+        if let Some(ref transport) = self.client {
+            let msg_id = self.msg_counter.fetch_add(1, Relaxed);
             let mut frame = BytesMut::with_capacity(8 + msg.len());
             let rx = {
-                let mut senders = self.senders.lock();
-                let msg_id = self.msg_counter;
                 frame.put_u64_le(msg_id);
                 frame.extend_from_slice(msg.as_ref());
-                self.msg_counter += 1;
                 let (tx, rx) = oneshot::channel();
+                let mut senders = self.senders.lock();
                 senders.insert(msg_id, tx);
                 rx
             };
-            time::timeout(self.timeout, transport.send(frame.freeze())).await??;
+            debug!("Sending msg {}, size {}", msg_id, frame.len());
+            time::timeout(self.timeout, transport.lock().await.send(frame.freeze())).await??;
+            debug!("Sent msg {}", msg_id);
             Ok(time::timeout(self.timeout, rx).await?.unwrap())
         } else {
             Ok(shortcut::call(self.server_id, msg).await?)

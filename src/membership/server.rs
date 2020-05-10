@@ -113,7 +113,7 @@ impl Membership {
         let service_clone = service.clone();
         tokio::spawn(async move {
             while !service_clone.closed.load(Ordering::Relaxed) {
-                let is_leader = service_clone.raft_service.is_leader().await;
+                let is_leader = service_clone.raft_service.is_leader_for_real().await;
                 let was_leader = service_clone.was_leader.load(Ordering::Relaxed);
                 if !was_leader && is_leader {
                     service_clone.transfer_leadership().await

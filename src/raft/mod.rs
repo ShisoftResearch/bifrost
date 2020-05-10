@@ -30,6 +30,8 @@ use tokio::prelude::*;
 use tokio::runtime;
 use tokio::time::*;
 use crate::raft::disk::*;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::Relaxed;
 
 #[macro_use]
 pub mod state_machine;
@@ -186,7 +188,8 @@ pub struct RaftService {
     meta: RwLock<RaftMeta>,
     pub id: u64,
     pub options: Options,
-    rt: runtime::Runtime
+    rt: runtime::Runtime,
+    _is_leader: AtomicBool
 }
 dispatch_rpc_service_functions!(RaftService);
 
@@ -293,7 +296,8 @@ impl RaftService {
                 .thread_name("raft-server")
                 .threaded_scheduler()
                 .build()
-                .unwrap()
+                .unwrap(),
+            _is_leader: AtomicBool::new(false)
         };
         Arc::new(server_obj)
     }
@@ -325,8 +329,10 @@ impl RaftService {
                 {
                     let mut meta = server.meta.write().await; //WARNING: Reentering not supported
                     let current_time = get_time();
+                    let mut is_leader = false;
                     let action = match meta.membership {
                         Membership::Leader(_) => {
+                            is_leader = true;
                             if current_time >= meta.last_checked + HEARTBEAT_MS {
                                 CheckerAction::SendHeartbeat
                             } else {
@@ -351,6 +357,7 @@ impl RaftService {
                         Membership::Offline => CheckerAction::ExitLoop,
                         Membership::Undefined => CheckerAction::None,
                     };
+                    server._is_leader.store(is_leader, Relaxed);
                     match action {
                         CheckerAction::SendHeartbeat => {
                             server.send_followers_heartbeat(&mut meta, None, false).await;
@@ -530,12 +537,15 @@ impl RaftService {
         let meta = self.meta.read().await;
         meta.leader_id
     }
-    pub async fn is_leader(&self) -> bool {
+    pub async fn is_leader_for_real(&self) -> bool {
         let meta = self.meta.read().await;
         match meta.membership {
             Membership::Leader(_) => true,
             _ => false,
         }
+    }
+    pub fn is_leader(&self) -> bool {
+        self._is_leader.load(Relaxed)
     }
     pub async fn register_state_machine(&self, state_machine: SubStateMachine) {
         let meta = self.meta.read().await;

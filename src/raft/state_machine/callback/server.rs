@@ -157,10 +157,9 @@ impl SMCallback {
         R: serde::Serialize + Send + Sync + Clone + Any + Unpin + 'static,
         M: RaftMsg<R> + 'static,
     {
-        unimplemented!("Find a way to check is leader");
-        // if !IS_LEADER.get() {
-        //     return Err(NotifyError::IsNotLeader);
-        // }
+        if !self.raft_service.is_leader() {
+            return Err(NotifyError::IsNotLeader);
+        }
         let (fn_id, op_type, pattern_data) = msg.encode();
         return match op_type {
             OpType::SUBSCRIBE => {
@@ -182,7 +181,6 @@ impl SMCallback {
                         .iter()
                         .map(|sub_id| {
                             let message = Pin::new(&message);
-                            let sub_id = sub_id.clone();
                             async move {
                                 let svr_subs = self.subscriptions.read().await;
                                 if let Some(subscriber_id) = svr_subs.sub_suber.get(&sub_id) {
@@ -191,7 +189,9 @@ impl SMCallback {
                                     {
                                         let data = crate::utils::serde::serialize(&*message);
                                         let client = &subscriber.client;
-                                        Ok(client.notify(key, data).await)
+                                        debug!("Sending out callback notification to sub id {}", sub_id);
+                                        let client_result = client.notify(key, data).await;
+                                        Ok(client_result)
                                     } else {
                                         Err(NotifyError::CannotFindSubscriber)
                                     }
@@ -236,7 +236,7 @@ impl SMCallback {
                     .entry(pattern_id)
                     .or_insert_with(|| Vec::new())
                     .push(InternalSubscription {
-                        action: Box::new(move |any: &Any| match any.downcast_ref::<R>() {
+                        action: Box::new(move |any: &dyn Any| match any.downcast_ref::<R>() {
                             Some(r) => trigger(r),
                             None => warn!("type mismatch in internal subscription"),
                         }),
