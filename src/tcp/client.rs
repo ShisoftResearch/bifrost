@@ -60,7 +60,7 @@ impl Client {
                     while let Some(res) = reader.next().await {
                         if let Ok(mut data) = res {
                             let res_msg_id = data.get_u64_le();
-                            debug!("Received msg for {}, size {}", res_msg_id, data.len());
+                            trace!("Received msg for {}, size {}", res_msg_id, data.len());
                             let sender: oneshot::Sender<BytesMut> = cloned_senders.lock().remove(&res_msg_id).unwrap();
                             sender.send(data).unwrap();
                         }
@@ -93,9 +93,9 @@ impl Client {
                 senders.insert(msg_id, tx);
                 rx
             };
-            debug!("Sending msg {}, size {}", msg_id, frame.len());
+            trace!("Sending msg {}, size {}", msg_id, frame.len());
             time::timeout(self.timeout, transport.lock().await.send(frame.freeze())).await??;
-            debug!("Sent msg {}", msg_id);
+            trace!("Sent msg {}", msg_id);
             Ok(time::timeout(self.timeout, rx).await?.unwrap())
         } else {
             Ok(shortcut::call(self.server_id, msg).await?)
