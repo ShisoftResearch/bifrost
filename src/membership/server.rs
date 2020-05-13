@@ -6,8 +6,8 @@ use crate::raft::state_machine::callback::server::{notify as cb_notify, SMCallba
 use crate::raft::state_machine::StateMachineCtl;
 use crate::raft::{LogEntry, RaftMsg, RaftService, Service as raft_svr_trait};
 use crate::rpc::Server;
-use async_std::sync::*;
 use crate::utils::time;
+use async_std::sync::*;
 use bifrost_hasher::hash_str;
 use futures::prelude::future::*;
 use futures::prelude::*;
@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::{thread, time as std_time};
 use tokio::time as async_time;
 
-static MAX_TIMEOUT: i64 = 5000; //5 secs for 500ms heartbeat
+static MAX_TIMEOUT: i64 = 2000; //2 secs for 500ms heartbeat
 
 struct HBStatus {
     online: bool,
@@ -53,6 +53,7 @@ impl Service for HeartbeatService {
 impl HeartbeatService {
     fn update_raft(&self, online: &Vec<u64>, offline: &Vec<u64>) {
         let log = commands::hb_online_changed::new(online, offline);
+        // Encode to state machine command
         let (fn_id, _, data) = log.encode();
         self.raft_service.c_command(LogEntry {
             id: 0,
@@ -116,6 +117,7 @@ impl Membership {
                 let is_leader = service_clone.raft_service.is_leader();
                 let was_leader = service_clone.was_leader.load(Ordering::Relaxed);
                 if !was_leader && is_leader {
+                    // Transferred leader will skip checking all member timeout for once
                     service_clone.transfer_leadership().await
                 }
                 if was_leader != is_leader {
@@ -124,18 +126,22 @@ impl Membership {
                 if is_leader {
                     let current_time = time::get_time();
                     let mut outdated_members: Vec<u64> = Vec::new();
-                    let mut backedin_members: Vec<u64> = Vec::new();
+                    let mut back_in_members: Vec<u64> = Vec::new();
                     {
                         let mut status_map = service_clone.status.write().await;
                         let mut members_to_update: HashMap<u64, bool> = HashMap::new();
                         for (id, status) in status_map.iter() {
                             let alive = (current_time - status.last_updated) < MAX_TIMEOUT;
+                            // Finding new offline servers
                             if status.online && !alive {
+                                debug!("Found dead member {}", id);
                                 outdated_members.push(*id);
                                 members_to_update.insert(*id, alive);
                             }
+                            // Finding new online servers
                             if !status.online && alive {
-                                backedin_members.push(*id);
+                                debug!("Found alive member {}", id);
+                                back_in_members.push(*id);
                                 members_to_update.insert(*id, alive);
                             }
                         }
@@ -144,11 +150,13 @@ impl Membership {
                             status.online = *alive;
                         }
                     }
-                    if backedin_members.len() + outdated_members.len() > 0 {
-                        service_clone.update_raft(&backedin_members, &outdated_members);
+                    if back_in_members.len() + outdated_members.len() > 0 {
+                        debug!("Update member state machine for {} online, {} offline",
+                               back_in_members.len(), outdated_members.len());
+                        service_clone.update_raft(&back_in_members, &outdated_members);
                     }
                 }
-                async_time::delay_for(std_time::Duration::from_secs(1)).await
+                async_time::delay_for(std_time::Duration::from_millis(500)).await
             }
         });
         let mut membership_service = Membership {
@@ -240,7 +248,6 @@ impl Membership {
     }
     async fn leave_group_(&mut self, group_id: u64, id: u64, need_notify: bool) -> bool {
         let mut success = false;
-        let client_member: Option<ClientMember> = None;
         if let Some(ref mut group) = self.groups.get_mut(&group_id) {
             if let Some(ref mut member) = self.members.get_mut(&id) {
                 group.members.remove(&id);
@@ -292,12 +299,12 @@ impl Membership {
         }
         if changed {
             let version = self.version;
-            let old_convert = if let Some(id_opt) = old {
+            let old_leader = if let Some(id_opt) = old {
                 Some(self.compose_client_member(id_opt).await)
             } else {
                 None
             };
-            let new_convert = if let Some(id_opt) = new {
+            let new_leader = if let Some(id_opt) = new {
                 Some(self.compose_client_member(id_opt).await)
             } else {
                 None
@@ -305,7 +312,7 @@ impl Membership {
             cb_notify(
                 &self.callback,
                 commands::on_group_leader_changed::new(&group_id),
-                move || (old_convert, new_convert, version),
+                move || (old_leader, new_leader, version),
             )
             .await;
             Ok(())
@@ -314,7 +321,7 @@ impl Membership {
         }
     }
     async fn group_leader_candidate_available(&mut self, group_id: u64, member: u64) {
-        // if the group does not have a leader, assign the member
+        // if the group does not have a leader, assign the available member
         let mut leader_changed = false;
         if let Some(group) = self.groups.get_mut(&group_id) {
             if group.leader == None {

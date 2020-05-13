@@ -1,6 +1,6 @@
+use crate::raft::client::RaftClient;
 use std::any::Any;
 use std::sync::Arc;
-use crate::raft::client::RaftClient;
 
 pub enum Storage {
     MEMORY,

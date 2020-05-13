@@ -1,3 +1,5 @@
+// Group membership manager regardless actual raft members
+
 pub mod client;
 pub mod member;
 pub mod server;
@@ -32,6 +34,9 @@ pub mod raft {
     }
 }
 
+// The service only responsible for receiving heartbeat and
+// Updating last updated time
+// Expired update time will trigger timeout in the raft state machine
 mod heartbeat_rpc {
     service! {
         rpc ping(id: u64);
@@ -310,7 +315,10 @@ mod test {
 
         member1_svr.close(); // close only end the heartbeat thread
 
+        info!("Waiting for membership changes");
         async_wait_secs().await;
+        async_wait_secs().await;
+        info!("Checking members");
 
         assert_eq!(
             member1_svr
@@ -495,6 +503,7 @@ mod test {
 
         async_wait_secs().await;
 
+        info!("Checking event trigger");
         assert_eq!(any_member_joined_count.load(Ordering::Relaxed), 3);
         assert_eq!(any_member_left_count.load(Ordering::Relaxed), 1);
         assert_eq!(any_member_offline_count.load(Ordering::Relaxed), 1);

@@ -112,8 +112,11 @@ impl MasterStateMachine {
                 if let Some(sm) = self.subs.get_mut(&entry.sm_id) {
                     parse_output(sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data).await)
                 } else {
-                    debug!("Cannot find state machine {} for command, we have {:?}",
-                           entry.id, self.subs.keys().collect::<Vec<_>>());
+                    debug!(
+                        "Cannot find state machine {} for command, we have {:?}",
+                        entry.id,
+                        self.subs.keys().collect::<Vec<_>>()
+                    );
                     Err(ExecError::SmNotFound)
                 }
             }
@@ -128,8 +131,11 @@ impl MasterStateMachine {
                 if let Some(sm) = self.subs.get(&entry.sm_id) {
                     parse_output(sm.fn_dispatch_qry(entry.fn_id, &entry.data).await)
                 } else {
-                    debug!("Cannot find state machine {} for query, we have {:?}",
-                           entry.id, self.subs.keys().collect::<Vec<_>>());
+                    debug!(
+                        "Cannot find state machine {} for query, we have {:?}",
+                        entry.id,
+                        self.subs.keys().collect::<Vec<_>>()
+                    );
                     Err(ExecError::SmNotFound)
                 }
             }

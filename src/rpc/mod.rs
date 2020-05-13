@@ -2,8 +2,8 @@
 pub mod proto;
 
 use crate::tcp::client::Client;
-use async_std::sync::*;
 use crate::{tcp, DISABLE_SHORTCUT};
+use async_std::sync::*;
 use bifrost_hasher::hash_str;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::buf::BufExt;
@@ -38,7 +38,7 @@ pub enum RPCRequestError {
 pub enum RPCError {
     IOError(io::Error),
     RequestError(RPCRequestError),
-    ClientCannotDecodeResponse
+    ClientCannotDecodeResponse,
 }
 
 pub trait RPCService: Sync + Send {
@@ -224,7 +224,11 @@ impl ClientPool {
             let client = clients.get(&server_id).unwrap().clone();
             Ok(client)
         } else {
-            let client = timeout(Duration::from_secs(5), RPCClient::new_async(&addr_fn(server_id))).await??;
+            let client = timeout(
+                Duration::from_secs(5),
+                RPCClient::new_async(&addr_fn(server_id)),
+            )
+            .await??;
             clients.insert(server_id, client.clone());
             Ok(client)
         }
@@ -346,10 +350,10 @@ mod test {
         use super::*;
 
         #[derive(Serialize, Deserialize, Clone)]
-        pub struct ComplexAnswer{
+        pub struct ComplexAnswer {
             name: String,
             id: u64,
-            req: Option<String>
+            req: Option<String>,
         }
 
         service! {
@@ -371,8 +375,9 @@ mod test {
                 future::ready(ComplexAnswer {
                     name: format!("Server for {:?}", req),
                     id: self.id,
-                    req
-                }).boxed()
+                    req,
+                })
+                .boxed()
             }
 
             fn large_query(&self, req: Option<String>) -> BoxFuture<Vec<ComplexAnswer>> {
@@ -381,13 +386,17 @@ mod test {
                     res.push(ComplexAnswer {
                         name: format!("Server for {:?}", &req),
                         id: i,
-                        req: req.clone()
+                        req: req.clone(),
                     })
-                };
+                }
                 future::ready(res).boxed()
             }
 
-            fn large_req(&self, mut req: Vec<ComplexAnswer>, mut req2: Vec<ComplexAnswer>) -> BoxFuture<Vec<ComplexAnswer>> {
+            fn large_req(
+                &self,
+                mut req: Vec<ComplexAnswer>,
+                mut req2: Vec<ComplexAnswer>,
+            ) -> BoxFuture<Vec<ComplexAnswer>> {
                 req.append(&mut req2);
                 future::ready(req).boxed()
             }
@@ -423,11 +432,20 @@ mod test {
                 let id_un = id_res.unwrap();
                 assert_eq!(id_un, id);
                 let user_str = format!("User {}", id);
-                let complex = service_client.query_answer(Some(user_str.to_string())).await.unwrap();
-                let large = service_client.large_query(Some(user_str.to_string())).await.unwrap();
+                let complex = service_client
+                    .query_answer(Some(user_str.to_string()))
+                    .await
+                    .unwrap();
+                let large = service_client
+                    .large_query(Some(user_str.to_string()))
+                    .await
+                    .unwrap();
                 assert_eq!(large.len(), 1024);
                 assert_eq!(complex.req, Some(user_str));
-                let large_req = service_client.large_req(large.clone(), large).await.unwrap();
+                let large_req = service_client
+                    .large_req(large.clone(), large)
+                    .await
+                    .unwrap();
                 assert_eq!(large_req.len(), 1024 * 2);
                 id += 1;
             }

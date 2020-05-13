@@ -3,13 +3,13 @@ use crate::raft::state_machine::callback::SubKey;
 use crate::raft::state_machine::StateMachineCtl;
 use crate::raft::AsyncServiceClient;
 use crate::rpc;
+use crate::rpc::RPCClient;
 use async_std::sync::*;
 use bifrost_hasher::hash_str;
 use futures::FutureExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use crate::rpc::RPCClient;
 
 pub const CONFIG_SM_ID: u64 = 1;
 

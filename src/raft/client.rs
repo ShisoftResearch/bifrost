@@ -5,7 +5,9 @@ use crate::raft::state_machine::configs::commands::{
     subscribe as conf_subscribe, unsubscribe as conf_unsubscribe,
 };
 use crate::raft::state_machine::master::ExecError;
+use crate::raft::state_machine::StateMachineClient;
 use crate::rpc;
+use async_std::sync::*;
 use bifrost_hasher::{hash_bytes, hash_str};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -16,8 +18,6 @@ use std::iter::FromIterator;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::time::delay_for;
-use async_std::sync::*;
-use crate::raft::state_machine::StateMachineClient;
 
 const ORDERING: Ordering = Ordering::Relaxed;
 pub type Client = Arc<AsyncServiceClient>;
@@ -84,17 +84,17 @@ impl RaftClient {
             Some(())
         } else {
             None
-        }
+        };
     }
 
-    async fn cluster_info<'a>(
-        &'a self,
-        servers: &Vec<String>,
-    ) -> Option<ClientClusterInfo> {
+    async fn cluster_info<'a>(&'a self, servers: &Vec<String>) -> Option<ClientClusterInfo> {
         debug!("Getting server info for {:?}", servers);
         let mut attempt_remains: i32 = 10;
         loop {
-            debug!("Trying to get cluster info, attempt from {:?}...{}", servers, attempt_remains);
+            debug!(
+                "Trying to get cluster info, attempt from {:?}...{}",
+                servers, attempt_remains
+            );
             let mut found_zero_leader = true;
             let mut futs: FuturesUnordered<_> = servers
                 .iter()
@@ -109,9 +109,10 @@ impl RaftClient {
                             match rpc::DEFAULT_CLIENT_POOL.get(&server_addr).await {
                                 Ok(client) => {
                                     debug!("Added server info on {} to members", server_addr);
-                                    members
-                                        .clients
-                                        .insert(id, AsyncServiceClient::new(self.service_id, &client));
+                                    members.clients.insert(
+                                        id,
+                                        AsyncServiceClient::new(self.service_id, &client),
+                                    );
                                     debug!("Member {} added", server_addr);
                                 }
                                 Err(e) => {
@@ -140,12 +141,15 @@ impl RaftClient {
                                     found_zero_leader = true;
                                     None
                                 }
-                            },
+                            }
                             Err(e) => {
-                                debug!("Error on getting cluster info from {}, {:?}", server_addr, e);
+                                debug!(
+                                    "Error on getting cluster info from {}, {:?}",
+                                    server_addr, e
+                                );
                                 None
                             }
-                        }
+                        };
                     }
                 })
                 .collect();
@@ -157,7 +161,10 @@ impl RaftClient {
             if found_zero_leader && attempt_remains > 0 {
                 // We found an uninitialized node, should try again
                 // Random sleep
-                debug!("This fail attempt have zero leader id, retry...{}", attempt_remains);
+                debug!(
+                    "This fail attempt have zero leader id, retry...{}",
+                    attempt_remains
+                );
                 let delay_sec = {
                     let mut rng = rand::thread_rng();
                     rng.gen_range(1, 10)
@@ -210,7 +217,7 @@ impl RaftClient {
             None => {
                 debug!("Cannot update info, cannot get cluster info");
                 Err(ClientError::ServerUnreachable)
-            },
+            }
         }
     }
 
@@ -375,11 +382,7 @@ impl RaftClient {
             let num_members = members.clients.len();
             if num_members >= 1 {
                 let node_index = pos as usize % num_members;
-                let rpc_client = members
-                    .clients
-                    .values()
-                    .nth(node_index)
-                    .unwrap();
+                let rpc_client = members.clients.values().nth(node_index).unwrap();
                 let res = rpc_client
                     .c_query(self.gen_log_entry(sm_id, fn_id, &data))
                     .await;
@@ -408,15 +411,18 @@ impl RaftClient {
                         }
                     },
                     Err(e) => {
-                        error!("Got unknown error on query: {:?}, server {}", e, rpc_client.client.address);
+                        error!(
+                            "Got unknown error on query: {:?}, server {}",
+                            e, rpc_client.client.address
+                        );
                         if depth >= num_members {
-                            return Err(ExecError::Unknown)
+                            return Err(ExecError::Unknown);
                         } else {
                             debug!("Retry query...{}", depth);
                             depth += 1;
                             continue;
                         }
-                    },
+                    }
                 }
             } else {
                 return Err(ExecError::ServersUnreachable);
@@ -428,7 +434,7 @@ impl RaftClient {
         &self,
         sm_id: u64,
         fn_id: u64,
-        data: Vec<u8>
+        data: Vec<u8>,
     ) -> Result<ExecResult, ExecError> {
         enum FailureAction {
             SwitchLeader,
@@ -454,20 +460,26 @@ impl RaftClient {
                             .await;
                         match cmd_res {
                             Ok(ClientCmdResponse::Success {
-                                   data,
-                                   last_log_term,
-                                   last_log_id,
-                               }) => {
+                                data,
+                                last_log_term,
+                                last_log_id,
+                            }) => {
                                 swap_when_greater(&self.last_log_id, last_log_id);
                                 swap_when_greater(&self.last_log_term, last_log_term);
                                 return Ok(data);
                             }
                             Ok(ClientCmdResponse::NotLeader(new_leader_id)) => {
                                 if new_leader_id == 0 || leader_id == leader_id {
-                                    debug!("CLIENT: NOT LEADER, SUGGESTION NOT USEFUL, PROBE. GOT: {}", new_leader_id);
+                                    debug!(
+                                        "CLIENT: NOT LEADER, SUGGESTION NOT USEFUL, PROBE. GOT: {}",
+                                        new_leader_id
+                                    );
                                     FailureAction::SwitchLeader
                                 } else {
-                                    debug!("CLIENT: NOT LEADER, REMOTE SUGGEST SWITCH TO {}", new_leader_id);
+                                    debug!(
+                                        "CLIENT: NOT LEADER, REMOTE SUGGEST SWITCH TO {}",
+                                        new_leader_id
+                                    );
                                     self.leader_id.store(new_leader_id, ORDERING);
                                     FailureAction::NotLeader
                                 }
@@ -493,7 +505,8 @@ impl RaftClient {
                         .keys()
                         .nth(depth as usize % num_members)
                         .unwrap();
-                    self.leader_id.compare_and_swap(leader_id, *new_leader_id, ORDERING);
+                    self.leader_id
+                        .compare_and_swap(leader_id, *new_leader_id, ORDERING);
                     debug!("CLIENT: Switch leader {}", new_leader_id);
                 }
                 _ => {}
@@ -517,7 +530,6 @@ impl RaftClient {
     pub async fn leader_client(&self) -> Option<(u64, Client)> {
         let members = self.members.read().await;
         let leader_id = self.leader_id();
-        debug!("Leader id for client: {}", leader_id);
         if let Some(client) = members.clients.get(&leader_id) {
             Some((leader_id, client.clone()))
         } else {
@@ -572,17 +584,20 @@ pub struct CachedStateMachine<T: StateMachineClient> {
     server_list: Vec<String>,
     raft_service_id: u64,
     state_machine_id: u64,
-    cache: RwLock<Option<Arc<T>>>
+    cache: RwLock<Option<Arc<T>>>,
 }
 
-impl <T: StateMachineClient> CachedStateMachine<T> {
+impl<T: StateMachineClient> CachedStateMachine<T> {
     pub fn new(server_list: &Vec<String>, raft_service_id: u64, state_machine_id: u64) -> Self {
-        debug!("Construct cached state machine for list {:?}, service id {}, state machine {}", server_list, raft_service_id, state_machine_id);
+        debug!(
+            "Construct cached state machine for list {:?}, service id {}, state machine {}",
+            server_list, raft_service_id, state_machine_id
+        );
         Self {
             server_list: server_list.clone(),
             raft_service_id,
             state_machine_id,
-            cache: RwLock::new(None)
+            cache: RwLock::new(None),
         }
     }
     pub async fn get(&self) -> Arc<T> {
@@ -596,12 +611,18 @@ impl <T: StateMachineClient> CachedStateMachine<T> {
             {
                 let mut place_holder = self.cache.write().await;
                 if place_holder.is_none() {
-                    debug!("Creating state machine client instance, service {}, state machine id {}", self.raft_service_id, self.state_machine_id);
+                    debug!(
+                        "Creating state machine client instance, service {}, state machine id {}",
+                        self.raft_service_id, self.state_machine_id
+                    );
                     let raft_client = RaftClient::new(&self.server_list, self.raft_service_id)
                         .await
                         .unwrap();
                     // Create a client for the state machine on the raft service
-                    *place_holder = Some(Arc::new(T::new_instance(self.state_machine_id, &raft_client)))
+                    *place_holder = Some(Arc::new(T::new_instance(
+                        self.state_machine_id,
+                        &raft_client,
+                    )))
                 }
             }
         }

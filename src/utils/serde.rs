@@ -1,7 +1,6 @@
 use serde;
-use std::backtrace;
 use serde_cbor::{from_slice, to_vec};
-
+use std::backtrace;
 
 #[cfg(not(debug_assertions))]
 pub fn serialize<T>(obj: &T) -> Vec<u8>
@@ -22,8 +21,11 @@ where
     match from_slice(data) {
         Ok(obj) => Some(obj),
         Err(e) => {
-            warn!("Error on decoding data for type '{}', {}",
-                  unsafe { std::intrinsics::type_name::<T>() }, e);
+            warn!(
+                "Error on decoding data for type '{}', {}",
+                unsafe { std::intrinsics::type_name::<T>() },
+                e
+            );
             None
         }
     }
@@ -31,8 +33,8 @@ where
 
 #[cfg(debug_assertions)]
 pub fn serialize<T>(obj: &T) -> Vec<u8>
-    where
-        T: serde::Serialize,
+where
+    T: serde::Serialize,
 {
     match serde_json::to_vec(obj) {
         Ok(data) => data,
@@ -42,15 +44,19 @@ pub fn serialize<T>(obj: &T) -> Vec<u8>
 
 #[cfg(debug_assertions)]
 pub fn deserialize<'a, T>(data: &'a [u8]) -> Option<T>
-    where
-        T: serde::Deserialize<'a>,
+where
+    T: serde::Deserialize<'a>,
 {
     let type_name = unsafe { std::intrinsics::type_name::<T>() };
     match serde_json::from_slice(data) {
         Ok(obj) => Some(obj),
         Err(e) => {
-            warn!("Error on decoding data for type '{}', {}, json: {}",
-                  type_name, e, String::from_utf8_lossy(data));
+            warn!(
+                "Error on decoding data for type '{}', {}, json: {}",
+                type_name,
+                e,
+                String::from_utf8_lossy(data)
+            );
             None
         }
     }

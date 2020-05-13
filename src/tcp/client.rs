@@ -6,23 +6,23 @@ use crate::DISABLE_SHORTCUT;
 use bifrost_hasher::hash_str;
 
 use crate::tcp::server::{TcpReq, TcpRes};
-use bytes::{BytesMut, BufMut, Bytes, Buf};
-use futures::SinkExt;
-use std::future::Future;
-use std::pin::Pin;
-use tokio::io;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::time;
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
-use tokio::sync::mpsc::*;
+use async_std::sync::Mutex;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::prelude::*;
 use futures::stream::SplitSink;
+use futures::SinkExt;
+use parking_lot::Mutex as SyncMutex;
 use std::collections::HashMap;
-use parking_lot::{Mutex as SyncMutex};
-use async_std::sync::Mutex;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::AtomicU64;
-use tokio::sync::oneshot;
 use std::sync::atomic::Ordering::Relaxed;
+use tokio::io;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc::*;
+use tokio::sync::oneshot;
+use tokio::time;
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 pub struct Client {
     //client: Option<SplitSink<Bytes>>,
@@ -37,7 +37,12 @@ impl Client {
     pub async fn connect_with_timeout(address: &String, timeout: Duration) -> io::Result<Self> {
         let server_id = hash_str(address);
         let senders = Arc::new(SyncMutex::new(HashMap::new()));
-        debug!("TCP connect to {}, server id {}, timeout {}ms", address, server_id, timeout.as_millis());
+        debug!(
+            "TCP connect to {}, server id {}, timeout {}ms",
+            address,
+            server_id,
+            timeout.as_millis()
+        );
         let client = {
             if !DISABLE_SHORTCUT && shortcut::is_local(server_id).await {
                 debug!("Local connection, using shortcut");
@@ -61,7 +66,8 @@ impl Client {
                         if let Ok(mut data) = res {
                             let res_msg_id = data.get_u64_le();
                             trace!("Received msg for {}, size {}", res_msg_id, data.len());
-                            let sender: oneshot::Sender<BytesMut> = cloned_senders.lock().remove(&res_msg_id).unwrap();
+                            let sender: oneshot::Sender<BytesMut> =
+                                cloned_senders.lock().remove(&res_msg_id).unwrap();
                             sender.send(data).unwrap();
                         }
                     }
@@ -75,7 +81,7 @@ impl Client {
             server_id,
             senders,
             timeout,
-            msg_counter: AtomicU64::new(0)
+            msg_counter: AtomicU64::new(0),
         })
     }
     pub async fn connect(address: &String) -> io::Result<Self> {

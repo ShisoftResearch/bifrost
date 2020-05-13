@@ -1,7 +1,7 @@
 use super::STANDALONE_ADDRESS;
 use crate::tcp::shortcut;
 use crate::tcp::shortcut::call;
-use bytes::{BytesMut, BufMut, Bytes, Buf};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::future::BoxFuture;
 use futures::SinkExt;
 use std::error::Error;
@@ -41,7 +41,8 @@ impl Server {
                                     Ok(mut data) => {
                                         let msg_id = data.get_u64_le();
                                         let call_back_data = callback(data).await;
-                                        let mut res = BytesMut::with_capacity(8 + call_back_data.len());
+                                        let mut res =
+                                            BytesMut::with_capacity(8 + call_back_data.len());
                                         // debug!("Received TCP message {}", msg_id);
                                         res.put_u64_le(msg_id);
                                         res.extend_from_slice(call_back_data.as_ref());

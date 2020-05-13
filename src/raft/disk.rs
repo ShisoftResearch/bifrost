@@ -1,16 +1,16 @@
 // Now only offers log persistent
 
+use crate::raft::{LogEntry, LogsMap, Options, RaftMeta, Storage};
+use async_std::sync::*;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs::OpenOptions;
-use crate::raft::{Options, Storage, RaftMeta, LogsMap, LogEntry};
+use std::io;
+use std::io::Read;
+use std::ops::Bound::*;
 use std::path::Path;
 use tokio::fs::*;
 use tokio::io::*;
-use async_std::sync::*;
-use std::io;
-use std::ops::Bound::*;
-use serde::{Serialize, Deserialize};
-use std::io::Read;
-use std::collections::BTreeMap;
 
 const MAX_LOG_CAPACITY: usize = 10;
 
@@ -19,13 +19,13 @@ pub struct DiskOptions {
     pub path: String,
     pub take_snapshots: bool,
     pub append_logs: bool,
-    pub trim_logs: bool
+    pub trim_logs: bool,
 }
 
 pub struct StorageEntity {
     pub logs: Option<File>,
     pub snapshot: Option<File>,
-    pub last_term: u64
+    pub last_term: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -33,7 +33,7 @@ struct DiskLogEntry {
     term: u64,
     commit_index: u64,
     last_applied: u64,
-    log: LogEntry
+    log: LogEntry,
 }
 
 impl StorageEntity {
@@ -42,7 +42,7 @@ impl StorageEntity {
         term: &mut u64,
         commit_index: &mut u64,
         last_applied: &mut u64,
-        logs: &mut LogsMap
+        logs: &mut LogsMap,
     ) -> io::Result<Option<Self>> {
         Ok(match &opts.storage {
             &Storage::DISK(ref options) => {
@@ -70,7 +70,10 @@ impl StorageEntity {
                             if log_file.read_exact(&mut data_buf).is_err() {
                                 break;
                             }
-                            let entry = crate::utils::serde::deserialize::<DiskLogEntry>(data_buf.as_slice()).unwrap();
+                            let entry = crate::utils::serde::deserialize::<DiskLogEntry>(
+                                data_buf.as_slice(),
+                            )
+                            .unwrap();
                             *term = entry.term;
                             *commit_index = entry.commit_index;
                             *last_applied = entry.last_applied;
@@ -87,7 +90,7 @@ impl StorageEntity {
                     } else {
                         None
                     },
-                    last_term: 0
+                    last_term: 0,
                 })
             }
             _ => None,
@@ -108,7 +111,7 @@ impl StorageEntity {
                     term: *term,
                     commit_index: meta.commit_index,
                     last_applied: meta.last_applied,
-                    log: log.clone()
+                    log: log.clone(),
                 };
                 let entry_data = crate::utils::serde::serialize(&entry);
                 f.write(&(entry_data.len() as u64).to_le_bytes()).await?;
@@ -119,7 +122,10 @@ impl StorageEntity {
             }
             if counter > 0 {
                 f.sync_all().await?;
-                debug!("Appended and persisted {} logs, was {}, appended {:?}", counter, was_last_term, terms_appended);
+                debug!(
+                    "Appended and persisted {} logs, was {}, appended {:?}",
+                    counter, was_last_term, terms_appended
+                );
             }
         }
         Ok(())
@@ -128,7 +134,7 @@ impl StorageEntity {
     pub async fn post_processing<'a>(
         &mut self,
         meta: &RwLockWriteGuard<'a, RaftMeta>,
-        mut logs: RwLockWriteGuard<'a, LogsMap>
+        mut logs: RwLockWriteGuard<'a, LogsMap>,
     ) -> io::Result<()> {
         // TODO: trim logs in memory
         // TODO: trim logs on disk

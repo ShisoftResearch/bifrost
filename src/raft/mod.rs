@@ -3,9 +3,10 @@ use self::state_machine::configs::{RaftMember, CONFIG_SM_ID};
 use self::state_machine::master::{ExecError, ExecResult, MasterStateMachine, SubStateMachine};
 use self::state_machine::OpType;
 use crate::raft::client::RaftClient;
+use crate::raft::disk::*;
 use crate::raft::state_machine::StateMachineCtl;
-use async_std::sync::*;
 use crate::utils::time::get_time;
+use async_std::sync::*;
 use bifrost_hasher::hash_str;
 use bifrost_plugins::hash_ident;
 use futures::executor::*;
@@ -24,14 +25,13 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::Relaxed;
 use std::time::Duration;
 use std::{fs, thread};
 use tokio::prelude::*;
 use tokio::runtime;
 use tokio::time::*;
-use crate::raft::disk::*;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering::Relaxed;
 
 #[macro_use]
 pub mod state_machine;
@@ -189,7 +189,7 @@ pub struct RaftService {
     pub id: u64,
     pub options: Options,
     rt: runtime::Runtime,
-    _is_leader: AtomicBool
+    _is_leader: AtomicBool,
 }
 dispatch_rpc_service_functions!(RaftService);
 
@@ -230,7 +230,10 @@ async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
 fn is_majority(members: u64, granted: u64) -> bool {
     let required = members / 2 + 1;
     let majority = granted >= (required);
-    debug!("Members {} granted {}, is majority: {}", members, granted, majority);
+    debug!(
+        "Members {} granted {}, is majority: {}",
+        members, granted, majority
+    );
     majority
 }
 
@@ -269,8 +272,9 @@ impl RaftService {
             &mut term,
             &mut commit_index,
             &mut last_applied,
-            &mut logs
-        ).unwrap();
+            &mut logs,
+        )
+        .unwrap();
 
         let mut master_sm = MasterStateMachine::new(opts.service_id);
 
@@ -286,7 +290,7 @@ impl RaftService {
                 commit_index,
                 last_applied,
                 leader_id: 0,
-                storage: storage_entity.map(|e| Arc::new(Mutex::new(e)))
+                storage: storage_entity.map(|e| Arc::new(Mutex::new(e))),
             }),
             id: server_id,
             options: opts,
@@ -297,7 +301,7 @@ impl RaftService {
                 .threaded_scheduler()
                 .build()
                 .unwrap(),
-            _is_leader: AtomicBool::new(false)
+            _is_leader: AtomicBool::new(false),
         };
         Arc::new(server_obj)
     }
@@ -360,7 +364,9 @@ impl RaftService {
                     server._is_leader.store(is_leader, Relaxed);
                     match action {
                         CheckerAction::SendHeartbeat => {
-                            server.send_followers_heartbeat(&mut meta, None, false).await;
+                            server
+                                .send_followers_heartbeat(&mut meta, None, false)
+                                .await;
                         }
                         CheckerAction::BecomeCandidate => {
                             server.become_candidate(&mut meta).await;
@@ -633,26 +639,34 @@ impl RaftService {
                                 .await
                             {
                                 if vote_granted {
-                                    debug!("Member {} received one vote from {}", server_id, member_id);
+                                    debug!(
+                                        "Member {} received one vote from {}",
+                                        server_id, member_id
+                                    );
                                     RequestVoteResponse::Granted
                                 } else if remote_term > term {
-                                    debug!("Member {} is term out, by {}. Now leader is {}, term {}",
-                                           server_id, member_id, remote_leader_id, remote_term);
+                                    debug!(
+                                        "Member {} is term out, by {}. Now leader is {}, term {}",
+                                        server_id, member_id, remote_leader_id, remote_term
+                                    );
                                     RequestVoteResponse::TermOut(remote_term, remote_leader_id)
                                 } else {
-                                    debug!("Member {} did not get vote from {}", server_id, member_id);
+                                    debug!(
+                                        "Member {} did not get vote from {}",
+                                        server_id, member_id
+                                    );
                                     RequestVoteResponse::NotGranted
                                 }
                             } else {
-                                debug!("Member {} request vote failed from {}", server_id, member_id);
+                                debug!(
+                                    "Member {} request vote failed from {}",
+                                    server_id, member_id
+                                );
                                 RequestVoteResponse::NotGranted // default for request failure
                             }
                         }
                     };
-                    timeout(
-                        Duration::from_millis(1500),
-                        self.rt.spawn(vote_fut),
-                    )
+                    timeout(Duration::from_millis(1500), self.rt.spawn(vote_fut))
                 })
                 .collect();
             (futs, len)
@@ -672,7 +686,10 @@ impl RaftService {
                         granted += 1;
                         debug!("Member {} received {} votes in for now", server_id, granted);
                         if is_majority(num_members as u64, granted) {
-                            debug!("Member {} become leader for received majority votes", server_id);
+                            debug!(
+                                "Member {} become leader for received majority votes",
+                                server_id
+                            );
                             self.become_leader(meta, last_log_id).await;
                             break;
                         }
@@ -709,7 +726,7 @@ impl RaftService {
         &self,
         meta: &mut RwLockWriteGuard<'a, RaftMeta>,
         log_id: Option<u64>,
-        no_delay: bool
+        no_delay: bool,
     ) -> bool {
         let now = get_time();
         if meta.last_checked + HEARTBEAT_MS > now {
@@ -840,7 +857,8 @@ impl RaftService {
                 // break when retry and there is no entry
                 trace!(
                     "Stop retry when entry is empty, {}, member id {}",
-                    follower.next_index, member_id
+                    follower.next_index,
+                    member_id
                 );
                 return follower.match_index;
             }
@@ -1126,10 +1144,7 @@ impl Service for RaftService {
                 } else {
                     debug!(
                         "{} VOTE FOR: {}, not granted, candidate valid: {}, voted for {:?}",
-                        self.id,
-                        candidate_id,
-                        candidate_valid,
-                        vote_for
+                        self.id, candidate_id, candidate_valid, vote_for
                     );
                 }
             } else {
@@ -1179,13 +1194,16 @@ impl Service for RaftService {
             let meta = self.write_meta().await;
             let mut entry = entry;
             if !is_leader(&meta) {
-                debug!("Command sent to non-leader node, {}, should be {}", self.id, meta.leader_id);
+                debug!(
+                    "Command sent to non-leader node, {}, should be {}",
+                    self.id, meta.leader_id
+                );
                 return if meta.leader_id == self.id {
                     debug!("Found outdated leader id, will return 0");
                     ClientCmdResponse::NotLeader(0)
                 } else {
                     ClientCmdResponse::NotLeader(meta.leader_id)
-                }
+                };
             }
             let (new_log_id, new_log_term) = self.leader_append_log(&meta, &mut entry).await;
             let data = match entry.sm_id {
@@ -1269,11 +1287,11 @@ impl RaftStateMachine {
 #[cfg(test)]
 mod test {
     use crate::raft::state_machine::master::ExecError;
+    use crate::raft::state_machine::StateMachineCtl;
     use crate::raft::{Options, RaftService, Storage, DEFAULT_SERVICE_ID};
     use crate::rpc::Server;
     use crate::utils::time::async_wait_secs;
     use futures::FutureExt;
-    use crate::raft::state_machine::StateMachineCtl;
 
     #[tokio::test(threaded_scheduler)]
     async fn startup() {
@@ -1516,10 +1534,10 @@ mod test {
     mod state_machine {
         use super::*;
         use crate::raft::client::RaftClient;
-        use futures::stream::FuturesUnordered;
-        use std::time::Duration;
         use crate::utils::time::async_wait;
+        use futures::stream::FuturesUnordered;
         use std::sync::Arc;
+        use std::time::Duration;
 
         raft_state_machine! {
             def qry answer_to_the_universe(name: String) -> String;
@@ -1528,7 +1546,7 @@ mod test {
         }
 
         struct SM {
-            shots: i32
+            shots: i32,
         }
         impl StateMachineCmds for SM {
             fn answer_to_the_universe<'a>(&'a self, name: String) -> BoxFuture<'_, String> {
@@ -1556,7 +1574,7 @@ mod test {
                 future::ready(()).boxed()
             }
         }
-    
+
         #[tokio::test(threaded_scheduler)]
         async fn query_and_command() {
             env_logger::try_init();
@@ -1575,18 +1593,22 @@ mod test {
                 .await;
             Server::listen_and_resume(&server).await;
             RaftService::start(&raft_service).await;
-            raft_service
-                .register_state_machine(Box::new(sm))
-                .await;
+            raft_service.register_state_machine(Box::new(sm)).await;
             raft_service.bootstrap().await;
-    
+
             async_wait_secs().await;
-    
+
             let raft_client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID)
                 .await
                 .unwrap();
             let sm_client = client::SMClient::new(sm_id, &raft_client);
-            assert_eq!(sm_client.answer_to_the_universe(&"Alice".to_string()).await.unwrap(), "Alice, the answer is 42");
+            assert_eq!(
+                sm_client
+                    .answer_to_the_universe(&"Alice".to_string())
+                    .await
+                    .unwrap(),
+                "Alice, the answer is 42"
+            );
             assert_eq!(sm_client.take_a_shot(&2).await.unwrap(), 8);
         }
 
@@ -1621,9 +1643,7 @@ mod test {
                             .await;
                         Server::listen_and_resume(&server).await;
                         RaftService::start(&raft_service).await;
-                        raft_service
-                            .register_state_machine(Box::new(sm))
-                            .await;
+                        raft_service.register_state_machine(Box::new(sm)).await;
                         raft_service
                     }
                 })
@@ -1647,7 +1667,12 @@ mod test {
             async_wait(Duration::from_secs(5)).await;
             info!("Mass query");
             for i in 0..100 {
-                assert_eq!(sm_client.get_shot().await.unwrap(), 110, "fail at test {}", i);
+                assert_eq!(
+                    sm_client.get_shot().await.unwrap(),
+                    110,
+                    "fail at test {}",
+                    i
+                );
             }
             info!("Tests after leader transfer");
             info!("Leader should be consistent");
@@ -1664,7 +1689,13 @@ mod test {
                 if svr.id == raft_services[0].id {
                     continue;
                 }
-                assert_ne!(svr.leader_id().await, raft_services[0].id, "id {} at node {}", i, svr.id);
+                assert_ne!(
+                    svr.leader_id().await,
+                    raft_services[0].id,
+                    "id {} at node {}",
+                    i,
+                    svr.id
+                );
                 assert_eq!(svr.leader_id().await, new_leader);
             }
             info!("Now we have leader {}", new_leader);
@@ -1676,8 +1707,13 @@ mod test {
             async_wait(Duration::from_secs(5)).await;
             info!("Mass query");
             for i in 0..100 {
-                assert_eq!(sm_client.get_shot().await.unwrap(), 100, "fail at test {}", i);
+                assert_eq!(
+                    sm_client.get_shot().await.unwrap(),
+                    100,
+                    "fail at test {}",
+                    i
+                );
             }
-        } 
+        }
     }
 }

@@ -189,7 +189,10 @@ impl SMCallback {
                                     {
                                         let data = crate::utils::serde::serialize(&*message);
                                         let client = &subscriber.client;
-                                        debug!("Sending out callback notification to sub id {}", sub_id);
+                                        debug!(
+                                            "Sending out callback notification to sub id {}",
+                                            sub_id
+                                        );
                                         let client_result = client.notify(key, data).await;
                                         Ok(client_result)
                                     } else {
