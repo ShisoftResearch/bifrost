@@ -51,7 +51,7 @@ impl Service for HeartbeatService {
     }
 }
 impl HeartbeatService {
-    fn update_raft(&self, online: &Vec<u64>, offline: &Vec<u64>) {
+    async fn update_raft(&self, online: &Vec<u64>, offline: &Vec<u64>) {
         let log = commands::hb_online_changed::new(online, offline);
         // Encode to state machine command
         let (fn_id, _, data) = log.encode();
@@ -61,7 +61,7 @@ impl HeartbeatService {
             sm_id: DEFAULT_SERVICE_ID,
             fn_id,
             data,
-        });
+        }).await;
     }
     async fn transfer_leadership(&self) {
         //update timestamp for every alive server
@@ -104,7 +104,7 @@ impl Drop for Membership {
 }
 
 impl Membership {
-    pub async fn new(server: &Arc<Server>, raft_service: &Arc<RaftService>) {
+    pub async fn new(server: &Arc<Server>, raft_service: &Arc<RaftService>, callback: bool) {
         let service = Arc::new(HeartbeatService {
             status: RwLock::new(HashMap::new()),
             closed: AtomicBool::new(false),
@@ -153,7 +153,7 @@ impl Membership {
                     if back_in_members.len() + outdated_members.len() > 0 {
                         debug!("Update member state machine for {} online, {} offline",
                                back_in_members.len(), outdated_members.len());
-                        service_clone.update_raft(&back_in_members, &outdated_members);
+                        service_clone.update_raft(&back_in_members, &outdated_members).await;
                     }
                 }
                 async_time::delay_for(std_time::Duration::from_millis(500)).await
@@ -166,7 +166,9 @@ impl Membership {
             callback: None,
             version: 0,
         };
-        membership_service.init_callback(raft_service);
+        if callback {
+            membership_service.init_callback(raft_service).await;
+        }
         raft_service
             .register_state_machine(Box::new(membership_service))
             .await;
@@ -363,6 +365,7 @@ impl Membership {
 
 impl StateMachineCmds for Membership {
     fn hb_online_changed(&mut self, online: Vec<u64>, offline: Vec<u64>) -> BoxFuture<()> {
+        debug!("Member status changed, back online  {}, gone offline {}", online.len(), offline.len());
         async move {
             self.version += 1;
             {

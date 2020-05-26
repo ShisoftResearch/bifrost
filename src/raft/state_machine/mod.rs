@@ -7,6 +7,7 @@ pub enum Storage {
     DISK(String),
 }
 
+#[derive(Debug)]
 pub enum OpType {
     COMMAND,
     QUERY,

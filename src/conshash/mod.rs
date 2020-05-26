@@ -376,7 +376,7 @@ mod test {
             service_id: 0,
         });
         let server = Server::new(&addr);
-        let heartbeat_service = Membership::new(&server, &raft_service).await;
+        let heartbeat_service = Membership::new(&server, &raft_service, true).await;
         server.register_service(0, &raft_service).await;
         Server::listen_and_resume(&server).await;
         RaftService::start(&raft_service);

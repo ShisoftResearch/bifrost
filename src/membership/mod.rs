@@ -49,7 +49,7 @@ mod test {
     use crate::membership::member::MemberService;
     use crate::membership::server::Membership;
     use crate::raft::client::RaftClient;
-    use crate::raft::{Options, RaftService, Storage};
+    use crate::raft::{Options, RaftService, Storage, DEFAULT_SERVICE_ID};
     use crate::rpc::Server;
     use crate::utils::time::async_wait_secs;
     use futures::prelude::*;
@@ -63,21 +63,20 @@ mod test {
         let raft_service = RaftService::new(Options {
             storage: Storage::default(),
             address: addr.clone(),
-            service_id: 0,
+            service_id: DEFAULT_SERVICE_ID,
         });
         let server = Server::new(&addr);
-        let heartbeat_service = Membership::new(&server, &raft_service);
-        server.register_service(0, &raft_service).await;
+        server.register_service(DEFAULT_SERVICE_ID, &raft_service).await;
         Server::listen_and_resume(&server).await;
         RaftService::start(&raft_service).await;
-        Membership::new(&server, &raft_service).await;
+        Membership::new(&server, &raft_service, true).await;
         raft_service.bootstrap().await;
 
         let group_1 = String::from("test_group_1");
         let group_2 = String::from("test_group_2");
         let group_3 = String::from("test_group_3");
 
-        let wild_raft_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
+        let wild_raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID).await.unwrap();
         let client = ObserverClient::new(&wild_raft_client);
 
         RaftClient::prepare_subscription(&server).await;
@@ -202,15 +201,15 @@ mod test {
             .unwrap()
             .unwrap();
 
-        let member1_raft_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
+        let member1_raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID).await.unwrap();
         let member1_addr = String::from("server1");
         let member1_svr = MemberService::new(&member1_addr, &member1_raft_client).await;
 
-        let member2_raft_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
+        let member2_raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID).await.unwrap();
         let member2_addr = String::from("server2");
         let member2_svr = MemberService::new(&member2_addr, &member2_raft_client).await;
 
-        let member3_raft_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
+        let member3_raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID).await.unwrap();
         let member3_addr = String::from("server3");
         let member3_svr = MemberService::new(&member3_addr, &member3_raft_client).await;
 

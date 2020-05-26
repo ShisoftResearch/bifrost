@@ -47,6 +47,8 @@ impl Subscriptions {
         let suber_id = hash_str(address);
         let suber_exists = self.subscribers.contains_key(&suber_id);
         let sub_id = self.next_id;
+        let (raft_sid, sm_id, fn_id, pattern_id) = key;
+        debug!("Subscription {:?} from {}, address {}, fn {}, pattern {}", key, suber_id, address, fn_id, pattern_id);
         let require_reload_suber = if suber_exists {
             let suber_session_id = self.subscribers.get(&suber_id).unwrap().session_id;
             let session_match = suber_session_id == session_id;
@@ -59,7 +61,7 @@ impl Subscriptions {
         } else {
             true
         };
-        if !self.subscribers.contains_key(&suber_id) {
+        if !suber_exists || require_reload_suber {
             self.subscribers.insert(
                 suber_id,
                 Subscriber {
@@ -90,6 +92,7 @@ impl Subscriptions {
     }
 
     pub fn remove_subscriber(&mut self, suber_id: u64) {
+        debug!("Removing subscriber {}", suber_id);
         let suber_subs = if let Some(sub_ids) = self.suber_subs.get(&suber_id) {
             sub_ids.iter().cloned().collect()
         } else {
@@ -103,6 +106,7 @@ impl Subscriptions {
     }
 
     pub fn remove_subscription(&mut self, id: u64) {
+        debug!("Removing subscription {}", id);
         let sub_key = self.sub_to_key.remove(&id);
         if let Some(sub_key) = sub_key {
             if let Some(ref mut sub_subers) = self.subscriptions.get_mut(&sub_key) {
@@ -169,12 +173,13 @@ impl SMCallback {
                 let key = (raft_sid, sm_id, fn_id, pattern_id);
                 let internal_subs = self.internal_subs.read().await;
                 let svr_subs = self.subscriptions.read().await;
-                debug!("Subs key: {:?}", svr_subs.subscriptions.keys());
-                debug!("Looking for: {:?}", &key);
+                debug!("Sending notification, func {}, op: {:?}, pattern_id {}", fn_id, op_type, pattern_id);
                 if let Some(internal_subs) = internal_subs.get(&pattern_id) {
                     for is in internal_subs {
                         (is.action)(&message)
                     }
+                } else {
+                    trace!("Cannot found internal subs {}", pattern_id);
                 }
                 if let Some(sub_ids) = svr_subs.subscriptions.get(&key) {
                     let sub_result_futs: FuturesUnordered<_> = sub_ids
@@ -218,6 +223,7 @@ impl SMCallback {
                         .collect::<Vec<_>>();
                     Ok((sub_ids.len(), errors, response))
                 } else {
+                    warn!("Cannot find subscription {:?}, pattern {}", key, pattern_id);
                     Err(NotifyError::CannotFindSubscription)
                 }
             }
@@ -259,5 +265,7 @@ where
 {
     if let Some(ref callback) = *callback {
         callback.notify(msg, data()).await;
+    } else {
+        warn!("Cannot send notification, callback handler is empty");
     }
 }
