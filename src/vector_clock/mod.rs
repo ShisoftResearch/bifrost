@@ -1,5 +1,6 @@
 use bifrost_hasher::hash_str;
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
@@ -170,3 +171,19 @@ impl ServerVectorClock {
 }
 
 pub type StandardVectorClock = VectorClock<u64>;
+
+#[cfg(test)]
+mod test {
+    use crate::vector_clock::StandardVectorClock;
+
+    #[test]
+    fn test() {
+        let mut clock = StandardVectorClock::new();
+        let blank_clock = StandardVectorClock::new();
+        clock.inc(1);
+        println!("{:?}", clock.relation(&blank_clock));
+        assert!(clock > blank_clock);
+        assert!(blank_clock < clock);
+        assert!(blank_clock != clock);
+    }
+}

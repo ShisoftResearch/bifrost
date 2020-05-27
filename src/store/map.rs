@@ -4,6 +4,7 @@ macro_rules! def_store_hash_map {
         pub mod $m {
             use super::*;
             use bifrost_hasher::hash_str;
+            use futures::FutureExt;
             use std::collections::HashMap;
             use std::sync::Arc;
             use $crate::raft::state_machine::callback::server::SMCallback;
@@ -37,74 +38,79 @@ macro_rules! def_store_hash_map {
                 def sub on_key_removed(k: $kt) -> $vt;
             }
             impl StateMachineCmds for Map {
-                fn get(&self, k: $kt) -> Result<Option<$vt>, ()> {
-                    Ok(if let Some(v) = self.map.get(&k) {
+                fn get(&self, k: $kt) -> ::futures::future::BoxFuture<Option<$vt>> {
+                    let value = if let Some(v) = self.map.get(&k) {
                         Some(v.clone())
                     } else {
                         None
-                    })
+                    };
+                    future::ready(value).boxed()
                 }
-                fn insert(&mut self, k: $kt, v: $vt) -> Result<Option<$vt>, ()> {
+                fn insert(&mut self, k: $kt, v: $vt) -> ::futures::future::BoxFuture<Option<$vt>> {
                     if let Some(ref callback) = self.callback {
-                        callback.notify(commands::on_inserted::new(), Ok((k.clone(), v.clone())));
-                        callback.notify(commands::on_key_inserted::new(&k), Ok(v.clone()));
+                        callback.notify(commands::on_inserted::new(), (k.clone(), v.clone()));
+                        callback.notify(commands::on_key_inserted::new(&k), v.clone());
                     }
-                    Ok(self.map.insert(k, v))
+                    future::ready(self.map.insert(k, v)).boxed()
                 }
-                fn insert_if_absent(&mut self, k: $kt, v: $vt) -> Result<$vt, ()> {
+                fn insert_if_absent(
+                    &mut self,
+                    k: $kt,
+                    v: $vt,
+                ) -> ::futures::future::BoxFuture<$vt> {
                     if let Some(v) = self.map.get(&k) {
-                        return Ok(v.clone());
+                        return future::ready(v.clone()).boxed();
                     }
                     self.insert(k, v.clone());
-                    Ok(v)
+                    future::ready(v).boxed()
                 }
-                fn remove(&mut self, k: $kt) -> Result<Option<$vt>, ()> {
+                fn remove(&mut self, k: $kt) -> ::futures::future::BoxFuture<Option<$vt>> {
                     let res = self.map.remove(&k);
                     if let Some(ref callback) = self.callback {
                         if let Some(ref v) = res {
-                            callback
-                                .notify(commands::on_removed::new(), Ok((k.clone(), v.clone())));
-                            callback.notify(commands::on_key_removed::new(&k), Ok(v.clone()));
+                            callback.notify(commands::on_removed::new(), (k.clone(), v.clone()));
+                            callback.notify(commands::on_key_removed::new(&k), v.clone());
                         }
                     }
-                    Ok(res)
+                    future::ready(res).boxed()
                 }
-                fn is_empty(&self) -> Result<bool, ()> {
-                    Ok(self.map.is_empty())
+                fn is_empty(&self) -> ::futures::future::BoxFuture<bool> {
+                    future::ready(self.map.is_empty()).boxed()
                 }
-                fn len(&self) -> Result<u64, ()> {
-                    Ok(self.map.len() as u64)
+                fn len(&self) -> ::futures::future::BoxFuture<u64> {
+                    future::ready(self.map.len() as u64).boxed()
                 }
-                fn clear(&mut self) -> Result<(), ()> {
-                    Ok(self.map.clear())
+                fn clear(&mut self) -> ::futures::future::BoxFuture<()> {
+                    future::ready(self.map.clear()).boxed()
                 }
-                fn keys(&self) -> Result<Vec<$kt>, ()> {
-                    Ok(self.map.keys().cloned().collect())
+                fn keys(&self) -> ::futures::future::BoxFuture<Vec<$kt>> {
+                    future::ready(self.map.keys().cloned().collect()).boxed()
                 }
-                fn values(&self) -> Result<Vec<$vt>, ()> {
-                    Ok(self.map.values().cloned().collect())
+                fn values(&self) -> ::futures::future::BoxFuture<Vec<$vt>> {
+                    future::ready(self.map.values().cloned().collect()).boxed()
                 }
-                fn entries(&self) -> Result<Vec<($kt, $vt)>, ()> {
+                fn entries(&self) -> ::futures::future::BoxFuture<Vec<($kt, $vt)>> {
                     let mut r = Vec::new();
                     for (k, v) in self.map.iter() {
                         r.push((k.clone(), v.clone()));
                     }
-                    Ok(r)
+                    future::ready(r).boxed()
                 }
-                fn clone(&self) -> Result<HashMap<$kt, $vt>, ()> {
-                    Ok(self.map.clone())
+                fn clone(&self) -> ::futures::future::BoxFuture<HashMap<$kt, $vt>> {
+                    future::ready(self.map.clone()).boxed()
                 }
-                fn contains_key(&self, k: $kt) -> Result<bool, ()> {
-                    Ok(self.map.contains_key(&k))
+                fn contains_key(&self, k: $kt) -> ::futures::future::BoxFuture<bool> {
+                    future::ready(self.map.contains_key(&k)).boxed()
                 }
             }
             impl StateMachineCtl for Map {
                 raft_sm_complete!();
                 fn snapshot(&self) -> Option<Vec<u8>> {
-                    Some($crate::utils::bincode::serialize(&self.map))
+                    Some($crate::utils::serde::serialize(&self.map))
                 }
-                fn recover(&mut self, data: Vec<u8>) {
-                    self.map = $crate::utils::bincode::deserialize(&data);
+                fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
+                    self.map = $crate::utils::serde::deserialize(&data).unwrap();
+                    future::ready(()).boxed()
                 }
                 fn id(&self) -> u64 {
                     self.id
@@ -121,8 +127,8 @@ macro_rules! def_store_hash_map {
                 pub fn new_by_name(name: &String) -> Map {
                     Map::new(hash_str(name))
                 }
-                pub fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
-                    self.callback = Some(SMCallback::new(self.id(), raft_service.clone()));
+                pub async fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
+                    self.callback = Some(SMCallback::new(self.id(), raft_service.clone()).await);
                 }
             }
         }
@@ -130,4 +136,172 @@ macro_rules! def_store_hash_map {
 }
 
 def_store_hash_map!(string_u8vec_hashmap <String, Vec<u8>>);
-def_store_hash_map!(string_string_hashmap <String, String>);
+
+#[cfg(test)]
+mod test {
+    use crate::raft::client::RaftClient;
+    use crate::raft::{Options, RaftService, Storage, DEFAULT_SERVICE_ID};
+    use crate::rpc::Server;
+    use crate::utils::time::async_wait_secs;
+    use futures::prelude::*;
+    use std::collections::{HashMap, HashSet};
+    use std::iter::FromIterator;
+    use string_string_hashmap::client::SMClient;
+
+    def_store_hash_map!(string_string_hashmap <String, String>);
+
+    #[tokio::test(threaded_scheduler)]
+    async fn hash_map() {
+        let addr = String::from("127.0.0.1:2013");
+        let mut map_sm = string_string_hashmap::Map::new_by_name(&String::from("test"));
+        let raft_service = RaftService::new(Options {
+            storage: Storage::default(),
+            address: addr.clone(),
+            service_id: DEFAULT_SERVICE_ID,
+        });
+        let server = Server::new(&addr);
+        server
+            .register_service(DEFAULT_SERVICE_ID, &raft_service)
+            .await;
+        Server::listen_and_resume(&server).await;
+        let sm_id = map_sm.id;
+        map_sm.init_callback(&raft_service);
+        assert!(RaftService::start(&raft_service).await);
+        raft_service.register_state_machine(Box::new(map_sm)).await;
+        raft_service.bootstrap().await;
+
+        let raft_client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID)
+            .await
+            .unwrap();
+        let sm_client = SMClient::new(sm_id, &raft_client);
+        RaftClient::prepare_subscription(&server);
+
+        let sk1 = String::from("k1");
+        let sk2 = String::from("k2");
+        let sk3 = String::from("k3");
+        let sk4 = String::from("k4");
+
+        let sv1 = String::from("v1");
+        let sv2 = String::from("v2");
+        let sv3 = String::from("v3");
+        let sv4 = String::from("v4");
+
+        let mut inserted_stash = HashMap::new();
+        inserted_stash.insert(sk1.clone(), sv1.clone());
+        inserted_stash.insert(sk2.clone(), sv2.clone());
+        inserted_stash.insert(sk3.clone(), sv3.clone());
+        inserted_stash.insert(sk4.clone(), sv4.clone());
+
+        let mut removed_stash = HashMap::new();
+        removed_stash.insert(sk2.clone(), sv2.clone());
+
+        sm_client.on_inserted(move |res| {
+            let (key, value) = res;
+            println!("GOT INSERT CALLBACK {:?} -> {:?}", key, value);
+            assert_eq!(inserted_stash.get(&key).unwrap(), &value);
+            future::ready(()).boxed()
+        });
+        sm_client.on_removed(move |res| {
+            let (key, value) = res;
+            println!("GOT REMOVED CALLBACK {:?} -> {:?}", key, value);
+            assert_eq!(removed_stash.get(&key).unwrap(), &value);
+            future::ready(()).boxed()
+        });
+        sm_client.on_key_inserted(
+            |res| {
+                println!("GOT K1 CALLBACK {:?}", res);
+                assert_eq!(&String::from("v1"), &res);
+                future::ready(()).boxed()
+            },
+            &sk1,
+        );
+        sm_client.on_key_removed(
+            |res| {
+                println!("GOT K2 CALLBACK {:?}", res);
+                assert_eq!(&String::from("v2"), &res);
+                future::ready(()).boxed()
+            },
+            &sk2,
+        );
+        assert!(sm_client.is_empty().await.unwrap());
+        sm_client.insert(&sk1, &sv1).await.unwrap();
+        sm_client.insert(&sk2, &sv2).await.unwrap();
+        assert!(!sm_client.is_empty().await.unwrap());
+
+        assert_eq!(sm_client.len().await.unwrap(), 2);
+        assert_eq!(sm_client.get(&sk1).await.unwrap().unwrap(), sv1);
+        assert_eq!(sm_client.get(&sk2).await.unwrap().unwrap(), sv2);
+
+        sm_client
+            .insert_if_absent(&sk2, &String::from("kv2"))
+            .await
+            .unwrap();
+        assert_eq!(sm_client.len().await.unwrap(), 2);
+        assert_eq!(sm_client.get(&sk2).await.unwrap().unwrap(), sv2);
+
+        assert_eq!(sm_client.remove(&sk2).await.unwrap().unwrap(), sv2);
+        assert_eq!(sm_client.len().await.unwrap(), 1);
+        assert!(sm_client.get(&sk2).await.unwrap().is_none());
+
+        sm_client.clear().await.unwrap();
+        assert_eq!(sm_client.len().await.unwrap(), 0);
+
+        sm_client.insert(&sk1, &sv1).await.unwrap().unwrap();
+        sm_client.insert(&sk2, &sv2).await.unwrap().unwrap();
+        sm_client.insert(&sk3, &sv3).await.unwrap().unwrap();
+        sm_client.insert(&sk4, &sv4).await.unwrap().unwrap();
+        assert_eq!(sm_client.len().await.unwrap(), 4);
+
+        let remote_keys = sm_client.keys().await.unwrap();
+        let remote_keys_set = HashSet::<String>::from_iter(remote_keys.iter().cloned());
+        assert_eq!(remote_keys_set.len(), 4);
+
+        let remote_values = sm_client.values().await.unwrap();
+        let remote_values_set = HashSet::<String>::from_iter(remote_values.iter().cloned());
+        assert_eq!(remote_values_set.len(), 4);
+
+        let remote_entries = sm_client.entries().await.unwrap();
+        let remote_entries_set =
+            HashSet::<(String, String)>::from_iter(remote_entries.iter().cloned());
+        assert_eq!(remote_entries_set.len(), 4);
+
+        let expected_keys: HashSet<_> = [sk1.clone(), sk2.clone(), sk3.clone(), sk4.clone()]
+            .iter()
+            .cloned()
+            .collect();
+        let expected_values: HashSet<_> = [sv1.clone(), sv2.clone(), sv3.clone(), sv4.clone()]
+            .iter()
+            .cloned()
+            .collect();
+        let expected_entries: HashSet<_> = [
+            (sk1.clone(), sv1.clone()),
+            (sk2.clone(), sv2.clone()),
+            (sk3.clone(), sv3.clone()),
+            (sk4.clone(), sv4.clone()),
+        ]
+        .iter()
+        .cloned()
+        .collect();
+
+        assert_eq!(remote_keys_set.intersection(&expected_keys).count(), 4);
+        assert_eq!(remote_values_set.intersection(&expected_values).count(), 4);
+        assert_eq!(
+            remote_entries_set.intersection(&expected_entries).count(),
+            4
+        );
+
+        let mut expected_hashmap = HashMap::new();
+        expected_hashmap.insert(sk1.clone(), sv1.clone());
+        expected_hashmap.insert(sk2.clone(), sv2.clone());
+        expected_hashmap.insert(sk3.clone(), sv3.clone());
+        expected_hashmap.insert(sk4.clone(), sv4.clone());
+        assert_eq!(expected_hashmap, sm_client.clone().await.unwrap());
+
+        assert!(sm_client.contains_key(&sk1).await.unwrap());
+        assert!(sm_client.contains_key(&sk2).await.unwrap());
+        assert!(sm_client.contains_key(&sk3).await.unwrap());
+        assert!(sm_client.contains_key(&sk4).await.unwrap());
+
+        async_wait_secs().await;
+    }
+}

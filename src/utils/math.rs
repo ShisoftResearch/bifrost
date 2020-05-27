@@ -29,3 +29,22 @@ pub fn avg_scale(nums: &Vec<u64>) -> Option<u64> {
     }
     return None;
 }
+
+#[cfg(test)]
+mod test {
+    use crate::utils::math;
+
+    #[test]
+    fn max() {
+        assert_eq!(math::max(&vec!(1, 2, 3, 4, 5)).unwrap(), 5);
+        assert_eq!(math::max(&vec!(1, 2, 9, 4, 5)).unwrap(), 9);
+        assert_eq!(math::max(&Vec::<u64>::new()), None);
+    }
+
+    #[test]
+    fn min() {
+        assert_eq!(math::min(&vec!(1, 2, 3, 4, 5)).unwrap(), 1);
+        assert_eq!(math::min(&vec!(1, 2, -10, 4, 5)).unwrap(), -10);
+        assert_eq!(math::min(&Vec::<u64>::new()), None);
+    }
+}

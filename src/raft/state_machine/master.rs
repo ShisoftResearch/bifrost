@@ -6,7 +6,6 @@ use std::error::Error;
 use std::fmt;
 use std::fmt::Display;
 use std::fmt::Formatter;
-use utils::bincode;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ExecError {
@@ -55,14 +54,15 @@ impl StateMachineCtl for MasterStateMachine {
             }
         }
         sms.push((self.configs.id(), self.configs.snapshot().unwrap()));
-        let data = bincode::serialize(&sms);
+        let data = crate::utils::serde::serialize(&sms);
         Some(data)
     }
-    fn recover(&mut self, data: Vec<u8>) {
-        let mut sms: SnapshotDataItems = bincode::deserialize(&data);
+    fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
+        let mut sms: SnapshotDataItems = crate::utils::serde::deserialize(data.as_slice()).unwrap();
         for (sm_id, snapshot) in sms {
             self.snapshots.insert(sm_id, snapshot);
         }
+        future::ready(()).boxed()
     }
 }
 
@@ -103,25 +103,39 @@ impl MasterStateMachine {
         &self.configs.members
     }
 
-    pub fn commit_cmd(&mut self, entry: &LogEntry) -> ExecResult {
+    pub async fn commit_cmd(&mut self, entry: &LogEntry) -> ExecResult {
         match entry.sm_id {
-            CONFIG_SM_ID => parse_output(self.configs.fn_dispatch_cmd(entry.fn_id, &entry.data)),
+            CONFIG_SM_ID => {
+                parse_output(self.configs.fn_dispatch_cmd(entry.fn_id, &entry.data).await)
+            }
             _ => {
                 if let Some(sm) = self.subs.get_mut(&entry.sm_id) {
-                    parse_output(sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data))
+                    parse_output(sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data).await)
                 } else {
+                    debug!(
+                        "Cannot find state machine {} for command, we have {:?}",
+                        entry.id,
+                        self.subs.keys().collect::<Vec<_>>()
+                    );
                     Err(ExecError::SmNotFound)
                 }
             }
         }
     }
-    pub fn exec_qry(&self, entry: &LogEntry) -> ExecResult {
+    pub async fn exec_qry(&self, entry: &LogEntry) -> ExecResult {
         match entry.sm_id {
-            CONFIG_SM_ID => parse_output(self.configs.fn_dispatch_qry(entry.fn_id, &entry.data)),
+            CONFIG_SM_ID => {
+                parse_output(self.configs.fn_dispatch_qry(entry.fn_id, &entry.data).await)
+            }
             _ => {
                 if let Some(sm) = self.subs.get(&entry.sm_id) {
-                    parse_output(sm.fn_dispatch_qry(entry.fn_id, &entry.data))
+                    parse_output(sm.fn_dispatch_qry(entry.fn_id, &entry.data).await)
                 } else {
+                    debug!(
+                        "Cannot find state machine {} for query, we have {:?}",
+                        entry.id,
+                        self.subs.keys().collect::<Vec<_>>()
+                    );
                     Err(ExecError::SmNotFound)
                 }
             }
@@ -129,6 +143,9 @@ impl MasterStateMachine {
     }
     pub fn clear_subs(&mut self) {
         self.subs.clear()
+    }
+    pub fn has_sub(&self, id: &u64) -> bool {
+        self.subs.contains_key(&id)
     }
 }
 

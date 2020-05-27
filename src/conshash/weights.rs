@@ -1,9 +1,9 @@
+use crate::raft::state_machine::StateMachineCtl;
+use crate::raft::RaftService;
 use bifrost_plugins::hash_ident;
-use raft::state_machine::StateMachineCtl;
-use raft::RaftService;
+use futures::FutureExt;
 use std::collections::HashMap;
 use std::sync::Arc;
-use utils::bincode;
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_DHT_WEIGHTS) as u64;
 
@@ -17,29 +17,31 @@ pub struct Weights {
     pub id: u64,
 }
 impl StateMachineCmds for Weights {
-    fn set_weight(&mut self, group: u64, id: u64, weight: u64) -> Result<(), ()> {
+    fn set_weight(&mut self, group: u64, id: u64, weight: u64) -> BoxFuture<()> {
         *self
             .groups
             .entry(group)
             .or_insert_with(|| HashMap::new())
             .entry(id)
             .or_insert_with(|| 0) = weight;
-        Ok(())
+        future::ready(()).boxed()
     }
-    fn get_weights(&self, group: u64) -> Result<Option<HashMap<u64, u64>>, ()> {
-        Ok(match self.groups.get(&group) {
+    fn get_weights(&self, group: u64) -> BoxFuture<Option<HashMap<u64, u64>>> {
+        future::ready(match self.groups.get(&group) {
             Some(m) => Some(m.clone()),
             None => None,
         })
+        .boxed()
     }
-    fn get_weight(&self, group: u64, id: u64) -> Result<Option<u64>, ()> {
-        Ok(match self.groups.get(&group) {
+    fn get_weight(&self, group: u64, id: u64) -> BoxFuture<Option<u64>> {
+        future::ready(match self.groups.get(&group) {
             Some(m) => match m.get(&id) {
                 Some(w) => Some(*w),
                 None => None,
             },
             None => None,
         })
+        .boxed()
     }
 }
 impl StateMachineCtl for Weights {
@@ -48,20 +50,23 @@ impl StateMachineCtl for Weights {
         self.id
     }
     fn snapshot(&self) -> Option<Vec<u8>> {
-        Some(bincode::serialize(&self.groups))
+        Some(crate::utils::serde::serialize(&self.groups))
     }
-    fn recover(&mut self, data: Vec<u8>) {
-        self.groups = bincode::deserialize(&data);
+    fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
+        self.groups = crate::utils::serde::deserialize(data.as_slice()).unwrap();
+        future::ready(()).boxed()
     }
 }
 impl Weights {
-    pub fn new_with_id(id: u64, raft_service: &Arc<RaftService>) {
-        raft_service.register_state_machine(Box::new(Weights {
-            groups: HashMap::new(),
-            id,
-        }))
+    pub async fn new_with_id(id: u64, raft_service: &Arc<RaftService>) {
+        raft_service
+            .register_state_machine(Box::new(Weights {
+                groups: HashMap::new(),
+                id,
+            }))
+            .await
     }
-    pub fn new(raft_service: &Arc<RaftService>) {
-        Self::new_with_id(DEFAULT_SERVICE_ID, raft_service)
+    pub async fn new(raft_service: &Arc<RaftService>) {
+        Self::new_with_id(DEFAULT_SERVICE_ID, raft_service).await
     }
 }

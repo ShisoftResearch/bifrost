@@ -1,78 +1,67 @@
-use std::io;
-use std::net::SocketAddr;
-use std::sync::Arc;
-
-use futures::{future, Future};
-use tokio_proto::TcpServer;
-use tokio_service::{NewService, Service};
-
 use super::STANDALONE_ADDRESS;
-use tcp::proto::BytesServerProto;
-use tcp::shortcut;
+use crate::tcp::shortcut;
+use crate::tcp::shortcut::call;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use futures::future::BoxFuture;
+use futures::SinkExt;
+use std::error::Error;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use tokio::net::TcpListener;
+use tokio::stream::StreamExt;
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-pub struct ServerCallback {
-    closure: Box<Fn(Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = io::Error>>>,
-}
+pub type RPCFuture = dyn Future<Output = TcpRes>;
+pub type BoxedRPCFuture = Box<RPCFuture>;
+pub type TcpReq = BytesMut;
+pub type TcpRes = Pin<Box<dyn Future<Output = BytesMut> + Send>>;
 
-impl ServerCallback {
-    pub fn new<F: 'static>(f: F) -> ServerCallback
-    where
-        F: Fn(Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = io::Error>>,
-    {
-        ServerCallback {
-            closure: Box::new(f),
-        }
-    }
-    pub fn call(&self, data: Vec<u8>) -> Box<Future<Item = Vec<u8>, Error = io::Error>> {
-        (self.closure)(data)
-    }
-}
-
-unsafe impl Send for ServerCallback {}
-unsafe impl Sync for ServerCallback {}
-
-pub struct Server {
-    callback: Arc<ServerCallback>,
-}
-
-pub struct NewServer {
-    callback: Arc<ServerCallback>,
-}
-
-impl Service for Server {
-    type Request = Vec<u8>;
-    type Response = Vec<u8>;
-    type Error = io::Error;
-    type Future = Box<Future<Item = Vec<u8>, Error = io::Error>>;
-
-    fn call(&self, req: Self::Request) -> Self::Future {
-        self.callback.call(req)
-    }
-}
-
-impl NewService for NewServer {
-    type Request = Vec<u8>;
-    type Response = Vec<u8>;
-    type Error = io::Error;
-    type Instance = Server;
-
-    fn new_service(&self) -> io::Result<Self::Instance> {
-        Ok(Server {
-            callback: self.callback.clone(),
-        })
-    }
-}
+pub struct Server;
 
 impl Server {
-    pub fn new(addr: &String, callback: ServerCallback) {
-        let callback_ref = Arc::new(callback);
-        shortcut::register_server(addr, &callback_ref);
-        let new_server = NewServer {
-            callback: callback_ref,
-        };
+    pub async fn new(
+        addr: &String,
+        callback: Arc<dyn Fn(TcpReq) -> TcpRes + Send + Sync>,
+    ) -> Result<(), Box<dyn Error>> {
+        shortcut::register_server(addr, &callback).await;
         if !addr.eq(&STANDALONE_ADDRESS) {
-            let socket_addr: SocketAddr = addr.parse().unwrap();
-            TcpServer::new(BytesServerProto, socket_addr).serve(new_server);
+            let mut listener = TcpListener::bind(&addr).await?;
+            loop {
+                match listener.accept().await {
+                    Ok((socket, _)) => {
+                        // Like with other small servers, we'll `spawn` this client to ensure it
+                        // runs concurrently with all other clients. The `move` keyword is used
+                        // here to move ownership of our db handle into the async closure.
+                        let callback = callback.clone();
+                        tokio::spawn(async move {
+                            let mut transport = Framed::new(socket, LengthDelimitedCodec::new());
+                            while let Some(result) = transport.next().await {
+                                match result {
+                                    Ok(mut data) => {
+                                        let msg_id = data.get_u64_le();
+                                        let call_back_data = callback(data).await;
+                                        let mut res =
+                                            BytesMut::with_capacity(8 + call_back_data.len());
+                                        // debug!("Received TCP message {}", msg_id);
+                                        res.put_u64_le(msg_id);
+                                        res.extend_from_slice(call_back_data.as_ref());
+                                        if let Err(e) = transport.send(res.freeze()).await {
+                                            error!("Error on TCP callback {:?}", e);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("error on decoding from socket; error = {:?}", e);
+                                    }
+                                }
+                            }
+                            // The connection will be closed at this point as `lines.next()` has returned `None`.
+                        });
+                    }
+                    Err(e) => error!("error accepting socket; error = {:?}", e),
+                }
+            }
         }
+        Ok(())
     }
 }

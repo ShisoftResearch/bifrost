@@ -1,24 +1,17 @@
-use parking_lot::{RwLock, RwLockWriteGuard};
-use serde;
-use std;
-use std::collections::HashMap;
+use futures::prelude::*;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 
+use crate::conshash::weights::client::SMClient as WeightSMClient;
+use crate::conshash::weights::DEFAULT_SERVICE_ID;
+use crate::membership::client::{Member, ObserverClient as MembershipClient};
+use crate::raft::client::{RaftClient, SubscriptionError, SubscriptionReceipt};
+use crate::raft::state_machine::master::ExecError;
+use crate::utils::serde::serialize;
+use async_std::sync::*;
 use bifrost_hasher::{hash_bytes, hash_str};
-use conshash::weights::client::SMClient as WeightSMClient;
-use conshash::weights::DEFAULT_SERVICE_ID;
-use membership::client::{Member, ObserverClient as MembershipClient};
-use raft::client::{RaftClient, SubscriptionError, SubscriptionReceipt};
-use raft::state_machine::master::ExecError;
-use rand;
-use utils::bincode::serialize;
-
-use futures::prelude::*;
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
-use tokio_core::reactor::Core;
 
 pub mod weights;
 
@@ -58,7 +51,7 @@ pub struct ConsistentHashing {
 }
 
 impl ConsistentHashing {
-    pub fn new_with_id(
+    pub async fn new_with_id(
         id: u64,
         group: &str,
         raft_client: &Arc<RaftClient>,
@@ -75,18 +68,17 @@ impl ConsistentHashing {
             watchers: RwLock::new(Vec::new()),
             version: AtomicU64::new(0),
         });
-        let mut core = Core::new().unwrap();
         {
             let ch = ch.clone();
-            let res_fut = membership.on_group_member_joined(
-                move |r| {
-                    if let Ok((member, version)) = r {
-                        server_joined(&ch, member, version);
-                    }
-                },
-                group,
-            );
-            let res = core.run(res_fut);
+            let res = membership
+                .on_group_member_joined(
+                    move |(member, version)| {
+                        let ch = ch.clone();
+                        server_joined(ch, member, version).boxed()
+                    },
+                    group,
+                )
+                .await;
             if let Ok(Ok(_)) = res {
             } else {
                 return Err(CHError::WatchError(res));
@@ -94,15 +86,15 @@ impl ConsistentHashing {
         }
         {
             let ch = ch.clone();
-            let res_fut = membership.on_group_member_online(
-                move |r| {
-                    if let Ok((member, version)) = r {
-                        server_joined(&ch, member, version);
-                    }
-                },
-                group,
-            );
-            let res = core.run(res_fut);
+            let res = membership
+                .on_group_member_online(
+                    move |(member, version)| {
+                        let ch = ch.clone();
+                        server_joined(ch, member, version).boxed()
+                    },
+                    group,
+                )
+                .await;
             if let Ok(Ok(_)) = res {
             } else {
                 return Err(CHError::WatchError(res));
@@ -110,15 +102,15 @@ impl ConsistentHashing {
         }
         {
             let ch = ch.clone();
-            let res_fut = membership.on_group_member_left(
-                move |r| {
-                    if let Ok((member, version)) = r {
-                        server_left(&ch, member, version);
-                    }
-                },
-                group,
-            );
-            let res = core.run(res_fut);
+            let res = membership
+                .on_group_member_left(
+                    move |(member, version)| {
+                        let ch = ch.clone();
+                        server_left(ch, member, version).boxed()
+                    },
+                    group,
+                )
+                .await;
             if let Ok(Ok(_)) = res {
             } else {
                 return Err(CHError::WatchError(res));
@@ -126,15 +118,15 @@ impl ConsistentHashing {
         }
         {
             let ch = ch.clone();
-            let res_fut = membership.on_group_member_offline(
-                move |r| {
-                    if let Ok((member, version)) = r {
-                        server_left(&ch, member, version);
-                    }
-                },
-                group,
-            );
-            let res = core.run(res_fut);
+            let res = membership
+                .on_group_member_offline(
+                    move |(member, version)| {
+                        let ch = ch.clone();
+                        server_left(ch, member, version).boxed()
+                    },
+                    group,
+                )
+                .await;
             if let Ok(Ok(_)) = res {
             } else {
                 return Err(CHError::WatchError(res));
@@ -142,47 +134,49 @@ impl ConsistentHashing {
         }
         Ok(ch)
     }
-    pub fn new(
+    pub async fn new(
         group: &str,
         raft_client: &Arc<RaftClient>,
     ) -> Result<Arc<ConsistentHashing>, CHError> {
-        Self::new_with_id(DEFAULT_SERVICE_ID, group, raft_client)
+        Self::new_with_id(DEFAULT_SERVICE_ID, group, raft_client).await
     }
-    pub fn new_client(
+    pub async fn new_client(
         group: &str,
         raft_client: &Arc<RaftClient>,
     ) -> Result<Arc<ConsistentHashing>, CHError> {
-        Self::new_client_with_id(DEFAULT_SERVICE_ID, group, raft_client)
+        Self::new_client_with_id(DEFAULT_SERVICE_ID, group, raft_client).await
     }
-    pub fn new_client_with_id(
+    pub async fn new_client_with_id(
         id: u64,
         group: &str,
         raft_client: &Arc<RaftClient>,
     ) -> Result<Arc<ConsistentHashing>, CHError> {
-        match ConsistentHashing::new_with_id(id, group, raft_client) {
+        match ConsistentHashing::new_with_id(id, group, raft_client).await {
             Err(e) => Err(e),
-            Ok(ch) => match ch.init_table() {
+            Ok(ch) => match ch.init_table().await {
                 Err(e) => Err(CHError::InitTableError(e)),
                 Ok(_) => Ok(ch.clone()),
             },
         }
     }
-    pub fn init_table(&self) -> Result<(), InitTableError> {
-        let mut table = &mut self.tables.write();
-        self.init_table_(&mut table)
+    pub async fn init_table(&self) -> Result<(), InitTableError> {
+        let mut table = self.tables.write().await;
+        self.init_table_(&mut table).await
     }
-    pub fn to_server_name(&self, server_id: u64) -> String {
-        let lookup_table = self.tables.read();
+    pub async fn to_server_name(&self, server_id: u64) -> String {
+        let lookup_table = self.tables.read().await;
         lookup_table.addrs.get(&server_id).unwrap().clone()
     }
-    pub fn to_server_name_option(&self, server_id: Option<u64>) -> Option<String> {
-        server_id.map(|id| {
-            let lookup_table = self.tables.read();
-            lookup_table.addrs.get(&id).unwrap().clone()
-        })
+    pub async fn to_server_name_option(&self, server_id: Option<u64>) -> Option<String> {
+        if let Some(sid) = server_id {
+            let lookup_table = self.tables.read().await;
+            Some(lookup_table.addrs.get(&sid).unwrap().clone())
+        } else {
+            None
+        }
     }
-    pub fn get_server_id(&self, hash: u64) -> Option<u64> {
-        let lookup_table = self.tables.read();
+    pub async fn get_server_id(&self, hash: u64) -> Option<u64> {
+        let lookup_table = self.tables.read().await;
         let nodes = &lookup_table.nodes;
         let slot_count = nodes.len();
         if slot_count == 0 {
@@ -208,54 +202,52 @@ impl ConsistentHashing {
         );
         b as usize
     }
-    pub fn get_server(&self, hash: u64) -> Option<String> {
-        self.to_server_name_option(self.get_server_id(hash))
+    pub async fn get_server(&self, hash: u64) -> Option<String> {
+        self.to_server_name_option(self.get_server_id(hash).await)
+            .await
     }
-    pub fn get_server_by_string(&self, string: &String) -> Option<String> {
-        self.get_server(hash_str(string))
+    pub async fn get_server_by_string(&self, string: &String) -> Option<String> {
+        self.get_server(hash_str(string)).await
     }
-    pub fn get_server_by<T>(&self, obj: &T) -> Option<String>
+    pub async fn get_server_by<T>(&self, obj: &T) -> Option<String>
     where
         T: serde::Serialize,
     {
-        self.get_server(hash_bytes(serialize(obj).as_slice()))
+        self.get_server(hash_bytes(serialize(obj).as_slice())).await
     }
-    pub fn get_server_id_by_string(&self, string: &String) -> Option<u64> {
-        self.get_server_id(hash_str(string))
+    pub async fn get_server_id_by_string(&self, string: &String) -> Option<u64> {
+        self.get_server_id(hash_str(string)).await
     }
-    pub fn get_server_id_by<T>(&self, obj: &T) -> Option<u64>
+    pub async fn get_server_id_by<T>(&self, obj: &T) -> Option<u64>
     where
         T: serde::Serialize,
     {
         self.get_server_id(hash_bytes(serialize(obj).as_slice()))
+            .await
     }
-    pub fn rand_server(&self) -> Option<String> {
+    pub async fn rand_server(&self) -> Option<String> {
         let rand = rand::random::<u64>();
-        self.get_server(rand)
+        self.get_server(rand).await
     }
-    pub fn nodes_count(&self) -> usize {
-        let lookup_table = self.tables.read();
+    pub async fn nodes_count(&self) -> usize {
+        let lookup_table = self.tables.read().await;
         return lookup_table.nodes.len();
     }
-    pub fn set_weight(
-        &self,
-        server_name: &String,
-        weight: u64,
-    ) -> impl Future<Item = bool, Error = ExecError> {
+    pub async fn set_weight(&self, server_name: &String, weight: u64) -> Result<(), ExecError> {
         let group_id = hash_str(&self.group_name);
         let server_id = hash_str(server_name);
         self.weight_sm_client
             .set_weight(&group_id, &server_id, &weight)
-            .map(|res| if let Ok(_) = res { true } else { false })
+            .await
     }
-    pub fn watch_all_actions<F>(&self, f: F)
+    pub async fn watch_all_actions<F>(&self, f: F)
     where
         F: Fn(&Member, &Action, &LookupTables, &Vec<u64>) + 'static + Send + Sync,
     {
-        let mut watchers = self.watchers.write();
+        let mut watchers = self.watchers.write().await;
         watchers.push(Box::new(f));
     }
-    pub fn watch_server_nodes_range_changed<F>(&self, server: &String, f: F)
+    pub async fn watch_server_nodes_range_changed<F>(&self, server: &String, f: F)
     // return ranges [...,...)
     where
         F: Fn((usize, u32)) + 'static + Send + Sync,
@@ -281,19 +273,19 @@ impl ConsistentHashing {
                 warn!("No node exists for watch");
             }
         };
-        self.watch_all_actions(wrapper);
+        self.watch_all_actions(wrapper).await;
     }
 
-    fn init_table_(
+    async fn init_table_(
         &self,
-        lookup_table: &mut RwLockWriteGuard<LookupTables>,
+        lookup_table: &mut RwLockWriteGuard<'_, LookupTables>,
     ) -> Result<(), InitTableError> {
-        if let Ok(Ok((mut members, version))) =
-            self.membership.group_members(&self.group_name, true).wait()
+        if let Ok(Some((mut members, version))) =
+            self.membership.group_members(&self.group_name, true).await
         {
             let group_id = hash_str(&self.group_name);
-            match self.weight_sm_client.get_weights(&group_id).wait() {
-                Ok(Ok(Some(weights))) => {
+            match self.weight_sm_client.get_weights(&group_id).await {
+                Ok(Some(weights)) => {
                     if let Some(min_weight) = weights.values().min() {
                         let mut factors: BTreeMap<u64, u32> = BTreeMap::new();
                         let min_weight = *min_weight as f64;
@@ -322,7 +314,7 @@ impl ConsistentHashing {
                     }
                 }
                 Err(e) => Err(InitTableError::NoWeightService(e)),
-                Ok(Ok(None)) => Err(InitTableError::NoWeightGroup),
+                Ok(None) => Err(InitTableError::NoWeightGroup),
                 _ => Err(InitTableError::Unknown),
             }
         } else {
@@ -334,33 +326,208 @@ impl ConsistentHashing {
     }
 }
 
-fn server_joined(ch: &Arc<ConsistentHashing>, member: Member, version: u64) {
-    server_changed(ch, member, Action::Joined, version);
+async fn server_joined(ch: Arc<ConsistentHashing>, member: Member, version: u64) {
+    server_changed(ch, member, Action::Joined, version).await;
 }
-fn server_left(ch: &Arc<ConsistentHashing>, member: Member, version: u64) {
-    server_changed(ch, member, Action::Left, version);
+async fn server_left(ch: Arc<ConsistentHashing>, member: Member, version: u64) {
+    server_changed(ch, member, Action::Left, version).await;
 }
-fn server_changed(ch: &Arc<ConsistentHashing>, member: Member, action: Action, version: u64) {
+async fn server_changed(ch: Arc<ConsistentHashing>, member: Member, action: Action, version: u64) {
+    // let ch = ch.clone();
     let ch_version = ch.version.load(Ordering::Relaxed);
     if ch_version < version {
-        let ch = ch.clone();
-        thread::Builder::new()
-            .name(format!(
-                "Conshash member changes update - {}",
-                member.address
-            ))
-            .spawn(move || {
-                let mut lookup_table = ch.tables.write();
-                let watchers = ch.watchers.read();
-                let ch_version = ch.version.load(Ordering::Relaxed);
-                if ch_version >= version {
-                    return;
-                }
-                let old_nodes = lookup_table.nodes.clone();
-                ch.init_table_(&mut lookup_table);
-                for watch in watchers.iter() {
-                    watch(&member, &action, &*lookup_table, &old_nodes);
-                }
-            });
+        let watchers = ch.watchers.read().await;
+        let ch_version = ch.version.load(Ordering::Relaxed);
+        if ch_version >= version {
+            return;
+        }
+        {
+            let mut lookup_table = ch.tables.write().await;
+            let old_nodes = lookup_table.nodes.clone();
+            ch.init_table_(&mut lookup_table).await;
+            for watch in watchers.iter() {
+                watch(&member, &action, &*lookup_table, &old_nodes);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::conshash::weights::Weights;
+    use crate::conshash::ConsistentHashing;
+    use crate::membership::client::ObserverClient;
+    use crate::membership::member::MemberService;
+    use crate::membership::server::Membership;
+    use crate::raft::client::RaftClient;
+    use crate::raft::{Options, RaftService, Storage};
+    use crate::rpc::Server;
+    use crate::utils::time::async_wait_secs;
+    use std::collections::HashMap;
+    use std::sync::atomic::*;
+    use std::sync::Arc;
+
+    #[tokio::test(threaded_scheduler)]
+    async fn primary() {
+        env_logger::try_init();
+
+        let addr = String::from("127.0.0.1:2200");
+        let raft_service = RaftService::new(Options {
+            storage: Storage::default(),
+            address: addr.clone(),
+            service_id: 0,
+        });
+
+        let server = Server::new(&addr);
+        let heartbeat_service = Membership::new(&server, &raft_service, true).await;
+        server.register_service(0, &raft_service).await;
+        Server::listen_and_resume(&server).await;
+        RaftService::start(&raft_service).await;
+        raft_service.bootstrap().await;
+
+        let group_1 = String::from("test_group_1");
+        let group_2 = String::from("test_group_2");
+        let group_3 = String::from("test_group_3");
+
+        let server_1 = String::from("server1");
+        let server_2 = String::from("server2");
+        let server_3 = String::from("server3");
+
+        let wild_raft_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
+        let client = ObserverClient::new(&wild_raft_client);
+
+        RaftClient::prepare_subscription(&server).await;
+
+        client.new_group(&group_1).await.unwrap().unwrap();
+        client.new_group(&group_2).await.unwrap().unwrap();
+        client.new_group(&group_3).await.unwrap().unwrap();
+
+        let member1_raft_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
+        let member1_svr = MemberService::new(&server_1, &member1_raft_client).await;
+
+        let member2_raft_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
+        let member2_svr = MemberService::new(&server_2, &member2_raft_client).await;
+
+        let member3_raft_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
+        let member3_svr = MemberService::new(&server_3, &member3_raft_client).await;
+
+        member1_svr.join_group(&group_1).await.unwrap();
+        member2_svr.join_group(&group_1).await.unwrap();
+        member3_svr.join_group(&group_1).await.unwrap();
+
+        member1_svr.join_group(&group_2).await.unwrap();
+        member2_svr.join_group(&group_2).await.unwrap();
+
+        member1_svr.join_group(&group_3).await.unwrap();
+
+        Weights::new(&raft_service).await;
+
+        let ch1 = ConsistentHashing::new(&group_1, &wild_raft_client)
+            .await
+            .unwrap();
+        let ch2 = ConsistentHashing::new(&group_2, &wild_raft_client)
+            .await
+            .unwrap();
+        let ch3 = ConsistentHashing::new(&group_3, &wild_raft_client)
+            .await
+            .unwrap();
+
+        ch1.set_weight(&server_1, 1).await.unwrap();
+        ch1.set_weight(&server_2, 2).await.unwrap();
+        ch1.set_weight(&server_3, 3).await.unwrap();
+
+        ch2.set_weight(&server_1, 1).await.unwrap();
+        ch2.set_weight(&server_2, 1).await.unwrap();
+
+        ch3.set_weight(&server_1, 2).await.unwrap();
+
+        ch1.init_table().await.unwrap();
+        ch2.init_table().await.unwrap();
+        ch3.init_table().await.unwrap();
+
+        let ch1_server_node_changes_count = Arc::new(AtomicUsize::new(0));
+        let ch1_server_node_changes_count_clone = Arc::new(AtomicUsize::new(0)).clone();
+        ch1.watch_server_nodes_range_changed(&server_2, move |r| {
+            ch1_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
+        }).await;
+
+        let ch2_server_node_changes_count = Arc::new(AtomicUsize::new(0));
+        let ch2_server_node_changes_count_clone = Arc::new(AtomicUsize::new(0)).clone();
+        ch2.watch_server_nodes_range_changed(&server_2, move |r| {
+            ch2_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
+        }).await;
+
+        let ch3_server_node_changes_count = Arc::new(AtomicUsize::new(0));
+        let ch3_server_node_changes_count_clone = Arc::new(AtomicUsize::new(0)).clone();
+        ch3.watch_server_nodes_range_changed(&server_2, move |r| {
+            ch3_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
+        }).await;
+
+        assert_eq!(ch1.nodes_count().await, 6);
+        assert_eq!(ch2.nodes_count().await, 2);
+        assert_eq!(ch3.nodes_count().await, 1);
+
+        let mut ch_1_mapping: HashMap<String, u64> = HashMap::new();
+        for i in 0..30000usize {
+            let k = format!("k - {}", i);
+            let server = ch1.get_server_by_string(&k).await.unwrap();
+            *ch_1_mapping.entry(server.clone()).or_insert(0) += 1;
+        }
+        assert_eq!(ch_1_mapping.get(&server_1).unwrap(), &4936);
+        assert_eq!(ch_1_mapping.get(&server_2).unwrap(), &9923);
+        assert_eq!(ch_1_mapping.get(&server_3).unwrap(), &15141); // hard coded due to constant
+
+        let mut ch_2_mapping: HashMap<String, u64> = HashMap::new();
+        for i in 0..30000usize {
+            let k = format!("k - {}", i);
+            let server = ch2.get_server_by_string(&k).await.unwrap();
+            *ch_2_mapping.entry(server.clone()).or_insert(0) += 1;
+        }
+        assert_eq!(ch_2_mapping.get(&server_1).unwrap(), &14967);
+        assert_eq!(ch_2_mapping.get(&server_2).unwrap(), &15033);
+
+        let mut ch_3_mapping: HashMap<String, u64> = HashMap::new();
+        for i in 0..30000usize {
+            let k = format!("k - {}", i);
+            let server = ch3.get_server_by_string(&k).await.unwrap();
+            *ch_3_mapping.entry(server.clone()).or_insert(0) += 1;
+        }
+        assert_eq!(ch_3_mapping.get(&server_1).unwrap(), &30000);
+
+        member1_svr.close();
+        async_wait_secs().await;
+        async_wait_secs().await;
+
+        let mut ch_1_mapping: HashMap<String, u64> = HashMap::new();
+        for i in 0..30000usize {
+            let k = format!("k - {}", i);
+            let server = ch1.get_server_by_string(&k).await.unwrap();
+            *ch_1_mapping.entry(server.clone()).or_insert(0) += 1;
+        }
+        assert_eq!(ch_1_mapping.get(&server_2).unwrap(), &9923);
+        assert_eq!(ch_1_mapping.get(&server_3).unwrap(), &15141);
+
+        member3_svr.close();
+        async_wait_secs().await;
+        async_wait_secs().await;
+
+        let mut ch_2_mapping: HashMap<String, u64> = HashMap::new();
+        for i in 0..30000usize {
+            let k = format!("k - {}", i);
+            let server = ch2.get_server_by_string(&k).await.unwrap();
+            *ch_2_mapping.entry(server.clone()).or_insert(0) += 1;
+        }
+        assert_eq!(ch_2_mapping.get(&server_2).unwrap(), &30000);
+
+        for i in 0..30000usize {
+            let k = format!("k - {}", i);
+            assert!(ch3.get_server_by_string(&k).await.is_none()); // no member
+        }
+
+        //    wait();
+        //    wait();
+        //    assert_eq!(ch1_server_node_changes_count.load(Ordering::Relaxed), 1);
+        //    assert_eq!(ch2_server_node_changes_count.load(Ordering::Relaxed), 1);
+        //    assert_eq!(ch3_server_node_changes_count.load(Ordering::Relaxed), 0);
     }
 }

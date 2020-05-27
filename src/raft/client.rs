@@ -1,24 +1,23 @@
 use super::*;
-use bifrost_hasher::{hash_bytes, hash_str};
-use futures::prelude::{async, await};
-use raft::state_machine::callback::client::SubscriptionService;
-use raft::state_machine::callback::SubKey;
-use raft::state_machine::configs::commands::{
+use crate::raft::state_machine::callback::client::SubscriptionService;
+use crate::raft::state_machine::callback::SubKey;
+use crate::raft::state_machine::configs::commands::{
     subscribe as conf_subscribe, unsubscribe as conf_unsubscribe,
 };
-use raft::state_machine::configs::CONFIG_SM_ID;
-use raft::state_machine::master::{ExecError, ExecResult};
-use raft::state_machine::OpType;
-use raft::{AsyncServiceClient, ClientCmdResponse, ClientQryResponse, LogEntry, RaftMsg};
-use rand;
-use rpc;
+use crate::raft::state_machine::master::ExecError;
+use crate::raft::state_machine::StateMachineClient;
+use crate::rpc;
+use async_std::sync::*;
+use bifrost_hasher::{hash_bytes, hash_str};
+use futures::future::BoxFuture;
+use serde::{Deserialize, Serialize};
 use std::clone::Clone;
 use std::cmp::max;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::iter::FromIterator;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use utils::async_locks::RwLock;
+use tokio::time::delay_for;
 
 const ORDERING: Ordering = Ordering::Relaxed;
 pub type Client = Arc<AsyncServiceClient>;
@@ -50,7 +49,7 @@ struct Members {
     id_map: HashMap<u64, String>,
 }
 
-struct RaftClientInner {
+pub struct RaftClient {
     qry_meta: QryMeta,
     members: RwLock<Members>,
     leader_id: AtomicU64,
@@ -59,73 +58,9 @@ struct RaftClientInner {
     service_id: u64,
 }
 
-pub struct RaftClient {
-    inner: Arc<RaftClientInner>,
-}
-
 impl RaftClient {
-    pub fn new(servers: &Vec<String>, service_id: u64) -> Result<Arc<RaftClient>, ClientError> {
-        Ok(Arc::new(RaftClient {
-            inner: RaftClientInner::new(servers, service_id)?,
-        }))
-    }
-
-    pub fn prepare_subscription(server: &Arc<rpc::Server>) -> Option<()> {
-        RaftClientInner::prepare_subscription(server)
-    }
-
-    pub fn execute<R, M>(&self, sm_id: u64, msg: M) -> Box<Future<Item = R, Error = ExecError>>
-    where
-        R: 'static,
-        M: RaftMsg<R> + 'static,
-    {
-        RaftClientInner::execute(self.inner.clone(), sm_id, msg)
-    }
-
-    pub fn can_callback() -> bool {
-        RaftClientInner::can_callback()
-    }
-
-    pub fn subscribe<M, R, F>(
-        &self,
-        sm_id: u64,
-        msg: M,
-        f: F,
-    ) -> Box<Future<Item = Result<SubscriptionReceipt, SubscriptionError>, Error = ExecError>>
-    where
-        M: RaftMsg<R> + 'static,
-        R: 'static,
-        F: Fn(R) + 'static + Send + Sync,
-    {
-        RaftClientInner::subscribe(self.inner.clone(), sm_id, msg, f)
-    }
-
-    pub fn unsubscribe(
-        &self,
-        receipt: SubscriptionReceipt,
-    ) -> Box<Future<Item = Result<(), SubscriptionError>, Error = ExecError>> {
-        RaftClientInner::unsubscribe(self.inner.clone(), receipt)
-    }
-
-    pub fn leader_id(&self) -> u64 {
-        self.inner.leader_id.load(ORDERING)
-    }
-
-    pub fn leader_client(&self) -> Option<(u64, Client)> {
-        self.inner.leader_client()
-    }
-
-    pub fn current_leader_rpc_client(&self) -> impl Future<Item = Arc<rpc::RPCClient>, Error = ()> {
-        RaftClientInner::current_leader_rpc_client(self.inner.clone())
-    }
-}
-
-impl RaftClientInner {
-    pub fn new(
-        servers: &Vec<String>,
-        service_id: u64,
-    ) -> Result<Arc<RaftClientInner>, ClientError> {
-        let client = Arc::new(RaftClientInner {
+    pub async fn new(servers: &Vec<String>, service_id: u64) -> Result<Arc<Self>, ClientError> {
+        let client = RaftClient {
             qry_meta: QryMeta {
                 pos: AtomicU64::new(rand::random::<u64>()),
             },
@@ -137,61 +72,122 @@ impl RaftClientInner {
             last_log_id: AtomicU64::new(0),
             last_log_term: AtomicU64::new(0),
             service_id,
-        });
-        Self::update_info(client.clone(), HashSet::from_iter(servers.iter().cloned()))
-            .wait()
-            .map(move |_| client)
+        };
+        client.update_info(servers).await?;
+        Ok(Arc::new(client))
     }
-    pub fn prepare_subscription(server: &Arc<rpc::Server>) -> Option<()> {
-        let mut callback = CALLBACK.write();
-        if callback.is_none() {
-            let sub_service = SubscriptionService::initialize(&server);
+    pub async fn prepare_subscription(server: &Arc<rpc::Server>) -> Option<()> {
+        let mut callback = CALLBACK.write().await;
+        return if callback.is_none() {
+            let sub_service = SubscriptionService::initialize(&server).await;
             *callback = Some(sub_service.clone());
-            return Some(());
+            Some(())
         } else {
-            return None;
-        }
+            None
+        };
     }
 
-    #[async(boxed)]
-    fn cluster_info(
-        this: Arc<Self>,
-        servers: HashSet<String>,
-    ) -> Result<(Option<ClientClusterInfo>, RwLockWriteGuard<Members>), ()> {
-        let members = await!(this.members.write_async()).unwrap();
-        for server_addr in servers {
-            let id = hash_str(&server_addr);
-            if !members.clients.contains_key(&id) {
-                match rpc::DEFAULT_CLIENT_POOL.get(&server_addr) {
-                    Ok(client) => {
-                        let members = members.mutate();
-                        members
-                            .clients
-                            .insert(id, AsyncServiceClient::new(this.service_id, &client));
+    async fn cluster_info<'a>(&'a self, servers: &Vec<String>) -> Option<ClientClusterInfo> {
+        debug!("Getting server info for {:?}", servers);
+        let mut attempt_remains: i32 = 10;
+        loop {
+            debug!(
+                "Trying to get cluster info, attempt from {:?}...{}",
+                servers, attempt_remains
+            );
+            let mut found_zero_leader = true;
+            let mut futs: FuturesUnordered<_> = servers
+                .iter()
+                .map(|server_addr| {
+                    let id = hash_str(server_addr);
+                    let server_addr = server_addr.clone();
+                    async move {
+                        let mut members = self.members.write().await;
+                        debug!("Checking server info on {}", server_addr);
+                        if !members.clients.contains_key(&id) {
+                            debug!("Connecting to node {}", server_addr);
+                            match rpc::DEFAULT_CLIENT_POOL.get(&server_addr).await {
+                                Ok(client) => {
+                                    debug!("Added server info on {} to members", server_addr);
+                                    members.clients.insert(
+                                        id,
+                                        AsyncServiceClient::new(self.service_id, &client),
+                                    );
+                                    debug!("Member {} added", server_addr);
+                                }
+                                Err(e) => {
+                                    warn!("Cannot find server info from {}, {}", server_addr, e);
+                                    return None;
+                                }
+                            }
+                        }
+                        debug!("Getting server info from {}", server_addr);
+                        let member_client = members.clients.get(&id);
+                        debug!("Checking server client {}", server_addr);
+                        if member_client.is_none() {
+                            debug!("Server not found, skip {}", server_addr);
+                            return None;
+                        }
+                        debug!("Invoking server_cluster_info on {}", server_addr);
+                        let info_res = member_client.unwrap().c_server_cluster_info().await;
+                        debug!("Checking response from {}", server_addr);
+                        return match info_res {
+                            Ok(info) => {
+                                if info.leader_id != 0 {
+                                    debug!("Found server info with leader id {}", info.leader_id);
+                                    Some(info)
+                                } else {
+                                    debug!("Discovered zero leader id from {}", server_addr);
+                                    found_zero_leader = true;
+                                    None
+                                }
+                            }
+                            Err(e) => {
+                                debug!(
+                                    "Error on getting cluster info from {}, {:?}",
+                                    server_addr, e
+                                );
+                                None
+                            }
+                        };
                     }
-                    Err(_) => {
-                        continue;
-                    }
+                })
+                .collect();
+            while let Some(res) = futs.next().await {
+                if let Some(info) = res {
+                    return Some(info);
                 }
             }
-            if let Ok(Ok(info)) = await!(members.clients.get(&id).unwrap().c_server_cluster_info())
-            {
-                if info.leader_id != 0 {
-                    return Ok((Some(info), members));
-                }
+            if found_zero_leader && attempt_remains > 0 {
+                // We found an uninitialized node, should try again
+                // Random sleep
+                debug!(
+                    "This fail attempt have zero leader id, retry...{}",
+                    attempt_remains
+                );
+                let delay_sec = {
+                    let mut rng = rand::thread_rng();
+                    rng.gen_range(1, 10)
+                };
+                delay_for(Duration::from_secs(delay_sec)).await;
+                attempt_remains -= 1;
+                continue;
+            } else if found_zero_leader && attempt_remains <= 0 {
+                debug!("Continuously getting zero leader id, give up");
+                break;
             }
         }
-        return Ok((None, members));
+        warn!("Cannot find anything useful from list: {:?}", servers);
+        return None;
     }
 
-    #[async(boxed)]
-    fn update_info(this: Arc<Self>, servers: HashSet<String>) -> Result<(), ClientError> {
-        let (cluster_info, members) = await!(Self::cluster_info(this.clone(), servers)).unwrap();
+    async fn update_info(&self, servers: &Vec<String>) -> Result<(), ClientError> {
+        let cluster_info = self.cluster_info(servers).await;
         match cluster_info {
             Some(info) => {
+                let mut members = self.members.write().await;
                 let remote_members = info.members;
                 let mut remote_ids = HashSet::with_capacity(remote_members.len());
-                let mut members = members.mutate();
                 members.id_map.clear();
                 for (id, addr) in remote_members {
                     members.id_map.insert(id, addr);
@@ -208,32 +204,65 @@ impl RaftClientInner {
                 for id in remote_ids.difference(&connected_ids) {
                     let addr = members.id_map.get(id).unwrap().clone();
                     if !members.clients.contains_key(id) {
-                        if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(&addr) {
+                        if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(&addr).await {
                             members
                                 .clients
-                                .insert(*id, AsyncServiceClient::new(this.service_id, &client));
+                                .insert(*id, AsyncServiceClient::new(self.service_id, &client));
                         }
                     }
                 }
-                this.leader_id.store(info.leader_id, ORDERING);
+                self.leader_id.store(info.leader_id, ORDERING);
                 Ok(())
             }
-            None => Err(ClientError::ServerUnreachable),
+            None => {
+                debug!("Cannot update info, cannot get cluster info");
+                Err(ClientError::ServerUnreachable)
+            }
         }
     }
 
-    #[async(boxed)]
-    pub fn execute<R, M>(this: Arc<Self>, sm_id: u64, msg: M) -> Result<R, ExecError>
+    pub async fn probe_servers(
+        servers: &Vec<String>,
+        server_address: &String,
+        service_id: u64,
+    ) -> bool {
+        servers
+            .iter()
+            .map(|peer_addr| {
+                timeout(Duration::from_secs(2), async move {
+                    if peer_addr == server_address {
+                        // Should not include the server we are running
+                        return false;
+                    }
+                    match rpc::DEFAULT_CLIENT_POOL.get(peer_addr).await {
+                        Ok(client) => {
+                            let client = AsyncServiceClient::new(service_id, &client);
+                            let check_res = client.c_ping().await;
+                            check_res.is_ok()
+                        }
+                        Err(_) => false,
+                    }
+                })
+            })
+            .collect::<FuturesUnordered<_>>()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .any(|r| match r {
+                Ok(true) => true,
+                _ => false,
+            })
+    }
+
+    pub async fn execute<R, M>(&self, sm_id: u64, msg: M) -> Result<R, ExecError>
     where
         R: 'static,
         M: RaftMsg<R> + 'static,
     {
         let (fn_id, op, req_data) = msg.encode();
         let response = match op {
-            OpType::QUERY => await!(Self::query(this, sm_id, fn_id, req_data, 0)),
-            OpType::COMMAND | OpType::SUBSCRIBE => {
-                await!(Self::command(this, sm_id, fn_id, req_data, 0))
-            }
+            OpType::QUERY => self.query(sm_id, fn_id, req_data).await,
+            OpType::COMMAND | OpType::SUBSCRIBE => self.command(sm_id, fn_id, req_data).await,
         };
         match response {
             Ok(data) => match data {
@@ -244,8 +273,8 @@ impl RaftClientInner {
         }
     }
 
-    pub fn can_callback() -> bool {
-        CALLBACK.read().is_some()
+    pub async fn can_callback() -> bool {
+        CALLBACK.read().await.is_some()
     }
     fn get_sub_key<M, R>(&self, sm_id: u64, msg: M) -> SubKey
     where
@@ -259,9 +288,9 @@ impl RaftClientInner {
         };
         return (raft_sid, sm_id, fn_id, pattern_id);
     }
-    #[async(boxed)]
-    pub fn get_callback(this: Arc<Self>) -> Result<Arc<SubscriptionService>, SubscriptionError> {
-        match (*await!(CALLBACK.read_async()).unwrap()).clone() {
+
+    pub async fn get_callback(&self) -> Result<Arc<SubscriptionService>, SubscriptionError> {
+        match CALLBACK.read().await.clone() {
             None => {
                 debug!("Subscription service not set");
                 Err(SubscriptionError::SubServiceNotSet)
@@ -269,34 +298,37 @@ impl RaftClientInner {
             Some(c) => Ok(c),
         }
     }
-    #[async(boxed)]
-    pub fn subscribe<M, R, F>(
-        this: Arc<Self>,
+
+    pub async fn subscribe<M, R, F>(
+        &self,
         sm_id: u64,
         msg: M,
         f: F,
     ) -> Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>
     where
         M: RaftMsg<R> + 'static,
-        R: 'static,
-        F: Fn(R) + 'static + Send + Sync,
+        R: 'static + Send,
+        F: Fn(R) -> BoxFuture<'static, ()> + 'static + Send + Sync,
     {
-        let callback = match await!(Self::get_callback(this.clone())) {
+        let callback = match self.get_callback().await {
             Ok(c) => c,
             Err(e) => return Ok(Err(e)),
         };
-        let key = this.get_sub_key(sm_id, msg);
-        let wrapper_fn = move |data: Vec<u8>| f(M::decode_return(&data));
-        let cluster_subs = await!(Self::execute(
-            this.clone(),
-            CONFIG_SM_ID,
-            conf_subscribe::new(&key, &callback.server_address, &callback.session_id)
-        ));
+        let key = self.get_sub_key(sm_id, msg);
+        let wrapper_fn =
+            move |data: Vec<u8>| -> BoxFuture<'static, ()> { f(M::decode_return(&data)).boxed() };
+        let cluster_subs = self
+            .execute(
+                CONFIG_SM_ID,
+                conf_subscribe::new(&key, &callback.server_address, &callback.session_id),
+            )
+            .await;
         match cluster_subs {
             Ok(Ok(sub_id)) => {
-                let mut subs_map = callback.subs.write();
+                let mut subs_map = callback.subs.write().await;
                 let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
-                subs_lst.push((Box::new(wrapper_fn), sub_id));
+                let boxed_fn = Box::new(wrapper_fn);
+                subs_lst.push((boxed_fn, sub_id));
                 Ok(Ok((key, sub_id)))
             }
             Ok(Err(_)) => Ok(Err(SubscriptionError::RemoteError)),
@@ -304,22 +336,19 @@ impl RaftClientInner {
         }
     }
 
-    #[async(boxed)]
-    pub fn unsubscribe(
-        this: Arc<Self>,
+    pub async fn unsubscribe(
+        &self,
         receipt: SubscriptionReceipt,
     ) -> Result<Result<(), SubscriptionError>, ExecError> {
-        match await!(Self::get_callback(this.clone())) {
+        match self.get_callback().await {
             Ok(callback) => {
                 let (key, sub_id) = receipt;
-                let unsub = await!(Self::execute(
-                    this.clone(),
-                    CONFIG_SM_ID,
-                    conf_unsubscribe::new(&sub_id)
-                ));
+                let unsub = self
+                    .execute(CONFIG_SM_ID, conf_unsubscribe::new(&sub_id))
+                    .await;
                 match unsub {
-                    Ok(Ok(_)) => {
-                        let mut subs_map = callback.subs.write();
+                    Ok(_) => {
+                        let mut subs_map = callback.subs.write().await;
                         let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
                         let mut sub_index = 0;
                         for i in 0..subs_lst.len() {
@@ -335,7 +364,6 @@ impl RaftClientInner {
                             Ok(Err(SubscriptionError::CannotFindSubId))
                         }
                     }
-                    Ok(Err(_)) => Ok(Err(SubscriptionError::RemoteError)),
                     Err(e) => Err(e),
                 }
             }
@@ -346,59 +374,67 @@ impl RaftClientInner {
         }
     }
 
-    #[async(boxed)]
-    fn query(
-        this: Arc<Self>,
-        sm_id: u64,
-        fn_id: u64,
-        data: Vec<u8>,
-        depth: usize,
-    ) -> Result<ExecResult, ExecError> {
-        let pos = this.qry_meta.pos.fetch_add(1, ORDERING);
-        let members = await!(this.members.read_async()).unwrap();
-        let num_members = members.clients.len();
-        if num_members >= 1 {
-            let res = {
-                await!(members
-                    .clients
-                    .values()
-                    .nth(pos as usize % num_members)
-                    .unwrap()
-                    .c_query(this.gen_log_entry(sm_id, fn_id, &data)))
-            };
-            match res {
-                Ok(Ok(res)) => match res {
-                    ClientQryResponse::LeftBehind => {
+    async fn query(&self, sm_id: u64, fn_id: u64, data: Vec<u8>) -> Result<ExecResult, ExecError> {
+        let mut depth = 0;
+        loop {
+            let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
+            let members = self.members.read().await;
+            let num_members = members.clients.len();
+            if num_members >= 1 {
+                let node_index = pos as usize % num_members;
+                let rpc_client = members.clients.values().nth(node_index).unwrap();
+                let res = rpc_client
+                    .c_query(self.gen_log_entry(sm_id, fn_id, &data))
+                    .await;
+                match res {
+                    Ok(res) => match res {
+                        ClientQryResponse::LeftBehind => {
+                            debug!("Found left behind record...{}", depth);
+                            if depth >= num_members {
+                                return Err(ExecError::TooManyRetry);
+                            } else {
+                                depth += 1;
+                                continue;
+                            }
+                        }
+                        ClientQryResponse::Success {
+                            data,
+                            last_log_term,
+                            last_log_id,
+                        } => {
+                            swap_when_greater(&self.last_log_id, last_log_id);
+                            swap_when_greater(&self.last_log_term, last_log_term);
+                            if depth > 0 {
+                                warn!("Retry successful...{}", depth);
+                            }
+                            return Ok(data);
+                        }
+                    },
+                    Err(e) => {
+                        error!(
+                            "Got unknown error on query: {:?}, server {}",
+                            e, rpc_client.client.address
+                        );
                         if depth >= num_members {
-                            Err(ExecError::TooManyRetry)
+                            return Err(ExecError::Unknown);
                         } else {
-                            await!(Self::query(this.clone(), sm_id, fn_id, data, depth + 1))
+                            debug!("Retry query...{}", depth);
+                            depth += 1;
+                            continue;
                         }
                     }
-                    ClientQryResponse::Success {
-                        data,
-                        last_log_term,
-                        last_log_id,
-                    } => {
-                        swap_when_greater(&this.last_log_id, last_log_id);
-                        swap_when_greater(&this.last_log_term, last_log_term);
-                        Ok(data)
-                    }
-                },
-                _ => Err(ExecError::Unknown),
+                }
+            } else {
+                return Err(ExecError::ServersUnreachable);
             }
-        } else {
-            Err(ExecError::ServersUnreachable)
         }
     }
 
-    #[async(boxed)]
-    fn command(
-        this: Arc<Self>,
+    async fn command(
+        &self,
         sm_id: u64,
         fn_id: u64,
         data: Vec<u8>,
-        depth: usize,
     ) -> Result<ExecResult, ExecError> {
         enum FailureAction {
             SwitchLeader,
@@ -407,61 +443,76 @@ impl RaftClientInner {
             NotLeader,
             Retry,
         }
-        let failure = {
-            if depth > 0 {
-                let members = this.members.read();
-                let num_members = members.clients.len();
-                if depth >= max(num_members, 5) {
-                    return Err(ExecError::TooManyRetry);
-                };
-            }
-            match await!(Self::current_leader_client(this.clone())) {
-                Ok((leader_id, client)) => {
-                    match await!(client.c_command(this.gen_log_entry(sm_id, fn_id, &data))) {
-                        Ok(Ok(ClientCmdResponse::Success {
-                            data,
-                            last_log_term,
-                            last_log_id,
-                        })) => {
-                            swap_when_greater(&this.last_log_id, last_log_id);
-                            swap_when_greater(&this.last_log_term, last_log_term);
-                            return Ok(data);
-                        }
-                        Ok(Ok(ClientCmdResponse::NotLeader(leader_id))) => {
-                            this.leader_id.store(leader_id, ORDERING);
-                            FailureAction::NotLeader
-                        }
-                        Ok(Ok(ClientCmdResponse::NotCommitted)) => FailureAction::NotCommitted,
-                        Err(e) => {
-                            debug!("CLIENT: E1 - {} - {:?}", leader_id, e);
-                            FailureAction::SwitchLeader // need switch server for leader
-                        }
-                        Ok(Err(e)) => {
-                            debug!("CLIENT: E2 - {} - {:?}", leader_id, e);
-                            FailureAction::SwitchLeader // need switch server for leader
+        let mut depth = 0;
+        loop {
+            let failure = {
+                if depth > 0 {
+                    let members = self.members.read().await;
+                    let num_members = members.clients.len();
+                    if depth >= max(num_members + 1, 5) {
+                        return Err(ExecError::TooManyRetry);
+                    };
+                }
+                match self.current_leader_client().await {
+                    Some((leader_id, client)) => {
+                        let cmd_res = client
+                            .c_command(self.gen_log_entry(sm_id, fn_id, &data))
+                            .await;
+                        match cmd_res {
+                            Ok(ClientCmdResponse::Success {
+                                data,
+                                last_log_term,
+                                last_log_id,
+                            }) => {
+                                swap_when_greater(&self.last_log_id, last_log_id);
+                                swap_when_greater(&self.last_log_term, last_log_term);
+                                return Ok(data);
+                            }
+                            Ok(ClientCmdResponse::NotLeader(new_leader_id)) => {
+                                if new_leader_id == 0 || leader_id == leader_id {
+                                    debug!(
+                                        "CLIENT: NOT LEADER, SUGGESTION NOT USEFUL, PROBE. GOT: {}",
+                                        new_leader_id
+                                    );
+                                    FailureAction::SwitchLeader
+                                } else {
+                                    debug!(
+                                        "CLIENT: NOT LEADER, REMOTE SUGGEST SWITCH TO {}",
+                                        new_leader_id
+                                    );
+                                    self.leader_id.store(new_leader_id, ORDERING);
+                                    FailureAction::NotLeader
+                                }
+                            }
+                            Ok(ClientCmdResponse::NotCommitted) => FailureAction::NotCommitted,
+                            Err(e) => {
+                                debug!("CLIENT: ERROR - {} - {:?}", leader_id, e);
+                                FailureAction::SwitchLeader // need switch server for leader
+                            }
                         }
                     }
+                    None => FailureAction::UpdateInfo, // need update members
                 }
-                Err(()) => FailureAction::UpdateInfo, // need update members
+            }; //
+            match failure {
+                FailureAction::SwitchLeader => {
+                    debug!("Switch leader by probing");
+                    let members = self.members.read().await;
+                    let num_members = members.clients.len();
+                    let leader_id = self.leader_id.load(ORDERING);
+                    let new_leader_id = members
+                        .clients
+                        .keys()
+                        .nth(depth as usize % num_members)
+                        .unwrap();
+                    self.leader_id
+                        .compare_and_swap(leader_id, *new_leader_id, ORDERING);
+                    debug!("CLIENT: Switch leader {}", new_leader_id);
+                }
+                _ => {}
             }
-        }; //
-        match failure {
-            FailureAction::SwitchLeader => {
-                let members = this.members.read();
-                let num_members = members.clients.len();
-                let pos = this.qry_meta.pos.load(ORDERING);
-                let leader_id = this.leader_id.load(ORDERING);
-                let index = members
-                    .clients
-                    .keys()
-                    .nth(pos as usize % num_members)
-                    .unwrap();
-                this.leader_id.compare_and_swap(leader_id, *index, ORDERING);
-                debug!("CLIENT: Switch leader");
-            }
-            _ => {}
+            depth += 1;
         }
-        await!(Self::command(this, sm_id, fn_id, data, depth + 1))
     }
 
     fn gen_log_entry(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>) -> LogEntry {
@@ -476,8 +527,8 @@ impl RaftClientInner {
     pub fn leader_id(&self) -> u64 {
         self.leader_id.load(ORDERING)
     }
-    pub fn leader_client(&self) -> Option<(u64, Client)> {
-        let members = self.members.read();
+    pub async fn leader_client(&self) -> Option<(u64, Client)> {
+        let members = self.members.read().await;
         let leader_id = self.leader_id();
         if let Some(client) = members.clients.get(&leader_id) {
             Some((leader_id, client.clone()))
@@ -485,33 +536,32 @@ impl RaftClientInner {
             None
         }
     }
-    #[async(boxed)]
-    fn current_leader_client(this: Arc<Self>) -> Result<(u64, Client), ()> {
+
+    async fn current_leader_client(&self) -> Option<(u64, Client)> {
         {
-            let leader_client = this.leader_client();
+            let leader_client = self.leader_client().await;
             if leader_client.is_some() {
-                return leader_client.ok_or(());
+                return leader_client;
             }
         }
         {
             let servers = {
-                let members = this.members.read();
-                HashSet::from_iter(members.id_map.values().cloned())
+                let members = self.members.read().await;
+                Vec::from_iter(members.id_map.values().cloned())
             };
-            await!(Self::update_info(this.clone(), servers));
-            let leader_id = this.leader_id.load(ORDERING);
-            let members = this.members.read();
+            self.update_info(&servers).await;
+            let leader_id = self.leader_id.load(ORDERING);
+            let members = self.members.read().await;
             if let Some(client) = members.clients.get(&leader_id) {
-                Ok((leader_id, client.clone()))
+                Some((leader_id, client.clone()))
             } else {
-                Err(())
+                None
             }
         }
     }
-    pub fn current_leader_rpc_client(
-        this: Arc<Self>,
-    ) -> impl Future<Item = Arc<rpc::RPCClient>, Error = ()> {
-        Self::current_leader_client(this).map(|(_, client)| client.client.clone())
+    pub async fn current_leader_rpc_client(&self) -> Result<Arc<rpc::RPCClient>, ()> {
+        let (_, client) = self.current_leader_client().await.ok_or_else(|| ())?;
+        Ok(client.client.clone())
     }
 }
 
@@ -526,6 +576,55 @@ fn swap_when_greater(atomic: &AtomicU64, value: u64) {
             return;
         } else {
             orig_num = actual;
+        }
+    }
+}
+
+pub struct CachedStateMachine<T: StateMachineClient> {
+    server_list: Vec<String>,
+    raft_service_id: u64,
+    state_machine_id: u64,
+    cache: RwLock<Option<Arc<T>>>,
+}
+
+impl<T: StateMachineClient> CachedStateMachine<T> {
+    pub fn new(server_list: &Vec<String>, raft_service_id: u64, state_machine_id: u64) -> Self {
+        debug!(
+            "Construct cached state machine for list {:?}, service id {}, state machine {}",
+            server_list, raft_service_id, state_machine_id
+        );
+        Self {
+            server_list: server_list.clone(),
+            raft_service_id,
+            state_machine_id,
+            cache: RwLock::new(None),
+        }
+    }
+    pub async fn get(&self) -> Arc<T> {
+        loop {
+            {
+                let client = self.cache.read().await;
+                if let Some(cache) = &*client {
+                    return (*cache).clone();
+                }
+            }
+            {
+                let mut place_holder = self.cache.write().await;
+                if place_holder.is_none() {
+                    debug!(
+                        "Creating state machine client instance, service {}, state machine id {}",
+                        self.raft_service_id, self.state_machine_id
+                    );
+                    let raft_client = RaftClient::new(&self.server_list, self.raft_service_id)
+                        .await
+                        .unwrap();
+                    // Create a client for the state machine on the raft service
+                    *place_holder = Some(Arc::new(T::new_instance(
+                        self.state_machine_id,
+                        &raft_client,
+                    )))
+                }
+            }
         }
     }
 }

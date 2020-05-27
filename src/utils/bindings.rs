@@ -17,7 +17,7 @@ where
 {
     pub fn new(default: T) -> Binding<T> {
         Binding {
-            default: default,
+            default,
             thread_vals: RwLock::new(HashMap::new()),
         }
     }

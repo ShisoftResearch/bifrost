@@ -1,7 +1,7 @@
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use crc32fast::Hasher;
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::linked_list::LinkedList;
 use std::fs::{create_dir_all, read_dir, File};
@@ -205,7 +205,7 @@ where
         }
         let queue = PartialQueue {
             id: header.id,
-            list: bincode::deserialize(buffer.as_slice()).unwrap(),
+            list: crate::utils::serde::deserialize(buffer.as_slice()).unwrap(),
             file: read_buffer.into_inner(),
             pending_ops: 0,
         };
@@ -213,7 +213,7 @@ where
     }
 
     pub fn persist(&mut self) -> io::Result<()> {
-        let mut data = bincode::serialize(&self.list).unwrap();
+        let mut data = crate::utils::serde::serialize(&self.list);
         let len = data.len();
         let checksum = crc32(data.as_slice());
         let mut write_buffer = BufWriter::new(&self.file);
