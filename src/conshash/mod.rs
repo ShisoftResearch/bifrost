@@ -369,18 +369,21 @@ mod test {
 
     #[tokio::test(threaded_scheduler)]
     async fn primary() {
+        env_logger::try_init();
+
         let addr = String::from("127.0.0.1:2200");
         let raft_service = RaftService::new(Options {
             storage: Storage::default(),
             address: addr.clone(),
             service_id: 0,
         });
+
         let server = Server::new(&addr);
         let heartbeat_service = Membership::new(&server, &raft_service, true).await;
         server.register_service(0, &raft_service).await;
         Server::listen_and_resume(&server).await;
-        RaftService::start(&raft_service);
-        raft_service.bootstrap();
+        RaftService::start(&raft_service).await;
+        raft_service.bootstrap().await;
 
         let group_1 = String::from("test_group_1");
         let group_2 = String::from("test_group_2");
@@ -393,7 +396,7 @@ mod test {
         let wild_raft_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
         let client = ObserverClient::new(&wild_raft_client);
 
-        RaftClient::prepare_subscription(&server);
+        RaftClient::prepare_subscription(&server).await;
 
         client.new_group(&group_1).await.unwrap().unwrap();
         client.new_group(&group_2).await.unwrap().unwrap();
@@ -417,7 +420,7 @@ mod test {
 
         member1_svr.join_group(&group_3).await.unwrap();
 
-        let weight_service = Weights::new(&raft_service);
+        Weights::new(&raft_service).await;
 
         let ch1 = ConsistentHashing::new(&group_1, &wild_raft_client)
             .await
@@ -446,19 +449,19 @@ mod test {
         let ch1_server_node_changes_count_clone = Arc::new(AtomicUsize::new(0)).clone();
         ch1.watch_server_nodes_range_changed(&server_2, move |r| {
             ch1_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
-        });
+        }).await;
 
         let ch2_server_node_changes_count = Arc::new(AtomicUsize::new(0));
         let ch2_server_node_changes_count_clone = Arc::new(AtomicUsize::new(0)).clone();
         ch2.watch_server_nodes_range_changed(&server_2, move |r| {
             ch2_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
-        });
+        }).await;
 
         let ch3_server_node_changes_count = Arc::new(AtomicUsize::new(0));
         let ch3_server_node_changes_count_clone = Arc::new(AtomicUsize::new(0)).clone();
         ch3.watch_server_nodes_range_changed(&server_2, move |r| {
             ch3_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
-        });
+        }).await;
 
         assert_eq!(ch1.nodes_count().await, 6);
         assert_eq!(ch2.nodes_count().await, 2);
@@ -491,8 +494,8 @@ mod test {
         }
         assert_eq!(ch_3_mapping.get(&server_1).unwrap(), &30000);
 
-        member1_svr.leave().await.unwrap();
-
+        member1_svr.close();
+        async_wait_secs().await;
         async_wait_secs().await;
 
         let mut ch_1_mapping: HashMap<String, u64> = HashMap::new();
@@ -501,8 +504,12 @@ mod test {
             let server = ch1.get_server_by_string(&k).await.unwrap();
             *ch_1_mapping.entry(server.clone()).or_insert(0) += 1;
         }
-        assert_eq!(ch_1_mapping.get(&server_2).unwrap(), &11932);
-        assert_eq!(ch_1_mapping.get(&server_3).unwrap(), &18068);
+        assert_eq!(ch_1_mapping.get(&server_2).unwrap(), &9923);
+        assert_eq!(ch_1_mapping.get(&server_3).unwrap(), &15141);
+
+        member3_svr.close();
+        async_wait_secs().await;
+        async_wait_secs().await;
 
         let mut ch_2_mapping: HashMap<String, u64> = HashMap::new();
         for i in 0..30000usize {
