@@ -125,7 +125,6 @@ impl Server {
                             encode_res(svr_res)
                         }
                         None => {
-                            panic!("Service Id NOT found {}", svr_id);
                             encode_res(Err(RPCRequestError::ServiceIdNotFound))
                         }
                     }
