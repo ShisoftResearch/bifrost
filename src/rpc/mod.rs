@@ -124,9 +124,7 @@ impl Server {
                             let svr_res = service.dispatch(data).await;
                             encode_res(svr_res)
                         }
-                        None => {
-                            encode_res(Err(RPCRequestError::ServiceIdNotFound))
-                        }
+                        None => encode_res(Err(RPCRequestError::ServiceIdNotFound)),
                     }
                 }
                 .boxed()

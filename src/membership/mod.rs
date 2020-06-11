@@ -66,7 +66,9 @@ mod test {
             service_id: DEFAULT_SERVICE_ID,
         });
         let server = Server::new(&addr);
-        server.register_service(DEFAULT_SERVICE_ID, &raft_service).await;
+        server
+            .register_service(DEFAULT_SERVICE_ID, &raft_service)
+            .await;
         Server::listen_and_resume(&server).await;
         RaftService::start(&raft_service).await;
         Membership::new(&server, &raft_service, true).await;
@@ -76,7 +78,9 @@ mod test {
         let group_2 = String::from("test_group_2");
         let group_3 = String::from("test_group_3");
 
-        let wild_raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID).await.unwrap();
+        let wild_raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID)
+            .await
+            .unwrap();
         let client = ObserverClient::new(&wild_raft_client);
 
         RaftClient::prepare_subscription(&server).await;
@@ -201,15 +205,21 @@ mod test {
             .unwrap()
             .unwrap();
 
-        let member1_raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID).await.unwrap();
+        let member1_raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID)
+            .await
+            .unwrap();
         let member1_addr = String::from("server1");
         let member1_svr = MemberService::new(&member1_addr, &member1_raft_client).await;
 
-        let member2_raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID).await.unwrap();
+        let member2_raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID)
+            .await
+            .unwrap();
         let member2_addr = String::from("server2");
         let member2_svr = MemberService::new(&member2_addr, &member2_raft_client).await;
 
-        let member3_raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID).await.unwrap();
+        let member3_raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID)
+            .await
+            .unwrap();
         let member3_addr = String::from("server3");
         let member3_svr = MemberService::new(&member3_addr, &member3_raft_client).await;
 

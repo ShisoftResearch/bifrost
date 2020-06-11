@@ -48,7 +48,10 @@ impl Subscriptions {
         let suber_exists = self.subscribers.contains_key(&suber_id);
         let sub_id = self.next_id;
         let (raft_sid, sm_id, fn_id, pattern_id) = key;
-        debug!("Subscription {:?} from {}, address {}, fn {}, pattern {}", key, suber_id, address, fn_id, pattern_id);
+        debug!(
+            "Subscription {:?} from {}, address {}, fn {}, pattern {}",
+            key, suber_id, address, fn_id, pattern_id
+        );
         let require_reload_suber = if suber_exists {
             let suber_session_id = self.subscribers.get(&suber_id).unwrap().session_id;
             let session_match = suber_session_id == session_id;
@@ -173,7 +176,10 @@ impl SMCallback {
                 let key = (raft_sid, sm_id, fn_id, pattern_id);
                 let internal_subs = self.internal_subs.read().await;
                 let svr_subs = self.subscriptions.read().await;
-                debug!("Sending notification, func {}, op: {:?}, pattern_id {}", fn_id, op_type, pattern_id);
+                debug!(
+                    "Sending notification, func {}, op: {:?}, pattern_id {}",
+                    fn_id, op_type, pattern_id
+                );
                 if let Some(internal_subs) = internal_subs.get(&pattern_id) {
                     for is in internal_subs {
                         (is.action)(&message)

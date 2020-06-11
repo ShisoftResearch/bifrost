@@ -449,19 +449,22 @@ mod test {
         let ch1_server_node_changes_count_clone = Arc::new(AtomicUsize::new(0)).clone();
         ch1.watch_server_nodes_range_changed(&server_2, move |r| {
             ch1_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
-        }).await;
+        })
+        .await;
 
         let ch2_server_node_changes_count = Arc::new(AtomicUsize::new(0));
         let ch2_server_node_changes_count_clone = Arc::new(AtomicUsize::new(0)).clone();
         ch2.watch_server_nodes_range_changed(&server_2, move |r| {
             ch2_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
-        }).await;
+        })
+        .await;
 
         let ch3_server_node_changes_count = Arc::new(AtomicUsize::new(0));
         let ch3_server_node_changes_count_clone = Arc::new(AtomicUsize::new(0)).clone();
         ch3.watch_server_nodes_range_changed(&server_2, move |r| {
             ch3_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
-        }).await;
+        })
+        .await;
 
         assert_eq!(ch1.nodes_count().await, 6);
         assert_eq!(ch2.nodes_count().await, 2);
