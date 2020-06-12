@@ -47,7 +47,7 @@ impl Subscriptions {
         let suber_id = hash_str(address);
         let suber_exists = self.subscribers.contains_key(&suber_id);
         let sub_id = self.next_id;
-        let (raft_sid, sm_id, fn_id, pattern_id) = key;
+        let (_, _, fn_id, pattern_id) = key;
         debug!(
             "Subscription {:?} from {}, address {}, fn {}, pattern {}",
             key, suber_id, address, fn_id, pattern_id
@@ -270,7 +270,7 @@ where
     R: serde::Serialize + Send + Sync + Clone + Unpin + Any + 'static,
 {
     if let Some(ref callback) = *callback {
-        callback.notify(msg, data()).await;
+        callback.notify(msg, data()).await.unwrap();
     } else {
         warn!("Cannot send notification, callback handler is empty");
     }

@@ -5,7 +5,6 @@ use crate::raft::state_machine::master::ExecError;
 use bifrost_hasher::hash_str;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use std::future::Future;
 use std::sync::Arc;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

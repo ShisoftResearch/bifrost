@@ -54,14 +54,14 @@ mod test {
         fn snapshot(&self) -> Option<Vec<u8>> {
             None
         }
-        fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
+        fn recover(&mut self, _: Vec<u8>) -> BoxFuture<()> {
             future::ready(()).boxed()
         }
     }
 
     #[tokio::test(threaded_scheduler)]
     async fn dummy() {
-        env_logger::try_init();
+        let _ = env_logger::try_init();
         println!("TESTING CALLBACK");
         let addr = String::from("127.0.0.1:2110");
         let raft_service = RaftService::new(Options {

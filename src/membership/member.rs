@@ -10,7 +10,6 @@ use tokio::time;
 use crate::membership::DEFAULT_SERVICE_ID;
 use crate::raft::client::RaftClient;
 use crate::raft::state_machine::master::ExecError;
-use std::pin::Pin;
 
 static PING_INTERVAL: u64 = 100;
 
@@ -18,7 +17,6 @@ pub struct MemberService {
     member_client: MemberClient,
     sm_client: Arc<SMClient>,
     raft_client: Arc<RaftClient>,
-    address: String,
     closed: AtomicBool,
     id: u64,
 }
@@ -34,18 +32,17 @@ impl MemberService {
                 sm_client: sm_client.clone(),
             },
             raft_client: raft_client.clone(),
-            address: server_address.clone(),
             closed: AtomicBool::new(false),
             id: server_id,
         });
-        sm_client.join(&server_address).await;
+        let _join_res = sm_client.join(&server_address).await;
         let service_clone = service.clone();
         tokio::spawn(async move {
             while !service_clone.closed.load(Ordering::Relaxed) {
                 let rpc_client = service_clone.raft_client.current_leader_rpc_client().await;
                 if let Ok(rpc_client) = rpc_client {
                     let heartbeat_client = AsyncServiceClient::new(DEFAULT_SERVICE_ID, &rpc_client);
-                    heartbeat_client.ping(service_clone.id).await;
+                    let _ping_res = heartbeat_client.ping(service_clone.id).await;
                 }
                 time::delay_for(time::Duration::from_millis(PING_INTERVAL)).await
             }

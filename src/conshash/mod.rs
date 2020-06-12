@@ -2,7 +2,6 @@ use futures::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::thread;
 
 use crate::conshash::weights::client::SMClient as WeightSMClient;
 use crate::conshash::weights::DEFAULT_SERVICE_ID;
@@ -46,7 +45,7 @@ pub struct ConsistentHashing {
     membership: Arc<MembershipClient>,
     weight_sm_client: WeightSMClient,
     group_name: String,
-    watchers: RwLock<Vec<Box<Fn(&Member, &Action, &LookupTables, &Vec<u64>) + Send + Sync>>>,
+    watchers: RwLock<Vec<Box<dyn Fn(&Member, &Action, &LookupTables, &Vec<u64>) + Send + Sync>>>,
     version: AtomicU64,
 }
 
@@ -240,7 +239,7 @@ impl ConsistentHashing {
             .set_weight(&group_id, &server_id, &weight)
             .await
     }
-    pub async fn watch_all_actions<F>(&self, f: F)
+    async fn watch_all_actions<F>(&self, f: F)
     where
         F: Fn(&Member, &Action, &LookupTables, &Vec<u64>) + 'static + Send + Sync,
     {
@@ -280,7 +279,7 @@ impl ConsistentHashing {
         &self,
         lookup_table: &mut RwLockWriteGuard<'_, LookupTables>,
     ) -> Result<(), InitTableError> {
-        if let Ok(Some((mut members, version))) =
+        if let Ok(Some((members, version))) =
             self.membership.group_members(&self.group_name, true).await
         {
             let group_id = hash_str(&self.group_name);
@@ -303,7 +302,7 @@ impl ConsistentHashing {
                             lookup_table.addrs.insert(member.id, member.address.clone());
                         }
                         for (server_id, weight) in factors.into_iter() {
-                            for i in 0..weight {
+                            for _ in 0..weight {
                                 lookup_table.nodes.push(server_id);
                             }
                         }
@@ -315,7 +314,6 @@ impl ConsistentHashing {
                 }
                 Err(e) => Err(InitTableError::NoWeightService(e)),
                 Ok(None) => Err(InitTableError::NoWeightGroup),
-                _ => Err(InitTableError::Unknown),
             }
         } else {
             Err(InitTableError::GroupNotExisted)
@@ -344,7 +342,7 @@ async fn server_changed(ch: Arc<ConsistentHashing>, member: Member, action: Acti
         {
             let mut lookup_table = ch.tables.write().await;
             let old_nodes = lookup_table.nodes.clone();
-            ch.init_table_(&mut lookup_table).await;
+            ch.init_table_(&mut lookup_table).await.unwrap();
             for watch in watchers.iter() {
                 watch(&member, &action, &*lookup_table, &old_nodes);
             }
@@ -369,7 +367,7 @@ mod test {
 
     #[tokio::test(threaded_scheduler)]
     async fn primary() {
-        env_logger::try_init();
+        let _ = env_logger::try_init();
 
         let addr = String::from("127.0.0.1:2200");
         let raft_service = RaftService::new(Options {
@@ -379,7 +377,7 @@ mod test {
         });
 
         let server = Server::new(&addr);
-        let heartbeat_service = Membership::new(&server, &raft_service, true).await;
+        let _heartbeat_service = Membership::new(&server, &raft_service, true).await;
         server.register_service(0, &raft_service).await;
         Server::listen_and_resume(&server).await;
         RaftService::start(&raft_service).await;
@@ -446,22 +444,22 @@ mod test {
         ch3.init_table().await.unwrap();
 
         let ch1_server_node_changes_count = Arc::new(AtomicUsize::new(0));
-        let ch1_server_node_changes_count_clone = Arc::new(AtomicUsize::new(0)).clone();
-        ch1.watch_server_nodes_range_changed(&server_2, move |r| {
+        let ch1_server_node_changes_count_clone = ch1_server_node_changes_count.clone();
+        ch1.watch_server_nodes_range_changed(&server_2, move |_| {
             ch1_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
         })
         .await;
 
         let ch2_server_node_changes_count = Arc::new(AtomicUsize::new(0));
-        let ch2_server_node_changes_count_clone = Arc::new(AtomicUsize::new(0)).clone();
-        ch2.watch_server_nodes_range_changed(&server_2, move |r| {
+        let ch2_server_node_changes_count_clone = ch2_server_node_changes_count.clone();
+        ch2.watch_server_nodes_range_changed(&server_2, move |_| {
             ch2_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
         })
         .await;
 
         let ch3_server_node_changes_count = Arc::new(AtomicUsize::new(0));
-        let ch3_server_node_changes_count_clone = Arc::new(AtomicUsize::new(0)).clone();
-        ch3.watch_server_nodes_range_changed(&server_2, move |r| {
+        let ch3_server_node_changes_count_clone = ch3_server_node_changes_count.clone();
+        ch3.watch_server_nodes_range_changed(&server_2, move |_| {
             ch3_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
         })
         .await;

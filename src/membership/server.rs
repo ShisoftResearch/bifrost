@@ -1,7 +1,7 @@
 use super::heartbeat_rpc::*;
 use super::raft::*;
 use super::*;
-use crate::membership::client::{Group as ClientGroup, Member as ClientMember};
+use crate::membership::client::{Member as ClientMember};
 use crate::raft::state_machine::callback::server::{notify as cb_notify, SMCallback};
 use crate::raft::state_machine::StateMachineCtl;
 use crate::raft::{LogEntry, RaftMsg, RaftService, Service as raft_svr_trait};
@@ -14,10 +14,9 @@ use futures::prelude::*;
 use futures::stream::FuturesUnordered;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::{thread, time as std_time};
+use std::{time as std_time};
 use tokio::time as async_time;
 
 static MAX_TIMEOUT: i64 = 2000; //2 secs for 500ms heartbeat
@@ -86,8 +85,6 @@ struct Member {
 }
 
 struct MemberGroup {
-    name: String,
-    id: u64,
     members: BTreeSet<u64>,
     leader: Option<u64>,
 }
@@ -266,9 +263,9 @@ impl Membership {
         }
         if success {
             if need_notify {
-                self.notify_for_group_member_left(group_id, &self.compose_client_member(id).await);
+                self.notify_for_group_member_left(group_id, &self.compose_client_member(id).await).await;
             }
-            self.group_leader_candidate_unavailable(group_id, id);
+            self.group_leader_candidate_unavailable(group_id, id).await;
             true
         } else {
             false
@@ -338,7 +335,7 @@ impl Membership {
             }
         }
         if leader_changed {
-            self.change_leader(group_id, Some(member)).await;
+            self.change_leader(group_id, Some(member)).await.unwrap();
         }
     }
     async fn group_leader_candidate_unavailable(&mut self, group_id: u64, member: u64) {
@@ -351,7 +348,7 @@ impl Membership {
         }
         if reelected {
             let online_id = self.group_first_online_member_id(group_id).await.unwrap();
-            self.change_leader(group_id, online_id);
+            self.change_leader(group_id, online_id).await.unwrap();
         }
     }
     async fn leader_candidate_available(&mut self, member: u64) {
@@ -475,7 +472,7 @@ impl StateMachineCmds for Membership {
             self.version += 1;
             let mut success = false;
             if !self.groups.contains_key(&group_id) {
-                self.new_group(group_name).await;
+                self.new_group(group_name).await.unwrap();
             } // create group if not exists
             if let Some(ref mut group) = self.groups.get_mut(&group_id) {
                 if let Some(ref mut member) = self.members.get_mut(&id) {
@@ -515,8 +512,6 @@ impl StateMachineCmds for Membership {
             self.groups.entry(id).or_insert_with(|| {
                 inserted = true;
                 MemberGroup {
-                    name,
-                    id,
                     members: BTreeSet::new(),
                     leader: None,
                 }
@@ -620,7 +615,7 @@ impl StateMachineCtl for Membership {
         //Some(serialize!(&self.map))
         None // TODO: Backup members
     }
-    fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
+    fn recover(&mut self, _: Vec<u8>) -> BoxFuture<()> {
         future::ready(()).boxed()
         //self.map = deserialize!(&data);
     }

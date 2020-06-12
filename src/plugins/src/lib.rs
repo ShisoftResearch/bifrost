@@ -4,7 +4,6 @@ extern crate bifrost_hasher;
 use proc_macro::TokenStream;
 use bifrost_hasher::hash_str;
 use proc_macro::TokenTree;
-use proc_macro::TokenTree::Ident;
 
 #[proc_macro]
 pub fn hash_ident(item: TokenStream) -> TokenStream {

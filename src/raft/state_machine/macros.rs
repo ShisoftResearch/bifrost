@@ -165,6 +165,7 @@ macro_rules! raft_state_machine {
             use serde::{Serialize, Deserialize};
             $(
                 #[derive(Serialize, Deserialize, Debug)]
+                #[allow(non_camel_case_types)]
                 pub struct $fn_name {
                     pub data: Vec<u8>
                 }

@@ -110,7 +110,7 @@ mod test {
         let group_member_offline_count_clone = group_member_offline_count.clone();
 
         client
-            .on_any_member_joined(move |res| {
+            .on_any_member_joined(move |_| {
                 any_member_joined_count_clone.fetch_add(1, Ordering::Relaxed);
                 future::ready(()).boxed()
             })
@@ -119,7 +119,7 @@ mod test {
             .unwrap();
 
         client
-            .on_any_member_left(move |res| {
+            .on_any_member_left(move |_| {
                 any_member_left_count_clone.fetch_add(1, Ordering::Relaxed);
                 future::ready(()).boxed()
             })
@@ -128,7 +128,7 @@ mod test {
             .unwrap();
 
         client
-            .on_any_member_offline(move |res| {
+            .on_any_member_offline(move |_| {
                 any_member_offline_count_clone.fetch_add(1, Ordering::Relaxed);
                 future::ready(()).boxed()
             })
@@ -137,7 +137,7 @@ mod test {
             .unwrap();
 
         client
-            .on_any_member_online(move |res| {
+            .on_any_member_online(move |_| {
                 any_member_online_count_clone.fetch_add(1, Ordering::Relaxed);
                 future::ready(()).boxed()
             })
@@ -147,7 +147,7 @@ mod test {
 
         client
             .on_group_leader_changed(
-                move |res| {
+                move |_| {
                     group_leader_changed_count_clone.fetch_add(1, Ordering::Relaxed);
                     future::ready(()).boxed()
                 },
@@ -159,7 +159,7 @@ mod test {
 
         client
             .on_group_member_joined(
-                move |res| {
+                move |_| {
                     group_member_joined_count_clone.fetch_add(1, Ordering::Relaxed);
                     future::ready(()).boxed()
                 },
@@ -171,7 +171,7 @@ mod test {
 
         client
             .on_group_member_left(
-                move |res| {
+                move |_| {
                     group_member_left_count_clone.fetch_add(1, Ordering::Relaxed);
                     future::ready(()).boxed()
                 },
@@ -183,7 +183,7 @@ mod test {
 
         client
             .on_group_member_online(
-                move |res| {
+                move |_| {
                     group_member_online_count_clone.fetch_add(1, Ordering::Relaxed);
                     future::ready(()).boxed()
                 },
@@ -195,7 +195,7 @@ mod test {
 
         client
             .on_group_member_offline(
-                move |res| {
+                move |_| {
                     group_member_offline_count_clone.fetch_add(1, Ordering::Relaxed);
                     future::ready(()).boxed()
                 },

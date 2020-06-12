@@ -1,9 +1,7 @@
 #![crate_type = "lib"]
 #![feature(plugin)]
 #![feature(integer_atomics)]
-#![feature(proc_macro)]
 #![feature(box_syntax)]
-#![feature(use_extern_macros)]
 #![feature(proc_macro_hygiene)]
 #![feature(trait_alias)]
 #![feature(core_intrinsics)]
@@ -23,7 +21,6 @@ pub mod rpc;
 #[macro_use]
 pub mod raft;
 pub mod conshash;
-pub mod durable_queue;
 pub mod membership;
 pub mod store;
 pub mod vector_clock;
