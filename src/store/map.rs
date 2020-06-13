@@ -2,7 +2,6 @@
 macro_rules! def_store_hash_map {
     ($m: ident <$kt: ty, $vt: ty>) => {
         pub mod $m {
-            use super::*;
             use bifrost_hasher::hash_str;
             use futures::FutureExt;
             use std::collections::HashMap;
@@ -47,11 +46,13 @@ macro_rules! def_store_hash_map {
                     future::ready(value).boxed()
                 }
                 fn insert(&mut self, k: $kt, v: $vt) -> ::futures::future::BoxFuture<Option<$vt>> {
-                    if let Some(ref callback) = self.callback {
-                        callback.notify(commands::on_inserted::new(), (k.clone(), v.clone()));
-                        callback.notify(commands::on_key_inserted::new(&k), v.clone());
-                    }
-                    future::ready(self.map.insert(k, v)).boxed()
+                    async move {
+                        if let Some(ref callback) = self.callback {
+                            let _ = callback.notify(commands::on_inserted::new(), (k.clone(), v.clone())).await;
+                            let _ = callback.notify(commands::on_key_inserted::new(&k), v.clone()).await;
+                        }
+                        self.map.insert(k, v)
+                    }.boxed()
                 }
                 fn insert_if_absent(
                     &mut self,
@@ -65,14 +66,16 @@ macro_rules! def_store_hash_map {
                     future::ready(v).boxed()
                 }
                 fn remove(&mut self, k: $kt) -> ::futures::future::BoxFuture<Option<$vt>> {
-                    let res = self.map.remove(&k);
-                    if let Some(ref callback) = self.callback {
-                        if let Some(ref v) = res {
-                            callback.notify(commands::on_removed::new(), (k.clone(), v.clone()));
-                            callback.notify(commands::on_key_removed::new(&k), v.clone());
+                    async move {
+                        let res = self.map.remove(&k);
+                        if let Some(ref callback) = self.callback {
+                            if let Some(ref v) = res {
+                                let _ = callback.notify(commands::on_removed::new(), (k.clone(), v.clone())).await;
+                                let _ = callback.notify(commands::on_key_removed::new(&k), v.clone()).await;
+                            }
                         }
-                    }
-                    future::ready(res).boxed()
+                        res
+                    }.boxed()
                 }
                 fn is_empty(&self) -> ::futures::future::BoxFuture<bool> {
                     future::ready(self.map.is_empty()).boxed()
@@ -165,7 +168,7 @@ mod test {
             .await;
         Server::listen_and_resume(&server).await;
         let sm_id = map_sm.id;
-        map_sm.init_callback(&raft_service);
+        map_sm.init_callback(&raft_service).await;
         assert!(RaftService::start(&raft_service).await);
         raft_service.register_state_machine(Box::new(map_sm)).await;
         raft_service.bootstrap().await;
@@ -174,7 +177,7 @@ mod test {
             .await
             .unwrap();
         let sm_client = SMClient::new(sm_id, &raft_client);
-        RaftClient::prepare_subscription(&server);
+        RaftClient::prepare_subscription(&server).await;
 
         let sk1 = String::from("k1");
         let sk2 = String::from("k2");

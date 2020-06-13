@@ -1,23 +1,19 @@
 #[macro_use]
 pub mod proto;
 
-use crate::tcp::client::Client;
 use crate::{tcp, DISABLE_SHORTCUT};
 use async_std::sync::*;
 use bifrost_hasher::hash_str;
-use byteorder::{ByteOrder, LittleEndian};
-use bytes::buf::BufExt;
 use bytes::{Buf, BufMut, BytesMut};
-use futures::future::{err, BoxFuture};
+use futures::future::BoxFuture;
 use futures::prelude::*;
-use futures::{future, Future};
+use futures::Future;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 use tokio::time::delay_for;
 use tokio::time::*;
@@ -113,7 +109,7 @@ impl Server {
         let server = server.clone();
         tcp::server::Server::new(
             address,
-            Arc::new(move |mut data| {
+            Arc::new(move |data| {
                 let server = server.clone();
                 async move {
                     let (svr_id, data) = read_u64_head(data);
@@ -319,7 +315,7 @@ mod test {
 
         #[tokio::test(threaded_scheduler)]
         pub async fn struct_rpc() {
-            env_logger::try_init();
+            let _ = env_logger::try_init();
             let addr = String::from("127.0.0.1:1400");
             {
                 let addr = addr.clone();

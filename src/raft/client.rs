@@ -7,10 +7,8 @@ use crate::raft::state_machine::configs::commands::{
 use crate::raft::state_machine::master::ExecError;
 use crate::raft::state_machine::StateMachineClient;
 use crate::rpc;
-use async_std::sync::*;
 use bifrost_hasher::{hash_bytes, hash_str};
 use futures::future::BoxFuture;
-use serde::{Deserialize, Serialize};
 use std::clone::Clone;
 use std::cmp::max;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -326,7 +324,7 @@ impl RaftClient {
         match cluster_subs {
             Ok(Ok(sub_id)) => {
                 let mut subs_map = callback.subs.write().await;
-                let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
+                let subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
                 let boxed_fn = Box::new(wrapper_fn);
                 subs_lst.push((boxed_fn, sub_id));
                 Ok(Ok((key, sub_id)))
@@ -349,7 +347,7 @@ impl RaftClient {
                 match unsub {
                     Ok(_) => {
                         let mut subs_map = callback.subs.write().await;
-                        let mut subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
+                        let subs_lst = subs_map.entry(key).or_insert_with(|| Vec::new());
                         let mut sub_index = 0;
                         for i in 0..subs_lst.len() {
                             if subs_lst[i].1 == sub_id {
@@ -358,7 +356,7 @@ impl RaftClient {
                             }
                         }
                         if subs_lst.len() > 0 && subs_lst[sub_index].1 == sub_id {
-                            subs_lst.remove(sub_index);
+                            let _ = subs_lst.remove(sub_index);
                             Ok(Ok(()))
                         } else {
                             Ok(Err(SubscriptionError::CannotFindSubId))
@@ -441,7 +439,6 @@ impl RaftClient {
             NotCommitted,
             UpdateInfo,
             NotLeader,
-            Retry,
         }
         let mut depth = 0;
         loop {
@@ -549,7 +546,7 @@ impl RaftClient {
                 let members = self.members.read().await;
                 Vec::from_iter(members.id_map.values().cloned())
             };
-            self.update_info(&servers).await;
+            self.update_info(&servers).await.unwrap();
             let leader_id = self.leader_id.load(ORDERING);
             let members = self.members.read().await;
             if let Some(client) = members.clients.get(&leader_id) {

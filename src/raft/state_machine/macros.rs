@@ -156,9 +156,12 @@ macro_rules! raft_state_machine {
             def $smt:ident $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty;
         )*
     ) => {
+        #[allow(unused_imports)]
         use futures::prelude::*;
         use futures::future::BoxFuture;
 
+        #[allow(dead_code)]
+        #[allow(unused_imports)]
         pub mod commands {
             use super::*;
             use futures::prelude::*;
@@ -192,6 +195,8 @@ macro_rules! raft_state_machine {
             )*
         }
 
+        #[allow(dead_code)]
+        #[allow(unused_variables)]
         pub trait StateMachineCmds: $crate::raft::state_machine::StateMachineCtl {
            $(
                 $(#[$attr])*
@@ -235,6 +240,9 @@ macro_rules! raft_state_machine {
                }.boxed()
            }
         }
+
+        #[allow(dead_code)]
+        #[allow(unused_imports)]
         pub mod client {
             use super::*;
             use std::sync::Arc;

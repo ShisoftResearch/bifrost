@@ -3,7 +3,7 @@
 use crate::raft::{LogEntry, LogsMap, Options, RaftMeta, Storage};
 use async_std::sync::*;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+
 use std::fs::OpenOptions;
 use std::io;
 use std::io::Read;
@@ -12,7 +12,7 @@ use std::path::Path;
 use tokio::fs::*;
 use tokio::io::*;
 
-const MAX_LOG_CAPACITY: usize = 10;
+// const MAX_LOG_CAPACITY: usize = 10;
 
 #[derive(Clone)]
 pub struct DiskOptions {
@@ -134,7 +134,7 @@ impl StorageEntity {
     pub async fn post_processing<'a>(
         &mut self,
         meta: &RwLockWriteGuard<'a, RaftMeta>,
-        mut logs: RwLockWriteGuard<'a, LogsMap>,
+        logs: RwLockWriteGuard<'a, LogsMap>,
     ) -> io::Result<()> {
         // TODO: trim logs in memory
         // TODO: trim logs on disk

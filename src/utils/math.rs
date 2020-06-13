@@ -1,5 +1,3 @@
-use std::ops::{Add, Div, Sub};
-
 pub fn min<T>(nums: &Vec<T>) -> Option<T>
 where
     T: Ord + Copy,

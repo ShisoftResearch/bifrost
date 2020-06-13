@@ -113,7 +113,7 @@ impl<S: Ord + Eq + Copy> VectorClock<S> {
     pub fn merge_with(&mut self, clock_b: &VectorClock<S>) {
         // merge_with is used to update counter for other servers (also learn from it)
         for (server, bc) in clock_b.map.iter() {
-            let mut ba = self.map.entry(*server).or_insert(0);
+            let ba = self.map.entry(*server).or_insert(0);
             if *ba < *bc {
                 *ba = *bc
             }

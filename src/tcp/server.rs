@@ -1,8 +1,6 @@
 use super::STANDALONE_ADDRESS;
 use crate::tcp::shortcut;
-use crate::tcp::shortcut::call;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use futures::future::BoxFuture;
+use bytes::{Buf, BufMut, BytesMut};
 use futures::SinkExt;
 use std::error::Error;
 use std::future::Future;

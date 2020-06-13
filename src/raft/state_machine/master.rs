@@ -26,7 +26,7 @@ pub enum RegisterResult {
 
 pub type ExecOk = Vec<u8>;
 pub type ExecResult = Result<ExecOk, ExecError>;
-pub type SubStateMachine = Box<StateMachineCtl>;
+pub type SubStateMachine = Box<dyn StateMachineCtl>;
 pub type SnapshotDataItem = (u64, Vec<u8>);
 pub type SnapshotDataItems = Vec<SnapshotDataItem>;
 
@@ -58,7 +58,7 @@ impl StateMachineCtl for MasterStateMachine {
         Some(data)
     }
     fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
-        let mut sms: SnapshotDataItems = crate::utils::serde::deserialize(data.as_slice()).unwrap();
+        let sms: SnapshotDataItems = crate::utils::serde::deserialize(data.as_slice()).unwrap();
         for (sm_id, snapshot) in sms {
             self.snapshots.insert(sm_id, snapshot);
         }
@@ -76,7 +76,7 @@ fn parse_output(r: Option<Vec<u8>>) -> ExecResult {
 
 impl MasterStateMachine {
     pub fn new(service_id: u64) -> MasterStateMachine {
-        let mut msm = MasterStateMachine {
+        let msm = MasterStateMachine {
             subs: HashMap::new(),
             snapshots: HashMap::new(),
             configs: Configures::new(service_id),

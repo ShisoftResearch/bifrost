@@ -9,27 +9,18 @@ use crate::utils::time::get_time;
 use async_std::sync::*;
 use bifrost_hasher::hash_str;
 use bifrost_plugins::hash_ident;
-use futures::executor::*;
 use futures::future::BoxFuture;
 use futures::prelude::*;
 use futures::stream::FuturesUnordered;
-use futures::task::SpawnExt;
-use futures::FutureExt;
-use rand;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::cmp::{max, min};
 use std::collections::Bound::{Included, Unbounded};
 use std::collections::{BTreeMap, HashMap};
-use std::fs::{File, OpenOptions};
 use std::io;
-use std::io::{Read, Write};
-use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::Duration;
-use std::{fs, thread};
-use tokio::prelude::*;
 use tokio::runtime;
 use tokio::time::*;
 
@@ -39,7 +30,6 @@ pub mod client;
 pub mod disk;
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_RAFT_DEFAULT_SERVICE) as u64;
-const THREAD_POOL_SIZE: usize = 10;
 
 pub trait RaftMsg<R>: Send + Sync {
     fn encode(self) -> (u64, OpType, Vec<u8>);
@@ -222,7 +212,7 @@ async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
         // TODO: Get rid of frequent locking and clone?
         let logs = meta.logs.read().await;
         if let Some(entry) = logs.get(&last_applied) {
-            commit_command(meta, &entry).await;
+            commit_command(meta, &entry).await.unwrap();
         };
     }
 }
@@ -267,7 +257,7 @@ impl RaftService {
         let mut commit_index = 0;
         let mut last_applied = 0;
 
-        let mut storage_entity = StorageEntity::new_with_options(
+        let storage_entity = StorageEntity::new_with_options(
             &opts,
             &mut term,
             &mut commit_index,
@@ -276,7 +266,7 @@ impl RaftService {
         )
         .unwrap();
 
-        let mut master_sm = MasterStateMachine::new(opts.service_id);
+        let master_sm = MasterStateMachine::new(opts.service_id);
 
         let server_obj = RaftService {
             meta: RwLock::new(RaftMeta {
@@ -427,7 +417,7 @@ impl RaftService {
             if storage.lock().await.last_term > 0 {
                 debug!("There are logged term, will probe and join or bootstrap");
                 drop(meta);
-                self.probe_and_join(servers).await;
+                self.probe_and_join(servers).await.unwrap();
             } else {
                 debug!("Log is empty, bootstrap");
                 drop(meta);
@@ -436,7 +426,7 @@ impl RaftService {
         } else {
             debug!("No storage, will probe and join or bootstrap");
             drop(meta);
-            self.probe_and_join(servers).await;
+            self.probe_and_join(servers).await.unwrap();
         }
     }
     pub async fn join(&self, servers: &Vec<String>) -> Result<bool, ExecError> {
@@ -491,7 +481,7 @@ impl RaftService {
         if let Ok(client) = RaftClient::new(&servers, self.options.service_id).await {
             client
                 .execute(CONFIG_SM_ID, del_member_::new(&self.options.address))
-                .await;
+                .await.unwrap();
         } else {
             return false;
         }
@@ -980,14 +970,14 @@ impl RaftService {
         entry.term = new_log_term;
         entry.id = new_log_id;
         logs.insert(entry.id, entry.clone());
-        self.logs_post_processing(meta, logs).await;
+        self.logs_post_processing(meta, logs).await.unwrap();
         (new_log_id, new_log_term)
     }
 
     async fn logs_post_processing<'a>(
         &'a self,
         meta: &'a RwLockWriteGuard<'a, RaftMeta>,
-        mut logs: RwLockWriteGuard<'a, LogsMap>,
+        logs: RwLockWriteGuard<'a, LogsMap>,
     ) -> io::Result<()> {
         if let Some(storage_mutex) = &meta.storage {
             let mut storage = storage_mutex.lock().await;
@@ -1023,7 +1013,6 @@ impl RaftService {
         debug!("Sync config to followers");
         meta.commit_index = new_log_id;
         let data = commit_command(&meta, &entry).await;
-        let t = get_time();
         if let Membership::Leader(ref leader_meta) = meta.membership {
             let mut leader_meta = leader_meta.write().await;
             let member_sm = meta.state_machine.read().await;
@@ -1060,7 +1049,7 @@ impl Service for RaftService {
                     let mut logs = meta.logs.write().await;
                     //RI, 2
                     let contains_prev_log = logs.contains_key(&prev_log_id);
-                    let mut log_mismatch = false;
+                    let log_mismatch;
 
                     if contains_prev_log {
                         let entry = logs.get(&prev_log_id).unwrap();
@@ -1087,14 +1076,13 @@ impl Service for RaftService {
                         // entry not empty
                         for entry in entries {
                             let entry_id = entry.id;
-                            let sm_id = entry.sm_id;
                             logs.entry(entry_id).or_insert(entry.clone()); // RI, 4
                             last_new_entry = max(last_new_entry, entry_id);
                         }
                     } else if !logs.is_empty() {
                         last_new_entry = logs.values().last().unwrap().id;
                     }
-                    self.logs_post_processing(&meta, logs).await;
+                    self.logs_post_processing(&meta, logs).await.unwrap();
                 }
                 if leader_commit > meta.commit_index {
                     //RI, 5
@@ -1306,7 +1294,7 @@ mod test {
 
     #[tokio::test(threaded_scheduler)]
     async fn server_membership() {
-        env_logger::try_init();
+        let _ = env_logger::try_init();
         let s1_addr = String::from("127.0.0.1:2001");
         let s2_addr = String::from("127.0.0.1:2002");
         let s3_addr = String::from("127.0.0.1:2003");
@@ -1404,7 +1392,7 @@ mod test {
 
     #[tokio::test(threaded_scheduler)]
     async fn log_replication() {
-        env_logger::try_init();
+        let _ = env_logger::try_init();
         info!("Testing log replications");
         let s1_addr = String::from("127.0.0.1:2004");
         let s2_addr = String::from("127.0.0.1:2005");
@@ -1570,14 +1558,14 @@ mod test {
             fn snapshot(&self) -> Option<Vec<u8>> {
                 None
             }
-            fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
+            fn recover(&mut self, _data: Vec<u8>) -> BoxFuture<()> {
                 future::ready(()).boxed()
             }
         }
 
         #[tokio::test(threaded_scheduler)]
         async fn query_and_command() {
-            env_logger::try_init();
+            let _ = env_logger::try_init();
             println!("TESTING CALLBACK");
             let addr = String::from("127.0.0.1:2009");
             let raft_service = RaftService::new(Options {
@@ -1614,7 +1602,7 @@ mod test {
 
         #[tokio::test(threaded_scheduler)]
         async fn multi_server_command() {
-            env_logger::try_init();
+            let _ = env_logger::try_init();
             // 5 servers
             let addresses: Vec<_> = vec![
                 "127.0.0.1:2010",

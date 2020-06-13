@@ -1,6 +1,4 @@
 use serde;
-use serde_cbor::{from_slice, to_vec};
-use std::backtrace;
 
 #[cfg(not(debug_assertions))]
 pub fn serialize<T>(obj: &T) -> Vec<u8>
@@ -47,7 +45,7 @@ pub fn deserialize<'a, T>(data: &'a [u8]) -> Option<T>
 where
     T: serde::Deserialize<'a>,
 {
-    let type_name = unsafe { std::intrinsics::type_name::<T>() };
+    let type_name = std::intrinsics::type_name::<T>();
     match serde_json::from_slice(data) {
         Ok(obj) => Some(obj),
         Err(e) => {

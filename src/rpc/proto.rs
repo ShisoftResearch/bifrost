@@ -2,7 +2,6 @@
 macro_rules! dispatch_rpc_service_functions {
     ($s:ty) => {
         use bytes::BytesMut;
-        use futures::prelude::*;
         impl $crate::rpc::RPCService for $s {
             fn dispatch<'a>(
                 &'a self,
@@ -95,8 +94,10 @@ macro_rules! service {
             rpc $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty;
         )*
     ) => {
+
         use std::sync::Arc;
         use $crate::rpc::*;
+        #[allow(unused_imports)]
         use futures::prelude::*;
         use std::pin::Pin;
 
@@ -132,6 +133,8 @@ macro_rules! service {
                }.boxed()
            }
         }
+
+        #[allow(dead_code)]
         pub async fn get_local(server_id: u64, service_id: u64) -> Option<Arc<dyn Service>> {
             let svrs = RPC_SVRS.read().await;
             match svrs.get(&(server_id, service_id)) {
@@ -139,11 +142,15 @@ macro_rules! service {
                 _ => None
             }
         }
+
+        #[allow(dead_code)]
         pub struct AsyncServiceClient {
             pub service_id: u64,
             pub server_id: u64,
             pub client: Arc<RPCClient>,
         }
+
+        #[allow(dead_code)]
         impl AsyncServiceClient {
            $(
                 #[allow(non_camel_case_types)]
@@ -194,7 +201,7 @@ mod syntax_test {
 mod struct_test {
     use serde::{Deserialize, Serialize};
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct a {
+    pub struct A {
         b: u32,
         d: u64,
         e: String,
@@ -202,6 +209,6 @@ mod struct_test {
     }
 
     service! {
-        rpc test(a: a, b: u32) -> bool;
+        rpc test(a: A, b: u32) -> bool;
     }
 }

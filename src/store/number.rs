@@ -43,12 +43,13 @@ macro_rules! def_store_number {
             }
             impl StateMachineCmds for Number {
                 fn set(&mut self, n: $t) -> BoxFuture<()> {
-                    let on = self.num;
-                    self.num = n;
-                    if let Some(ref callback) = self.callback {
-                        callback.notify(commands::on_changed::new(), (on, n));
-                    }
-                    future::ready(()).boxed()
+                    async move {
+                        let on = self.num;
+                        self.num = n;
+                        if let Some(ref callback) = self.callback {
+                            let _ = callback.notify(commands::on_changed::new(), (on, n)).await;
+                        }
+                    }.boxed()
                 }
                 fn get(&self) -> BoxFuture<$t> {
                     future::ready(self.num).boxed()
@@ -184,7 +185,7 @@ mod test {
             let server = Server::new(&addr);
             server.register_service(DEFAULT_SERVICE_ID, &service).await;
             Server::listen_and_resume(&server).await;
-            num_sm.init_callback(&service);
+            num_sm.init_callback(&service).await;
             assert!(RaftService::start(&service).await);
             service.register_state_machine(Box::new(num_sm)).await;
             service.bootstrap().await;
@@ -193,7 +194,7 @@ mod test {
                 .await
                 .unwrap();
             let sm_client = SMClient::new(sm_id, &client);
-            RaftClient::prepare_subscription(&server);
+            RaftClient::prepare_subscription(&server).await;
 
             sm_client.on_changed(|res| {
                 let (old, new) = res;
@@ -227,7 +228,6 @@ mod test {
         use crate::raft::client::RaftClient;
         use crate::raft::{Options, RaftService, Storage, DEFAULT_SERVICE_ID};
         use crate::rpc::Server;
-        use futures::prelude::*;
         use F64::client::SMClient;
 
         def_store_number!(F64, f64);

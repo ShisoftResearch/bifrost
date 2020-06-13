@@ -20,12 +20,13 @@ macro_rules! def_store_value {
             }
             impl StateMachineCmds for Value {
                 fn set(&mut self, v: $t) -> ::futures::future::BoxFuture<()> {
-                    if let Some(ref callback) = self.callback {
-                        let old = self.val.clone();
-                        callback.notify(commands::on_changed::new(), (old, v.clone()));
-                    }
-                    self.val = v;
-                    future::ready(()).boxed()
+                    async move {
+                        if let Some(ref callback) = self.callback {
+                            let old = self.val.clone();
+                            let _ = callback.notify(commands::on_changed::new(), (old, v.clone())).await;
+                        }
+                        self.val = v;
+                    }.boxed()
                 }
                 fn get(&self) -> ::futures::future::BoxFuture<$t> {
                     future::ready(self.val.clone()).boxed()
@@ -86,7 +87,7 @@ mod test {
         });
         let sm_id = string_sm.id;
         let server = Server::new(&addr);
-        string_sm.init_callback(&service);
+        string_sm.init_callback(&service).await;
         server.register_service(DEFAULT_SERVICE_ID, &service).await;
         Server::listen_and_resume(&server).await;
         assert!(RaftService::start(&service).await);
@@ -97,16 +98,7 @@ mod test {
             .await
             .unwrap();
         let sm_client = SMClient::new(sm_id, &client);
-        let unchanged_str = original_string.clone();
-        let changed_str = altered_string.clone();
-        RaftClient::prepare_subscription(&server);
-        //    sm_client.on_changed(move |res| {
-        //        if let Ok((old, new)) = res {
-        //            println!("GOT VAL CALLBACK {:?} -> {:?}", old, new);
-        //            assert_eq!(old, unchanged_str);
-        //            assert_eq!(new, changed_str);
-        //        }
-        //    }).unwrap().unwrap();
+        RaftClient::prepare_subscription(&server).await;
         assert_eq!(&sm_client.get().await.unwrap(), &original_string);
         sm_client.set(&altered_string).await.unwrap();
         assert_eq!(&sm_client.get().await.unwrap(), &altered_string);
