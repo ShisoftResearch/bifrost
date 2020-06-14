@@ -174,6 +174,7 @@ mod test {
 
         #[tokio::test(threaded_scheduler)]
         async fn test() {
+            let _ = env_logger::try_init();
             let addr = String::from("127.0.0.1:2011");
             let mut num_sm = U32::Number::new_by_name(&String::from("test"), 0);
             let service = RaftService::new(Options {
@@ -198,7 +199,7 @@ mod test {
 
             sm_client.on_changed(|res| {
                 let (old, new) = res;
-                println!("GOT NUM CHANGED: {} -> {}", old, new);
+                info!("GOT NUM CHANGED: {} -> {}", old, new);
                 future::ready(()).boxed()
             });
 

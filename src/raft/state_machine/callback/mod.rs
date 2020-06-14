@@ -62,7 +62,7 @@ mod test {
     #[tokio::test(threaded_scheduler)]
     async fn dummy() {
         let _ = env_logger::try_init();
-        println!("TESTING CALLBACK");
+        info!("TESTING CALLBACK");
         let addr = String::from("127.0.0.1:2110");
         let raft_service = RaftService::new(Options {
             storage: Storage::default(),
@@ -102,7 +102,7 @@ mod test {
             .on_trigged(move |res: u64| {
                 counter_clone.fetch_add(1, Ordering::Relaxed);
                 sumer_clone.fetch_add(res as usize, Ordering::Relaxed);
-                println!("CALLBACK TRIGGERED {}", res);
+                info!("CALLBACK TRIGGERED {}", res);
                 future::ready(()).boxed()
             })
             .await

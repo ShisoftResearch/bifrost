@@ -155,6 +155,7 @@ mod test {
 
     #[tokio::test(threaded_scheduler)]
     async fn hash_map() {
+        let _ = env_logger::try_init();
         let addr = String::from("127.0.0.1:2013");
         let mut map_sm = string_string_hashmap::Map::new_by_name(&String::from("test"));
         let raft_service = RaftService::new(Options {
@@ -200,19 +201,19 @@ mod test {
 
         sm_client.on_inserted(move |res| {
             let (key, value) = res;
-            println!("GOT INSERT CALLBACK {:?} -> {:?}", key, value);
+            info!("GOT INSERT CALLBACK {:?} -> {:?}", key, value);
             assert_eq!(inserted_stash.get(&key).unwrap(), &value);
             future::ready(()).boxed()
         });
         sm_client.on_removed(move |res| {
             let (key, value) = res;
-            println!("GOT REMOVED CALLBACK {:?} -> {:?}", key, value);
+            info!("GOT REMOVED CALLBACK {:?} -> {:?}", key, value);
             assert_eq!(removed_stash.get(&key).unwrap(), &value);
             future::ready(()).boxed()
         });
         sm_client.on_key_inserted(
             |res| {
-                println!("GOT K1 CALLBACK {:?}", res);
+                info!("GOT K1 CALLBACK {:?}", res);
                 assert_eq!(&String::from("v1"), &res);
                 future::ready(()).boxed()
             },
@@ -220,7 +221,7 @@ mod test {
         );
         sm_client.on_key_removed(
             |res| {
-                println!("GOT K2 CALLBACK {:?}", res);
+                info!("GOT K2 CALLBACK {:?}", res);
                 assert_eq!(&String::from("v2"), &res);
                 future::ready(()).boxed()
             },

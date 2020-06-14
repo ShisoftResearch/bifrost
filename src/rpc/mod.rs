@@ -148,7 +148,7 @@ impl Server {
                 .register_shortcut_service(service_ptr, self.server_id, service_id)
                 .await;
         } else {
-            println!("SERVICE SHORTCUT DISABLED");
+            debug!("SERVICE SHORTCUT DISABLED");
         }
         self.services.write().await.insert(service_id, service);
     }
@@ -259,6 +259,7 @@ mod test {
 
         #[tokio::test(threaded_scheduler)]
         pub async fn simple_rpc() {
+            let _ = env_logger::try_init();
             let addr = String::from("127.0.0.1:1300");
             {
                 let addr = addr.clone();
@@ -271,7 +272,7 @@ mod test {
             let service_client = AsyncServiceClient::new(0, &client);
             let response = service_client.hello(String::from("Jack")).await;
             let greeting_str = response.unwrap();
-            println!("SERVER RESPONDED: {}", greeting_str);
+            info!("SERVER RESPONDED: {}", greeting_str);
             assert_eq!(greeting_str, String::from("Hello, Jack!"));
             let expected_err_msg = String::from("This error is a good one");
             let response = service_client.error(expected_err_msg.clone());
@@ -332,7 +333,7 @@ mod test {
             });
             let res = response.await.unwrap();
             let greeting_str = res.text;
-            println!("SERVER RESPONDED: {}", greeting_str);
+            info!("SERVER RESPONDED: {}", greeting_str);
             assert_eq!(greeting_str, String::from("Hello, Jack. It is 12 now!"));
             assert_eq!(42, res.owner);
         }
@@ -455,6 +456,7 @@ mod test {
 
         #[tokio::test(threaded_scheduler)]
         pub async fn lots_of_reqs() {
+            let _ = env_logger::try_init();
             let addr = String::from("127.0.0.1:1411");
             {
                 let addr = addr.clone();
@@ -466,7 +468,7 @@ mod test {
             let client = RPCClient::new_async(&addr).await.unwrap();
             let service_client = AsyncServiceClient::new(0, &client);
 
-            println!("Testing parallel RPC reqs");
+            info!("Testing parallel RPC reqs");
 
             let mut futs = (0..100)
                 .map(|i| {
@@ -478,7 +480,7 @@ mod test {
                         });
                         let res = response.await.unwrap();
                         let greeting_str = res.text;
-                        println!("SERVER RESPONDED: {}", greeting_str);
+                        info!("SERVER RESPONDED: {}", greeting_str);
                         assert_eq!(greeting_str, format!("Hello, John. It is {} now!", i));
                         assert_eq!(42, res.owner);
                     })
@@ -504,7 +506,7 @@ mod test {
                         });
                         let res = response.await.unwrap();
                         let greeting_str = res.text;
-                        println!("SERVER RESPONDED: {}", greeting_str);
+                        info!("SERVER RESPONDED: {}", greeting_str);
                         assert_eq!(greeting_str, format!("Hello, John. It is {} now!", i));
                         assert_eq!(42, res.owner);
                     })

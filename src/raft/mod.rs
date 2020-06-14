@@ -1569,7 +1569,7 @@ mod test {
         #[tokio::test(threaded_scheduler)]
         async fn query_and_command() {
             let _ = env_logger::try_init();
-            println!("TESTING CALLBACK");
+            info!("TESTING CALLBACK");
             let addr = String::from("127.0.0.1:2009");
             let raft_service = RaftService::new(Options {
                 storage: Storage::default(),
