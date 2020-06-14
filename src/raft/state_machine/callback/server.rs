@@ -213,7 +213,7 @@ impl SMCallback {
                                     Err(NotifyError::CannotFindSubscribers)
                                 }
                             }
-                        })
+                        }) 
                         .collect();
                     let sub_result: Vec<_> = sub_result_futs.collect().await;
                     let errors = sub_result
@@ -229,7 +229,6 @@ impl SMCallback {
                         .collect::<Vec<_>>();
                     Ok((sub_ids.len(), errors, response))
                 } else {
-                    warn!("Cannot find subscription {:?}, pattern {}", key, pattern_id);
                     Err(NotifyError::CannotFindSubscription)
                 }
             }
@@ -270,7 +269,10 @@ where
     R: serde::Serialize + Send + Sync + Clone + Unpin + Any + 'static,
 {
     if let Some(ref callback) = *callback {
-        callback.notify(msg, data()).await.unwrap();
+        match callback.notify(msg, data()).await {
+            Ok(_) | Err(NotifyError::IsNotLeader) => {},
+            Err(e) => warn!("Cannot send nofication, failed after called due to: {:?}", e),
+        }
     } else {
         warn!("Cannot send notification, callback handler is empty");
     }

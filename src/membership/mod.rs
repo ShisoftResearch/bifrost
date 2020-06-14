@@ -65,28 +65,41 @@ mod test {
             address: addr.clone(),
             service_id: DEFAULT_SERVICE_ID,
         });
+        info!("Creating server");
         let server = Server::new(&addr);
+        info!("Register service");
         server
             .register_service(DEFAULT_SERVICE_ID, &raft_service)
             .await;
+        info!("Server listen and resume");
         Server::listen_and_resume(&server).await;
-        RaftService::start(&raft_service).await;
+        info!("Creating membership service");
         Membership::new(&server, &raft_service, true).await;
+        info!("Start raft service");
+        RaftService::start(&raft_service).await;
+        info!("Bootstrap radt service");
         raft_service.bootstrap().await;
 
         let group_1 = String::from("test_group_1");
         let group_2 = String::from("test_group_2");
         let group_3 = String::from("test_group_3");
 
+        info!("Creating raft client");
         let wild_raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID)
             .await
             .unwrap();
+
+        info!("Create observer");
         let client = ObserverClient::new(&wild_raft_client);
 
+        info!("Prepare subscription");
         RaftClient::prepare_subscription(&server).await;
 
+        info!("Creating new group: {}", group_1);
         client.new_group(&group_1).await.unwrap().unwrap();
+        info!("Creating new group {}", group_2);
         client.new_group(&group_2).await.unwrap().unwrap();
+        info!("Creating new group {}", group_3);
         client.new_group(&group_3).await.unwrap().unwrap();
 
         let any_member_joined_count = Arc::new(AtomicUsize::new(0));
@@ -109,6 +122,7 @@ mod test {
         let group_member_online_count_clone = group_member_online_count.clone();
         let group_member_offline_count_clone = group_member_offline_count.clone();
 
+        info!("Subscribe on_any_member_joined");
         client
             .on_any_member_joined(move |_| {
                 any_member_joined_count_clone.fetch_add(1, Ordering::Relaxed);
@@ -118,6 +132,7 @@ mod test {
             .unwrap()
             .unwrap();
 
+        info!("Subscribe on_any_member_left");
         client
             .on_any_member_left(move |_| {
                 any_member_left_count_clone.fetch_add(1, Ordering::Relaxed);
@@ -127,6 +142,7 @@ mod test {
             .unwrap()
             .unwrap();
 
+        info!("Subscribe on_any_member_offline");
         client
             .on_any_member_offline(move |_| {
                 any_member_offline_count_clone.fetch_add(1, Ordering::Relaxed);
@@ -136,6 +152,7 @@ mod test {
             .unwrap()
             .unwrap();
 
+        info!("Subscribe on_any_member_online");
         client
             .on_any_member_online(move |_| {
                 any_member_online_count_clone.fetch_add(1, Ordering::Relaxed);
@@ -145,6 +162,7 @@ mod test {
             .unwrap()
             .unwrap();
 
+        info!("Subscribe on_group_leader_changed");
         client
             .on_group_leader_changed(
                 move |_| {
@@ -157,6 +175,7 @@ mod test {
             .unwrap()
             .unwrap();
 
+        info!("Subscribe on_group_member_joined");
         client
             .on_group_member_joined(
                 move |_| {
@@ -169,6 +188,7 @@ mod test {
             .unwrap()
             .unwrap();
 
+        info!("Subscribe on_group_member_left");
         client
             .on_group_member_left(
                 move |_| {
@@ -181,6 +201,7 @@ mod test {
             .unwrap()
             .unwrap();
 
+        info!("Subscribe on_group_member_online");
         client
             .on_group_member_online(
                 move |_| {
@@ -193,6 +214,7 @@ mod test {
             .unwrap()
             .unwrap();
 
+        info!("Subscribe on_group_member_offline");
         client
             .on_group_member_offline(
                 move |_| {
@@ -205,33 +227,46 @@ mod test {
             .unwrap()
             .unwrap();
 
+        info!("New member1_raft_client");
         let member1_raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID)
             .await
             .unwrap();
         let member1_addr = String::from("server1");
+        info!("New member service {}", member1_addr);
         let member1_svr = MemberService::new(&member1_addr, &member1_raft_client).await;
 
+        info!("New member2_raft_client");
         let member2_raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID)
             .await
             .unwrap();
         let member2_addr = String::from("server2");
+        info!("New member service {}", member2_addr);
         let member2_svr = MemberService::new(&member2_addr, &member2_raft_client).await;
 
+        info!("New member3_raft_client");
         let member3_raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID)
             .await
             .unwrap();
         let member3_addr = String::from("server3");
+        info!("New member service {}", member3_addr);
         let member3_svr = MemberService::new(&member3_addr, &member3_raft_client).await;
 
+        info!("Member 1 join group 1");
         member1_svr.join_group(&group_1).await.unwrap();
+        info!("Member 2 join group 1");
         member2_svr.join_group(&group_1).await.unwrap();
+        info!("Member 3 join group 1");
         member3_svr.join_group(&group_1).await.unwrap();
 
+        info!("Member 1 join group 2");
         member1_svr.join_group(&group_2).await.unwrap();
+        info!("Member 2 join group 2");
         member2_svr.join_group(&group_2).await.unwrap();
 
+        info!("Member 1 join group 3");
         member1_svr.join_group(&group_3).await.unwrap();
 
+        info!("Checking group members after join");
         assert_eq!(
             member1_svr
                 .client()
@@ -324,10 +359,10 @@ mod test {
 
         member1_svr.close(); // close only end the heartbeat thread
 
-        info!("Waiting for membership changes");
+        info!("############### Waiting for membership changes ###############");
         async_wait_secs().await;
         async_wait_secs().await;
-        info!("Checking members");
+        info!("*************** Checking members ***************");
 
         assert_eq!(
             member1_svr
@@ -512,7 +547,7 @@ mod test {
 
         async_wait_secs().await;
 
-        info!("Checking event trigger");
+        info!("=========== Checking event trigger ===========");
         assert_eq!(any_member_joined_count.load(Ordering::Relaxed), 3);
         assert_eq!(any_member_left_count.load(Ordering::Relaxed), 1);
         assert_eq!(any_member_offline_count.load(Ordering::Relaxed), 1);
