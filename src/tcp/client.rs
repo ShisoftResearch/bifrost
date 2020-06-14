@@ -5,7 +5,7 @@ use crate::tcp::{shortcut, STANDALONE_ADDRESS};
 use crate::DISABLE_SHORTCUT;
 use bifrost_hasher::hash_str;
 
-use crate::tcp::server::{TcpReq, TcpRes};
+use crate::tcp::server::TcpReq;
 use async_std::sync::Mutex;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::prelude::*;

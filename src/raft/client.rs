@@ -93,7 +93,6 @@ impl RaftClient {
                 "Trying to get cluster info, attempt from {:?}...{}",
                 servers, attempt_remains
             );
-            let mut found_zero_leader = true;
             let mut futs: FuturesUnordered<_> = servers
                 .iter()
                 .map(|server_addr| {
@@ -136,7 +135,6 @@ impl RaftClient {
                                     Some(info)
                                 } else {
                                     debug!("Discovered zero leader id from {}", server_addr);
-                                    found_zero_leader = true;
                                     None
                                 }
                             }
@@ -156,7 +154,7 @@ impl RaftClient {
                     return Some(info);
                 }
             }
-            if found_zero_leader && attempt_remains > 0 {
+            if attempt_remains > 0 {
                 // We found an uninitialized node, should try again
                 // Random sleep
                 debug!(
@@ -170,7 +168,7 @@ impl RaftClient {
                 delay_for(Duration::from_secs(delay_sec)).await;
                 attempt_remains -= 1;
                 continue;
-            } else if found_zero_leader && attempt_remains <= 0 {
+            } else {
                 debug!("Continuously getting zero leader id, give up");
                 break;
             }
