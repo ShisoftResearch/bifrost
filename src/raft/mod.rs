@@ -543,6 +543,9 @@ impl RaftService {
     pub fn is_leader(&self) -> bool {
         self._is_leader.load(Relaxed)
     }
+    pub fn get_server_id(&self) -> u64 {
+        self.id
+    }
     pub async fn register_state_machine(&self, state_machine: SubStateMachine) {
         let meta = self.meta.read().await;
         let mut master_sm = meta.state_machine.write().await;

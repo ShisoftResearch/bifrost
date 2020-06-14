@@ -58,7 +58,7 @@ mod test {
 
     #[tokio::test(threaded_scheduler)]
     async fn primary() {
-        env_logger::try_init().unwrap();
+        let _ = env_logger::builder().format_timestamp(None).init();
         let addr = String::from("127.0.0.1:2100");
         let raft_service = RaftService::new(Options {
             storage: Storage::default(),
@@ -73,12 +73,12 @@ mod test {
             .await;
         info!("Server listen and resume");
         Server::listen_and_resume(&server).await;
-        info!("Creating membership service");
-        Membership::new(&server, &raft_service, true).await;
         info!("Start raft service");
         RaftService::start(&raft_service).await;
-        info!("Bootstrap radt service");
+        info!("Bootstrap raft service");
         raft_service.bootstrap().await;
+        info!("Creating membership service");
+        Membership::new(&server, &raft_service, true).await;
 
         let group_1 = String::from("test_group_1");
         let group_2 = String::from("test_group_2");

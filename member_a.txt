@@ -1,0 +1,220 @@
+running 1 test
+[INFO  bifrost::membership::test] Creating server
+[INFO  bifrost::membership::test] Register service
+[INFO  bifrost::membership::test] Server listen and resume
+[INFO  bifrost::membership::test] Creating membership service
+[INFO  bifrost::membership::test] Start raft service
+[INFO  bifrost::raft] Waiting for raft server to be initialized
+[DEBUG bifrost::tcp::client] TCP connect to 127.0.0.1:2100, server id 11133027135283410007, timeout 2000ms
+[DEBUG bifrost::tcp::client] Local connection, using shortcut
+[INFO  bifrost::membership::test] Bootstrap radt service
+[DEBUG bifrost::raft] Server 11133027135283410007 become leader, term 0
+[INFO  bifrost::membership::test] Creating raft client
+[DEBUG bifrost::raft::client] Getting server info for ["127.0.0.1:2100"]
+[DEBUG bifrost::raft::client] Trying to get cluster info, attempt from ["127.0.0.1:2100"]...10
+[DEBUG bifrost::raft::client] Checking server info on 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Connecting to node 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Added server info on 127.0.0.1:2100 to members
+[DEBUG bifrost::raft::client] Member 127.0.0.1:2100 added
+[DEBUG bifrost::raft::client] Getting server info from 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Checking server client 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Invoking server_cluster_info on 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Checking response from 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Found server info with leader id 11133027135283410007
+[INFO  bifrost::membership::test] Create observer
+[INFO  bifrost::membership::test] Prepare subscription
+[INFO  bifrost::membership::test] Creating new group: test_group_1
+[DEBUG bifrost::raft] Sync logs to followers
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[INFO  bifrost::membership::test] Creating new group test_group_2
+[DEBUG bifrost::raft] Sync logs to followers
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[INFO  bifrost::membership::test] Creating new group test_group_3
+[DEBUG bifrost::raft] Sync logs to followers
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[INFO  bifrost::membership::test] Subscribe on_any_member_joined
+[DEBUG bifrost::raft] Sync config to followers
+[DEBUG bifrost::raft::state_machine::callback::server] Subscription (10662549175266302366, 15763169983414420260, 798813424495336504, 4524394692449115962) from 11133027135283410007, address 127.0.0.1:2100, fn 798813424495336504, pattern 4524394692449115962
+[DEBUG bifrost::tcp::client] TCP connect to 127.0.0.1:2100, server id 11133027135283410007, timeout 2000ms
+[DEBUG bifrost::tcp::client] Local connection, using shortcut
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[INFO  bifrost::membership::test] Subscribe on_any_member_left
+[DEBUG bifrost::raft] Sync config to followers
+[DEBUG bifrost::raft::state_machine::callback::server] Subscription (10662549175266302366, 15763169983414420260, 14802763625815020069, 4524394692449115962) from 11133027135283410007, address 127.0.0.1:2100, fn 14802763625815020069, pattern 4524394692449115962
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[INFO  bifrost::membership::test] Subscribe on_any_member_offline
+[DEBUG bifrost::raft] Sync config to followers
+[DEBUG bifrost::raft::state_machine::callback::server] Subscription (10662549175266302366, 15763169983414420260, 6426322653218706682, 4524394692449115962) from 11133027135283410007, address 127.0.0.1:2100, fn 6426322653218706682, pattern 4524394692449115962
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[INFO  bifrost::membership::test] Subscribe on_any_member_online
+[DEBUG bifrost::raft] Sync config to followers
+[DEBUG bifrost::raft::state_machine::callback::server] Subscription (10662549175266302366, 15763169983414420260, 8489104059404810988, 4524394692449115962) from 11133027135283410007, address 127.0.0.1:2100, fn 8489104059404810988, pattern 4524394692449115962
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[INFO  bifrost::membership::test] Subscribe on_group_leader_changed
+[DEBUG bifrost::raft] Sync config to followers
+[DEBUG bifrost::raft::state_machine::callback::server] Subscription (10662549175266302366, 15763169983414420260, 16842762480516317074, 2784375096897990001) from 11133027135283410007, address 127.0.0.1:2100, fn 16842762480516317074, pattern 2784375096897990001
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[INFO  bifrost::membership::test] Subscribe on_group_member_joined
+[DEBUG bifrost::raft] Sync config to followers
+[DEBUG bifrost::raft::state_machine::callback::server] Subscription (10662549175266302366, 15763169983414420260, 15119233229645674237, 2784375096897990001) from 11133027135283410007, address 127.0.0.1:2100, fn 15119233229645674237, pattern 2784375096897990001
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[INFO  bifrost::membership::test] Subscribe on_group_member_left
+[DEBUG bifrost::raft] Sync config to followers
+[DEBUG bifrost::raft::state_machine::callback::server] Subscription (10662549175266302366, 15763169983414420260, 11817205201490667192, 2784375096897990001) from 11133027135283410007, address 127.0.0.1:2100, fn 11817205201490667192, pattern 2784375096897990001
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[INFO  bifrost::membership::test] Subscribe on_group_member_online
+[DEBUG bifrost::raft] Sync config to followers
+[DEBUG bifrost::raft::state_machine::callback::server] Subscription (10662549175266302366, 15763169983414420260, 5987367411679107627, 2784375096897990001) from 11133027135283410007, address 127.0.0.1:2100, fn 5987367411679107627, pattern 2784375096897990001
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[INFO  bifrost::membership::test] Subscribe on_group_member_offline
+[DEBUG bifrost::raft] Sync config to followers
+[DEBUG bifrost::raft::state_machine::callback::server] Subscription (10662549175266302366, 15763169983414420260, 15289708582071566041, 2784375096897990001) from 11133027135283410007, address 127.0.0.1:2100, fn 15289708582071566041, pattern 2784375096897990001
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[INFO  bifrost::membership::test] New member1_raft_client
+[DEBUG bifrost::raft::client] Getting server info for ["127.0.0.1:2100"]
+[DEBUG bifrost::raft::client] Trying to get cluster info, attempt from ["127.0.0.1:2100"]...10
+[DEBUG bifrost::raft::client] Checking server info on 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Connecting to node 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Added server info on 127.0.0.1:2100 to members
+[DEBUG bifrost::raft::client] Member 127.0.0.1:2100 added
+[DEBUG bifrost::raft::client] Getting server info from 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Checking server client 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Invoking server_cluster_info on 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Checking response from 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Found server info with leader id 11133027135283410007
+[INFO  bifrost::membership::test] New member service server1
+[DEBUG bifrost::raft] Sync logs to followers
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 798813424495336504, op: SUBSCRIBE, pattern_id 4524394692449115962
+[DEBUG bifrost::raft::state_machine::callback::server] Sending out callback notification to sub id 0
+[DEBUG bifrost::raft::state_machine::callback::client] Received notification for key (10662549175266302366, 15763169983414420260, 798813424495336504, 4524394692449115962)
+[INFO  bifrost::membership::test] New member2_raft_client
+[DEBUG bifrost::raft::client] Getting server info for ["127.0.0.1:2100"]
+[DEBUG bifrost::raft::client] Trying to get cluster info, attempt from ["127.0.0.1:2100"]...10
+[DEBUG bifrost::raft::client] Checking server info on 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Connecting to node 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Added server info on 127.0.0.1:2100 to members
+[DEBUG bifrost::raft::client] Member 127.0.0.1:2100 added
+[DEBUG bifrost::raft::client] Getting server info from 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Checking server client 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Invoking server_cluster_info on 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Checking response from 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Found server info with leader id 11133027135283410007
+[INFO  bifrost::membership::test] New member service server2
+[DEBUG bifrost::raft] Sync logs to followers
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 798813424495336504, op: SUBSCRIBE, pattern_id 4524394692449115962
+[DEBUG bifrost::raft::state_machine::callback::server] Sending out callback notification to sub id 0
+[DEBUG bifrost::raft::state_machine::callback::client] Received notification for key (10662549175266302366, 15763169983414420260, 798813424495336504, 4524394692449115962)
+[INFO  bifrost::membership::test] New member3_raft_client
+[DEBUG bifrost::raft::client] Getting server info for ["127.0.0.1:2100"]
+[DEBUG bifrost::raft::client] Trying to get cluster info, attempt from ["127.0.0.1:2100"]...10
+[DEBUG bifrost::raft::client] Checking server info on 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Connecting to node 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Added server info on 127.0.0.1:2100 to members
+[DEBUG bifrost::raft::client] Member 127.0.0.1:2100 added
+[DEBUG bifrost::raft::client] Getting server info from 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Checking server client 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Invoking server_cluster_info on 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Checking response from 127.0.0.1:2100
+[DEBUG bifrost::raft::client] Found server info with leader id 11133027135283410007
+[INFO  bifrost::membership::test] New member service server3
+[DEBUG bifrost::raft] Sync logs to followers
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 798813424495336504, op: SUBSCRIBE, pattern_id 4524394692449115962
+[DEBUG bifrost::raft::state_machine::callback::server] Sending out callback notification to sub id 0
+[DEBUG bifrost::raft::state_machine::callback::client] Received notification for key (10662549175266302366, 15763169983414420260, 798813424495336504, 4524394692449115962)
+[INFO  bifrost::membership::test] Member 1 join group 1
+[DEBUG bifrost::raft] Sync logs to followers
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 15119233229645674237, op: SUBSCRIBE, pattern_id 2784375096897990001
+[DEBUG bifrost::raft::state_machine::callback::server] Sending out callback notification to sub id 5
+[DEBUG bifrost::raft::state_machine::callback::client] Received notification for key (10662549175266302366, 15763169983414420260, 15119233229645674237, 2784375096897990001)
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 16842762480516317074, op: SUBSCRIBE, pattern_id 2784375096897990001
+[DEBUG bifrost::raft::state_machine::callback::server] Sending out callback notification to sub id 4
+[DEBUG bifrost::raft::state_machine::callback::client] Received notification for key (10662549175266302366, 15763169983414420260, 16842762480516317074, 2784375096897990001)
+[INFO  bifrost::membership::test] Member 2 join group 1
+[DEBUG bifrost::raft] Sync logs to followers
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 15119233229645674237, op: SUBSCRIBE, pattern_id 2784375096897990001
+[DEBUG bifrost::raft::state_machine::callback::server] Sending out callback notification to sub id 5
+[DEBUG bifrost::raft::state_machine::callback::client] Received notification for key (10662549175266302366, 15763169983414420260, 15119233229645674237, 2784375096897990001)
+[INFO  bifrost::membership::test] Member 3 join group 1
+[DEBUG bifrost::raft] Sync logs to followers
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 15119233229645674237, op: SUBSCRIBE, pattern_id 2784375096897990001
+[DEBUG bifrost::raft::state_machine::callback::server] Sending out callback notification to sub id 5
+[DEBUG bifrost::raft::state_machine::callback::client] Received notification for key (10662549175266302366, 15763169983414420260, 15119233229645674237, 2784375096897990001)
+[INFO  bifrost::membership::test] Member 1 join group 2
+[DEBUG bifrost::raft] Sync logs to followers
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 15119233229645674237, op: SUBSCRIBE, pattern_id 11565958847197537978
+[WARN  bifrost::raft::state_machine::callback::server] Cannot send nofication, failed after called due to: CannotFindSubscription
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 16842762480516317074, op: SUBSCRIBE, pattern_id 11565958847197537978
+[WARN  bifrost::raft::state_machine::callback::server] Cannot send nofication, failed after called due to: CannotFindSubscription
+[INFO  bifrost::membership::test] Member 2 join group 2
+[DEBUG bifrost::raft] Sync logs to followers
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 15119233229645674237, op: SUBSCRIBE, pattern_id 11565958847197537978
+[WARN  bifrost::raft::state_machine::callback::server] Cannot send nofication, failed after called due to: CannotFindSubscription
+[INFO  bifrost::membership::test] Member 1 join group 3
+[DEBUG bifrost::raft] Sync logs to followers
+[DEBUG bifrost::raft] Issuing delayed heartbeat
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 15119233229645674237, op: SUBSCRIBE, pattern_id 4066697582128911396
+[WARN  bifrost::raft::state_machine::callback::server] Cannot send nofication, failed after called due to: CannotFindSubscription
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 16842762480516317074, op: SUBSCRIBE, pattern_id 4066697582128911396
+[WARN  bifrost::raft::state_machine::callback::server] Cannot send nofication, failed after called due to: CannotFindSubscription
+[INFO  bifrost::membership::test] Checking group members after join
+[INFO  bifrost::membership::test] ############### Waiting for membership changes ###############
+[DEBUG bifrost::membership::server] Found dead member 3908898634140113396
+[DEBUG bifrost::membership::server] Update member state machine for 0 online, 1 offline
+[DEBUG bifrost::raft] Sync logs to followers
+[DEBUG bifrost::membership::server] Member status changed, back online  0, gone offline 1
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 6426322653218706682, op: SUBSCRIBE, pattern_id 4524394692449115962
+[DEBUG bifrost::raft::state_machine::callback::server] Sending out callback notification to sub id 2
+[DEBUG bifrost::raft::state_machine::callback::client] Received notification for key (10662549175266302366, 15763169983414420260, 6426322653218706682, 4524394692449115962)
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 15289708582071566041, op: SUBSCRIBE, pattern_id 4066697582128911396
+[WARN  bifrost::raft::state_machine::callback::server] Cannot send nofication, failed after called due to: CannotFindSubscription
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 15289708582071566041, op: SUBSCRIBE, pattern_id 2784375096897990001
+[DEBUG bifrost::raft::state_machine::callback::server] Sending out callback notification to sub id 8
+[DEBUG bifrost::raft::state_machine::callback::client] Received notification for key (10662549175266302366, 15763169983414420260, 15289708582071566041, 2784375096897990001)
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 15289708582071566041, op: SUBSCRIBE, pattern_id 11565958847197537978
+[WARN  bifrost::raft::state_machine::callback::server] Cannot send nofication, failed after called due to: CannotFindSubscription
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 16842762480516317074, op: SUBSCRIBE, pattern_id 4066697582128911396
+[WARN  bifrost::raft::state_machine::callback::server] Cannot send nofication, failed after called due to: CannotFindSubscription
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 16842762480516317074, op: SUBSCRIBE, pattern_id 2784375096897990001
+[DEBUG bifrost::raft::state_machine::callback::server] Sending out callback notification to sub id 4
+[DEBUG bifrost::raft::state_machine::callback::client] Received notification for key (10662549175266302366, 15763169983414420260, 16842762480516317074, 2784375096897990001)
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 16842762480516317074, op: SUBSCRIBE, pattern_id 11565958847197537978
+[WARN  bifrost::raft::state_machine::callback::server] Cannot send nofication, failed after called due to: CannotFindSubscription
+[INFO  bifrost::membership::test] *************** Checking members ***************
+[DEBUG bifrost::raft] Sync logs to followers
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 14802763625815020069, op: SUBSCRIBE, pattern_id 4524394692449115962
+[DEBUG bifrost::raft::state_machine::callback::server] Sending out callback notification to sub id 1
+[DEBUG bifrost::raft::state_machine::callback::client] Received notification for key (10662549175266302366, 15763169983414420260, 14802763625815020069, 4524394692449115962)
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 11817205201490667192, op: SUBSCRIBE, pattern_id 2784375096897990001
+[DEBUG bifrost::raft::state_machine::callback::server] Sending out callback notification to sub id 6
+[DEBUG bifrost::raft::state_machine::callback::client] Received notification for key (10662549175266302366, 15763169983414420260, 11817205201490667192, 2784375096897990001)
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 11817205201490667192, op: SUBSCRIBE, pattern_id 11565958847197537978
+[WARN  bifrost::raft::state_machine::callback::server] Cannot send nofication, failed after called due to: CannotFindSubscription
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 16842762480516317074, op: SUBSCRIBE, pattern_id 2784375096897990001
+[DEBUG bifrost::raft::state_machine::callback::server] Sending out callback notification to sub id 4
+[DEBUG bifrost::raft::state_machine::callback::client] Received notification for key (10662549175266302366, 15763169983414420260, 16842762480516317074, 2784375096897990001)
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 16842762480516317074, op: SUBSCRIBE, pattern_id 11565958847197537978
+[WARN  bifrost::raft::state_machine::callback::server] Cannot send nofication, failed after called due to: CannotFindSubscription
+[INFO  bifrost::membership::test] =========== Checking event trigger ===========
+[DEBUG bifrost::raft] Sync logs to followers
+[DEBUG bifrost::raft] Sync logs to followers
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 14802763625815020069, op: SUBSCRIBE, pattern_id 4524394692449115962
+[DEBUG bifrost::raft::state_machine::callback::server] Sending out callback notification to sub id 1
+[DEBUG bifrost::raft::state_machine::callback::client] Received notification for key (10662549175266302366, 15763169983414420260, 14802763625815020069, 4524394692449115962)
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 11817205201490667192, op: SUBSCRIBE, pattern_id 4066697582128911396
+[WARN  bifrost::raft::state_machine::callback::server] Cannot send nofication, failed after called due to: CannotFindSubscription
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 11817205201490667192, op: SUBSCRIBE, pattern_id 2784375096897990001
+[DEBUG bifrost::raft::state_machine::callback::server] Sending out callback notification to sub id 6
+[DEBUG bifrost::raft::state_machine::callback::client] Received notification for key (10662549175266302366, 15763169983414420260, 11817205201490667192, 2784375096897990001)
+[DEBUG bifrost::raft::state_machine::callback::server] Sending notification, func 11817205201490667192, op: SUBSCRIBE, pattern_id 11565958847197537978
+[WARN  bifrost::raft::state_machine::callback::server] Cannot send nofication, failed after called due to: CannotFindSubscription
+test membership::test::primary ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out
