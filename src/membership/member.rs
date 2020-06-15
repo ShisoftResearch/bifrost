@@ -11,7 +11,7 @@ use crate::membership::DEFAULT_SERVICE_ID;
 use crate::raft::client::RaftClient;
 use crate::raft::state_machine::master::ExecError;
 
-static PING_INTERVAL: u64 = 100;
+static PING_INTERVAL: u64 = 500;
 
 pub struct MemberService {
     member_client: MemberClient,
@@ -41,11 +41,11 @@ impl MemberService {
             while !service_clone.closed.load(Ordering::Relaxed) {
                 let rpc_client = service_clone.raft_client.current_leader_rpc_client().await;
                 if let Ok(rpc_client) = rpc_client {
-                    let heartbeat_client = AsyncServiceClient::new(DEFAULT_SERVICE_ID, &rpc_client);
-                    let _ping_res = heartbeat_client.ping(service_clone.id).await;
+                    let _ping_res = ImmeServiceClient::ping(DEFAULT_SERVICE_ID, &rpc_client, service_clone.id).await;
                 }
                 time::delay_for(time::Duration::from_millis(PING_INTERVAL)).await
             }
+            debug!("Member service closed");
         });
         return service;
     }

@@ -558,6 +558,7 @@ mod test {
             *ch_1_mapping.entry(server.clone()).or_insert(0) += 1;
         }
         info!("Recount distribution for conshash 1");
+        assert_eq!(ch_1_mapping.get(&server_2).unwrap() + ch_1_mapping.get(&server_3).unwrap(), 3000);
         assert_eq!(ch_1_mapping.get(&server_2).unwrap(), &9923);
         assert_eq!(ch_1_mapping.get(&server_3).unwrap(), &15141);
 

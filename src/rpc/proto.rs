@@ -146,7 +146,6 @@ macro_rules! service {
         #[allow(dead_code)]
         pub struct AsyncServiceClient {
             pub service_id: u64,
-            pub server_id: u64,
             pub client: Arc<RPCClient>,
         }
 
@@ -155,17 +154,32 @@ macro_rules! service {
            $(
                 #[allow(non_camel_case_types)]
                 $(#[$attr])*
+                pub async fn $fn_name(&self, $($arg:$in_),*) -> Result<$out, RPCError> {
+                    ImmeServiceClient::$fn_name(self.service_id, &self.client, $($arg),*).await
+                }
+           )*
+           pub fn new(service_id: u64, client: &Arc<RPCClient>) -> Arc<AsyncServiceClient> {
+                Arc::new(AsyncServiceClient{
+                    service_id: service_id,
+                    client: client.clone()
+                })
+           }
+        }
+        pub struct ImmeServiceClient;
+        impl ImmeServiceClient {
+            $(
+                $(#[$attr])*
                 /// Judgement: Use data ownership transfer instead of borrowing.
                 /// Some applications highly depend on RPC shortcut to achieve performance advantages.
                 /// Cloning for shortcut will significantly increase overhead. Eg. Hivemind immutable queue
-                pub async fn $fn_name(&self, $($arg:$in_),*) -> Result<$out, RPCError> {
-                    if let Some(ref local) = get_local(self.server_id, self.service_id).await {
+                pub async fn $fn_name(service_id: u64, client: &Arc<RPCClient>, $($arg:$in_),*) -> Result<$out, RPCError> {
+                    if let Some(ref local) = get_local(client.server_id, service_id).await {
                         Ok(local.$fn_name($($arg),*).await)
                     } else {
                         let req_data = ($($arg,)*);
                         let req_data_bytes = ::bytes::BytesMut::from($crate::utils::serde::serialize(&req_data).as_slice());
                         let req_bytes = prepend_u64(::bifrost_plugins::hash_ident!($fn_name) as u64, req_data_bytes);
-                        let res_bytes = RPCClient::send_async(Pin::new(&*self.client), self.service_id, req_bytes).await;
+                        let res_bytes = RPCClient::send_async(Pin::new(&*client), service_id, req_bytes).await;
                         if let Ok(res_bytes) = res_bytes {
                             if let Some(data) = $crate::utils::serde::deserialize(&res_bytes) {
                                 Ok(data)
@@ -177,14 +191,7 @@ macro_rules! service {
                         }
                     }
                 }
-           )*
-           pub fn new(service_id: u64, client: &Arc<RPCClient>) -> Arc<AsyncServiceClient> {
-                Arc::new(AsyncServiceClient{
-                    service_id: service_id,
-                    server_id:client.server_id,
-                    client: client.clone()
-                })
-           }
+           )*            
         }
     }
 }

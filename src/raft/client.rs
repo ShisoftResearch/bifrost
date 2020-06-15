@@ -232,9 +232,7 @@ impl RaftClient {
                     }
                     match rpc::DEFAULT_CLIENT_POOL.get(peer_addr).await {
                         Ok(client) => {
-                            let client = AsyncServiceClient::new(service_id, &client);
-                            let check_res = client.c_ping().await;
-                            check_res.is_ok()
+                            ImmeServiceClient::c_ping(service_id, &client).await.is_ok()
                         }
                         Err(_) => false,
                     }
