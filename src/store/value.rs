@@ -23,10 +23,13 @@ macro_rules! def_store_value {
                     async move {
                         if let Some(ref callback) = self.callback {
                             let old = self.val.clone();
-                            let _ = callback.notify(commands::on_changed::new(), (old, v.clone())).await;
+                            let _ = callback
+                                .notify(commands::on_changed::new(), (old, v.clone()))
+                                .await;
                         }
                         self.val = v;
-                    }.boxed()
+                    }
+                    .boxed()
                 }
                 fn get(&self) -> ::futures::future::BoxFuture<$t> {
                     future::ready(self.val.clone()).boxed()

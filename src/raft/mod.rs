@@ -481,7 +481,8 @@ impl RaftService {
         if let Ok(client) = RaftClient::new(&servers, self.options.service_id).await {
             client
                 .execute(CONFIG_SM_ID, del_member_::new(&self.options.address))
-                .await.unwrap();
+                .await
+                .unwrap();
         } else {
             return false;
         }

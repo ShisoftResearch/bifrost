@@ -49,7 +49,8 @@ macro_rules! def_store_number {
                         if let Some(ref callback) = self.callback {
                             let _ = callback.notify(commands::on_changed::new(), (on, n)).await;
                         }
-                    }.boxed()
+                    }
+                    .boxed()
                 }
                 fn get(&self) -> BoxFuture<$t> {
                     future::ready(self.num).boxed()

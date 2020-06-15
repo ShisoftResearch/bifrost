@@ -48,11 +48,16 @@ macro_rules! def_store_hash_map {
                 fn insert(&mut self, k: $kt, v: $vt) -> ::futures::future::BoxFuture<Option<$vt>> {
                     async move {
                         if let Some(ref callback) = self.callback {
-                            let _ = callback.notify(commands::on_inserted::new(), (k.clone(), v.clone())).await;
-                            let _ = callback.notify(commands::on_key_inserted::new(&k), v.clone()).await;
+                            let _ = callback
+                                .notify(commands::on_inserted::new(), (k.clone(), v.clone()))
+                                .await;
+                            let _ = callback
+                                .notify(commands::on_key_inserted::new(&k), v.clone())
+                                .await;
                         }
                         self.map.insert(k, v)
-                    }.boxed()
+                    }
+                    .boxed()
                 }
                 fn insert_if_absent(
                     &mut self,
@@ -70,12 +75,17 @@ macro_rules! def_store_hash_map {
                         let res = self.map.remove(&k);
                         if let Some(ref callback) = self.callback {
                             if let Some(ref v) = res {
-                                let _ = callback.notify(commands::on_removed::new(), (k.clone(), v.clone())).await;
-                                let _ = callback.notify(commands::on_key_removed::new(&k), v.clone()).await;
+                                let _ = callback
+                                    .notify(commands::on_removed::new(), (k.clone(), v.clone()))
+                                    .await;
+                                let _ = callback
+                                    .notify(commands::on_key_removed::new(&k), v.clone())
+                                    .await;
                             }
                         }
                         res
-                    }.boxed()
+                    }
+                    .boxed()
                 }
                 fn is_empty(&self) -> ::futures::future::BoxFuture<bool> {
                     future::ready(self.map.is_empty()).boxed()

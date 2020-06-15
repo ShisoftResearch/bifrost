@@ -165,7 +165,10 @@ impl SMCallback {
         M: RaftMsg<R> + 'static,
     {
         if !self.raft_service.is_leader() {
-            debug!("Will not send notification from {} because this node is not a leader", self.raft_service.get_server_id());
+            debug!(
+                "Will not send notification from {} because this node is not a leader",
+                self.raft_service.get_server_id()
+            );
             return Err(NotifyError::IsNotLeader);
         }
         let (fn_id, op_type, pattern_data) = msg.encode();
@@ -214,7 +217,7 @@ impl SMCallback {
                                     Err(NotifyError::CannotFindSubscribers)
                                 }
                             }
-                        }) 
+                        })
                         .collect();
                     let sub_result: Vec<_> = sub_result_futs.collect().await;
                     let errors = sub_result
@@ -271,8 +274,11 @@ where
 {
     if let Some(ref callback) = *callback {
         match callback.notify(msg, data()).await {
-            Ok(_) | Err(NotifyError::IsNotLeader) => {},
-            Err(e) => warn!("Cannot send nofication, failed after called due to: {:?}", e),
+            Ok(_) | Err(NotifyError::IsNotLeader) => {}
+            Err(e) => warn!(
+                "Cannot send nofication, failed after called due to: {:?}",
+                e
+            ),
         }
     } else {
         warn!("Cannot send notification, callback handler is empty");

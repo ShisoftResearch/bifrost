@@ -1,7 +1,7 @@
 use super::heartbeat_rpc::*;
 use super::raft::*;
 use super::*;
-use crate::membership::client::{Member as ClientMember};
+use crate::membership::client::Member as ClientMember;
 use crate::raft::state_machine::callback::server::{notify as cb_notify, SMCallback};
 use crate::raft::state_machine::StateMachineCtl;
 use crate::raft::{LogEntry, RaftMsg, RaftService, Service as raft_svr_trait};
@@ -16,7 +16,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::{time as std_time};
+use std::time as std_time;
 use tokio::time as async_time;
 
 static MAX_TIMEOUT: i64 = 2000; //2 secs for 500ms heartbeat
@@ -263,7 +263,8 @@ impl Membership {
         }
         if success {
             if need_notify {
-                self.notify_for_group_member_left(group_id, &self.compose_client_member(id).await).await;
+                self.notify_for_group_member_left(group_id, &self.compose_client_member(id).await)
+                    .await;
             }
             self.group_leader_candidate_unavailable(group_id, id).await;
             true

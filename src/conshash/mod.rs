@@ -197,7 +197,9 @@ impl ConsistentHashing {
         }
         trace!(
             "Jump hash point to index {} for {}, with slots {}",
-            b, hash, slot_count
+            b,
+            hash,
+            slot_count
         );
         b as usize
     }
