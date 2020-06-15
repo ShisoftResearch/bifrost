@@ -58,7 +58,7 @@ mod test {
 
     #[tokio::test(threaded_scheduler)]
     async fn primary() {
-        let _ = env_logger::builder().format_timestamp(None).init();
+        let _ = env_logger::builder().format_timestamp(None).try_init();
         let addr = String::from("127.0.0.1:2100");
         let raft_service = RaftService::new(Options {
             storage: Storage::default(),

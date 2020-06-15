@@ -182,7 +182,7 @@ impl ConsistentHashing {
             return None;
         }
         let result = nodes.get(self.jump_hash(slot_count, hash));
-        debug!("Hash {} have been point to {:?}", hash, result);
+        trace!("Hash {} have been point to {:?}", hash, result);
         result.cloned()
     }
     pub fn jump_hash(&self, slot_count: usize, hash: u64) -> usize {
@@ -195,7 +195,7 @@ impl ConsistentHashing {
             j = (((b.wrapping_add(1)) as f64) * ((1i64 << 31) as f64)
                 / (((h >> 33).wrapping_add(1)) as f64)) as i64;
         }
-        debug!(
+        trace!(
             "Jump hash point to index {} for {}, with slots {}",
             b, hash, slot_count
         );
@@ -369,6 +369,7 @@ mod test {
     async fn primary() {
         let _ = env_logger::try_init();
 
+        info!("Creating raft service");
         let addr = String::from("127.0.0.1:2200");
         let raft_service = RaftService::new(Options {
             storage: Storage::default(),
@@ -376,6 +377,7 @@ mod test {
             service_id: 0,
         });
 
+        info!("Creating server");
         let server = Server::new(&addr);
         let _heartbeat_service = Membership::new(&server, &raft_service, true).await;
         server.register_service(0, &raft_service).await;
@@ -391,60 +393,94 @@ mod test {
         let server_2 = String::from("server2");
         let server_3 = String::from("server3");
 
+        info!("Create raft client");
         let wild_raft_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
+        info!("Create observer");
         let client = ObserverClient::new(&wild_raft_client);
 
+        info!("Create subscription");
         RaftClient::prepare_subscription(&server).await;
 
+        info!("New group 1");
         client.new_group(&group_1).await.unwrap().unwrap();
+        info!("New group 2");
         client.new_group(&group_2).await.unwrap().unwrap();
+        info!("New group 3");
         client.new_group(&group_3).await.unwrap().unwrap();
 
+        info!("New raft client for member 1");
         let member1_raft_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
+        info!("New member service 1");
         let member1_svr = MemberService::new(&server_1, &member1_raft_client).await;
 
+        info!("New raft client for member 2");
         let member2_raft_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
+        info!("New member service 2");
         let member2_svr = MemberService::new(&server_2, &member2_raft_client).await;
 
+        info!("New raft client for member 3");
         let member3_raft_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
+        info!("New member service 3");
         let member3_svr = MemberService::new(&server_3, &member3_raft_client).await;
 
+        info!("Member 1 join group 1");
         member1_svr.join_group(&group_1).await.unwrap();
+        info!("Member 1 join group 2");
         member2_svr.join_group(&group_1).await.unwrap();
+        info!("Member 1 join group 3");
         member3_svr.join_group(&group_1).await.unwrap();
 
+        info!("Member 1 join group 2");
         member1_svr.join_group(&group_2).await.unwrap();
+        info!("Member 2 join group 2");
         member2_svr.join_group(&group_2).await.unwrap();
 
+        info!("Member 1 join group 3");
         member1_svr.join_group(&group_3).await.unwrap();
 
+        info!("New weight service");
         Weights::new(&raft_service).await;
 
+        info!("New conshash for group 1");
         let ch1 = ConsistentHashing::new(&group_1, &wild_raft_client)
             .await
             .unwrap();
+
+        info!("New conshash for group 2");
         let ch2 = ConsistentHashing::new(&group_2, &wild_raft_client)
             .await
             .unwrap();
+
+        info!("New conshash for group 3");
         let ch3 = ConsistentHashing::new(&group_3, &wild_raft_client)
             .await
             .unwrap();
 
+        info!("Set server 1 in group 1 to 1");
         ch1.set_weight(&server_1, 1).await.unwrap();
+        info!("Set server 2 in group 1 to 2");
         ch1.set_weight(&server_2, 2).await.unwrap();
+        info!("Set server 3 in group 1 to 3");
         ch1.set_weight(&server_3, 3).await.unwrap();
 
+        info!("Set server 1 in group 2 to 1");
         ch2.set_weight(&server_1, 1).await.unwrap();
+        info!("Set server 2 in group 2 to 1");
         ch2.set_weight(&server_2, 1).await.unwrap();
 
+        info!("Set server 1 in group 3 to 2");
         ch3.set_weight(&server_1, 2).await.unwrap();
 
+        info!("Init table for conshash 1");
         ch1.init_table().await.unwrap();
+        info!("Init table for conshash 2");
         ch2.init_table().await.unwrap();
+        info!("Init table for conshash 3");
         ch3.init_table().await.unwrap();
 
         let ch1_server_node_changes_count = Arc::new(AtomicUsize::new(0));
         let ch1_server_node_changes_count_clone = ch1_server_node_changes_count.clone();
+        info!("Watch node change from conshash 1");
         ch1.watch_server_nodes_range_changed(&server_2, move |_| {
             ch1_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
         })
@@ -452,6 +488,7 @@ mod test {
 
         let ch2_server_node_changes_count = Arc::new(AtomicUsize::new(0));
         let ch2_server_node_changes_count_clone = ch2_server_node_changes_count.clone();
+        info!("Watch node change from conshash 2");
         ch2.watch_server_nodes_range_changed(&server_2, move |_| {
             ch2_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
         })
@@ -459,67 +496,80 @@ mod test {
 
         let ch3_server_node_changes_count = Arc::new(AtomicUsize::new(0));
         let ch3_server_node_changes_count_clone = ch3_server_node_changes_count.clone();
+        info!("Watch node change from conshash 3");
         ch3.watch_server_nodes_range_changed(&server_2, move |_| {
             ch3_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
         })
         .await;
 
+        info!("Counting nodes for conshash 1");
         assert_eq!(ch1.nodes_count().await, 6);
+        info!("Counting nodes for conshash 2");
         assert_eq!(ch2.nodes_count().await, 2);
+        info!("Counting nodes for conshash 3");
         assert_eq!(ch3.nodes_count().await, 1);
 
+        info!("Batch get server by string from conshash 1");
         let mut ch_1_mapping: HashMap<String, u64> = HashMap::new();
         for i in 0..30000usize {
             let k = format!("k - {}", i);
             let server = ch1.get_server_by_string(&k).await.unwrap();
             *ch_1_mapping.entry(server.clone()).or_insert(0) += 1;
         }
+        info!("Counting distribution for conshash 1");
         assert_eq!(ch_1_mapping.get(&server_1).unwrap(), &4936);
         assert_eq!(ch_1_mapping.get(&server_2).unwrap(), &9923);
         assert_eq!(ch_1_mapping.get(&server_3).unwrap(), &15141); // hard coded due to constant
 
+        info!("Batch get server by string from conshash 2");
         let mut ch_2_mapping: HashMap<String, u64> = HashMap::new();
         for i in 0..30000usize {
             let k = format!("k - {}", i);
             let server = ch2.get_server_by_string(&k).await.unwrap();
             *ch_2_mapping.entry(server.clone()).or_insert(0) += 1;
         }
+        info!("Counting distribution for conshash 2");
         assert_eq!(ch_2_mapping.get(&server_1).unwrap(), &14967);
         assert_eq!(ch_2_mapping.get(&server_2).unwrap(), &15033);
 
+        info!("Batch get server by string from conshash 3");
         let mut ch_3_mapping: HashMap<String, u64> = HashMap::new();
         for i in 0..30000usize {
             let k = format!("k - {}", i);
             let server = ch3.get_server_by_string(&k).await.unwrap();
             *ch_3_mapping.entry(server.clone()).or_insert(0) += 1;
         }
+        info!("Counting distribution for conshash 3");
         assert_eq!(ch_3_mapping.get(&server_1).unwrap(), &30000);
 
+        info!("Close member 1");
         member1_svr.close();
+        info!("Waiting");
         async_wait_secs().await;
         async_wait_secs().await;
 
         let mut ch_1_mapping: HashMap<String, u64> = HashMap::new();
+        info!("Recheck get server by string for conshash 1");
         for i in 0..30000usize {
             let k = format!("k - {}", i);
             let server = ch1.get_server_by_string(&k).await.unwrap();
             *ch_1_mapping.entry(server.clone()).or_insert(0) += 1;
         }
+        info!("Recount distribution for conshash 1");
         assert_eq!(ch_1_mapping.get(&server_2).unwrap(), &9923);
         assert_eq!(ch_1_mapping.get(&server_3).unwrap(), &15141);
 
-        member3_svr.close();
-        async_wait_secs().await;
-        async_wait_secs().await;
-
         let mut ch_2_mapping: HashMap<String, u64> = HashMap::new();
+        info!("Recheck get server by string for conshash 2");
         for i in 0..30000usize {
             let k = format!("k - {}", i);
             let server = ch2.get_server_by_string(&k).await.unwrap();
             *ch_2_mapping.entry(server.clone()).or_insert(0) += 1;
         }
+        info!("Recount distribution for conshash 2");
         assert_eq!(ch_2_mapping.get(&server_2).unwrap(), &30000);
 
+        info!("Cheching conshash 3 with no members");
         for i in 0..30000usize {
             let k = format!("k - {}", i);
             assert!(ch3.get_server_by_string(&k).await.is_none()); // no member
