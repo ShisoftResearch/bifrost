@@ -298,8 +298,9 @@ impl RaftService {
     pub async fn start(server: &Arc<RaftService>) -> bool {
         let server_address = server.options.address.clone();
         info!("Waiting for raft server to be initialized");
-        let mut meta = server.meta.write().await;
         {
+            let mut meta = server.meta.write().await;
+            meta.last_checked = get_time() + (CHECKER_MS * 10);
             let mut sm = meta.state_machine.write().await;
             let mut inited = false;
             let start_time = get_time();
@@ -320,7 +321,7 @@ impl RaftService {
             loop {
                 let start_time = get_time();
                 let expected_ends = start_time + CHECKER_MS;
-                {
+                let heartbeat_task_continue = async {
                     let mut meta = server.meta.write().await; //WARNING: Reentering not supported
                     let current_time = get_time();
                     let mut is_leader = false;
@@ -340,7 +341,7 @@ impl RaftService {
                             if meta.vote_for == None && time_remains < 0 {
                                 // TODO: in my test sometimes timeout_elapsed may go 1 for no reason, require investigation
                                 //Timeout, require election
-                                debug!(
+                                warn!(
                                 "LEADER {} TIMEOUT!!! GOING TO CANDIDATE!!! {}, time remains {}ms",
                                 meta.leader_id, server.id, time_remains);
                                 CheckerAction::BecomeCandidate
@@ -362,20 +363,33 @@ impl RaftService {
                             server.become_candidate(&mut meta).await;
                         }
                         CheckerAction::ExitLoop => {
-                            break;
+                            return false;
                         }
                         CheckerAction::None => {}
                     }
-                }
+                    return true;
+                };
+                let timed_heartbeat = timeout(Duration::from_millis(HEARTBEAT_MS as u64), heartbeat_task_continue).await;
                 let end_time = get_time();
                 let time_to_sleep = expected_ends - end_time - 1;
+                match timed_heartbeat {
+                    Err(_) => {
+                        error!("Heartbeat cannot finish in time for {}ms, skip the beat", HEARTBEAT_MS);
+                    }
+                    Ok(false) => {
+                        debug!("Heartbeat loop exiting");
+                        break;
+                    }
+                    Ok(true) => {
+                        trace!("Continue on heartbeat, going to sleep for {}ms", time_to_sleep);
+                    }
+                }
                 if time_to_sleep > 0 {
                     // Use thread sleep here because we want system scheduler for precision
                     delay_for(Duration::from_millis(time_to_sleep as u64)).await;
                 }
             }
         });
-        meta.last_checked = get_time() + (CHECKER_MS * 10);
         return true;
     }
     pub async fn new_server(opts: Options) -> (bool, Arc<RaftService>, Arc<Server>) {
@@ -1224,14 +1238,21 @@ impl Service for RaftService {
 
     fn c_query(&self, entry: LogEntry) -> BoxFuture<ClientQryResponse> {
         async move {
+            trace!("Client query for raft sm_id {}, fn_id {} with term {}, id {}. Obtaining meta read lock.", entry.sm_id, entry.fn_id, entry.term, entry.id);
             let meta = self.meta.read().await;
+            trace!("Client query for raft sm_id {}, fn_id {} with term {}, id {}. Obtaining logs read lock.", entry.sm_id, entry.fn_id, entry.term, entry.id);
             let logs = meta.logs.read().await;
+            trace!("Client query for raft sm_id {}, fn_id {} with term {}, id {}. Getting last log and check term and id", entry.sm_id, entry.fn_id, entry.term, entry.id);
             let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
             if entry.term > last_log_term || entry.id > last_log_id {
+                trace!("Client query for raft sm_id {}, fn_id {} with term {}, id {} have left behind. Extected term {}, id {}", entry.sm_id, entry.fn_id, entry.term, entry.id, last_log_term, last_log_id);
                 ClientQryResponse::LeftBehind
             } else {
+                trace!("Client query for raft sm_id {}, fn_id {} with term {}, id {}. Reading state machine for query result.", entry.sm_id, entry.fn_id, entry.term, entry.id);
+                let qry_res = meta.state_machine.read().await.exec_qry(&entry).await;
+                trace!("Client query for raft sm_id {}, fn_id {} with term {}, id {}.Query complete, return result to client.", entry.sm_id, entry.fn_id, entry.term, entry.id);
                 ClientQryResponse::Success {
-                    data: meta.state_machine.read().await.exec_qry(&entry).await,
+                    data: qry_res,
                     last_log_id,
                     last_log_term,
                 }

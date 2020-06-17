@@ -78,7 +78,7 @@ mod test {
         info!("Bootstrap raft service");
         raft_service.bootstrap().await;
         info!("Creating membership service");
-        Membership::new(&server, &raft_service, true).await;
+        Membership::new(&server, &raft_service).await;
 
         let group_1 = String::from("test_group_1");
         let group_2 = String::from("test_group_2");

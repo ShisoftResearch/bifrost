@@ -103,7 +103,7 @@ impl Drop for Membership {
 }
 
 impl Membership {
-    pub async fn new(server: &Arc<Server>, raft_service: &Arc<RaftService>, callback: bool) {
+    pub async fn new(server: &Arc<Server>, raft_service: &Arc<RaftService>) {
         let service = Arc::new(HeartbeatService {
             status: RwLock::new(HashMap::new()),
             closed: AtomicBool::new(false),
@@ -162,6 +162,7 @@ impl Membership {
                 }
                 async_time::delay_for(std_time::Duration::from_millis(500)).await
             }
+            debug!("Membership server stopped");
         });
         let mut membership_service = Membership {
             heartbeat: service.clone(),
@@ -170,9 +171,7 @@ impl Membership {
             callback: None,
             version: 0,
         };
-        if callback {
-            membership_service.init_callback(raft_service).await;
-        }
+        membership_service.init_callback(raft_service).await;
         raft_service
             .register_state_machine(Box::new(membership_service))
             .await;
@@ -191,6 +190,7 @@ impl Membership {
         self.callback = Some(SMCallback::new(self.id(), raft_service.clone()).await);
     }
     async fn notify_for_member_online(&self, id: u64) {
+        debug!("Notifying member {} online", id);
         let client_member = self.compose_client_member(id).await;
         let version = self.version;
         cb_notify(
@@ -211,6 +211,7 @@ impl Membership {
         }
     }
     async fn notify_for_member_offline(&self, id: u64) {
+        debug!("Notifying member {} offline", id);
         let client_member = self.compose_client_member(id).await;
         let version = self.version;
         cb_notify(
@@ -231,6 +232,7 @@ impl Membership {
         }
     }
     async fn notify_for_member_left(&self, id: u64) {
+        debug!("Notifying member {} left", id);
         let client_member = self.compose_client_member(id).await;
         let version = self.version;
         cb_notify(&self.callback, commands::on_any_member_left::new(), || {
@@ -245,6 +247,7 @@ impl Membership {
         }
     }
     async fn notify_for_group_member_left(&self, group: u64, member: &ClientMember) {
+        debug!("Notifying member {:?} left group {}", member, group);
         cb_notify(
             &self.callback,
             commands::on_group_member_left::new(&group),

@@ -371,15 +371,22 @@ impl RaftClient {
     async fn query(&self, sm_id: u64, fn_id: u64, data: Vec<u8>) -> Result<ExecResult, ExecError> {
         let mut depth = 0;
         loop {
+            if depth == 0 {
+                trace!("Raft client query sm_id {}, fn_id {}", sm_id, fn_id);
+            } else {
+                warn!("Retry client query sm_id {}, fn_id {}", sm_id, fn_id);
+            }
             let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
             let members = self.members.read().await;
             let num_members = members.clients.len();
             if num_members >= 1 {
                 let node_index = pos as usize % num_members;
                 let rpc_client = members.clients.values().nth(node_index).unwrap();
+                trace!("Query from node {} for sm_id {}, fn_id {}", node_index, sm_id, fn_id);
                 let res = rpc_client
                     .c_query(self.gen_log_entry(sm_id, fn_id, &data))
                     .await;
+                trace!("Query from node {} for sm_id {}, fn_id {} completed", node_index, sm_id, fn_id);
                 match res {
                     Ok(res) => match res {
                         ClientQryResponse::LeftBehind => {
@@ -401,6 +408,7 @@ impl RaftClient {
                             if depth > 0 {
                                 warn!("Retry successful...{}", depth);
                             }
+                            trace!("Query from node {} for sm_id {}, fn_id {}, successful at log id {}, term {}", node_index, sm_id, fn_id, last_log_id, last_log_term);
                             return Ok(data);
                         }
                     },

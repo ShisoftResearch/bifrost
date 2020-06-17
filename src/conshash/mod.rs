@@ -54,14 +54,14 @@ impl ConsistentHashing {
         id: u64,
         group: &str,
         raft_client: &Arc<RaftClient>,
+        membership_client: &Arc<MembershipClient>
     ) -> Result<Arc<ConsistentHashing>, CHError> {
-        let membership = Arc::new(MembershipClient::new(raft_client));
         let ch = Arc::new(ConsistentHashing {
             tables: RwLock::new(LookupTables {
                 nodes: Vec::new(),
                 addrs: HashMap::new(),
             }),
-            membership: membership.clone(),
+            membership: membership_client.clone(),
             weight_sm_client: WeightSMClient::new(id, &raft_client),
             group_name: group.to_string(),
             watchers: RwLock::new(Vec::new()),
@@ -69,7 +69,7 @@ impl ConsistentHashing {
         });
         {
             let ch = ch.clone();
-            let res = membership
+            let res = membership_client
                 .on_group_member_joined(
                     move |(member, version)| {
                         let ch = ch.clone();
@@ -85,7 +85,7 @@ impl ConsistentHashing {
         }
         {
             let ch = ch.clone();
-            let res = membership
+            let res = membership_client
                 .on_group_member_online(
                     move |(member, version)| {
                         let ch = ch.clone();
@@ -101,7 +101,7 @@ impl ConsistentHashing {
         }
         {
             let ch = ch.clone();
-            let res = membership
+            let res = membership_client
                 .on_group_member_left(
                     move |(member, version)| {
                         let ch = ch.clone();
@@ -117,7 +117,7 @@ impl ConsistentHashing {
         }
         {
             let ch = ch.clone();
-            let res = membership
+            let res = membership_client
                 .on_group_member_offline(
                     move |(member, version)| {
                         let ch = ch.clone();
@@ -136,21 +136,24 @@ impl ConsistentHashing {
     pub async fn new(
         group: &str,
         raft_client: &Arc<RaftClient>,
+        membership_client: &Arc<MembershipClient>
     ) -> Result<Arc<ConsistentHashing>, CHError> {
-        Self::new_with_id(DEFAULT_SERVICE_ID, group, raft_client).await
+        Self::new_with_id(DEFAULT_SERVICE_ID, group, raft_client, membership_client).await
     }
     pub async fn new_client(
         group: &str,
         raft_client: &Arc<RaftClient>,
+        membership_client: &Arc<MembershipClient>
     ) -> Result<Arc<ConsistentHashing>, CHError> {
-        Self::new_client_with_id(DEFAULT_SERVICE_ID, group, raft_client).await
+        Self::new_client_with_id(DEFAULT_SERVICE_ID, group, raft_client, membership_client).await
     }
     pub async fn new_client_with_id(
         id: u64,
         group: &str,
         raft_client: &Arc<RaftClient>,
+        membership_client: &Arc<MembershipClient>
     ) -> Result<Arc<ConsistentHashing>, CHError> {
-        match ConsistentHashing::new_with_id(id, group, raft_client).await {
+        match ConsistentHashing::new_with_id(id, group, raft_client, membership_client).await {
             Err(e) => Err(e),
             Ok(ch) => match ch.init_table().await {
                 Err(e) => Err(CHError::InitTableError(e)),
@@ -182,7 +185,7 @@ impl ConsistentHashing {
             return None;
         }
         let result = nodes.get(self.jump_hash(slot_count, hash));
-        trace!("Hash {} have been point to {:?}", hash, result);
+        // trace!("Hash {} have been point to {:?}", hash, result);
         result.cloned()
     }
     pub fn jump_hash(&self, slot_count: usize, hash: u64) -> usize {
@@ -195,12 +198,12 @@ impl ConsistentHashing {
             j = (((b.wrapping_add(1)) as f64) * ((1i64 << 31) as f64)
                 / (((h >> 33).wrapping_add(1)) as f64)) as i64;
         }
-        trace!(
-            "Jump hash point to index {} for {}, with slots {}",
-            b,
-            hash,
-            slot_count
-        );
+        // trace!(
+        //     "Jump hash point to index {} for {}, with slots {}",
+        //     b,
+        //     hash,
+        //     slot_count
+        // );
         b as usize
     }
     pub async fn get_server(&self, hash: u64) -> Option<String> {
@@ -281,12 +284,17 @@ impl ConsistentHashing {
         &self,
         lookup_table: &mut RwLockWriteGuard<'_, LookupTables>,
     ) -> Result<(), InitTableError> {
-        if let Ok(Some((members, version))) =
-            self.membership.group_members(&self.group_name, true).await
-        {
-            let group_id = hash_str(&self.group_name);
+        let group_name = &self.group_name;
+        debug!("Initializing table from membership group members for {}", group_name);
+        debug!("Get group members for {}", group_name);
+        let group_members =  self.membership.group_members(group_name, true).await;
+        debug!("Got group members for {}", group_name);
+        if let Ok(Some((members, version))) = group_members {
+            let group_id = hash_str(group_name);
+            debug!("Getting weights for {}", group_name);
             match self.weight_sm_client.get_weights(&group_id).await {
                 Ok(Some(weights)) => {
+                    debug!("Group {} have {} weights", group_name, weights.len());
                     if let Some(min_weight) = weights.values().min() {
                         let mut factors: BTreeMap<u64, u32> = BTreeMap::new();
                         let min_weight = *min_weight as f64;
@@ -314,10 +322,17 @@ impl ConsistentHashing {
                         Err(InitTableError::NoWeightInfo)
                     }
                 }
-                Err(e) => Err(InitTableError::NoWeightService(e)),
-                Ok(None) => Err(InitTableError::NoWeightGroup),
+                Err(e) => {
+                    error!("No weright service for group {}", group_name);
+                    Err(InitTableError::NoWeightService(e))
+                },
+                Ok(None) => {
+                    error!("No weight group for group {}", group_name);
+                    Err(InitTableError::NoWeightGroup)
+                },
             }
         } else {
+            error!("No group {} existed in table", group_name);
             Err(InitTableError::GroupNotExisted)
         }
     }
@@ -333,22 +348,28 @@ async fn server_left(ch: Arc<ConsistentHashing>, member: Member, version: u64) {
     server_changed(ch, member, Action::Left, version).await;
 }
 async fn server_changed(ch: Arc<ConsistentHashing>, member: Member, action: Action, version: u64) {
-    // let ch = ch.clone();
+    debug!("Detected server membership change, member {:?}, action {:?}, version {}", member, action, version);
     let ch_version = ch.version.load(Ordering::Relaxed);
     if ch_version < version {
+        debug!("Reading watchers from conshash");
         let watchers = ch.watchers.read().await;
-        let ch_version = ch.version.load(Ordering::Relaxed);
-        if ch_version >= version {
-            return;
-        }
         {
+            debug!("Obtaining conshash table write lock");
             let mut lookup_table = ch.tables.write().await;
             let old_nodes = lookup_table.nodes.clone();
-            ch.init_table_(&mut lookup_table).await.unwrap();
+            debug!("Reinit conshash table");
+            let reinit_res = ch.init_table_(&mut lookup_table).await;
+            if !reinit_res.is_ok() {
+                error!("Cannot reinit table {:?}", reinit_res.err().unwrap());
+            }
+            debug!("Triggering conshash watchers");
             for watch in watchers.iter() {
                 watch(&member, &action, &*lookup_table, &old_nodes);
             }
         }
+        debug!("Server change processing completed");
+    } else {
+        warn!("Server membership change too old to follow, member {:?}, action {:?}, version {}, expect {}", member, action, version, ch_version);
     }
 }
 
@@ -381,7 +402,8 @@ mod test {
 
         info!("Creating server");
         let server = Server::new(&addr);
-        let _heartbeat_service = Membership::new(&server, &raft_service, true).await;
+        info!("Creating membership service");
+        let _membership = Membership::new(&server, &raft_service).await;
         server.register_service(0, &raft_service).await;
         Server::listen_and_resume(&server).await;
         RaftService::start(&raft_service).await;
@@ -398,17 +420,17 @@ mod test {
         info!("Create raft client");
         let wild_raft_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
         info!("Create observer");
-        let client = ObserverClient::new(&wild_raft_client);
+        let observer_client = Arc::new(ObserverClient::new(&wild_raft_client));
 
         info!("Create subscription");
         RaftClient::prepare_subscription(&server).await;
 
         info!("New group 1");
-        client.new_group(&group_1).await.unwrap().unwrap();
+        observer_client.new_group(&group_1).await.unwrap().unwrap();
         info!("New group 2");
-        client.new_group(&group_2).await.unwrap().unwrap();
+        observer_client.new_group(&group_2).await.unwrap().unwrap();
         info!("New group 3");
-        client.new_group(&group_3).await.unwrap().unwrap();
+        observer_client.new_group(&group_3).await.unwrap().unwrap();
 
         info!("New raft client for member 1");
         let member1_raft_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
@@ -444,17 +466,17 @@ mod test {
         Weights::new(&raft_service).await;
 
         info!("New conshash for group 1");
-        let ch1 = ConsistentHashing::new(&group_1, &wild_raft_client)
+        let ch1 = ConsistentHashing::new(&group_1, &wild_raft_client, &observer_client)
             .await
             .unwrap();
 
         info!("New conshash for group 2");
-        let ch2 = ConsistentHashing::new(&group_2, &wild_raft_client)
+        let ch2 = ConsistentHashing::new(&group_2, &wild_raft_client, &observer_client)
             .await
             .unwrap();
 
         info!("New conshash for group 3");
-        let ch3 = ConsistentHashing::new(&group_3, &wild_raft_client)
+        let ch3 = ConsistentHashing::new(&group_3, &wild_raft_client, &observer_client)
             .await
             .unwrap();
 
