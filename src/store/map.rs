@@ -55,7 +55,7 @@ macro_rules! def_store_hash_map {
                                 .notify(commands::on_key_inserted::new(&k), v.clone())
                                 .await;
                         }
-                        self.map.insert(k, v)
+                        self.insert_to_map(k, v)
                     }
                     .boxed()
                 }
@@ -67,7 +67,7 @@ macro_rules! def_store_hash_map {
                     if let Some(v) = self.map.get(&k) {
                         return future::ready(v.clone()).boxed();
                     }
-                    self.insert(k, v.clone());
+                    self.insert_to_map(k, v.clone());
                     future::ready(v).boxed()
                 }
                 fn remove(&mut self, k: $kt) -> ::futures::future::BoxFuture<Option<$vt>> {
@@ -142,6 +142,9 @@ macro_rules! def_store_hash_map {
                 }
                 pub async fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
                     self.callback = Some(SMCallback::new(self.id(), raft_service.clone()).await);
+                }
+                pub fn insert_to_map(&mut self, k: $kt, v: $vt) -> Option<$vt> {
+                    self.map.insert(k, v)
                 }
             }
         }
@@ -255,15 +258,16 @@ mod test {
 
         assert_eq!(sm_client.remove(&sk2).await.unwrap().unwrap(), sv2);
         assert_eq!(sm_client.len().await.unwrap(), 1);
+        assert!(sm_client.get(&sk1).await.unwrap().is_some());
         assert!(sm_client.get(&sk2).await.unwrap().is_none());
 
         sm_client.clear().await.unwrap();
         assert_eq!(sm_client.len().await.unwrap(), 0);
 
-        sm_client.insert(&sk1, &sv1).await.unwrap().unwrap();
-        sm_client.insert(&sk2, &sv2).await.unwrap().unwrap();
-        sm_client.insert(&sk3, &sv3).await.unwrap().unwrap();
-        sm_client.insert(&sk4, &sv4).await.unwrap().unwrap();
+        assert!(sm_client.insert(&sk1, &sv1).await.unwrap().is_none());
+        assert!(sm_client.insert(&sk2, &sv2).await.unwrap().is_none());
+        assert!(sm_client.insert(&sk3, &sv3).await.unwrap().is_none());
+        assert!(sm_client.insert(&sk4, &sv4).await.unwrap().is_none());
         assert_eq!(sm_client.len().await.unwrap(), 4);
 
         let remote_keys = sm_client.keys().await.unwrap();
