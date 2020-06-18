@@ -602,10 +602,13 @@ mod test {
             assert!(ch3.get_server_by_string(&k).await.is_none()); // no member
         }
 
-        //    wait();
-        //    wait();
-        //    assert_eq!(ch1_server_node_changes_count.load(Ordering::Relaxed), 1);
-        //    assert_eq!(ch2_server_node_changes_count.load(Ordering::Relaxed), 1);
-        //    assert_eq!(ch3_server_node_changes_count.load(Ordering::Relaxed), 0);
+        info!("Waiting");
+        async_wait_secs().await;
+        async_wait_secs().await;
+        info!("Testing callback counter");
+        assert_eq!(ch1_server_node_changes_count.load(Ordering::Relaxed), 1);
+        assert_eq!(ch2_server_node_changes_count.load(Ordering::Relaxed), 1);
+        assert_eq!(ch3_server_node_changes_count.load(Ordering::Relaxed), 0);
+        info!("Membership tests all done !");
     }
 }
