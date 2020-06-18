@@ -1239,7 +1239,7 @@ impl Service for RaftService {
     fn c_query(&self, entry: LogEntry) -> BoxFuture<ClientQryResponse> {
         async move {
             trace!("Client query for raft sm_id {}, fn_id {} with term {}, id {}. Obtaining meta read lock.", entry.sm_id, entry.fn_id, entry.term, entry.id);
-            let meta = self.meta.read().await;
+            let meta = self.meta.read().await; // .unwrap();
             trace!("Client query for raft sm_id {}, fn_id {} with term {}, id {}. Obtaining logs read lock.", entry.sm_id, entry.fn_id, entry.term, entry.id);
             let logs = meta.logs.read().await;
             trace!("Client query for raft sm_id {}, fn_id {} with term {}, id {}. Getting last log and check term and id", entry.sm_id, entry.fn_id, entry.term, entry.id);

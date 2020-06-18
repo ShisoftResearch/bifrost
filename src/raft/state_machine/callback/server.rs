@@ -269,7 +269,7 @@ impl SMCallback {
 pub async fn notify<M, R, F>(callback: &Option<SMCallback>, msg: M, data: F)
 where
     F: FnOnce() -> R,
-    M: RaftMsg<R> + 'static,
+    M: RaftMsg<R> + Send + 'static,
     R: serde::Serialize + Send + Sync + Clone + Unpin + Any + 'static,
 {
     if let Some(ref callback) = *callback {

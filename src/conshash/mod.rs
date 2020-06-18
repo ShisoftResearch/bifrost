@@ -535,7 +535,9 @@ mod test {
 
         info!("Batch get server by string from conshash 1");
         let mut ch_1_mapping: HashMap<String, u64> = HashMap::new();
-        for i in 0..30000usize {
+        let data_set_size: usize = 30000;
+
+        for i in 0..data_set_size {
             let k = format!("k - {}", i);
             let server = ch1.get_server_by_string(&k).await.unwrap();
             *ch_1_mapping.entry(server.clone()).or_insert(0) += 1;
@@ -547,7 +549,7 @@ mod test {
 
         info!("Batch get server by string from conshash 2");
         let mut ch_2_mapping: HashMap<String, u64> = HashMap::new();
-        for i in 0..30000usize {
+        for i in 0..data_set_size {
             let k = format!("k - {}", i);
             let server = ch2.get_server_by_string(&k).await.unwrap();
             *ch_2_mapping.entry(server.clone()).or_insert(0) += 1;
@@ -558,7 +560,7 @@ mod test {
 
         info!("Batch get server by string from conshash 3");
         let mut ch_3_mapping: HashMap<String, u64> = HashMap::new();
-        for i in 0..30000usize {
+        for i in 0..data_set_size {
             let k = format!("k - {}", i);
             let server = ch3.get_server_by_string(&k).await.unwrap();
             *ch_3_mapping.entry(server.clone()).or_insert(0) += 1;
@@ -574,28 +576,28 @@ mod test {
 
         let mut ch_1_mapping: HashMap<String, u64> = HashMap::new();
         info!("Recheck get server by string for conshash 1");
-        for i in 0..30000usize {
+        for i in 0..data_set_size {
             let k = format!("k - {}", i);
             let server = ch1.get_server_by_string(&k).await.unwrap();
             *ch_1_mapping.entry(server.clone()).or_insert(0) += 1;
         }
         info!("Recount distribution for conshash 1");
-        assert_eq!(ch_1_mapping.get(&server_2).unwrap() + ch_1_mapping.get(&server_3).unwrap(), 3000);
-        assert_eq!(ch_1_mapping.get(&server_2).unwrap(), &9923);
-        assert_eq!(ch_1_mapping.get(&server_3).unwrap(), &15141);
+        assert_eq!(ch_1_mapping.get(&server_2).unwrap() + ch_1_mapping.get(&server_3).unwrap(), data_set_size as u64);
+        assert_eq!(ch_1_mapping.get(&server_2).unwrap(), &11932);
+        assert_eq!(ch_1_mapping.get(&server_3).unwrap(), &18068);
 
         let mut ch_2_mapping: HashMap<String, u64> = HashMap::new();
         info!("Recheck get server by string for conshash 2");
-        for i in 0..30000usize {
+        for i in 0..data_set_size {
             let k = format!("k - {}", i);
             let server = ch2.get_server_by_string(&k).await.unwrap();
             *ch_2_mapping.entry(server.clone()).or_insert(0) += 1;
         }
         info!("Recount distribution for conshash 2");
-        assert_eq!(ch_2_mapping.get(&server_2).unwrap(), &30000);
+        assert_eq!(ch_2_mapping.get(&server_2).unwrap(), &(data_set_size as u64));
 
         info!("Cheching conshash 3 with no members");
-        for i in 0..30000usize {
+        for i in 0..data_set_size {
             let k = format!("k - {}", i);
             assert!(ch3.get_server_by_string(&k).await.is_none()); // no member
         }

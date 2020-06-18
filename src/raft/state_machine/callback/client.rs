@@ -29,8 +29,8 @@ impl Service for SubscriptionService {
                         fun_pinned(data.clone())
                     })
                     .collect();
-                let _: Vec<_> = futs.collect().await;
-            }
+                tokio::spawn(async move { let _: Vec<_> = futs.collect().await; });
+            }  
         }
         .boxed()
     }
