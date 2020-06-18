@@ -44,8 +44,7 @@ macro_rules! def_store_number {
             impl StateMachineCmds for Number {
                 fn set(&mut self, n: $t) -> BoxFuture<()> {
                     async move {
-                        let on = self.num;
-                        self.num = n;
+                        let on = self.set_value(n);
                         if let Some(ref callback) = self.callback {
                             let _ = callback.notify(commands::on_changed::new(), (on, n)).await;
                         }
@@ -57,22 +56,22 @@ macro_rules! def_store_number {
                 }
                 fn get_and_add(&mut self, n: $t) -> BoxFuture<$t> {
                     let on = self.num;
-                    self.set(on + n);
+                    self.set_value(on + n);
                     future::ready(on).boxed()
                 }
                 fn add_and_get(&mut self, n: $t) -> BoxFuture<$t> {
                     let on = self.num;
-                    self.set(on + n);
+                    self.set_value(on + n);
                     future::ready(self.num).boxed()
                 }
                 fn get_and_minus(&mut self, n: $t) -> BoxFuture<$t> {
                     let on = self.num;
-                    self.set(on - n);
+                    self.set_value(on - n);
                     future::ready(on).boxed()
                 }
                 fn minus_and_get(&mut self, n: $t) -> BoxFuture<$t> {
                     let on = self.num;
-                    self.set(on - n);
+                    self.set_value(on - n);
                     future::ready(self.num).boxed()
                 }
                 fn get_and_incr(&mut self) -> BoxFuture<$t> {
@@ -89,34 +88,34 @@ macro_rules! def_store_number {
                 }
                 fn get_and_multiply(&mut self, n: $t) -> BoxFuture<$t> {
                     let on = self.num;
-                    self.set(on * n);
+                    self.set_value(on * n);
                     future::ready(on).boxed()
                 }
                 fn multiply_and_get(&mut self, n: $t) -> BoxFuture<$t> {
                     let on = self.num;
-                    self.set(on * n);
+                    self.set_value(on * n);
                     future::ready(self.num).boxed()
                 }
                 fn get_and_divide(&mut self, n: $t) -> BoxFuture<$t> {
                     let on = self.num;
-                    self.set(on / n);
+                    self.set_value(on / n);
                     future::ready(on).boxed()
                 }
                 fn divide_and_get(&mut self, n: $t) -> BoxFuture<$t> {
                     let on = self.num;
-                    self.set(on / n);
+                    self.set_value(on / n);
                     future::ready(self.num).boxed()
                 }
                 fn compare_and_swap(&mut self, original: $t, n: $t) -> BoxFuture<$t> {
                     let on = self.num;
                     if on == original {
-                        self.set(n);
+                        self.set_value(n);
                     }
                     future::ready(on).boxed()
                 }
                 fn swap(&mut self, n: $t) -> BoxFuture<$t> {
                     let on = self.num;
-                    self.set(n);
+                    self.set_value(n);
                     future::ready(on).boxed()
                 }
             }
@@ -147,7 +146,12 @@ macro_rules! def_store_number {
                 pub async fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
                     self.callback = Some(SMCallback::new(self.id(), raft_service.clone()).await);
                 }
-            }
+                fn set_value(&mut self, n: $t) -> $t {
+                    let on = self.num;
+                    self.num = n;
+                    return on;
+                }
+             }
         }
     };
 }
@@ -260,6 +264,7 @@ mod test {
             sm_client.set(&1.0).await.unwrap();
             assert_eq!(sm_client.get().await.unwrap(), 1.0);
             assert_eq!(sm_client.get_and_add(&2.0).await.unwrap(), 1.0);
+            assert_eq!(sm_client.get().await.unwrap(), 3.0);
             assert_eq!(sm_client.add_and_get(&3.0).await.unwrap(), 6.0);
             assert_eq!(sm_client.get_and_minus(&4.0).await.unwrap(), 6.0);
             assert_eq!(sm_client.minus_and_get(&2.0).await.unwrap(), 0.0);
