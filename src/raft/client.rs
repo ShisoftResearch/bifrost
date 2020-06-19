@@ -231,9 +231,7 @@ impl RaftClient {
                         return false;
                     }
                     match rpc::DEFAULT_CLIENT_POOL.get(peer_addr).await {
-                        Ok(client) => {
-                            ImmeServiceClient::c_ping(service_id, &client).await.is_ok()
-                        }
+                        Ok(client) => ImmeServiceClient::c_ping(service_id, &client).await.is_ok(),
                         Err(_) => false,
                     }
                 })
@@ -382,11 +380,21 @@ impl RaftClient {
             if num_members >= 1 {
                 let node_index = pos as usize % num_members;
                 let rpc_client = members.clients.values().nth(node_index).unwrap();
-                trace!("Query from node {} for sm_id {}, fn_id {}", node_index, sm_id, fn_id);
+                trace!(
+                    "Query from node {} for sm_id {}, fn_id {}",
+                    node_index,
+                    sm_id,
+                    fn_id
+                );
                 let res = rpc_client
                     .c_query(self.gen_log_entry(sm_id, fn_id, &data))
                     .await;
-                trace!("Query from node {} for sm_id {}, fn_id {} completed", node_index, sm_id, fn_id);
+                trace!(
+                    "Query from node {} for sm_id {}, fn_id {} completed",
+                    node_index,
+                    sm_id,
+                    fn_id
+                );
                 match res {
                     Ok(res) => match res {
                         ClientQryResponse::LeftBehind => {

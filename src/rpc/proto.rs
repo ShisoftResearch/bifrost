@@ -191,7 +191,7 @@ macro_rules! service {
                         }
                     }
                 }
-           )*            
+           )*
         }
     }
 }

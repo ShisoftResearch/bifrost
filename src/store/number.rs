@@ -151,7 +151,7 @@ macro_rules! def_store_number {
                     self.num = n;
                     return on;
                 }
-             }
+            }
         }
     };
 }

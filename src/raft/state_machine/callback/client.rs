@@ -30,8 +30,10 @@ impl Service for SubscriptionService {
                     })
                     .collect();
                 // Spawn async task DETACHED with the function to avoid deadlocks inside raft state machine
-                tokio::spawn(async move { let _: Vec<_> = futs.collect().await; });
-            }  
+                tokio::spawn(async move {
+                    let _: Vec<_> = futs.collect().await;
+                });
+            }
         }
         .boxed()
     }

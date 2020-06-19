@@ -369,19 +369,29 @@ impl RaftService {
                     }
                     return true;
                 };
-                let timed_heartbeat = timeout(Duration::from_millis(HEARTBEAT_MS as u64), heartbeat_task_continue).await;
+                let timed_heartbeat = timeout(
+                    Duration::from_millis(HEARTBEAT_MS as u64),
+                    heartbeat_task_continue,
+                )
+                .await;
                 let end_time = get_time();
                 let time_to_sleep = expected_ends - end_time - 1;
                 match timed_heartbeat {
                     Err(_) => {
-                        error!("Heartbeat cannot finish in time for {}ms, skip the beat", HEARTBEAT_MS);
+                        error!(
+                            "Heartbeat cannot finish in time for {}ms, skip the beat",
+                            HEARTBEAT_MS
+                        );
                     }
                     Ok(false) => {
                         debug!("Heartbeat loop exiting");
                         break;
                     }
                     Ok(true) => {
-                        trace!("Continue on heartbeat, going to sleep for {}ms", time_to_sleep);
+                        trace!(
+                            "Continue on heartbeat, going to sleep for {}ms",
+                            time_to_sleep
+                        );
                     }
                 }
                 if time_to_sleep > 0 {

@@ -41,7 +41,9 @@ impl MemberService {
             while !service_clone.closed.load(Ordering::Relaxed) {
                 let rpc_client = service_clone.raft_client.current_leader_rpc_client().await;
                 if let Ok(rpc_client) = rpc_client {
-                    let _ping_res = ImmeServiceClient::ping(DEFAULT_SERVICE_ID, &rpc_client, service_clone.id).await;
+                    let _ping_res =
+                        ImmeServiceClient::ping(DEFAULT_SERVICE_ID, &rpc_client, service_clone.id)
+                            .await;
                 }
                 time::delay_for(time::Duration::from_millis(PING_INTERVAL)).await
             }

@@ -54,7 +54,7 @@ impl ConsistentHashing {
         id: u64,
         group: &str,
         raft_client: &Arc<RaftClient>,
-        membership_client: &Arc<MembershipClient>
+        membership_client: &Arc<MembershipClient>,
     ) -> Result<Arc<ConsistentHashing>, CHError> {
         let ch = Arc::new(ConsistentHashing {
             tables: RwLock::new(LookupTables {
@@ -136,14 +136,14 @@ impl ConsistentHashing {
     pub async fn new(
         group: &str,
         raft_client: &Arc<RaftClient>,
-        membership_client: &Arc<MembershipClient>
+        membership_client: &Arc<MembershipClient>,
     ) -> Result<Arc<ConsistentHashing>, CHError> {
         Self::new_with_id(DEFAULT_SERVICE_ID, group, raft_client, membership_client).await
     }
     pub async fn new_client(
         group: &str,
         raft_client: &Arc<RaftClient>,
-        membership_client: &Arc<MembershipClient>
+        membership_client: &Arc<MembershipClient>,
     ) -> Result<Arc<ConsistentHashing>, CHError> {
         Self::new_client_with_id(DEFAULT_SERVICE_ID, group, raft_client, membership_client).await
     }
@@ -151,7 +151,7 @@ impl ConsistentHashing {
         id: u64,
         group: &str,
         raft_client: &Arc<RaftClient>,
-        membership_client: &Arc<MembershipClient>
+        membership_client: &Arc<MembershipClient>,
     ) -> Result<Arc<ConsistentHashing>, CHError> {
         match ConsistentHashing::new_with_id(id, group, raft_client, membership_client).await {
             Err(e) => Err(e),
@@ -285,9 +285,12 @@ impl ConsistentHashing {
         lookup_table: &mut RwLockWriteGuard<'_, LookupTables>,
     ) -> Result<(), InitTableError> {
         let group_name = &self.group_name;
-        debug!("Initializing table from membership group members for {}", group_name);
+        debug!(
+            "Initializing table from membership group members for {}",
+            group_name
+        );
         debug!("Get group members for {}", group_name);
-        let group_members =  self.membership.group_members(group_name, true).await;
+        let group_members = self.membership.group_members(group_name, true).await;
         debug!("Got group members for {}", group_name);
         if let Ok(Some((members, version))) = group_members {
             let group_id = hash_str(group_name);
@@ -325,11 +328,11 @@ impl ConsistentHashing {
                 Err(e) => {
                     error!("No weright service for group {}", group_name);
                     Err(InitTableError::NoWeightService(e))
-                },
+                }
                 Ok(None) => {
                     error!("No weight group for group {}", group_name);
                     Err(InitTableError::NoWeightGroup)
-                },
+                }
             }
         } else {
             error!("No group {} existed in table", group_name);
@@ -348,7 +351,10 @@ async fn server_left(ch: Arc<ConsistentHashing>, member: Member, version: u64) {
     server_changed(ch, member, Action::Left, version).await;
 }
 async fn server_changed(ch: Arc<ConsistentHashing>, member: Member, action: Action, version: u64) {
-    debug!("Detected server membership change, member {:?}, action {:?}, version {}", member, action, version);
+    debug!(
+        "Detected server membership change, member {:?}, action {:?}, version {}",
+        member, action, version
+    );
     let ch_version = ch.version.load(Ordering::Relaxed);
     if ch_version < version {
         debug!("Reading watchers from conshash");
@@ -582,7 +588,10 @@ mod test {
             *ch_1_mapping.entry(server.clone()).or_insert(0) += 1;
         }
         info!("Recount distribution for conshash 1");
-        assert_eq!(ch_1_mapping.get(&server_2).unwrap() + ch_1_mapping.get(&server_3).unwrap(), data_set_size as u64);
+        assert_eq!(
+            ch_1_mapping.get(&server_2).unwrap() + ch_1_mapping.get(&server_3).unwrap(),
+            data_set_size as u64
+        );
         assert_eq!(ch_1_mapping.get(&server_2).unwrap(), &11932);
         assert_eq!(ch_1_mapping.get(&server_3).unwrap(), &18068);
 
@@ -594,7 +603,10 @@ mod test {
             *ch_2_mapping.entry(server.clone()).or_insert(0) += 1;
         }
         info!("Recount distribution for conshash 2");
-        assert_eq!(ch_2_mapping.get(&server_2).unwrap(), &(data_set_size as u64));
+        assert_eq!(
+            ch_2_mapping.get(&server_2).unwrap(),
+            &(data_set_size as u64)
+        );
 
         info!("Cheching conshash 3 with no members");
         for i in 0..data_set_size {
