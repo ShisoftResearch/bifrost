@@ -24,7 +24,7 @@ parking_lot = {version = "*", features = ["nightly"]}
 thread-id = "3"
 
 tokio = { version = "0.2", features = ["full"] }
-tokio-util = {version = "0.3.1", features = ["full"]}
+tokio-util = {version = "0.3", features = ["full"]}
 bytes = "0.5"
 crc32fast = "*"
 
