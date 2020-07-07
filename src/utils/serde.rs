@@ -5,7 +5,7 @@ pub fn serialize<T>(obj: &T) -> Vec<u8>
 where
     T: serde::Serialize,
 {
-    match to_vec(obj) {
+    match serde_cbor::to_vec(obj) {
         Ok(data) => data,
         Err(e) => panic!("Cannot serialize: {:?}", e),
     }
@@ -16,12 +16,12 @@ pub fn deserialize<'a, T>(data: &'a [u8]) -> Option<T>
 where
     T: serde::Deserialize<'a>,
 {
-    match from_slice(data) {
+    match serde_cbor::from_slice(data) {
         Ok(obj) => Some(obj),
         Err(e) => {
             warn!(
                 "Error on decoding data for type '{}', {}",
-                unsafe { std::intrinsics::type_name::<T>() },
+                std::intrinsics::type_name::<T>(),
                 e
             );
             None
