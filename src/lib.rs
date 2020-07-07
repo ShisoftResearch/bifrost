@@ -29,6 +29,4 @@ pub mod vector_clock;
 extern crate log;
 
 #[macro_use]
-extern crate lazy_static;
-
-extern crate crate as bifrost;
+extern crate lazy_static; 
