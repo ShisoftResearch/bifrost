@@ -16,7 +16,7 @@ macro_rules! raft_trait_fn {
 macro_rules! raft_client_fn {
     (sub $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty) => {
         pub fn $fn_name<F>(&self, f: F, $($arg:$in_),* )
-            -> BoxFuture<Result<Result<crate::raft::client::SubscriptionReceipt, crate::raft::client::SubscriptionError>, crate::raft::state_machine::master::ExecError>>
+            -> BoxFuture<Result<Result<$crate::raft::client::SubscriptionReceipt, $crate::raft::client::SubscriptionError>, $crate::raft::state_machine::master::ExecError>>
         where F: Fn($out) -> BoxFuture<'static, ()> + 'static + Send + Sync
         {
             self.client.subscribe(
@@ -27,7 +27,7 @@ macro_rules! raft_client_fn {
         }
     };
     ($others:ident $fn_name:ident ( $( $arg:ident : $in_:ty ),* ) -> $out:ty) => {
-        pub async fn $fn_name(&self, $($arg:$in_),*) -> Result<$out, crate::raft::state_machine::master::ExecError> {
+        pub async fn $fn_name(&self, $($arg:$in_),*) -> Result<$out, $crate::raft::state_machine::master::ExecError> {
             self.client.execute(
                 self.sm_id,
                 $fn_name::new($($arg,)*)
@@ -247,10 +247,10 @@ macro_rules! raft_state_machine {
             use super::*;
             use std::sync::Arc;
             use super::commands::*;
-            use crate::raft::client::*;
-            use crate::raft::state_machine::master::ExecError;
-            use crate::raft::state_machine::StateMachineClient;
-            use crate::raft::client::{RaftClient, SubscriptionError, SubscriptionReceipt};
+            use $crate::raft::client::*;
+            use $crate::raft::state_machine::master::ExecError;
+            use $crate::raft::state_machine::StateMachineClient;
+            use $crate::raft::client::{RaftClient, SubscriptionError, SubscriptionReceipt};
 
             pub struct SMClient {
                 client: Arc<RaftClient>,
