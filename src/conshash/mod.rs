@@ -164,7 +164,7 @@ impl ConsistentHashing {
             },
         }
     }
-    pub async fn to_server_name(&self, server_id: u64) -> String {
+    pub fn to_server_name(&self, server_id: u64) -> String {
         let lookup_table = self.tables.read();
         lookup_table.addrs.get(&server_id).unwrap().clone()
     }
@@ -248,7 +248,7 @@ impl ConsistentHashing {
         let mut watchers = self.watchers.write();
         watchers.push(Box::new(f));
     }
-    pub async fn watch_server_nodes_range_changed<F>(&self, server: &String, f: F)
+    pub fn watch_server_nodes_range_changed<F>(&self, server: &String, f: F)
     // return ranges [...,...)
     where
         F: Fn((usize, u32)) + 'static + Send + Sync,
@@ -508,24 +508,21 @@ mod test {
         info!("Watch node change from conshash 1");
         ch1.watch_server_nodes_range_changed(&server_2, move |_| {
             ch1_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
-        })
-        .await;
+        });
 
         let ch2_server_node_changes_count = Arc::new(AtomicUsize::new(0));
         let ch2_server_node_changes_count_clone = ch2_server_node_changes_count.clone();
         info!("Watch node change from conshash 2");
         ch2.watch_server_nodes_range_changed(&server_2, move |_| {
             ch2_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
-        })
-        .await;
+        });
 
         let ch3_server_node_changes_count = Arc::new(AtomicUsize::new(0));
         let ch3_server_node_changes_count_clone = ch3_server_node_changes_count.clone();
         info!("Watch node change from conshash 3");
         ch3.watch_server_nodes_range_changed(&server_2, move |_| {
             ch3_server_node_changes_count_clone.fetch_add(1, Ordering::Relaxed);
-        })
-        .await;
+        });
 
         info!("Counting nodes for conshash 1");
         assert_eq!(ch1.nodes_count(), 6);
