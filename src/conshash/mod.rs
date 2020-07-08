@@ -9,7 +9,8 @@ use crate::membership::client::{Member, ObserverClient as MembershipClient};
 use crate::raft::client::{RaftClient, SubscriptionError, SubscriptionReceipt};
 use crate::raft::state_machine::master::ExecError;
 use crate::utils::serde::serialize;
-use async_std::sync::*;
+// use async_std::sync::*;
+use parking_lot::*;
 use bifrost_hasher::{hash_bytes, hash_str};
 
 pub mod weights;
@@ -45,7 +46,8 @@ pub struct ConsistentHashing {
     membership: Arc<MembershipClient>,
     weight_sm_client: WeightSMClient,
     group_name: String,
-    watchers: RwLock<Vec<Box<dyn Fn(&Member, &Action, &LookupTables, &Vec<u64>) + Send + Sync>>>,
+    watchers: RwLock<Vec<Box<dyn Fn(&Member, &Action, &Vec<u64>, &Vec<u64>) + Send + Sync>>>,
+    update_lock: async_std::sync::Mutex<()>,
     version: AtomicU64,
 }
 
@@ -66,6 +68,7 @@ impl ConsistentHashing {
             group_name: group.to_string(),
             watchers: RwLock::new(Vec::new()),
             version: AtomicU64::new(0),
+            update_lock: async_std::sync::Mutex::new(())
         });
         {
             let ch = ch.clone();
@@ -161,24 +164,20 @@ impl ConsistentHashing {
             },
         }
     }
-    pub async fn init_table(&self) -> Result<(), InitTableError> {
-        let mut table = self.tables.write().await;
-        self.init_table_(&mut table).await
-    }
     pub async fn to_server_name(&self, server_id: u64) -> String {
-        let lookup_table = self.tables.read().await;
+        let lookup_table = self.tables.read();
         lookup_table.addrs.get(&server_id).unwrap().clone()
     }
-    pub async fn to_server_name_option(&self, server_id: Option<u64>) -> Option<String> {
+    pub fn to_server_name_option(&self, server_id: Option<u64>) -> Option<String> {
         if let Some(sid) = server_id {
-            let lookup_table = self.tables.read().await;
+            let lookup_table = self.tables.read();
             Some(lookup_table.addrs.get(&sid).unwrap().clone())
         } else {
             None
         }
     }
-    pub async fn get_server_id(&self, hash: u64) -> Option<u64> {
-        let lookup_table = self.tables.read().await;
+    pub fn get_server_id(&self, hash: u64) -> Option<u64> {
+        let lookup_table = self.tables.read();
         let nodes = &lookup_table.nodes;
         let slot_count = nodes.len();
         if slot_count == 0 {
@@ -206,35 +205,33 @@ impl ConsistentHashing {
         // );
         b as usize
     }
-    pub async fn get_server(&self, hash: u64) -> Option<String> {
-        self.to_server_name_option(self.get_server_id(hash).await)
-            .await
+    pub fn get_server(&self, hash: u64) -> Option<String> {
+        self.to_server_name_option(self.get_server_id(hash))
     }
-    pub async fn get_server_by_string(&self, string: &String) -> Option<String> {
-        self.get_server(hash_str(string)).await
+    pub fn get_server_by_string(&self, string: &String) -> Option<String> {
+        self.get_server(hash_str(string))
     }
-    pub async fn get_server_by<T>(&self, obj: &T) -> Option<String>
+    pub fn get_server_by<T>(&self, obj: &T) -> Option<String>
     where
         T: serde::Serialize,
     {
-        self.get_server(hash_bytes(serialize(obj).as_slice())).await
+        self.get_server(hash_bytes(serialize(obj).as_slice()))
     }
-    pub async fn get_server_id_by_string(&self, string: &String) -> Option<u64> {
-        self.get_server_id(hash_str(string)).await
+    pub fn get_server_id_by_string(&self, string: &String) -> Option<u64> {
+        self.get_server_id(hash_str(string))
     }
-    pub async fn get_server_id_by<T>(&self, obj: &T) -> Option<u64>
+    pub fn get_server_id_by<T>(&self, obj: &T) -> Option<u64>
     where
         T: serde::Serialize,
     {
         self.get_server_id(hash_bytes(serialize(obj).as_slice()))
-            .await
     }
-    pub async fn rand_server(&self) -> Option<String> {
+    pub fn rand_server(&self) -> Option<String> {
         let rand = rand::random::<u64>();
-        self.get_server(rand).await
+        self.get_server(rand)
     }
-    pub async fn nodes_count(&self) -> usize {
-        let lookup_table = self.tables.read().await;
+    pub fn nodes_count(&self) -> usize {
+        let lookup_table = self.tables.read();
         return lookup_table.nodes.len();
     }
     pub async fn set_weight(&self, server_name: &String, weight: u64) -> Result<(), ExecError> {
@@ -244,11 +241,11 @@ impl ConsistentHashing {
             .set_weight(&group_id, &server_id, &weight)
             .await
     }
-    async fn watch_all_actions<F>(&self, f: F)
+    fn watch_all_actions<F>(&self, f: F)
     where
-        F: Fn(&Member, &Action, &LookupTables, &Vec<u64>) + 'static + Send + Sync,
+        F: Fn(&Member, &Action, &Vec<u64>, &Vec<u64>) + 'static + Send + Sync,
     {
-        let mut watchers = self.watchers.write().await;
+        let mut watchers = self.watchers.write();
         watchers.push(Box::new(f));
     }
     pub async fn watch_server_nodes_range_changed<F>(&self, server: &String, f: F)
@@ -257,8 +254,7 @@ impl ConsistentHashing {
         F: Fn((usize, u32)) + 'static + Send + Sync,
     {
         let server_id = hash_str(server);
-        let wrapper = move |_: &Member, _: &Action, lookup_table: &LookupTables, _: &Vec<u64>| {
-            let nodes = &lookup_table.nodes;
+        let wrapper = move |_: &Member, _: &Action, nodes: &Vec<u64>, _: &Vec<u64>| {
             let node_len = nodes.len();
             let mut weight = 0;
             let mut start = None;
@@ -277,14 +273,14 @@ impl ConsistentHashing {
                 warn!("No node exists for watch");
             }
         };
-        self.watch_all_actions(wrapper).await;
+        self.watch_all_actions(wrapper);
     }
 
-    async fn init_table_(
-        &self,
-        lookup_table: &mut RwLockWriteGuard<'_, LookupTables>,
+    async fn init_table(
+        &self
     ) -> Result<(), InitTableError> {
         let group_name = &self.group_name;
+        let _lock = self.update_lock.lock().await;
         debug!(
             "Initializing table from membership group members for {}",
             group_name
@@ -310,6 +306,7 @@ impl ConsistentHashing {
                             factors.insert(k, (w / min_weight) as u32);
                         }
                         let factor_sum: u32 = factors.values().sum();
+                        let mut lookup_table = self.tables.write();
                         lookup_table.nodes = Vec::with_capacity(factor_sum as usize);
                         for member in members.iter() {
                             lookup_table.addrs.insert(member.id, member.address.clone());
@@ -357,20 +354,18 @@ async fn server_changed(ch: Arc<ConsistentHashing>, member: Member, action: Acti
     );
     let ch_version = ch.version.load(Ordering::Relaxed);
     if ch_version < version {
-        debug!("Reading watchers from conshash");
-        let watchers = ch.watchers.read().await;
         {
             debug!("Obtaining conshash table write lock");
-            let mut lookup_table = ch.tables.write().await;
-            let old_nodes = lookup_table.nodes.clone();
+            let old_nodes = (&*ch.tables.read()).nodes.clone();
             debug!("Reinit conshash table");
-            let reinit_res = ch.init_table_(&mut lookup_table).await;
+            let reinit_res = ch.init_table().await;
             if !reinit_res.is_ok() {
                 error!("Cannot reinit table {:?}", reinit_res.err().unwrap());
             }
             debug!("Triggering conshash watchers");
-            for watch in watchers.iter() {
-                watch(&member, &action, &*lookup_table, &old_nodes);
+            let new_nodes = (&*ch.tables.read()).nodes.clone();
+            for watch in ch.watchers.read().iter() {
+                watch(&member, &action, &new_nodes, &old_nodes);
             }
         }
         debug!("Server change processing completed");
@@ -533,11 +528,11 @@ mod test {
         .await;
 
         info!("Counting nodes for conshash 1");
-        assert_eq!(ch1.nodes_count().await, 6);
+        assert_eq!(ch1.nodes_count(), 6);
         info!("Counting nodes for conshash 2");
-        assert_eq!(ch2.nodes_count().await, 2);
+        assert_eq!(ch2.nodes_count(), 2);
         info!("Counting nodes for conshash 3");
-        assert_eq!(ch3.nodes_count().await, 1);
+        assert_eq!(ch3.nodes_count(), 1);
 
         info!("Batch get server by string from conshash 1");
         let mut ch_1_mapping: HashMap<String, u64> = HashMap::new();
@@ -545,7 +540,7 @@ mod test {
 
         for i in 0..data_set_size {
             let k = format!("k - {}", i);
-            let server = ch1.get_server_by_string(&k).await.unwrap();
+            let server = ch1.get_server_by_string(&k).unwrap();
             *ch_1_mapping.entry(server.clone()).or_insert(0) += 1;
         }
         info!("Counting distribution for conshash 1");
@@ -557,7 +552,7 @@ mod test {
         let mut ch_2_mapping: HashMap<String, u64> = HashMap::new();
         for i in 0..data_set_size {
             let k = format!("k - {}", i);
-            let server = ch2.get_server_by_string(&k).await.unwrap();
+            let server = ch2.get_server_by_string(&k).unwrap();
             *ch_2_mapping.entry(server.clone()).or_insert(0) += 1;
         }
         info!("Counting distribution for conshash 2");
@@ -568,7 +563,7 @@ mod test {
         let mut ch_3_mapping: HashMap<String, u64> = HashMap::new();
         for i in 0..data_set_size {
             let k = format!("k - {}", i);
-            let server = ch3.get_server_by_string(&k).await.unwrap();
+            let server = ch3.get_server_by_string(&k).unwrap();
             *ch_3_mapping.entry(server.clone()).or_insert(0) += 1;
         }
         info!("Counting distribution for conshash 3");
@@ -584,7 +579,7 @@ mod test {
         info!("Recheck get server by string for conshash 1");
         for i in 0..data_set_size {
             let k = format!("k - {}", i);
-            let server = ch1.get_server_by_string(&k).await.unwrap();
+            let server = ch1.get_server_by_string(&k).unwrap();
             *ch_1_mapping.entry(server.clone()).or_insert(0) += 1;
         }
         info!("Recount distribution for conshash 1");
@@ -599,7 +594,7 @@ mod test {
         info!("Recheck get server by string for conshash 2");
         for i in 0..data_set_size {
             let k = format!("k - {}", i);
-            let server = ch2.get_server_by_string(&k).await.unwrap();
+            let server = ch2.get_server_by_string(&k).unwrap();
             *ch_2_mapping.entry(server.clone()).or_insert(0) += 1;
         }
         info!("Recount distribution for conshash 2");
@@ -611,7 +606,7 @@ mod test {
         info!("Cheching conshash 3 with no members");
         for i in 0..data_set_size {
             let k = format!("k - {}", i);
-            assert!(ch3.get_server_by_string(&k).await.is_none()); // no member
+            assert!(ch3.get_server_by_string(&k).is_none()); // no member
         }
 
         info!("Waiting");

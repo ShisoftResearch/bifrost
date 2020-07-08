@@ -205,12 +205,12 @@ impl ClientPool {
     pub async fn get(&self, addr: &String) -> io::Result<Arc<RPCClient>> {
         let addr_clone = addr.clone();
         let server_id = hash_str(addr);
-        self.get_by_id(server_id, move |_| future::ready(addr_clone).boxed()).await
+        self.get_by_id(server_id, move |_| addr_clone).await
     }
 
-    pub async fn get_by_id<'a, F>(&self, server_id: u64, addr_fn: F) -> io::Result<Arc<RPCClient>>
+    pub async fn get_by_id<F>(&self, server_id: u64, addr_fn: F) -> io::Result<Arc<RPCClient>>
     where
-        F: FnOnce(u64) -> BoxFuture<'a, String>,
+        F: FnOnce(u64) -> String,
     {
         let mut clients = self.clients.lock().await;
         if clients.contains_key(&server_id) {
@@ -219,7 +219,7 @@ impl ClientPool {
         } else {
             let client = timeout(
                 Duration::from_secs(5),
-                RPCClient::new_async(&addr_fn(server_id).await),
+                RPCClient::new_async(&addr_fn(server_id)),
             )
             .await??;
             clients.insert(server_id, client.clone());
@@ -452,7 +452,6 @@ mod test {
         use crate::rpc::{RPCClient, Server, DEFAULT_CLIENT_POOL};
         use bifrost_hasher::hash_str;
         use futures::prelude::stream::*;
-        use futures::prelude::*;
         use futures::FutureExt;
 
         #[tokio::test(threaded_scheduler)]
@@ -497,7 +496,7 @@ mod test {
                     let addr = (&addr).clone();
                     tokio::spawn(async move {
                         let client = DEFAULT_CLIENT_POOL
-                            .get_by_id(server_id, move |_| future::ready(addr).boxed())
+                            .get_by_id(server_id, move |_| addr)
                             .await
                             .unwrap();
                         let service_client = AsyncServiceClient::new(0, &client);
