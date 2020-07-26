@@ -134,7 +134,7 @@ macro_rules! raft_state_machine {
     (
         {
             $(#[$attr:meta])*
-            def $smt:ident $fn_name:ident( $( $arg:ident : $in_:ty ),* ) -> $out:ty; //return, no error
+            def $smt:ident $fn_name:ident( $( $arg:ident : $in_:ty ),* ) -> $out:ty;
 
             $( $unexpanded:tt )*
         }

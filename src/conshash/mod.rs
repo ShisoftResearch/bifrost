@@ -276,7 +276,7 @@ impl ConsistentHashing {
         self.watch_all_actions(wrapper);
     }
 
-    async fn init_table(
+    pub async fn init_table(
         &self
     ) -> Result<(), InitTableError> {
         let group_name = &self.group_name;
