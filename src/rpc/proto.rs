@@ -164,6 +164,9 @@ macro_rules! service {
                     client: client.clone()
                 })
            }
+           pub fn server_id(&self) -> u64 {
+               self.client.server_id
+           }
         }
         pub struct ImmeServiceClient;
         impl ImmeServiceClient {
