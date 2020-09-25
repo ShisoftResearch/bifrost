@@ -166,7 +166,12 @@ impl ConsistentHashing {
     }
     pub fn to_server_name(&self, server_id: u64) -> String {
         let lookup_table = self.tables.read();
-        lookup_table.addrs.get(&server_id).unwrap().clone()
+        trace!("Lookup table has {:?}", lookup_table.addrs);
+        if let Some(name) = lookup_table.addrs.get(&server_id){
+            name.to_owned()
+        } else {
+            panic!("Cannot find server name for server id {}", server_id);
+        }
     }
     pub fn to_server_name_option(&self, server_id: Option<u64>) -> Option<String> {
         if let Some(sid) = server_id {
