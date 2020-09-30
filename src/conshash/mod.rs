@@ -9,7 +9,6 @@ use crate::membership::client::{Member, ObserverClient as MembershipClient};
 use crate::raft::client::{RaftClient, SubscriptionError, SubscriptionReceipt};
 use crate::raft::state_machine::master::ExecError;
 use crate::utils::serde::serialize;
-// use async_std::sync::*;
 use parking_lot::*;
 use bifrost_hasher::{hash_bytes, hash_str};
 

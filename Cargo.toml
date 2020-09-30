@@ -31,6 +31,7 @@ crc32fast = "*"
 futures = {version = "0.3", features = ["executor", "thread-pool"] }
 futures-timer = "3"
 async-std = "1"
+lightning = { git = "https://github.com/ShisoftResearch/Lightning.git", branch = "develop" }
 
 [dev-dependencies]
 env_logger = "*"

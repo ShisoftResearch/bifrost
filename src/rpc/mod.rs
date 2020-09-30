@@ -2,14 +2,13 @@
 pub mod proto;
 
 use crate::{tcp, DISABLE_SHORTCUT};
-use async_std::sync::*;
 use bifrost_hasher::hash_str;
 use bytes::{Buf, BufMut, BytesMut};
 use futures::future::BoxFuture;
 use futures::prelude::*;
 use futures::Future;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use lightning::map::*;
 use std::error::Error;
 use std::io;
 use std::pin::Pin;
@@ -48,7 +47,7 @@ pub trait RPCService: Sync + Send {
 }
 
 pub struct Server {
-    services: RwLock<HashMap<u64, Arc<dyn RPCService>>>,
+    services: ObjectMap<Arc<dyn RPCService>>,
     pub address: String,
     pub server_id: u64,
 }
@@ -56,7 +55,7 @@ pub struct Server {
 unsafe impl Sync for Server {}
 
 pub struct ClientPool {
-    clients: Arc<Mutex<HashMap<u64, Arc<RPCClient>>>>,
+    clients: ObjectMap<Arc<RPCClient>>,
 }
 
 fn encode_res(res: Result<BytesMut, RPCRequestError>) -> BytesMut {
@@ -99,7 +98,7 @@ pub fn read_u64_head(mut data: BytesMut) -> (u64, BytesMut) {
 impl Server {
     pub fn new(address: &String) -> Arc<Server> {
         Arc::new(Server {
-            services: RwLock::new(HashMap::new()),
+            services: ObjectMap::with_capacity(16),
             address: address.clone(),
             server_id: hash_str(address),
         })
@@ -113,7 +112,7 @@ impl Server {
                 let server = server.clone();
                 async move {
                     let (svr_id, data) = read_u64_head(data);
-                    let service = server.services.read().await.get(&svr_id).cloned();
+                    let service = server.services.get(&(svr_id as usize));
                     trace!("Processing request for service {}", svr_id);
                     match service {
                         Some(service) => {
@@ -150,11 +149,11 @@ impl Server {
         } else {
             debug!("SERVICE SHORTCUT DISABLED");
         }
-        self.services.write().await.insert(service_id, service);
+        self.services.insert(&(service_id as usize), service);
     }
 
     pub async fn remove_service(&self, service_id: u64) {
-        self.services.write().await.remove(&service_id);
+        self.services.remove(&(service_id as usize));
     }
     pub fn address(&self) -> &String {
         &self.address
@@ -198,7 +197,7 @@ impl RPCClient {
 impl ClientPool {
     pub fn new() -> ClientPool {
         ClientPool {
-            clients: Arc::new(Mutex::new(HashMap::new())),
+            clients: ObjectMap::with_capacity(16),
         }
     }
 
@@ -212,9 +211,9 @@ impl ClientPool {
     where
         F: FnOnce(u64) -> String,
     {
-        let mut clients = self.clients.lock().await;
-        if clients.contains_key(&server_id) {
-            let client = clients.get(&server_id).unwrap().clone();
+        let clients = &self.clients;
+        if clients.contains(&(server_id as usize)) {
+            let client = clients.get(&(server_id as usize)).unwrap().clone();
             Ok(client)
         } else {
             let client = timeout(
@@ -222,7 +221,7 @@ impl ClientPool {
                 RPCClient::new_async(&addr_fn(server_id)),
             )
             .await??;
-            clients.insert(server_id, client.clone());
+            clients.insert(&(server_id as usize), client.clone());
             Ok(client)
         }
     }
