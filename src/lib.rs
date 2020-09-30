@@ -22,7 +22,6 @@ pub mod rpc;
 pub mod raft;
 pub mod conshash;
 pub mod membership;
-pub mod store;
 pub mod vector_clock;
 
 #[macro_use]
