@@ -212,7 +212,7 @@ impl ClientPool {
         F: FnOnce(u64) -> String,
     {
         let clients = &self.clients;
-        if clients.contains(&(server_id as usize)) {
+        if clients.contains_key(&(server_id as usize)) {
             let client = clients.get(&(server_id as usize)).unwrap().clone();
             Ok(client)
         } else {
