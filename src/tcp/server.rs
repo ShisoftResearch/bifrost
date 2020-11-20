@@ -24,7 +24,7 @@ impl Server {
     ) -> Result<(), Box<dyn Error>> {
         shortcut::register_server(addr, &callback).await;
         if !addr.eq(&STANDALONE_ADDRESS) {
-            let mut listener = TcpListener::bind(&addr).await?;
+            let listener = TcpListener::bind(&addr).await?;
             loop {
                 match listener.accept().await {
                     Ok((socket, _)) => {
