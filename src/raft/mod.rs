@@ -284,11 +284,11 @@ impl RaftService {
             }),
             id: server_id,
             options: opts,
-            rt: runtime::Builder::new()
+            rt: runtime::Builder::new_multi_thread()
                 .enable_all()
-                .core_threads(10)
+                .worker_threads(10)
+                .max_threads(16)
                 .thread_name("raft-server")
-                .threaded_scheduler()
                 .build()
                 .unwrap(),
             _is_leader: AtomicBool::new(false),
@@ -396,7 +396,7 @@ impl RaftService {
                 }
                 if time_to_sleep > 0 {
                     // Use thread sleep here because we want system scheduler for precision
-                    delay_for(Duration::from_millis(time_to_sleep as u64)).await;
+                    sleep(Duration::from_millis(time_to_sleep as u64)).await;
                 }
             }
         });
@@ -1316,7 +1316,7 @@ mod test {
     use crate::utils::time::async_wait_secs;
     use futures::FutureExt;
 
-    #[tokio::test(threaded_scheduler)]
+    #[tokio::test(flavor = "multi_thread")]
     async fn startup() {
         let (success, _, _) = RaftService::new_server(Options {
             storage: Storage::default(),
@@ -1327,7 +1327,7 @@ mod test {
         assert!(success);
     }
 
-    #[tokio::test(threaded_scheduler)]
+    #[tokio::test(flavor = "multi_thread")]
     async fn server_membership() {
         let _ = env_logger::try_init();
         let s1_addr = String::from("127.0.0.1:2001");
@@ -1425,7 +1425,7 @@ mod test {
         assert_eq!(service3.num_members().await, 1);
     }
 
-    #[tokio::test(threaded_scheduler)]
+    #[tokio::test(flavor = "multi_thread")]
     async fn log_replication() {
         let _ = env_logger::try_init();
         info!("Testing log replications");
@@ -1598,7 +1598,7 @@ mod test {
             }
         }
 
-        #[tokio::test(threaded_scheduler)]
+        #[tokio::test(flavor = "multi_thread")]
         async fn query_and_command() {
             let _ = env_logger::try_init();
             info!("TESTING CALLBACK");
@@ -1635,7 +1635,7 @@ mod test {
             assert_eq!(sm_client.take_a_shot(&2).await.unwrap(), 8);
         }
 
-        #[tokio::test(threaded_scheduler)]
+        #[tokio::test(flavor = "multi_thread")]
         async fn multi_server_command() {
             let _ = env_logger::try_init();
             // 5 servers

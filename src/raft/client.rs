@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::iter::FromIterator;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::time::delay_for;
+use tokio::time::sleep;
 
 const ORDERING: Ordering = Ordering::Relaxed;
 pub type Client = Arc<AsyncServiceClient>;
@@ -165,7 +165,7 @@ impl RaftClient {
                     let mut rng = rand::thread_rng();
                     rng.gen_range(1, 10)
                 };
-                delay_for(Duration::from_secs(delay_sec)).await;
+                sleep(Duration::from_secs(delay_sec)).await;
                 attempt_remains -= 1;
                 continue;
             } else {

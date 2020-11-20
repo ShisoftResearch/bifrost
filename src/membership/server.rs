@@ -160,7 +160,7 @@ impl Membership {
                             .await;
                     }
                 }
-                async_time::delay_for(std_time::Duration::from_millis(500)).await
+                async_time::sleep(std_time::Duration::from_millis(500)).await
             }
             debug!("Membership server stopped");
         });

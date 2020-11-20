@@ -59,7 +59,7 @@ mod test {
         }
     }
 
-    #[tokio::test(threaded_scheduler)]
+    #[tokio::test(flavor = "multi_thread")]
     async fn dummy() {
         let _ = env_logger::try_init();
         info!("TESTING CALLBACK");

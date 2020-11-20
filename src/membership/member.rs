@@ -45,7 +45,7 @@ impl MemberService {
                         ImmeServiceClient::ping(DEFAULT_SERVICE_ID, &rpc_client, service_clone.id)
                             .await;
                 }
-                time::delay_for(time::Duration::from_millis(PING_INTERVAL)).await
+                time::sleep(time::Duration::from_millis(PING_INTERVAL)).await
             }
             debug!("Member service closed");
         });

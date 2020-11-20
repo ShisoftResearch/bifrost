@@ -56,7 +56,7 @@ mod test {
     use std::sync::atomic::*;
     use std::sync::Arc;
 
-    #[tokio::test(threaded_scheduler)]
+    #[tokio::test(flavor = "multi_thread")]
     async fn primary() {
         let _ = env_logger::builder().format_timestamp(None).try_init();
         let addr = String::from("127.0.0.1:2100");

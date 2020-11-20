@@ -23,9 +23,9 @@ num_cpus = "1"
 parking_lot = {version = "*", features = ["nightly"]}
 thread-id = "3"
 
-tokio = { version = "0.2", features = ["full"] }
-tokio-util = {version = "0.3", features = ["full"]}
-bytes = "0.5"
+tokio = { version = "0.3", features = ["full"] }
+tokio-util = {version = "0.5", features = ["full"]}
+bytes = "*"
 crc32fast = "*"
 
 futures = {version = "0.3", features = ["executor", "thread-pool"] }

@@ -1,6 +1,6 @@
 use std::time::Duration;
 use std::time::SystemTime;
-use tokio::time::delay_for;
+use tokio::time::sleep;
 
 pub fn get_time() -> i64 {
     //Get current time
@@ -16,7 +16,7 @@ pub fn duration_to_ms(duration: Duration) -> u64 {
 }
 
 pub async fn async_wait(duration: Duration) {
-    delay_for(duration).await;
+    sleep(duration).await;
 }
 
 pub async fn async_wait_secs() {

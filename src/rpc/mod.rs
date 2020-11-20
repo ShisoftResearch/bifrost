@@ -14,7 +14,7 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::delay_for;
+use tokio::time::sleep;
 use tokio::time::*;
 
 lazy_static! {
@@ -133,7 +133,7 @@ impl Server {
         tokio::spawn(async move {
             Self::listen(&server).await.unwrap();
         });
-        delay_for(Duration::from_secs(1)).await
+        sleep(Duration::from_secs(1)).await
     }
 
     pub async fn register_service<T>(&self, service_id: u64, service: &Arc<T>)
@@ -233,7 +233,7 @@ mod test {
     use serde::{Deserialize, Serialize};
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::time::delay_for;
+    use tokio::time::sleep;
 
     pub mod simple_service {
 
@@ -256,7 +256,7 @@ mod test {
         }
         dispatch_rpc_service_functions!(HelloServer);
 
-        #[tokio::test(threaded_scheduler)]
+        #[tokio::test(flavor = "multi_thread")]
         pub async fn simple_rpc() {
             let _ = env_logger::try_init();
             let addr = String::from("127.0.0.1:1300");
@@ -266,7 +266,7 @@ mod test {
                 server.register_service(0, &Arc::new(HelloServer)).await;
                 Server::listen_and_resume(&server).await;
             }
-            delay_for(Duration::from_millis(1000)).await;
+            sleep(Duration::from_millis(1000)).await;
             let client = RPCClient::new_async(&addr).await.unwrap();
             let service_client = AsyncServiceClient::new(0, &client);
             let response = service_client.hello(String::from("Jack")).await;
@@ -313,7 +313,7 @@ mod test {
         }
         dispatch_rpc_service_functions!(HelloServer);
 
-        #[tokio::test(threaded_scheduler)]
+        #[tokio::test(flavor = "multi_thread")]
         pub async fn struct_rpc() {
             let _ = env_logger::try_init();
             let addr = String::from("127.0.0.1:1400");
@@ -323,7 +323,7 @@ mod test {
                 server.register_service(0, &Arc::new(HelloServer)).await;
                 Server::listen_and_resume(&server).await;
             }
-            delay_for(Duration::from_millis(1000)).await;
+            sleep(Duration::from_millis(1000)).await;
             let client = RPCClient::new_async(&addr).await.unwrap();
             let service_client = AsyncServiceClient::new(0, &client);
             let response = service_client.hello(Greeting {
@@ -396,7 +396,7 @@ mod test {
         }
         dispatch_rpc_service_functions!(IdServer);
 
-        #[tokio::test(threaded_scheduler)]
+        #[tokio::test(flavor = "multi_thread")]
         async fn multi_server_rpc() {
             let addrs = vec![
                 String::from("127.0.0.1:1500"),
@@ -417,7 +417,7 @@ mod test {
                 }
             }
             id = 0;
-            delay_for(Duration::from_millis(1000)).await;
+            sleep(Duration::from_millis(1000)).await;
             for addr in &addrs {
                 let client = RPCClient::new_async(addr).await.unwrap();
                 let service_client = AsyncServiceClient::new(id, &client);
@@ -453,7 +453,7 @@ mod test {
         use futures::prelude::stream::*;
         use futures::FutureExt;
 
-        #[tokio::test(threaded_scheduler)]
+        #[tokio::test(flavor = "multi_thread")]
         pub async fn lots_of_reqs() {
             let _ = env_logger::try_init();
             let addr = String::from("127.0.0.1:1411");
@@ -463,7 +463,7 @@ mod test {
                 server.register_service(0, &Arc::new(HelloServer)).await;
                 Server::listen_and_resume(&server).await;
             }
-            delay_for(Duration::from_millis(1000)).await;
+            sleep(Duration::from_millis(1000)).await;
             let client = RPCClient::new_async(&addr).await.unwrap();
             let service_client = AsyncServiceClient::new(0, &client);
 
