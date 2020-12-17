@@ -111,7 +111,7 @@ fn gen_rand(lower: i64, higher: i64) -> i64 {
 }
 
 fn gen_timeout() -> i64 {
-    gen_rand(2000, 5000)
+    gen_rand(10_000, 30_000)
 }
 
 struct FollowerStatus {
@@ -287,7 +287,7 @@ impl RaftService {
             rt: runtime::Builder::new_multi_thread()
                 .enable_all()
                 .worker_threads(10)
-                .max_threads(16)
+                .max_threads(num_cpus::get())
                 .thread_name("raft-server")
                 .build()
                 .unwrap(),
