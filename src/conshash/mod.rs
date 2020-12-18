@@ -357,7 +357,7 @@ async fn server_changed(ch: Arc<ConsistentHashing>, member: Member, action: Acti
         member, action, version
     );
     let ch_version = ch.version.load(Ordering::Relaxed);
-    if ch_version < version {
+    if ch_version <= version {
         {
             debug!("Obtaining conshash table write lock");
             let old_nodes = (&*ch.tables.read()).nodes.clone();
