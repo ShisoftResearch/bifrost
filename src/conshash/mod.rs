@@ -352,7 +352,7 @@ async fn server_left(ch: Arc<ConsistentHashing>, member: Member, version: u64) {
     server_changed(ch, member, Action::Left, version).await;
 }
 async fn server_changed(ch: Arc<ConsistentHashing>, member: Member, action: Action, version: u64) {
-    debug!(
+    warn!(
         "Detected server membership change, member {:?}, action {:?}, version {}",
         member, action, version
     );
