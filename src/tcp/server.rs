@@ -7,7 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::stream::StreamExt;
+use tokio_stream::StreamExt;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 pub type RPCFuture = dyn Future<Output = TcpRes>;

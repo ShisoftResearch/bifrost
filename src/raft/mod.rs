@@ -286,8 +286,7 @@ impl RaftService {
             options: opts,
             rt: runtime::Builder::new_multi_thread()
                 .enable_all()
-                .worker_threads(10)
-                .max_threads(num_cpus::get())
+                .worker_threads(4)
                 .thread_name("raft-server")
                 .build()
                 .unwrap(),
