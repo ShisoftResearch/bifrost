@@ -163,7 +163,7 @@ impl RaftClient {
                 );
                 let delay_sec = {
                     let mut rng = rand::thread_rng();
-                    rng.gen_range(1, 10)
+                    rng.gen_range(1..10)
                 };
                 sleep(Duration::from_secs(delay_sec)).await;
                 attempt_remains -= 1;

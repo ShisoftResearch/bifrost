@@ -107,7 +107,7 @@ service! {
 
 fn gen_rand(lower: i64, higher: i64) -> i64 {
     let mut rng = rand::thread_rng();
-    rng.gen_range(lower, higher)
+    rng.gen_range(lower..higher)
 }
 
 fn gen_timeout() -> i64 {
