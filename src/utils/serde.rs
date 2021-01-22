@@ -1,4 +1,5 @@
 use serde;
+use bifrost_hasher::hash_bytes;
 
 #[cfg(not(debug_assertions))]
 pub fn serialize<T>(obj: &T) -> Vec<u8>
@@ -58,4 +59,12 @@ where
             None
         }
     }
+}
+
+pub fn hash<T>(obj: &T) -> u64
+where
+    T: serde::Serialize,
+{
+    let data = serialize(obj);
+    hash_bytes(data.as_slice())
 }
