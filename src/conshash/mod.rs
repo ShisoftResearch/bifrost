@@ -340,8 +340,11 @@ impl ConsistentHashing {
             Err(InitTableError::GroupNotExisted)
         }
     }
-    pub fn membership(&self) -> Arc<MembershipClient> {
-        self.membership.clone()
+
+
+    #[inline]
+    pub fn membership(&self) -> &Arc<MembershipClient> {
+        &self.membership
     }
 }
 
