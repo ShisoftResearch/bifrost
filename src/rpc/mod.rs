@@ -149,7 +149,7 @@ impl Server {
         } else {
             debug!("SERVICE SHORTCUT DISABLED");
         }
-        self.services.insert(&(service_id as usize), service);
+        self.services.insert(service_id as usize, service);
     }
 
     pub async fn remove_service(&self, service_id: u64) {
@@ -221,7 +221,7 @@ impl ClientPool {
                 RPCClient::new_async(&addr_fn(server_id)),
             )
             .await??;
-            clients.insert(&(server_id as usize), client.clone());
+            clients.insert(server_id as usize, client.clone());
             Ok(client)
         }
     }

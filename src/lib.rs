@@ -5,7 +5,6 @@
 #![feature(proc_macro_hygiene)]
 #![feature(trait_alias)]
 #![feature(core_intrinsics)]
-#![feature(backtrace)]
 
 #[cfg(disable_shortcut)]
 pub static DISABLE_SHORTCUT: bool = true;
