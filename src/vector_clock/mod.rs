@@ -2,7 +2,7 @@ use bifrost_hasher::hash_str;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub enum Relation {
@@ -12,12 +12,12 @@ pub enum Relation {
     Concurrent,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Hash, Eq)]
-pub struct VectorClock<S: Ord + Eq + Copy> {
-    map: BTreeMap<S, u64>,
+#[derive(Serialize, Deserialize, Debug, Clone, Eq)]
+pub struct VectorClock<S: std::hash::Hash + Ord + Eq + Copy> {
+    map: HashMap<S, u64>,
 }
 
-impl<S: Eq + Copy + Ord> PartialOrd for VectorClock<S> {
+impl<S: std::hash::Hash + Eq + Copy + Ord> PartialOrd for VectorClock<S> {
     fn partial_cmp(&self, other: &VectorClock<S>) -> Option<Ordering> {
         let rel = self.relation(other);
         match rel {
@@ -29,7 +29,7 @@ impl<S: Eq + Copy + Ord> PartialOrd for VectorClock<S> {
     }
 }
 
-impl<S: Eq + Copy + Ord> Ord for VectorClock<S> {
+impl<S: std::hash::Hash + Eq + Copy + Ord> Ord for VectorClock<S> {
     fn cmp(&self, other: &Self) -> Ordering {
         let rel = self.relation(other);
         match rel {
@@ -40,17 +40,17 @@ impl<S: Eq + Copy + Ord> Ord for VectorClock<S> {
     }
 }
 
-impl<S: Eq + Copy + Ord> PartialEq for VectorClock<S> {
+impl<S: std::hash::Hash + Eq + Copy + Ord> PartialEq for VectorClock<S> {
     fn eq(&self, other: &VectorClock<S>) -> bool {
         let rel = self.relation(other);
         rel == Relation::Equal
     }
 }
 
-impl<S: Ord + Eq + Copy> VectorClock<S> {
+impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
     pub fn new() -> VectorClock<S> {
         VectorClock {
-            map: BTreeMap::new(),
+            map: HashMap::new(),
         }
     }
 
