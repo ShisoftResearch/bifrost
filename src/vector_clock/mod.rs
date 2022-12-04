@@ -76,6 +76,7 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
         if bl == 0 {
             return false;
         }
+        let mut a_lt_b = false;
         while ai < al || bi < bl {
             if ai >= al {
                 // No need to check follwoing entries
@@ -88,15 +89,17 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
             let (bk, bn) = &clock_b.map[bi];
             if ak == bk {
                 // Two vector have the same key, compare their values
-                if an >= bn {
+                if an > bn {
                     return false;
                 }
                 ai += 1;
                 bi += 1;
+                a_lt_b = a_lt_b || *an < *bn;
             } else if ak > bk {
                 // Clock b have a server that a does not have
                 // b should either equal or happend after a
                 bi += 1;
+                a_lt_b = a_lt_b || 0 < *bn;
             } else if ak < bk {
                 // Clock a have a server that b does not have
                 // if a have thick greater than 0, it happened after b, which should return false
@@ -108,7 +111,7 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
                 unreachable!();
             }
         }
-        return true;
+        return a_lt_b;
     }
 
     pub fn equals(&self, clock_b: &VectorClock<S>) -> bool {
@@ -307,6 +310,7 @@ mod test {
         let mut clock = StandardVectorClock::new();
         let blank_clock = StandardVectorClock::new();
         clock.inc(1);
+        clock.inc(3);
         let old_clock = clock.clone();
         clock.inc(1);
         clock.inc(2);
