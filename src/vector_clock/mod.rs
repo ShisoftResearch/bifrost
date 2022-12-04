@@ -253,7 +253,7 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
 
 pub struct ServerVectorClock {
     server: u64,
-    clock: RwLock<VectorClock<u64>>,
+    clock: RwLock<StandardVectorClock>,
 }
 
 impl ServerVectorClock {
@@ -263,9 +263,10 @@ impl ServerVectorClock {
             clock: RwLock::new(VectorClock::new()),
         }
     }
-    pub fn inc(&self) {
+    pub fn inc(&self) -> StandardVectorClock {
         let mut clock = self.clock.write();
-        clock.inc(self.server)
+        clock.inc(self.server);
+        clock.clone()
     }
 
     pub fn happened_before(&self, clock_b: &StandardVectorClock) -> bool {
