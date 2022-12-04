@@ -78,7 +78,8 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
         }
         while ai < al || bi < bl {
             if ai >= al {
-                ai = al - 1;
+                // No need to check follwoing entries
+                break;
             }
             if bi >= bl {
                 bi = bl - 1;
@@ -297,17 +298,27 @@ pub type StandardVectorClock = VectorClock<u64>;
 
 #[cfg(test)]
 mod test {
-    use crate::vector_clock::StandardVectorClock;
+    use crate::vector_clock::{StandardVectorClock, Relation};
 
     #[test]
-    fn test() {
+    fn general() {
         let _ = env_logger::try_init();
         let mut clock = StandardVectorClock::new();
         let blank_clock = StandardVectorClock::new();
         clock.inc(1);
+        let old_clock = clock.clone();
+        clock.inc(1);
+        clock.inc(2);
         info!("{:?}", clock.relation(&blank_clock));
         assert!(clock > blank_clock);
         assert!(blank_clock < clock);
         assert!(blank_clock != clock);
+        assert!(old_clock.happened_before(&clock), "old {:?}, new {:?}", old_clock, clock);
+        assert!(!clock.happened_before(&old_clock), "old {:?}, new {:?}", old_clock, clock);
+        assert!(!clock.equals(&old_clock), "old {:?}, new {:?}", old_clock, clock);
+        assert_eq!(clock.relation(&old_clock), Relation::After, "old {:?}, new {:?}", old_clock, clock);
+        assert_eq!(old_clock.relation(&clock), Relation::Before, "old {:?}, new {:?}", old_clock, clock);
+        let blank_clock_2 = StandardVectorClock::new();
+        assert!(blank_clock == blank_clock_2);
     }
 }
