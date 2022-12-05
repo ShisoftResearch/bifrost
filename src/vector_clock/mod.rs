@@ -363,4 +363,3 @@ mod test {
         assert_eq!(clock_a.relation(&clock_b), Relation::Concurrent);
     }
 }
-
