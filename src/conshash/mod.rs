@@ -9,8 +9,8 @@ use crate::membership::client::{Member, ObserverClient as MembershipClient};
 use crate::raft::client::{RaftClient, SubscriptionError, SubscriptionReceipt};
 use crate::raft::state_machine::master::ExecError;
 use crate::utils::serde::serialize;
-use parking_lot::*;
 use bifrost_hasher::{hash_bytes, hash_str};
+use parking_lot::*;
 
 pub mod weights;
 
@@ -67,7 +67,7 @@ impl ConsistentHashing {
             group_name: group.to_string(),
             watchers: RwLock::new(Vec::new()),
             version: AtomicU64::new(0),
-            update_lock: async_std::sync::Mutex::new(())
+            update_lock: async_std::sync::Mutex::new(()),
         });
         {
             let ch = ch.clone();
@@ -166,7 +166,7 @@ impl ConsistentHashing {
     pub fn to_server_name(&self, server_id: u64) -> String {
         let lookup_table = self.tables.read();
         trace!("Lookup table has {:?}", lookup_table.addrs);
-        if let Some(name) = lookup_table.addrs.get(&server_id){
+        if let Some(name) = lookup_table.addrs.get(&server_id) {
             name.to_owned()
         } else {
             panic!("Cannot find server name for server id {}", server_id);
@@ -280,9 +280,7 @@ impl ConsistentHashing {
         self.watch_all_actions(wrapper);
     }
 
-    pub async fn init_table(
-        &self
-    ) -> Result<(), InitTableError> {
+    pub async fn init_table(&self) -> Result<(), InitTableError> {
         let group_name = &self.group_name;
         let _lock = self.update_lock.lock().await;
         debug!(
@@ -340,7 +338,6 @@ impl ConsistentHashing {
             Err(InitTableError::GroupNotExisted)
         }
     }
-
 
     #[inline]
     pub fn membership(&self) -> &Arc<MembershipClient> {

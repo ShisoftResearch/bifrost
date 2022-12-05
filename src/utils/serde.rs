@@ -1,5 +1,5 @@
-use serde;
 use bifrost_hasher::hash_bytes;
+use serde;
 
 #[cfg(not(debug_assertions))]
 pub fn serialize<T>(obj: &T) -> Vec<u8>

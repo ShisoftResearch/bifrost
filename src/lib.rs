@@ -27,5 +27,5 @@ pub mod vector_clock;
 extern crate log;
 
 #[macro_use]
-extern crate lazy_static; 
+extern crate lazy_static;
 pub extern crate bytes;

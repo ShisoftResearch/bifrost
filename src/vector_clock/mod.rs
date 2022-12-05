@@ -48,9 +48,11 @@ impl<S: std::hash::Hash + Eq + Copy + Ord> PartialEq for VectorClock<S> {
 
 impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
     pub fn new() -> VectorClock<S> {
-        VectorClock {
-            map: vec![],
-        }
+        VectorClock { map: vec![] }
+    }
+
+    pub fn from_vec(vec: Vec<(S, u64)>) -> Self {
+        Self { map: vec }
     }
 
     pub fn inc(&mut self, server: S) {
@@ -77,35 +79,19 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
             return false;
         }
         let mut a_lt_b = false;
-        while ai < al || bi < bl {
-            if ai >= al {
-                // No need to check follwoing entries
-                break;
-            }
-            if bi >= bl {
-                bi = bl - 1;
-            }
+        while ai < al && bi < bl {
             let (ak, an) = &self.map[ai];
             let (bk, bn) = &clock_b.map[bi];
             if ak == bk {
                 // Two vector have the same key, compare their values
-                if an > bn {
-                    return false;
-                }
                 ai += 1;
                 bi += 1;
                 a_lt_b = a_lt_b || *an < *bn;
             } else if ak > bk {
                 // Clock b have a server that a does not have
-                // b should either equal or happend after a
                 bi += 1;
-                a_lt_b = a_lt_b || 0 < *bn;
             } else if ak < bk {
                 // Clock a have a server that b does not have
-                // if a have thick greater than 0, it happened after b, which should return false
-                if *an > 0 {
-                    return false;
-                }
                 ai += 1;
             } else {
                 unreachable!();
@@ -115,23 +101,23 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
     }
 
     pub fn equals(&self, clock_b: &VectorClock<S>) -> bool {
-        let mut ai = 0;
-        let mut bi = 0;
         let al = self.map.len();
         let bl = clock_b.map.len();
         if al == 0 && al == bl {
             return true;
         }
-        if al != bl || (al == 0 || bl == 0) {
-            return false;
+        if al != bl {
+            if al == 0 {
+                return clock_b.map.iter().all(|(_, n)| *n == 0);
+            }
+            if bl == 0 {
+                return self.map.iter().all(|(_, n)| *n == 0);
+            }
         }
-        while ai < al || bi < bl {
-            if ai >= al {
-                ai = al - 1;
-            }
-            if bi >= bl {
-                bi = bl - 1;
-            }
+        let mut ai = 0;
+        let mut bi = 0;
+        let mut a_eq_b = false;
+        while ai < al && bi < bl {
             let (ak, an) = &self.map[ai];
             let (bk, bn) = &clock_b.map[bi];
             if ak == bk {
@@ -139,6 +125,7 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
                 if an != bn {
                     return false;
                 }
+                a_eq_b = true;
                 ai += 1;
                 bi += 1;
             } else if ak > bk {
@@ -152,7 +139,7 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
                 unreachable!();
             }
         }
-        return true;
+        return a_eq_b;
     }
 
     pub fn relation(&self, clock_b: &VectorClock<S>) -> Relation {
@@ -302,7 +289,7 @@ pub type StandardVectorClock = VectorClock<u64>;
 
 #[cfg(test)]
 mod test {
-    use crate::vector_clock::{StandardVectorClock, Relation};
+    use crate::vector_clock::{Relation, StandardVectorClock};
 
     #[test]
     fn general() {
@@ -318,12 +305,62 @@ mod test {
         assert!(clock > blank_clock);
         assert!(blank_clock < clock);
         assert!(blank_clock != clock);
-        assert!(old_clock.happened_before(&clock), "old {:?}, new {:?}", old_clock, clock);
-        assert!(!clock.happened_before(&old_clock), "old {:?}, new {:?}", old_clock, clock);
-        assert!(!clock.equals(&old_clock), "old {:?}, new {:?}", old_clock, clock);
-        assert_eq!(clock.relation(&old_clock), Relation::After, "old {:?}, new {:?}", old_clock, clock);
-        assert_eq!(old_clock.relation(&clock), Relation::Before, "old {:?}, new {:?}", old_clock, clock);
+        assert!(
+            old_clock.happened_before(&clock),
+            "old {:?}, new {:?}",
+            old_clock,
+            clock
+        );
+        assert!(
+            !clock.happened_before(&old_clock),
+            "old {:?}, new {:?}",
+            old_clock,
+            clock
+        );
+        assert!(
+            !clock.equals(&old_clock),
+            "old {:?}, new {:?}",
+            old_clock,
+            clock
+        );
+        assert_eq!(
+            clock.relation(&old_clock),
+            Relation::After,
+            "old {:?}, new {:?}",
+            old_clock,
+            clock
+        );
+        assert_eq!(
+            old_clock.relation(&clock),
+            Relation::Before,
+            "old {:?}, new {:?}",
+            old_clock,
+            clock
+        );
         let blank_clock_2 = StandardVectorClock::new();
         assert!(blank_clock == blank_clock_2);
     }
+
+    #[test]
+    fn unaligned_clock_eq() {
+        let _ = env_logger::try_init();
+        let clock_a = StandardVectorClock::from_vec(vec![(1, 2), (2, 3), (3, 4), (4, 5), (5, 6)]);
+        let clock_b = StandardVectorClock::from_vec(vec![(2, 3), (4, 5)]);
+        assert!(!clock_a.happened_before(&clock_b));
+        assert!(!clock_b.happened_before(&clock_a));
+        assert!(clock_a.equals(&clock_b));
+        assert_eq!(clock_a.relation(&clock_b), Relation::Equal);
+    }
+
+    #[test]
+    fn unaligned_clock_rel_concurrent() {
+        let _ = env_logger::try_init();
+        let clock_a = StandardVectorClock::from_vec(vec![(1, 2), (3, 4), (5, 6)]);
+        let clock_b = StandardVectorClock::from_vec(vec![(0, 1), (2, 3), (7, 8), (9, 10)]);
+        assert!(!clock_a.happened_before(&clock_b));
+        assert!(!clock_b.happened_before(&clock_a));
+        assert!(!clock_a.equals(&clock_b));
+        assert_eq!(clock_a.relation(&clock_b), Relation::Concurrent);
+    }
 }
+

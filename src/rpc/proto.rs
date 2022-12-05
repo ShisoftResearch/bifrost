@@ -8,8 +8,9 @@ macro_rules! dispatch_rpc_service_functions {
                 data: BytesMut,
             ) -> ::std::pin::Pin<
                 Box<
-                    dyn Future<Output = Result<$crate::bytes::BytesMut, $crate::rpc::RPCRequestError>>
-                        + Send
+                    dyn Future<
+                            Output = Result<$crate::bytes::BytesMut, $crate::rpc::RPCRequestError>,
+                        > + Send
                         + 'a,
                 >,
             >
