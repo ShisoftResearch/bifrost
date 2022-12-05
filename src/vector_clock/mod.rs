@@ -187,6 +187,8 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
                 // Two vector have the same key, compare their values
                 if an < bn {
                     new_map.push((*ak, *bn));
+                } else {
+                    new_map.push((*ak, *an));
                 }
                 ai += 1;
                 bi += 1;
@@ -196,6 +198,7 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
                 bi += 1;
             } else if ak < bk {
                 // Clock a have a server that b does not have
+                new_map.push((*ak, *an));
                 ai += 1;
             } else {
                 unreachable!();
@@ -225,18 +228,20 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
             if bi >= bl {
                 bi = bl - 1;
             }
-            let (ak, _an) = &self.map[ai];
+            let (ak, an) = &self.map[ai];
             let (bk, bn) = &clock_b.map[bi];
             if ak == bk {
                 // Two vector have the same key, compare their values
                 ai += 1;
                 bi += 1;
+                new_map.push((*ak, *an));
             } else if ak > bk {
                 // Clock b have a server that a does not have
                 new_map.push((*bk, *bn));
                 bi += 1;
             } else if ak < bk {
                 // Clock a have a server that b does not have
+                new_map.push((*ak, *an));
                 ai += 1;
             } else {
                 unreachable!();
