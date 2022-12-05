@@ -79,6 +79,7 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
             return false;
         }
         let mut a_lt_b = false;
+        let mut b_lt_a = false;
         while ai < al && bi < bl {
             let (ak, an) = &self.map[ai];
             let (bk, bn) = &clock_b.map[bi];
@@ -86,7 +87,11 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
                 // Two vector have the same key, compare their values
                 ai += 1;
                 bi += 1;
-                a_lt_b = a_lt_b || *an < *bn;
+                if *an < *bn {
+                    a_lt_b = true;
+                } else if *an > *bn {
+                    b_lt_a = true;
+                }
             } else if ak > bk {
                 // Clock b have a server that a does not have
                 bi += 1;
@@ -97,7 +102,7 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
                 unreachable!();
             }
         }
-        return a_lt_b;
+        return a_lt_b && (!b_lt_a);
     }
 
     pub fn equals(&self, clock_b: &VectorClock<S>) -> bool {
@@ -346,20 +351,34 @@ mod test {
         let _ = env_logger::try_init();
         let clock_a = StandardVectorClock::from_vec(vec![(1, 2), (2, 3), (3, 4), (4, 5), (5, 6)]);
         let clock_b = StandardVectorClock::from_vec(vec![(2, 3), (4, 5)]);
+        assert!(clock_a.equals(&clock_b));
+        assert!(clock_b.equals(&clock_a));
         assert!(!clock_a.happened_before(&clock_b));
         assert!(!clock_b.happened_before(&clock_a));
-        assert!(clock_a.equals(&clock_b));
         assert_eq!(clock_a.relation(&clock_b), Relation::Equal);
     }
 
     #[test]
-    fn unaligned_clock_rel_concurrent() {
+    fn unaligned_clock_rel_disjoint_concurrent() {
         let _ = env_logger::try_init();
         let clock_a = StandardVectorClock::from_vec(vec![(1, 2), (3, 4), (5, 6)]);
         let clock_b = StandardVectorClock::from_vec(vec![(0, 1), (2, 3), (7, 8), (9, 10)]);
+        assert!(!clock_a.equals(&clock_b));
+        assert!(!clock_b.equals(&clock_a));
         assert!(!clock_a.happened_before(&clock_b));
         assert!(!clock_b.happened_before(&clock_a));
+        assert_eq!(clock_a.relation(&clock_b), Relation::Concurrent);
+    }
+
+    #[test]
+    fn unaligned_clock_rel_joint_concurrent() {
+        let _ = env_logger::try_init();
+        let clock_a = StandardVectorClock::from_vec(vec![(1, 2), (3, 4)]);
+        let clock_b = StandardVectorClock::from_vec(vec![(1, 3), (3, 3)]);
         assert!(!clock_a.equals(&clock_b));
+        assert!(!clock_b.equals(&clock_a));
+        assert!(!clock_a.happened_before(&clock_b));
+        assert!(!clock_b.happened_before(&clock_a));
         assert_eq!(clock_a.relation(&clock_b), Relation::Concurrent);
     }
 }
