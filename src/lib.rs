@@ -1,7 +1,6 @@
 #![crate_type = "lib"]
 #![feature(plugin)]
 #![feature(integer_atomics)]
-#![feature(box_syntax)]
 #![feature(proc_macro_hygiene)]
 #![feature(trait_alias)]
 #![feature(core_intrinsics)]
