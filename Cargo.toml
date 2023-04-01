@@ -32,7 +32,7 @@ crc32fast = "*"
 futures = {version = "0.3", features = ["executor", "thread-pool"] }
 futures-timer = "3"
 async-std = "1"
-lightning-containers = { git = "https://github.com/ShisoftResearch/Lightning.git", branch = "develop" }
+lightning-containers = { git = "ssh://git@192.168.10.134/shisoft-x/Lightning.git", branch = "develop" }
 
 [dev-dependencies]
 env_logger = "*"
