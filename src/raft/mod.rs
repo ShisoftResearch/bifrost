@@ -913,7 +913,7 @@ impl RaftService {
                     match follower_last_entry {
                         Some(entry) => (entry.id, entry.term),
                         None => {
-                            panic!("Cannot find old logs for follower, first_id: {}, follower_last: {}");
+                            panic!("Cannot find old logs for follower, first_id: {}, follower_last: {}", first_log_id, follower_last_log_id);
                         }
                     }
                 }

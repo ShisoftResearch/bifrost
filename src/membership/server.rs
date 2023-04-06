@@ -79,7 +79,6 @@ dispatch_rpc_service_functions!(HeartbeatService);
 
 #[derive(Debug)]
 struct Member {
-    pub id: u64,
     pub address: String,
     pub groups: HashSet<u64>,
 }
@@ -421,7 +420,6 @@ impl StateMachineCmds for Membership {
                     stat.last_updated = current_time;
                     joined = true;
                     Member {
-                        id,
                         address: address.clone(),
                         groups: HashSet::new(),
                     }

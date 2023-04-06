@@ -514,8 +514,8 @@ impl RaftClient {
                         .keys()
                         .nth(depth as usize % num_members)
                         .unwrap();
-                    self.leader_id
-                        .compare_and_swap(leader_id, *new_leader_id, ORDERING);
+                    let _ = self.leader_id
+                        .compare_exchange(leader_id, *new_leader_id, ORDERING, Relaxed);
                     debug!("CLIENT: Switch leader {}", new_leader_id);
                 }
                 _ => {}
@@ -580,11 +580,13 @@ fn swap_when_greater(atomic: &AtomicU64, value: u64) {
         if orig_num >= value {
             return;
         }
-        let actual = atomic.compare_and_swap(orig_num, value, ORDERING);
-        if actual == orig_num {
-            return;
-        } else {
-            orig_num = actual;
+        match atomic.compare_exchange(orig_num, value, ORDERING, Relaxed) {
+            Ok(_) => {
+                return;
+            }
+            Err(actual) => {
+                orig_num = actual;
+            }
         }
     }
 }
