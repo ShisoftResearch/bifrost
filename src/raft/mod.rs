@@ -776,6 +776,7 @@ impl RaftService {
         }
         meta.leader_id = self.id;
         self.switch_membership(meta, Membership::Leader(leader_meta));
+        self._is_leader.store(true, Relaxed);
     }
 
     async fn send_followers_heartbeat<'a>(
