@@ -5,6 +5,7 @@ use self::state_machine::OpType;
 use crate::raft::client::RaftClient;
 use crate::raft::disk::*;
 use crate::raft::state_machine::StateMachineCtl;
+use crate::rpc;
 use crate::utils::time::get_time;
 use async_std::sync::*;
 use bifrost_hasher::hash_str;
@@ -97,6 +98,7 @@ service! {
     rpc append_entries(term: u64, leader_id: u64, prev_log_id: u64, prev_log_term: u64, entries: Option<LogEntries>, leader_commit: u64) -> (u64, AppendEntriesResult);
     rpc request_vote(term: u64, candidate_id: u64, last_log_id: u64, last_log_term: u64) -> ((u64, u64), bool); // term, voteGranted
     rpc install_snapshot(term: u64, leader_id: u64, last_included_index: u64, last_included_term: u64, data: Vec<u8>) -> u64;
+    rpc reelect() -> bool;
     rpc c_command(entry: LogEntry) -> ClientCmdResponse;
     rpc c_query(entry: LogEntry) -> ClientQryResponse;
     rpc c_server_cluster_info() -> ClientClusterInfo;
@@ -379,7 +381,7 @@ impl RaftService {
                 match timed_heartbeat {
                     Err(_) => {
                         error!(
-                            "Heartbeat cannot finish in time for {}ms, skip the beat",
+                            "Heartbeat cannot finish in time for {}ms",
                             HEARTBEAT_MS
                         );
                     }
@@ -495,25 +497,61 @@ impl RaftService {
         }
     }
     pub async fn leave(&self) -> bool {
-        let servers = self
+        let members = self
             .cluster_info()
             .await
-            .members
-            .iter()
+            .members;
+        let servers: Vec<_> = members.iter()
             .map(|&(_, ref address)| address.clone())
             .collect();
+        debug!("Leaving from a cluster, server id {} with {} members {:?}", self.id, servers.len(), servers);
         if let Ok(client) = RaftClient::new(&servers, self.options.service_id).await {
+            debug!("Temporary client for leaving, leader: {}. Sending removal message.", client.leader_id());
             client
                 .execute(CONFIG_SM_ID, del_member_::new(&self.options.address))
                 .await
                 .unwrap();
         } else {
+            error!("Cannot obtain temporary client for leaving");
             return false;
         }
         let mut meta = self.write_meta().await;
         if is_leader(&meta) {
+            info!("Leader step down {}", self.options.address);
             if !self.send_followers_heartbeat(&mut meta, None, true).await {
+                error!("Leader cannot step down");
                 return false;
+            }
+            info!("Step down heartbeat sent to followers");
+            let mut reelected = false;
+            for (_id, addr) in members {
+                if addr != self.options.address {
+                    info!("Calling reelect to {}", addr);
+                    match rpc::DEFAULT_CLIENT_POOL.get(&addr).await {
+                        Ok(client) => {
+                            let service = AsyncServiceClient::new(DEFAULT_SERVICE_ID, &client);
+                            match service.reelect().await {
+                                Ok(true) => {
+                                    info!("New leader has been elected");
+                                    reelected = true;
+                                    break; // Only need one successful reelection
+                                }
+                                Ok(false) => {
+                                    warn!("Server {} cannot be elected", addr);
+                                },
+                                Err(e) => {
+                                    error!("Server {} cannot be elected due to comm error {:?}", addr, e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Cannot call reelect to {}, error {:?}", addr, e)
+                        }
+                    }
+                }
+            }
+            if !reelected {
+                warn!("No new leader been elected");
             }
         }
         meta.membership = Membership::Offline;
@@ -1291,6 +1329,17 @@ impl Service for RaftService {
     fn c_ping(&self) -> BoxFuture<()> {
         future::ready(()).boxed()
     }
+
+    fn reelect<'a>(&'a self,) ->  futures::future::BoxFuture<bool> {
+        async move {
+            let mut meta = self.meta.write().await;
+            info!("Been asked to reelect, become candidate. Server id {}", self.get_server_id());
+            self.become_candidate(&mut meta).await;
+            let is_leader = self.is_leader();
+            info!("Reelect result for server {}, is leader {}", self.get_server_id(), is_leader);
+            is_leader
+        }.boxed()
+    }
 }
 
 pub struct RaftStateMachine {
@@ -1404,7 +1453,7 @@ mod test {
         async_wait_secs().await;
 
         // test remove member
-        info!("Server 1 ({}) is leaving", service1.id);
+        info!("Server 1 ({}) is leaving, leader {}", service1.id, service1.leader_id().await);
         assert!(service1.leave().await);
 
         async_wait_secs().await;
@@ -1415,7 +1464,7 @@ mod test {
 
         async_wait_secs().await;
 
-        info!("Server 2 ({}) is leaving", server2.server_id);
+        info!("Server 2 ({}) is leaving, leader {}", server2.server_id, service2.leader_id().await);
         assert!(service2.leave().await);
 
         // there will be some unavailability in leader transaction

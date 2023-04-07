@@ -118,14 +118,14 @@ impl RaftClient {
                                 }
                             }
                         }
-                        debug!("Getting server info from {}", server_addr);
+                        debug!("Getting server info from {}, id {}", server_addr, id);
                         let member_client = members.clients.get(&id);
-                        debug!("Checking server client {}", server_addr);
+                        debug!("Checking server client {}, id {}", server_addr, id);
                         if member_client.is_none() {
-                            debug!("Server not found, skip {}", server_addr);
+                            debug!("Server not found, skip {}, id {}", server_addr, id);
                             return None;
                         }
-                        debug!("Invoking server_cluster_info on {}", server_addr);
+                        debug!("Invoking server_cluster_info on {}, id {}", server_addr, id);
                         let info_res = member_client.unwrap().c_server_cluster_info().await;
                         debug!("Checking response from {}", server_addr);
                         return match info_res {
@@ -178,6 +178,7 @@ impl RaftClient {
     }
 
     async fn update_info(&self, servers: &Vec<String>) -> Result<(), ClientError> {
+        debug!("Updating cluster info from servers: {:?}", servers);
         let cluster_info = self.cluster_info(servers).await;
         match cluster_info {
             Some(info) => {
@@ -195,23 +196,28 @@ impl RaftClient {
                 }
                 let ids_to_remove = connected_ids.difference(&remote_ids);
                 for id in ids_to_remove {
+                    warn!("Removed server with id {}", id);
                     members.clients.remove(id);
                 }
                 for id in remote_ids.difference(&connected_ids) {
                     let addr = members.id_map.get(id).unwrap().clone();
                     if !members.clients.contains_key(id) {
                         if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(&addr).await {
+                            info!("Having new server addr {} id {}", addr, id);
                             members
                                 .clients
                                 .insert(*id, AsyncServiceClient::new(self.service_id, &client));
+                        } else {
+                            error!("Cannot connect to new server addr {}, id {}", addr, id);
                         }
                     }
                 }
+                info!("UPDATE_INFO Setting leader to {}, was {}", info.leader_id, self.leader_id.load(Relaxed));
                 self.leader_id.store(info.leader_id, ORDERING);
                 Ok(())
             }
             None => {
-                debug!("Cannot update info, cannot get cluster info");
+                error!("Cannot update info, cannot get cluster info");
                 Err(ClientError::ServerUnreachable)
             }
         }
@@ -489,6 +495,7 @@ impl RaftClient {
                                         "CLIENT: NOT LEADER, REMOTE SUGGEST SWITCH TO {}",
                                         new_leader_id
                                     );
+                                    info!("CMD Setting leader to {}, was {}", new_leader_id, self.leader_id.load(Relaxed));
                                     self.leader_id.store(new_leader_id, ORDERING);
                                     FailureAction::NotLeader
                                 }
@@ -500,7 +507,10 @@ impl RaftClient {
                             }
                         }
                     }
-                    None => FailureAction::UpdateInfo, // need update members
+                    None => {
+                        warn!("Need update members");
+                        FailureAction::UpdateInfo
+                    }
                 }
             }; //
             match failure {
@@ -514,8 +524,9 @@ impl RaftClient {
                         .keys()
                         .nth(depth as usize % num_members)
                         .unwrap();
-                    let _ = self.leader_id
+                    let leadder_switch = self.leader_id
                         .compare_exchange(leader_id, *new_leader_id, ORDERING, Relaxed);
+                    info!("SWITCH Excahnge leader to {}, was {:?}", new_leader_id, leadder_switch);
                     debug!("CLIENT: Switch leader {}", new_leader_id);
                 }
                 _ => {}
@@ -553,6 +564,7 @@ impl RaftClient {
                 return leader_client;
             }
         }
+        debug!("Obtaining leader client by updating clusyer info");
         {
             let servers = {
                 let members = self.members.read().await;
@@ -562,8 +574,10 @@ impl RaftClient {
             let leader_id = self.leader_id.load(ORDERING);
             let members = self.members.read().await;
             if let Some(client) = members.clients.get(&leader_id) {
+                debug!("Obtained leader client with id: {}", leader_id);
                 Some((leader_id, client.clone()))
             } else {
+                warn!("Cannot obtain leader client with id {}. Having {:?}", leader_id, members.clients.keys().collect::<Vec<_>>());
                 None
             }
         }

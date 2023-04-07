@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 pub const CONFIG_SM_ID: u64 = 1;
 
+#[derive(Clone)]
 pub struct RaftMember {
     pub rpc: Arc<AsyncServiceClient>,
     pub address: String,
@@ -68,9 +69,10 @@ impl StateMachineCmds for Configures {
         .boxed()
     }
     fn del_member_(&mut self, address: String) -> BoxFuture<()> {
-        let hash = hash_str(&address);
-        self.members.remove(&hash);
-        future::ready(()).boxed()
+        async move {
+            let hash = hash_str(&address);
+            self.members.remove(&hash);
+        }.boxed()
     }
     fn member_address(&self) -> BoxFuture<Vec<String>> {
         future::ready(self.members.values().map(|m| m.address.clone()).collect()).boxed()
