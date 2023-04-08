@@ -47,7 +47,7 @@ pub trait RPCService: Sync + Send {
 }
 
 pub struct Server {
-    services: ObjectMap<Arc<dyn RPCService>>,
+    services: PtrHashMap<u64, Arc<dyn RPCService>>,
     pub address: String,
     pub server_id: u64,
 }
@@ -55,7 +55,7 @@ pub struct Server {
 unsafe impl Sync for Server {}
 
 pub struct ClientPool {
-    clients: ObjectMap<Arc<RPCClient>>,
+    clients: PtrHashMap<u64, Arc<RPCClient>>,
 }
 
 fn encode_res(res: Result<BytesMut, RPCRequestError>) -> BytesMut {
@@ -98,7 +98,7 @@ pub fn read_u64_head(mut data: BytesMut) -> (u64, BytesMut) {
 impl Server {
     pub fn new(address: &String) -> Arc<Server> {
         Arc::new(Server {
-            services: ObjectMap::with_capacity(16),
+            services: PtrHashMap::with_capacity(16),
             address: address.clone(),
             server_id: hash_str(address),
         })
@@ -112,7 +112,7 @@ impl Server {
                 let server = server.clone();
                 async move {
                     let (svr_id, data) = read_u64_head(data);
-                    let service = server.services.get(&(svr_id as usize));
+                    let service = server.services.get(&svr_id);
                     trace!("Processing request for service {}", svr_id);
                     match service {
                         Some(service) => {
@@ -149,11 +149,11 @@ impl Server {
         } else {
             debug!("SERVICE SHORTCUT DISABLED");
         }
-        self.services.insert(service_id as usize, service);
+        self.services.insert(service_id, service);
     }
 
     pub async fn remove_service(&self, service_id: u64) {
-        self.services.remove(&(service_id as usize));
+        self.services.remove(&service_id);
     }
     pub fn address(&self) -> &String {
         &self.address
@@ -197,7 +197,7 @@ impl RPCClient {
 impl ClientPool {
     pub fn new() -> ClientPool {
         ClientPool {
-            clients: ObjectMap::with_capacity(16),
+            clients: PtrHashMap::with_capacity(16),
         }
     }
 
@@ -212,8 +212,8 @@ impl ClientPool {
         F: FnOnce(u64) -> String,
     {
         let clients = &self.clients;
-        if clients.contains_key(&(server_id as usize)) {
-            let client = clients.get(&(server_id as usize)).unwrap().clone();
+        if clients.contains_key(&server_id) {
+            let client = clients.get(&server_id).unwrap().clone();
             Ok(client)
         } else {
             let client = timeout(
@@ -221,7 +221,7 @@ impl ClientPool {
                 RPCClient::new_async(&addr_fn(server_id)),
             )
             .await??;
-            clients.insert(server_id as usize, client.clone());
+            clients.insert(server_id, client.clone());
             Ok(client)
         }
     }
