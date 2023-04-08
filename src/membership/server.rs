@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time as std_time;
 use tokio::time as async_time;
 
-static MAX_TIMEOUT: i64 = 10_000; //10 secs for 500ms heartbeat
+static MAX_TIMEOUT: i64 = 5_000; //5 secs for 500ms heartbeat
 
 struct HBStatus {
     online: bool,
@@ -39,7 +39,7 @@ impl Service for HeartbeatService {
             let mut stat_map = self.status.write().await;
             let current_time = time::get_time();
             let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
-                online: false,
+                online: true,
                 last_updated: current_time,
                 //orthodoxy info will trigger the watcher thread to update
             });
@@ -110,7 +110,7 @@ impl Membership {
             was_leader: AtomicBool::new(false),
         });
         let service_clone = service.clone();
-        tokio::spawn(async move {
+        raft_service.rt.spawn(async move {
             while !service_clone.closed.load(Ordering::Relaxed) {
                 let is_leader = service_clone.raft_service.is_leader();
                 let was_leader = service_clone.was_leader.load(Ordering::Relaxed);
@@ -159,7 +159,7 @@ impl Membership {
                             .await;
                     }
                 }
-                async_time::sleep(std_time::Duration::from_millis(500)).await
+                async_time::sleep(std_time::Duration::from_millis(100)).await
             }
             debug!("Membership server stopped");
         });

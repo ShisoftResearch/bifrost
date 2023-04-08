@@ -360,8 +360,9 @@ mod test {
         member1_svr.close(); // close only end the heartbeat thread
 
         info!("############### Waiting for membership changes ###############");
-        async_wait_secs().await;
-        async_wait_secs().await;
+        for i in 0..10 {
+            async_wait_secs().await;
+        }
         info!("*************** Checking members ***************");
 
         assert_eq!(

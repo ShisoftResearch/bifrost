@@ -573,8 +573,10 @@ mod test {
         info!("Close member 1");
         member1_svr.close();
         info!("Waiting");
-        async_wait_secs().await;
-        async_wait_secs().await;
+        
+        for i in 0..10 {
+            async_wait_secs().await;
+        }
 
         let mut ch_1_mapping: HashMap<String, u64> = HashMap::new();
         info!("Recheck get server by string for conshash 1");

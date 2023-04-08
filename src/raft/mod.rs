@@ -180,7 +180,7 @@ pub struct RaftService {
     meta: RwLock<RaftMeta>,
     pub id: u64,
     pub options: Options,
-    rt: runtime::Runtime,
+    pub rt: runtime::Runtime,
     _is_leader: AtomicBool,
 }
 dispatch_rpc_service_functions!(RaftService);
@@ -291,6 +291,8 @@ impl RaftService {
                 .thread_name("raft-server")
                 .worker_threads(12)
                 .max_blocking_threads(num_cpus::get())
+                .event_interval(31)
+
                 .build()
                 .unwrap(),
             _is_leader: AtomicBool::new(false),
