@@ -101,6 +101,7 @@ macro_rules! service {
         #[allow(unused_imports)]
         use futures::prelude::*;
         use std::pin::Pin;
+        use bifrost_proc_macro::{deref_tuple_types, adjust_caller_identifiers, adjust_function_signature};
 
         lazy_static! {
             pub static ref RPC_SVRS:
@@ -111,7 +112,9 @@ macro_rules! service {
         pub trait Service : RPCService {
            $(
                 $(#[$attr])*
-                fn $fn_name<'a>(&'a self, $($arg:$in_),*) -> ::futures::future::BoxFuture<$out>;
+                adjust_function_signature!{
+                    fn $fn_name<'a>(&self, $($arg:$in_),*) -> ::futures::future::BoxFuture<'a, $out>;
+                }
            )*
            fn inner_dispatch<'a>(&'a self, data: $crate::bytes::BytesMut) -> Pin<Box<dyn core::future::Future<Output = Result<$crate::bytes::BytesMut, RPCRequestError>> + Send + 'a>> {
                let (func_id, body) = read_u64_head(data);
@@ -119,7 +122,9 @@ macro_rules! service {
                 match func_id as usize {
                     $(::bifrost_plugins::hash_ident!($fn_name) => {
                         if let Some(data) = $crate::utils::serde::deserialize(body.as_ref()) {
-                            let ($($arg,)*) : ($($in_,)*) = data;
+                            #[allow(unused_parens)]
+                            let tuple : deref_tuple_types!(($($in_,)*)) = data;
+                            let adjust_caller_identifiers!($($arg: $in_),*) = tuple;
                             let f_result = self.$fn_name($($arg,)*).await;
                             let res_data = $crate::bytes::BytesMut::from($crate::utils::serde::serialize(&f_result).as_slice());
                             Ok(res_data)
@@ -205,6 +210,7 @@ mod syntax_test {
         rpc test(a: u32, b: u32) -> bool;
         rpc test2(a: u32);
         rpc test3(a: u32, b: u32, c: u32, d: u32);
+        rpc test4(a: u32, b: Vec<u32>, c: &Vec<u32>, d: u32);
     }
 }
 

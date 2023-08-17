@@ -16,7 +16,7 @@ pub struct SubscriptionService {
 }
 
 impl Service for SubscriptionService {
-    fn notify(&self, key: SubKey, data: Vec<u8>) -> BoxFuture<()> {
+    fn notify<'a>(&'a self, key: SubKey, data: &'a Vec<u8>) -> BoxFuture<'a, ()> {
         debug!("Received notification for key {:?}", key);
         async move {
             let subs = self.subs.read().await;

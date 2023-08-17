@@ -95,12 +95,12 @@ type LogEntries = Vec<LogEntry>;
 type LogsMap = BTreeMap<u64, LogEntry>;
 
 service! {
-    rpc append_entries(term: u64, leader_id: u64, prev_log_id: u64, prev_log_term: u64, entries: Option<LogEntries>, leader_commit: u64) -> (u64, AppendEntriesResult);
+    rpc append_entries(term: u64, leader_id: u64, prev_log_id: u64, prev_log_term: u64, entries: &Option<LogEntries>, leader_commit: u64) -> (u64, AppendEntriesResult);
     rpc request_vote(term: u64, candidate_id: u64, last_log_id: u64, last_log_term: u64) -> ((u64, u64), bool); // term, voteGranted
     rpc install_snapshot(term: u64, leader_id: u64, last_included_index: u64, last_included_term: u64, data: Vec<u8>) -> u64;
     rpc reelect() -> bool;
     rpc c_command(entry: LogEntry) -> ClientCmdResponse;
-    rpc c_query(entry: LogEntry) -> ClientQryResponse;
+    rpc c_query(entry: &LogEntry) -> ClientQryResponse;
     rpc c_server_cluster_info() -> ClientClusterInfo;
     rpc c_put_offline() -> bool;
     rpc c_have_state_machine(id: u64) -> bool;
@@ -965,7 +965,7 @@ impl RaftService {
                     leader_id,
                     follower_last_log_id,
                     follower_last_log_term,
-                    entries,
+                    &entries,
                     commit_index,
                 )
                 .await;
@@ -1095,15 +1095,15 @@ impl RaftService {
 }
 
 impl Service for RaftService {
-    fn append_entries(
-        &self,
+    fn append_entries<'a>(
+        &'a self,
         term: u64,
         leader_id: u64,
         prev_log_id: u64,
         prev_log_term: u64,
-        entries: Option<LogEntries>,
+        entries: &'a Option<LogEntries>,
         leader_commit: u64,
-    ) -> BoxFuture<(u64, AppendEntriesResult)> {
+    ) -> BoxFuture<'a, (u64, AppendEntriesResult)> {
         async move {
             let mut meta = self.write_meta().await;
             self.reset_last_checked(&mut meta);
@@ -1246,7 +1246,7 @@ impl Service for RaftService {
         .boxed()
     }
 
-    fn c_command(&self, entry: LogEntry) -> BoxFuture<ClientCmdResponse> {
+    fn c_command<'a>(&'a self, entry: LogEntry) -> BoxFuture<'a, ClientCmdResponse> {
         async move {
             let meta = self.write_meta().await;
             let mut entry = entry;
@@ -1287,7 +1287,7 @@ impl Service for RaftService {
         .boxed()
     }
 
-    fn c_query(&self, entry: LogEntry) -> BoxFuture<ClientQryResponse> {
+    fn c_query<'a>(&'a self, entry: &'a LogEntry) -> BoxFuture<'a, ClientQryResponse> {
         async move {
             trace!("Client query for raft sm_id {}, fn_id {} with term {}, id {}. Obtaining meta read lock.", entry.sm_id, entry.fn_id, entry.term, entry.id);
             let meta = self.meta.read().await; // .unwrap();

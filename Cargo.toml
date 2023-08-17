@@ -15,6 +15,7 @@ log = "*"
 serde = { version = "1.0", features = ["derive"] }
 bifrost_plugins = { path = "src/plugins" }
 bifrost_hasher = { path = "src/hasher" }
+bifrost_proc_macro = { path = "src/proc_macro" }
 rand = "*"
 
 lazy_static = "*"

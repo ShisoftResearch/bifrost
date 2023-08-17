@@ -208,7 +208,7 @@ impl SMCallback {
                                             "Sending out callback notification to sub id {}",
                                             sub_id
                                         );
-                                        let client_result = client.notify(key, data).await;
+                                        let client_result = client.notify(key, &data).await;
                                         Ok(client_result)
                                     } else {
                                         Err(NotifyError::CannotFindSubscriber)

@@ -393,7 +393,7 @@ impl RaftClient {
                     fn_id
                 );
                 let res = rpc_client
-                    .c_query(self.gen_log_entry(sm_id, fn_id, &data))
+                    .c_query(&self.gen_log_entry(sm_id, fn_id, &data))
                     .await;
                 trace!(
                     "Query from node {} for sm_id {}, fn_id {} completed",
