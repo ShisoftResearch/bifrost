@@ -110,24 +110,24 @@ impl Membership {
             raft_service: raft_service.clone(),
             was_leader: AtomicBool::new(false),
         });
-        let service_clone = service.clone();
         raft_service.rt.spawn(async move {
-            while !service_clone.closed.load(Ordering::Relaxed) {
+            while !service.closed.load(Ordering::Relaxed) {
                 let start_time = get_time();
-                let is_leader = service_clone.raft_service.is_leader();
-                let was_leader = service_clone.was_leader.load(Ordering::Relaxed);
+                let is_leader = service.raft_service.is_leader();
+                let was_leader = service.was_leader.load(Ordering::Relaxed);
                 if !was_leader && is_leader {
                     // Transferred leader will skip checking all member timeout for once
-                    service_clone.transfer_leadership().await
+                    service.transfer_leadership().await
                 }
                 if was_leader != is_leader {
-                    service_clone.was_leader.store(is_leader, Ordering::Relaxed);
+                    service.was_leader.store(is_leader, Ordering::Relaxed);
                 }
                 if is_leader {
+                    trace!("Resync Raft state machine as leader id {}", service.raft_service.id);
                     let mut outdated_members: Vec<u64> = Vec::new();
                     let mut back_in_members: Vec<u64> = Vec::new();
                     {
-                        let mut status_map = service_clone.status.write().await;
+                        let mut status_map = service.status.write().await;
                         let mut members_to_update: HashMap<u64, bool> = HashMap::new();
                         for (id, status) in status_map.iter() {
                             let last_updated = status.last_updated;
@@ -146,7 +146,7 @@ impl Membership {
                             }
                         }
                         for (id, alive) in members_to_update.iter() {
-                            let mut status = status_map.get_mut(&id).unwrap();
+                            let status = status_map.get_mut(&id).unwrap();
                             status.online = *alive;
                         }
                     }
@@ -156,7 +156,7 @@ impl Membership {
                             back_in_members.len(),
                             outdated_members.len()
                         );
-                        service_clone
+                        service
                             .update_raft(&back_in_members, &outdated_members)
                             .await;
                     }
@@ -166,7 +166,10 @@ impl Membership {
                 let interval = 500; // in ms
                 if time_took < interval {
                     let time_to_wait = interval - time_took;
+                    trace!("Raft resync completed, waiting for {}ms for next resync", time_to_wait);
                     async_time::sleep(std_time::Duration::from_millis(time_to_wait as u64)).await
+                } else {
+                    trace!("Raft resync completed, left behine {}ms for next resync", time_took - interval);
                 }
             }
             debug!("Membership server stopped");
