@@ -10,6 +10,7 @@ use tokio::time;
 use crate::membership::DEFAULT_SERVICE_ID;
 use crate::raft::client::RaftClient;
 use crate::raft::state_machine::master::ExecError;
+use crate::utils::time::get_time;
 
 static PING_INTERVAL: u64 = 500;
 
@@ -39,13 +40,23 @@ impl MemberService {
         let service_clone = service.clone();
         tokio::spawn(async move {
             while !service_clone.closed.load(Ordering::Relaxed) {
+                let start_time = get_time();
                 let rpc_client = service_clone.raft_client.current_leader_rpc_client().await;
                 if let Ok(rpc_client) = rpc_client {
                     let _ping_res =
                         ImmeServiceClient::ping(DEFAULT_SERVICE_ID, &rpc_client, service_clone.id)
                             .await;
+                } else {
+                    error!("Cannot find RPC client for membership heartbeat to leader");
                 }
-                time::sleep(time::Duration::from_millis(PING_INTERVAL)).await
+                let time_now = get_time();
+                let elapsed_time = time_now - start_time;
+                trace!("Membership ping at time {}, elapsed {}ms", time_now, elapsed_time);
+                if (elapsed_time as u64) < PING_INTERVAL {
+                    let wait_time = PING_INTERVAL - elapsed_time as u64;
+                    trace!("Waiting for {}ms for membership heartbeat", wait_time);
+                    time::sleep(time::Duration::from_millis(wait_time)).await;
+                }
             }
             debug!("Member service closed");
         });

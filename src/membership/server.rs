@@ -42,12 +42,14 @@ impl Service for HeartbeatService {
     fn ping(&self, id: u64) -> BoxFuture<()> {
         async move {
             let current_time = time::get_time();
-            self.status.insert(id, HBStatus {
+            let elapsed_time = self.status.insert(id, HBStatus {
                 online: true,
                 last_updated: current_time,
                 //orthodoxy info will trigger the watcher thread to update
-            });
-            trace!("Updated heartbeat time to {}", current_time);
+            })
+            .map(|s| current_time - s.last_updated)
+            .unwrap_or(0);
+            trace!("Updated heartbeat time to {}, elapsed {}ms", current_time, elapsed_time);
             // only update the timestamp, let the watcher thread to decide
         }
         .boxed()
