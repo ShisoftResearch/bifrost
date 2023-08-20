@@ -122,6 +122,7 @@ impl ConsistentHashing {
             let res = membership_client
                 .on_group_member_offline(
                     move |(member, version)| {
+                        debug!("Dected server member {:?} offline at version {}", member, version);
                         let ch = ch.clone();
                         server_left(ch, member, version).boxed()
                     },

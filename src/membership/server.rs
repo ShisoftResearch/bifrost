@@ -7,6 +7,7 @@ use crate::raft::state_machine::StateMachineCtl;
 use crate::raft::{LogEntry, RaftMsg, RaftService, Service as raft_svr_trait};
 use crate::rpc::Server;
 use crate::utils::time;
+use crate::utils::time::get_time;
 use async_std::sync::*;
 use bifrost_hasher::hash_str;
 use futures::prelude::future::*;
@@ -112,6 +113,7 @@ impl Membership {
         let service_clone = service.clone();
         raft_service.rt.spawn(async move {
             while !service_clone.closed.load(Ordering::Relaxed) {
+                let start_time = get_time();
                 let is_leader = service_clone.raft_service.is_leader();
                 let was_leader = service_clone.was_leader.load(Ordering::Relaxed);
                 if !was_leader && is_leader {
@@ -159,7 +161,12 @@ impl Membership {
                             .await;
                     }
                 }
-                async_time::sleep(std_time::Duration::from_millis(100)).await
+                let end_time = get_time();
+                let time_took = end_time - start_time;
+                let interval = 500; // in ms
+                if time_took < interval {
+                    async_time::sleep(std_time::Duration::from_millis(interval - time_took)).await
+                }
             }
             debug!("Membership server stopped");
         });
