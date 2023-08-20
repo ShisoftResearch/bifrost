@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time as std_time;
 use tokio::time as async_time;
 
-static MAX_TIMEOUT: i64 = 5_000; //5 secs for 500ms heartbeat
+static MAX_TIMEOUT: i64 = 10_000; //5 secs for 500ms heartbeat
 
 struct HBStatus {
     online: bool,
