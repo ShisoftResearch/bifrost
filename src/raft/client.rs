@@ -212,7 +212,11 @@ impl RaftClient {
                         }
                     }
                 }
-                info!("UPDATE_INFO Setting leader to {}, was {}", info.leader_id, self.leader_id.load(Relaxed));
+                info!(
+                    "UPDATE_INFO Setting leader to {}, was {}",
+                    info.leader_id,
+                    self.leader_id.load(Relaxed)
+                );
                 self.leader_id.store(info.leader_id, ORDERING);
                 Ok(())
             }
@@ -495,7 +499,11 @@ impl RaftClient {
                                         "CLIENT: NOT LEADER, REMOTE SUGGEST SWITCH TO {}",
                                         new_leader_id
                                     );
-                                    info!("CMD Setting leader to {}, was {}", new_leader_id, self.leader_id.load(Relaxed));
+                                    info!(
+                                        "CMD Setting leader to {}, was {}",
+                                        new_leader_id,
+                                        self.leader_id.load(Relaxed)
+                                    );
                                     self.leader_id.store(new_leader_id, ORDERING);
                                     FailureAction::NotLeader
                                 }
@@ -524,9 +532,16 @@ impl RaftClient {
                         .keys()
                         .nth(depth as usize % num_members)
                         .unwrap();
-                    let leadder_switch = self.leader_id
-                        .compare_exchange(leader_id, *new_leader_id, ORDERING, Relaxed);
-                    info!("SWITCH Excahnge leader to {}, was {:?}", new_leader_id, leadder_switch);
+                    let leadder_switch = self.leader_id.compare_exchange(
+                        leader_id,
+                        *new_leader_id,
+                        ORDERING,
+                        Relaxed,
+                    );
+                    info!(
+                        "SWITCH Excahnge leader to {}, was {:?}",
+                        new_leader_id, leadder_switch
+                    );
                     debug!("CLIENT: Switch leader {}", new_leader_id);
                 }
                 _ => {}
@@ -577,7 +592,11 @@ impl RaftClient {
                 debug!("Obtained leader client with id: {}", leader_id);
                 Some((leader_id, client.clone()))
             } else {
-                warn!("Cannot obtain leader client with id {}. Having {:?}", leader_id, members.clients.keys().collect::<Vec<_>>());
+                warn!(
+                    "Cannot obtain leader client with id {}. Having {:?}",
+                    leader_id,
+                    members.clients.keys().collect::<Vec<_>>()
+                );
                 None
             }
         }

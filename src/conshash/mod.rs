@@ -122,7 +122,10 @@ impl ConsistentHashing {
             let res = membership_client
                 .on_group_member_offline(
                     move |(member, version)| {
-                        debug!("Dected server member {:?} offline at version {}", member, version);
+                        debug!(
+                            "Dected server member {:?} offline at version {}",
+                            member, version
+                        );
                         let ch = ch.clone();
                         server_left(ch, member, version).boxed()
                     },
@@ -574,7 +577,7 @@ mod test {
         info!("Close member 1");
         member1_svr.close();
         info!("Waiting");
-        
+
         for i in 0..10 {
             async_wait_secs().await;
         }

@@ -14,9 +14,9 @@ use futures::prelude::future::*;
 use futures::prelude::*;
 use futures::stream::FuturesUnordered;
 use lightning::map::Map;
+use lightning::map::PtrHashMap;
 use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet};
-use lightning::map::PtrHashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -42,14 +42,23 @@ impl Service for HeartbeatService {
     fn ping(&self, id: u64) -> BoxFuture<()> {
         async move {
             let current_time = time::get_time();
-            let elapsed_time = self.status.insert(id, HBStatus {
-                online: true,
-                last_updated: current_time,
-                //orthodoxy info will trigger the watcher thread to update
-            })
-            .map(|s| current_time - s.last_updated)
-            .unwrap_or(0);
-            trace!("Updated heartbeat time to {}, elapsed {}ms", current_time, elapsed_time);
+            let elapsed_time = self
+                .status
+                .insert(
+                    id,
+                    HBStatus {
+                        online: true,
+                        last_updated: current_time,
+                        //orthodoxy info will trigger the watcher thread to update
+                    },
+                )
+                .map(|s| current_time - s.last_updated)
+                .unwrap_or(0);
+            trace!(
+                "Updated heartbeat time to {}, elapsed {}ms",
+                current_time,
+                elapsed_time
+            );
             // only update the timestamp, let the watcher thread to decide
         }
         .boxed()
@@ -138,7 +147,8 @@ impl Membership {
                         let mut members_to_update = vec![];
                         for (id, mut status) in all_entries {
                             let last_updated = status.last_updated;
-                            let alive = (start_time < last_updated) || ((start_time - last_updated) < MAX_TIMEOUT);
+                            let alive = (start_time < last_updated)
+                                || ((start_time - last_updated) < MAX_TIMEOUT);
                             // Finding new offline servers
                             if status.online && !alive {
                                 debug!("Found dead member {}", id);
@@ -149,7 +159,7 @@ impl Membership {
                             // Finding new online servers
                             if !status.online && alive {
                                 debug!("Found alive member {}", id);
-                                status.online =  true;
+                                status.online = true;
                                 back_in_members.push(id);
                                 members_to_update.push((id, status));
                             }
@@ -174,10 +184,16 @@ impl Membership {
                 let interval = 500; // in ms
                 if time_took < interval {
                     let time_to_wait = interval - time_took;
-                    trace!("Membership resync completed, waiting for {}ms for next resync", time_to_wait);
+                    trace!(
+                        "Membership resync completed, waiting for {}ms for next resync",
+                        time_to_wait
+                    );
                     async_time::sleep(std_time::Duration::from_millis(time_to_wait as u64)).await
                 } else {
-                    trace!("Membership resync completed, left behine {}ms for next resync", time_took - interval);
+                    trace!(
+                        "Membership resync completed, left behine {}ms for next resync",
+                        time_took - interval
+                    );
                 }
             }
             debug!("Membership server stopped");
@@ -193,7 +209,9 @@ impl Membership {
         raft_service
             .register_state_machine(Box::new(membership_service))
             .await;
-        server.register_service(DEFAULT_SERVICE_ID, &service_clone).await;
+        server
+            .register_service(DEFAULT_SERVICE_ID, &service_clone)
+            .await;
     }
     async fn compose_client_member(&self, id: u64) -> ClientMember {
         let member = self.members.get(&id).unwrap();
@@ -435,10 +453,13 @@ impl StateMachineCmds for Membership {
                         groups: HashSet::new(),
                     }
                 });
-                self.heartbeat.status.insert(id, HBStatus { 
-                    last_updated: current_time, 
-                    online: true 
-                });
+                self.heartbeat.status.insert(
+                    id,
+                    HBStatus {
+                        last_updated: current_time,
+                        online: true,
+                    },
+                );
             }
             if joined {
                 let composed_client_member = self.compose_client_member(id).await;

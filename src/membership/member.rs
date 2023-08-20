@@ -5,7 +5,7 @@ use bifrost_hasher::hash_str;
 use futures::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::time;
+use tokio::{runtime, time};
 
 use crate::membership::DEFAULT_SERVICE_ID;
 use crate::raft::client::RaftClient;
@@ -19,6 +19,7 @@ pub struct MemberService {
     sm_client: Arc<SMClient>,
     raft_client: Arc<RaftClient>,
     closed: AtomicBool,
+    rt: runtime::Runtime,
     id: u64,
 }
 
@@ -35,10 +36,18 @@ impl MemberService {
             raft_client: raft_client.clone(),
             closed: AtomicBool::new(false),
             id: server_id,
+            rt: runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_name("membership")
+                .worker_threads(1)
+                .max_blocking_threads(1)
+                .event_interval(5)
+                .build()
+                .unwrap(),
         });
         let _join_res = sm_client.join(&server_address).await;
         let service_clone = service.clone();
-        tokio::spawn(async move {
+        service.rt.spawn(async move {
             while !service_clone.closed.load(Ordering::Relaxed) {
                 let start_time = get_time();
                 let rpc_client = service_clone.raft_client.current_leader_rpc_client().await;
@@ -51,10 +60,14 @@ impl MemberService {
                 }
                 let time_now = get_time();
                 let elapsed_time = time_now - start_time;
-                trace!("Membership ping at time {}, elapsed {}ms", time_now, elapsed_time);
+                trace!(
+                    "Membership ping at time {}, elapsed {}ms",
+                    time_now,
+                    elapsed_time
+                );
                 if (elapsed_time as u64) < PING_INTERVAL {
                     let wait_time = PING_INTERVAL - elapsed_time as u64;
-                    trace!("Waiting for {}ms for membership heartbeat", wait_time);
+                    trace!("Waiting membership heartbeat for {}ms", wait_time);
                     time::sleep(time::Duration::from_millis(wait_time)).await;
                 }
             }

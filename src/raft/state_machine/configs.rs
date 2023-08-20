@@ -72,7 +72,8 @@ impl StateMachineCmds for Configures {
         async move {
             let hash = hash_str(&address);
             self.members.remove(&hash);
-        }.boxed()
+        }
+        .boxed()
     }
     fn member_address(&self) -> BoxFuture<Vec<String>> {
         future::ready(self.members.values().map(|m| m.address.clone()).collect()).boxed()

@@ -292,7 +292,6 @@ impl RaftService {
                 .worker_threads(12)
                 .max_blocking_threads(num_cpus::get())
                 .event_interval(31)
-
                 .build()
                 .unwrap(),
             _is_leader: AtomicBool::new(false),
@@ -382,10 +381,7 @@ impl RaftService {
                 let time_to_sleep = expected_ends - end_time - 1;
                 match timed_heartbeat {
                     Err(_) => {
-                        error!(
-                            "Heartbeat cannot finish in time for {}ms",
-                            HEARTBEAT_MS
-                        );
+                        error!("Heartbeat cannot finish in time for {}ms", HEARTBEAT_MS);
                     }
                     Ok(false) => {
                         debug!("Heartbeat loop exiting");
@@ -499,16 +495,22 @@ impl RaftService {
         }
     }
     pub async fn leave(&self) -> bool {
-        let members = self
-            .cluster_info()
-            .await
-            .members;
-        let servers: Vec<_> = members.iter()
+        let members = self.cluster_info().await.members;
+        let servers: Vec<_> = members
+            .iter()
             .map(|&(_, ref address)| address.clone())
             .collect();
-        debug!("Leaving from a cluster, server id {} with {} members {:?}", self.id, servers.len(), servers);
+        debug!(
+            "Leaving from a cluster, server id {} with {} members {:?}",
+            self.id,
+            servers.len(),
+            servers
+        );
         if let Ok(client) = RaftClient::new(&servers, self.options.service_id).await {
-            debug!("Temporary client for leaving, leader: {}. Sending removal message.", client.leader_id());
+            debug!(
+                "Temporary client for leaving, leader: {}. Sending removal message.",
+                client.leader_id()
+            );
             client
                 .execute(CONFIG_SM_ID, del_member_::new(&self.options.address))
                 .await
@@ -540,9 +542,12 @@ impl RaftService {
                                 }
                                 Ok(false) => {
                                     warn!("Server {} cannot be elected", addr);
-                                },
+                                }
                                 Err(e) => {
-                                    error!("Server {} cannot be elected due to comm error {:?}", addr, e);
+                                    error!(
+                                        "Server {} cannot be elected due to comm error {:?}",
+                                        addr, e
+                                    );
                                 }
                             }
                         }
@@ -1333,15 +1338,23 @@ impl Service for RaftService {
         future::ready(()).boxed()
     }
 
-    fn reelect<'a>(&'a self,) ->  futures::future::BoxFuture<bool> {
+    fn reelect<'a>(&'a self) -> futures::future::BoxFuture<bool> {
         async move {
             let mut meta = self.meta.write().await;
-            info!("Been asked to reelect, become candidate. Server id {}", self.get_server_id());
+            info!(
+                "Been asked to reelect, become candidate. Server id {}",
+                self.get_server_id()
+            );
             self.become_candidate(&mut meta).await;
             let is_leader = self.is_leader();
-            info!("Reelect result for server {}, is leader {}", self.get_server_id(), is_leader);
+            info!(
+                "Reelect result for server {}, is leader {}",
+                self.get_server_id(),
+                is_leader
+            );
             is_leader
-        }.boxed()
+        }
+        .boxed()
     }
 }
 
@@ -1456,7 +1469,11 @@ mod test {
         async_wait_secs().await;
 
         // test remove member
-        info!("Server 1 ({}) is leaving, leader {}", service1.id, service1.leader_id().await);
+        info!(
+            "Server 1 ({}) is leaving, leader {}",
+            service1.id,
+            service1.leader_id().await
+        );
         assert!(service1.leave().await);
 
         async_wait_secs().await;
@@ -1467,7 +1484,11 @@ mod test {
 
         async_wait_secs().await;
 
-        info!("Server 2 ({}) is leaving, leader {}", server2.server_id, service2.leader_id().await);
+        info!(
+            "Server 2 ({}) is leaving, leader {}",
+            server2.server_id,
+            service2.leader_id().await
+        );
         assert!(service2.leave().await);
 
         // there will be some unavailability in leader transaction
