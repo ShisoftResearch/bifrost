@@ -13,7 +13,10 @@ use bifrost_hasher::hash_str;
 use futures::prelude::future::*;
 use futures::prelude::*;
 use futures::stream::FuturesUnordered;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use lightning::map::Map;
+use std::collections::HashMap;
+use std::collections::{BTreeSet, HashSet};
+use lightning::map::PtrHashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -22,13 +25,14 @@ use tokio::time as async_time;
 
 static MAX_TIMEOUT: i64 = 10_000; //5 secs for 500ms heartbeat
 
+#[derive(Clone, Copy)]
 struct HBStatus {
-    online: bool,
     last_updated: i64,
+    online: bool,
 }
 
 pub struct HeartbeatService {
-    status: RwLock<HashMap<u64, HBStatus>>,
+    status: PtrHashMap<u64, HBStatus>,
     raft_service: Arc<RaftService>,
     closed: AtomicBool,
     was_leader: AtomicBool,
@@ -37,14 +41,13 @@ pub struct HeartbeatService {
 impl Service for HeartbeatService {
     fn ping(&self, id: u64) -> BoxFuture<()> {
         async move {
-            let mut stat_map = self.status.write().await;
             let current_time = time::get_time();
-            let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
+            self.status.insert(id, HBStatus {
                 online: true,
                 last_updated: current_time,
                 //orthodoxy info will trigger the watcher thread to update
             });
-            stat.last_updated = current_time;
+            trace!("Updated heartbeat time to {}", current_time);
             // only update the timestamp, let the watcher thread to decide
         }
         .boxed()
@@ -67,11 +70,12 @@ impl HeartbeatService {
     }
     async fn transfer_leadership(&self) {
         //update timestamp for every alive server
-        let mut stat_map = self.status.write().await;
-        let current_time = time::get_time();
-        for stat in stat_map.values_mut() {
+        let all_entries = self.status.entries();
+        let current_time = get_time();
+        for (id, mut stat) in all_entries {
             if stat.online {
                 stat.last_updated = current_time;
+                self.status.insert(id, stat);
             }
         }
     }
@@ -105,7 +109,7 @@ impl Drop for Membership {
 impl Membership {
     pub async fn new(server: &Arc<Server>, raft_service: &Arc<RaftService>) {
         let service = Arc::new(HeartbeatService {
-            status: RwLock::new(HashMap::new()),
+            status: PtrHashMap::with_capacity(32),
             closed: AtomicBool::new(false),
             raft_service: raft_service.clone(),
             was_leader: AtomicBool::new(false),
@@ -124,31 +128,32 @@ impl Membership {
                     service.was_leader.store(is_leader, Ordering::Relaxed);
                 }
                 if is_leader {
-                    trace!("Resync Raft state machine as leader id {}", service.raft_service.id);
+                    trace!("Resync Membership as leader id {}", service.raft_service.id);
                     let mut outdated_members: Vec<u64> = Vec::new();
                     let mut back_in_members: Vec<u64> = Vec::new();
                     {
-                        let mut status_map = service.status.write().await;
-                        let mut members_to_update: HashMap<u64, bool> = HashMap::new();
-                        for (id, status) in status_map.iter() {
+                        let all_entries = service.status.entries();
+                        let mut members_to_update = vec![];
+                        for (id, mut status) in all_entries {
                             let last_updated = status.last_updated;
-                            let alive = (start_time < last_updated) || ((start_time - status.last_updated) < MAX_TIMEOUT);
+                            let alive = (start_time < last_updated) || ((start_time - last_updated) < MAX_TIMEOUT);
                             // Finding new offline servers
                             if status.online && !alive {
                                 debug!("Found dead member {}", id);
-                                outdated_members.push(*id);
-                                members_to_update.insert(*id, alive);
+                                status.online = false;
+                                outdated_members.push(id);
+                                members_to_update.push((id, status));
                             }
                             // Finding new online servers
                             if !status.online && alive {
                                 debug!("Found alive member {}", id);
-                                back_in_members.push(*id);
-                                members_to_update.insert(*id, alive);
+                                status.online =  true;
+                                back_in_members.push(id);
+                                members_to_update.push((id, status));
                             }
                         }
-                        for (id, alive) in members_to_update.iter() {
-                            let status = status_map.get_mut(&id).unwrap();
-                            status.online = *alive;
+                        for (id, s) in members_to_update {
+                            service.status.insert(id, s);
                         }
                     }
                     if back_in_members.len() + outdated_members.len() > 0 {
@@ -167,10 +172,10 @@ impl Membership {
                 let interval = 500; // in ms
                 if time_took < interval {
                     let time_to_wait = interval - time_took;
-                    trace!("Raft resync completed, waiting for {}ms for next resync", time_to_wait);
+                    trace!("Membership resync completed, waiting for {}ms for next resync", time_to_wait);
                     async_time::sleep(std_time::Duration::from_millis(time_to_wait as u64)).await
                 } else {
-                    trace!("Raft resync completed, left behine {}ms for next resync", time_took - interval);
+                    trace!("Membership resync completed, left behine {}ms for next resync", time_took - interval);
                 }
             }
             debug!("Membership server stopped");
@@ -190,11 +195,10 @@ impl Membership {
     }
     async fn compose_client_member(&self, id: u64) -> ClientMember {
         let member = self.members.get(&id).unwrap();
-        let stat_map = self.heartbeat.status.read().await;
         ClientMember {
             id,
             address: member.address.clone(),
-            online: stat_map.get(&id).unwrap().online,
+            online: self.heartbeat.status.get(&id).unwrap().online,
         }
     }
     async fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
@@ -295,9 +299,8 @@ impl Membership {
     }
     async fn group_first_online_member_id(&self, group: u64) -> Result<Option<u64>, ()> {
         if let Some(group) = self.groups.get(&group) {
-            let stat_map = self.heartbeat.status.read().await;
             for member in group.members.iter() {
-                if let Some(member_stat) = stat_map.get(&member) {
+                if let Some(member_stat) = self.heartbeat.status.get(&member) {
                     if member_stat.online {
                         return Ok(Some(*member));
                     }
@@ -392,15 +395,16 @@ impl StateMachineCmds for Membership {
         async move {
             self.version += 1;
             {
-                let mut stat_map = self.heartbeat.status.write().await;
                 for id in &online {
-                    if let Some(ref mut stat) = stat_map.get_mut(&id) {
+                    if let Some(mut stat) = self.heartbeat.status.get(&id) {
                         stat.online = true;
+                        self.heartbeat.status.insert(*id, stat);
                     }
                 }
                 for id in &offline {
-                    if let Some(ref mut stat) = stat_map.get_mut(&id) {
+                    if let Some(mut stat) = self.heartbeat.status.get(&id) {
                         stat.online = false;
+                        self.heartbeat.status.insert(*id, stat);
                     }
                 }
             }
@@ -421,20 +425,17 @@ impl StateMachineCmds for Membership {
             let id = hash_str(&address);
             let mut joined = false;
             {
-                let mut stat_map = self.heartbeat.status.write().await;
+                let current_time = time::get_time();
                 self.members.entry(id).or_insert_with(|| {
-                    let current_time = time::get_time();
-                    let mut stat = stat_map.entry(id).or_insert_with(|| HBStatus {
-                        online: true,
-                        last_updated: current_time,
-                    });
-                    stat.online = true;
-                    stat.last_updated = current_time;
                     joined = true;
                     Member {
                         address: address.clone(),
                         groups: HashSet::new(),
                     }
+                });
+                self.heartbeat.status.insert(id, HBStatus { 
+                    last_updated: current_time, 
+                    online: true 
                 });
             }
             if joined {
@@ -471,10 +472,7 @@ impl StateMachineCmds for Membership {
             // in this part we will not do leader_candidate_unavailable
             // because it have already been triggered by leave_group_
             // in the loop above
-            {
-                let mut stat_map = self.heartbeat.status.write().await;
-                stat_map.remove(&id);
-            }
+            self.heartbeat.status.remove(&id);
             self.members.remove(&id);
             true
         }
