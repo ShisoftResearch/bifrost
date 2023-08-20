@@ -124,14 +124,14 @@ impl Membership {
                     service_clone.was_leader.store(is_leader, Ordering::Relaxed);
                 }
                 if is_leader {
-                    let current_time = time::get_time();
                     let mut outdated_members: Vec<u64> = Vec::new();
                     let mut back_in_members: Vec<u64> = Vec::new();
                     {
                         let mut status_map = service_clone.status.write().await;
                         let mut members_to_update: HashMap<u64, bool> = HashMap::new();
                         for (id, status) in status_map.iter() {
-                            let alive = (current_time - status.last_updated) < MAX_TIMEOUT;
+                            let last_updated = status.last_updated;
+                            let alive = (start_time < last_updated) || ((start_time - status.last_updated) < MAX_TIMEOUT);
                             // Finding new offline servers
                             if status.online && !alive {
                                 debug!("Found dead member {}", id);
@@ -165,7 +165,8 @@ impl Membership {
                 let time_took = end_time - start_time;
                 let interval = 500; // in ms
                 if time_took < interval {
-                    async_time::sleep(std_time::Duration::from_millis(interval - time_took)).await
+                    let time_to_wait = interval - time_took;
+                    async_time::sleep(std_time::Duration::from_millis(time_to_wait as u64)).await
                 }
             }
             debug!("Membership server stopped");
