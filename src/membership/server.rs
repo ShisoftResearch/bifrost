@@ -110,6 +110,7 @@ impl Membership {
             raft_service: raft_service.clone(),
             was_leader: AtomicBool::new(false),
         });
+        let service_clone = service.clone();
         raft_service.rt.spawn(async move {
             while !service.closed.load(Ordering::Relaxed) {
                 let start_time = get_time();
@@ -175,7 +176,7 @@ impl Membership {
             debug!("Membership server stopped");
         });
         let mut membership_service = Membership {
-            heartbeat: service.clone(),
+            heartbeat: service_clone.clone(),
             groups: HashMap::new(),
             members: HashMap::new(),
             callback: None,
@@ -185,7 +186,7 @@ impl Membership {
         raft_service
             .register_state_machine(Box::new(membership_service))
             .await;
-        server.register_service(DEFAULT_SERVICE_ID, &service).await;
+        server.register_service(DEFAULT_SERVICE_ID, &service_clone).await;
     }
     async fn compose_client_member(&self, id: u64) -> ClientMember {
         let member = self.members.get(&id).unwrap();
