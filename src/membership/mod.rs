@@ -233,7 +233,7 @@ mod test {
             .unwrap();
         let member1_addr = String::from("server1");
         info!("New member service {}", member1_addr);
-        let member1_svr = MemberService::new(&member1_addr, &member1_raft_client).await;
+        let member1_svr = MemberService::new(&member1_addr, &member1_raft_client, &raft_service).await;
 
         info!("New member2_raft_client");
         let member2_raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID)
@@ -241,7 +241,7 @@ mod test {
             .unwrap();
         let member2_addr = String::from("server2");
         info!("New member service {}", member2_addr);
-        let member2_svr = MemberService::new(&member2_addr, &member2_raft_client).await;
+        let member2_svr = MemberService::new(&member2_addr, &member2_raft_client, &raft_service).await;
 
         info!("New member3_raft_client");
         let member3_raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID)
@@ -249,7 +249,7 @@ mod test {
             .unwrap();
         let member3_addr = String::from("server3");
         info!("New member service {}", member3_addr);
-        let member3_svr = MemberService::new(&member3_addr, &member3_raft_client).await;
+        let member3_svr = MemberService::new(&member3_addr, &member3_raft_client, &raft_service).await;
 
         info!("Member 1 join group 1");
         member1_svr.join_group(&group_1).await.unwrap();

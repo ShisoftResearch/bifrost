@@ -444,17 +444,17 @@ mod test {
         info!("New raft client for member 1");
         let member1_raft_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
         info!("New member service 1");
-        let member1_svr = MemberService::new(&server_1, &member1_raft_client).await;
+        let member1_svr = MemberService::new(&server_1, &member1_raft_client, &raft_service).await;
 
         info!("New raft client for member 2");
         let member2_raft_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
         info!("New member service 2");
-        let member2_svr = MemberService::new(&server_2, &member2_raft_client).await;
+        let member2_svr = MemberService::new(&server_2, &member2_raft_client, &raft_service).await;
 
         info!("New raft client for member 3");
         let member3_raft_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
         info!("New member service 3");
-        let member3_svr = MemberService::new(&server_3, &member3_raft_client).await;
+        let member3_svr = MemberService::new(&server_3, &member3_raft_client, &raft_service).await;
 
         info!("Member 1 join group 1");
         member1_svr.join_group(&group_1).await.unwrap();

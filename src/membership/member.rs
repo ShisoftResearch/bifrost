@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio::{runtime, time};
 
 use crate::membership::DEFAULT_SERVICE_ID;
+use crate::raft::RaftService;
 use crate::raft::client::RaftClient;
 use crate::raft::state_machine::master::ExecError;
 use crate::utils::time::get_time;
@@ -19,12 +20,11 @@ pub struct MemberService {
     sm_client: Arc<SMClient>,
     raft_client: Arc<RaftClient>,
     closed: AtomicBool,
-    rt: runtime::Runtime,
     id: u64,
 }
 
 impl MemberService {
-    pub async fn new(server_address: &String, raft_client: &Arc<RaftClient>) -> Arc<MemberService> {
+    pub async fn new(server_address: &String, raft_client: &Arc<RaftClient>, raft_service: &Arc<RaftService>) -> Arc<MemberService> {
         let server_id = hash_str(server_address);
         let sm_client = Arc::new(SMClient::new(DEFAULT_SERVICE_ID, &raft_client));
         let service = Arc::new(MemberService {
@@ -35,19 +35,11 @@ impl MemberService {
             },
             raft_client: raft_client.clone(),
             closed: AtomicBool::new(false),
-            id: server_id,
-            rt: runtime::Builder::new_multi_thread()
-                .enable_all()
-                .thread_name("membership")
-                .worker_threads(1)
-                .max_blocking_threads(1)
-                .event_interval(5)
-                .build()
-                .unwrap(),
+            id: server_id, 
         });
         let _join_res = sm_client.join(&server_address).await;
         let service_clone = service.clone();
-        service.rt.spawn(async move {
+        raft_service.rt.spawn(async move {
             while !service_clone.closed.load(Ordering::Relaxed) {
                 let start_time = get_time();
                 let rpc_client = service_clone.raft_client.current_leader_rpc_client().await;

@@ -8,7 +8,6 @@ use crate::raft::{LogEntry, RaftMsg, RaftService, Service as raft_svr_trait};
 use crate::rpc::Server;
 use crate::utils::time;
 use crate::utils::time::get_time;
-use async_std::sync::*;
 use bifrost_hasher::hash_str;
 use futures::prelude::future::*;
 use futures::prelude::*;
