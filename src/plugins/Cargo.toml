@@ -8,3 +8,5 @@ proc-macro = true
 
 [dependencies]
 bifrost_hasher = { path = "../hasher" }
+syn = "2"
+quote = "1"
