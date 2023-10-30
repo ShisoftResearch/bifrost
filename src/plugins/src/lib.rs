@@ -17,8 +17,8 @@ pub fn hash_ident(item: TokenStream) -> TokenStream {
     }
     let text = match tokens[0] {
         TokenTree::Ident(ref ident) => ident.to_string(),
-        TokenTree::Literal(_) => parse_macro_input!(item_clone as LitStr).value(),
-        _ => panic!("argument only support ident or string literal, found '{:?}', parsing {:?}", tokens, tokens[0])
+        _ => parse_macro_input!(item_clone as LitStr).value(),
+        // _ => panic!("argument only support ident or string literal, found '{:?}', parsing {:?}", tokens, tokens[0])
     };
     let text = &*text;
     let str = String::from(text);
