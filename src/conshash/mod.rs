@@ -1,6 +1,6 @@
 use futures::prelude::*;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::conshash::weights::client::SMClient as WeightSMClient;
@@ -48,6 +48,7 @@ pub struct ConsistentHashing {
     watchers: RwLock<Vec<Box<dyn Fn(&Member, &Action, &Vec<u64>, &Vec<u64>) + Send + Sync>>>,
     update_lock: async_std::sync::Mutex<()>,
     version: AtomicU64,
+    num_addrs: AtomicUsize,
 }
 
 impl ConsistentHashing {
@@ -68,6 +69,7 @@ impl ConsistentHashing {
             watchers: RwLock::new(Vec::new()),
             version: AtomicU64::new(0),
             update_lock: async_std::sync::Mutex::new(()),
+            num_addrs: AtomicUsize::new(0)
         });
         {
             let ch = ch.clone();
@@ -242,6 +244,9 @@ impl ConsistentHashing {
         let lookup_table = self.tables.read();
         return lookup_table.nodes.len();
     }
+    pub fn server_count(&self) -> usize {
+        return self.num_addrs.load(Ordering::Relaxed);
+    }
     pub async fn set_weight(&self, server_name: &String, weight: u64) -> Result<(), ExecError> {
         let group_id = hash_str(&self.group_name);
         let server_id = hash_str(server_name);
@@ -322,6 +327,7 @@ impl ConsistentHashing {
                                 lookup_table.nodes.push(server_id);
                             }
                         }
+                        self.num_addrs.store(members.len(), Ordering::Relaxed);
                         self.version.store(version, Ordering::Relaxed);
                         Ok(())
                     } else {
