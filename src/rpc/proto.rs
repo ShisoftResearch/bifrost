@@ -164,15 +164,17 @@ macro_rules! service {
                     ImmeServiceClient::$fn_name(self.service_id, &self.client, $($arg),*).await
                 }
            )*
-           pub fn new(service_id: u64, client: &Arc<RPCClient>) -> Arc<AsyncServiceClient> {
-                Arc::new(AsyncServiceClient{
+        }
+        impl ServiceClient for AsyncServiceClient {
+            fn new_instance(service_id: u64, client: &Arc<RPCClient>) -> Self {
+                AsyncServiceClient{
                     service_id: service_id,
                     client: client.clone()
-                })
-           }
-           pub fn server_id(&self) -> u64 {
-               self.client.server_id
-           }
+                }
+            }
+            fn server_id(&self) -> u64 {
+                self.client.server_id
+            }
         }
         pub struct ImmeServiceClient;
         impl ImmeServiceClient {

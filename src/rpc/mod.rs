@@ -1,5 +1,6 @@
 #[macro_use]
 pub mod proto;
+pub mod cluster;
 
 use crate::{tcp, DISABLE_SHORTCUT};
 use bifrost_hasher::hash_str;
@@ -227,6 +228,21 @@ impl ClientPool {
     }
 }
 
+pub trait ServiceClient: Send + Sync {
+    fn new_instance(server_id: u64, client: &Arc<RPCClient>) -> Self;
+    fn server_id(&self) -> u64;
+    fn new(server_id: u64, client: &Arc<RPCClient>) -> Arc<Self>
+    where
+        Self: Sized,
+    {
+        Arc::new(Self::new_instance(server_id, client))
+    }
+}
+
+pub trait ServiceClientWithId: ServiceClient {
+    const SERVICE_ID: u64;
+}
+
 #[cfg(test)]
 mod test {
     use futures::future::BoxFuture;
@@ -448,7 +464,7 @@ mod test {
     mod parallel {
         use super::struct_service::*;
         use super::*;
-        use crate::rpc::{RPCClient, Server, DEFAULT_CLIENT_POOL};
+        use crate::rpc::{RPCClient, Server, ServiceClient, DEFAULT_CLIENT_POOL};
         use bifrost_hasher::hash_str;
         use futures::prelude::stream::*;
         use futures::FutureExt;

@@ -2,7 +2,7 @@ use crate::raft::state_machine::callback::server::Subscriptions;
 use crate::raft::state_machine::callback::SubKey;
 use crate::raft::state_machine::StateMachineCtl;
 use crate::raft::AsyncServiceClient;
-use crate::rpc;
+use crate::rpc::{self, ServiceClient};
 use async_std::sync::*;
 use bifrost_hasher::hash_str;
 use futures::FutureExt;
