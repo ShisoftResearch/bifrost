@@ -107,6 +107,10 @@ service! {
     rpc c_ping();
 }
 
+impl ServiceClientWithId for AsyncServiceClient {
+    const SERVICE_ID: u64 = DEFAULT_SERVICE_ID;
+}
+
 fn gen_rand(lower: i64, higher: i64) -> i64 {
     let mut rng = rand::thread_rng();
     rng.gen_range(lower..higher)
@@ -533,7 +537,7 @@ impl RaftService {
                     info!("Calling reelect to {}", addr);
                     match rpc::DEFAULT_CLIENT_POOL.get(&addr).await {
                         Ok(client) => {
-                            let service = AsyncServiceClient::new(DEFAULT_SERVICE_ID, &client);
+                            let service = AsyncServiceClient::new(&client);
                             match service.reelect().await {
                                 Ok(true) => {
                                     info!("New leader has been elected");

@@ -43,7 +43,6 @@ impl Subscriptions {
         address: &String,
         session_id: u64,
     ) -> Result<u64, ()> {
-        let sub_service_id = DEFAULT_SERVICE_ID;
         let suber_id = hash_str(address);
         let suber_exists = self.subscribers.contains_key(&suber_id);
         let sub_id = self.next_id;
@@ -71,7 +70,7 @@ impl Subscriptions {
                     session_id,
                     client: {
                         if let Ok(client) = RPCClient::new_async(address).await {
-                            AsyncServiceClient::new(sub_service_id, &client)
+                            AsyncServiceClient::new(&client)
                         } else {
                             return Err(());
                         }

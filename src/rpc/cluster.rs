@@ -73,5 +73,5 @@ pub fn client_by_rpc_client<C>(client: &Arc<RPCClient>) -> Arc<C>
 where
     C: ServiceClientWithId,
 {
-    C::new(C::SERVICE_ID, client)
+    C::new_with_service_id(C::SERVICE_ID, client)
 }

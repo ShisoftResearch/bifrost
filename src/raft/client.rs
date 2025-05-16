@@ -108,7 +108,7 @@ impl RaftClient {
                                     debug!("Added server info on {} to members", server_addr);
                                     members.clients.insert(
                                         id,
-                                        AsyncServiceClient::new(self.service_id, &client),
+                                        AsyncServiceClient::new_with_service_id(self.service_id, &client),
                                     );
                                     debug!("Member {} added", server_addr);
                                 }
@@ -206,7 +206,7 @@ impl RaftClient {
                             info!("Having new server addr {} id {}", addr, id);
                             members
                                 .clients
-                                .insert(*id, AsyncServiceClient::new(self.service_id, &client));
+                                .insert(*id, AsyncServiceClient::new_with_service_id(self.service_id, &client));
                         } else {
                             error!("Cannot connect to new server addr {}, id {}", addr, id);
                         }

@@ -229,18 +229,25 @@ impl ClientPool {
 }
 
 pub trait ServiceClient: Send + Sync {
-    fn new_instance(server_id: u64, client: &Arc<RPCClient>) -> Self;
+    fn new_instance_with_service_id(server_id: u64, client: &Arc<RPCClient>) -> Self;
     fn server_id(&self) -> u64;
-    fn new(server_id: u64, client: &Arc<RPCClient>) -> Arc<Self>
+    fn new_with_service_id(server_id: u64, client: &Arc<RPCClient>) -> Arc<Self>
     where
         Self: Sized,
     {
-        Arc::new(Self::new_instance(server_id, client))
+        Arc::new(Self::new_instance_with_service_id(server_id, client))
     }
 }
 
 pub trait ServiceClientWithId: ServiceClient {
     const SERVICE_ID: u64;
+
+    fn new(client: &Arc<RPCClient>) -> Arc<Self>
+    where
+        Self: Sized,
+    {
+        Self::new_with_service_id(Self::SERVICE_ID, client)
+    }
 }
 
 #[cfg(test)]
@@ -284,7 +291,7 @@ mod test {
             }
             sleep(Duration::from_millis(1000)).await;
             let client = RPCClient::new_async(&addr).await.unwrap();
-            let service_client = AsyncServiceClient::new(0, &client);
+            let service_client = AsyncServiceClient::new_with_service_id(0, &client);
             let response = service_client.hello(String::from("Jack")).await;
             let greeting_str = response.unwrap();
             info!("SERVER RESPONDED: {}", greeting_str);
@@ -341,7 +348,7 @@ mod test {
             }
             sleep(Duration::from_millis(1000)).await;
             let client = RPCClient::new_async(&addr).await.unwrap();
-            let service_client = AsyncServiceClient::new(0, &client);
+            let service_client = AsyncServiceClient::new_with_service_id(0, &client);
             let response = service_client.hello(Greeting {
                 name: String::from("Jack"),
                 time: 12,
@@ -436,7 +443,7 @@ mod test {
             sleep(Duration::from_millis(1000)).await;
             for addr in &addrs {
                 let client = RPCClient::new_async(addr).await.unwrap();
-                let service_client = AsyncServiceClient::new(id, &client);
+                let service_client = AsyncServiceClient::new_with_service_id(id, &client);
                 let id_res = service_client.query_server_id().await;
                 let id_un = id_res.unwrap();
                 assert_eq!(id_un, id);
@@ -481,7 +488,7 @@ mod test {
             }
             sleep(Duration::from_millis(1000)).await;
             let client = RPCClient::new_async(&addr).await.unwrap();
-            let service_client = AsyncServiceClient::new(0, &client);
+            let service_client = AsyncServiceClient::new_with_service_id(0, &client);
 
             info!("Testing parallel RPC reqs");
 
@@ -514,7 +521,7 @@ mod test {
                             .get_by_id(server_id, move |_| addr)
                             .await
                             .unwrap();
-                        let service_client = AsyncServiceClient::new(0, &client);
+                        let service_client = AsyncServiceClient::new_with_service_id(0, &client);
                         let response = service_client.hello(Greeting {
                             name: String::from("John"),
                             time: i,

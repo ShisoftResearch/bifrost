@@ -11,6 +11,10 @@ service! {
     rpc notify(key: SubKey, data: &Vec<u8>);
 }
 
+impl ServiceClientWithId for AsyncServiceClient {
+    const SERVICE_ID: u64 = DEFAULT_SERVICE_ID;
+}
+
 #[cfg(test)]
 mod test {
     use crate::raft::client::RaftClient;

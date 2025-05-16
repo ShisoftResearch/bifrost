@@ -166,7 +166,7 @@ macro_rules! service {
            )*
         }
         impl ServiceClient for AsyncServiceClient {
-            fn new_instance(service_id: u64, client: &Arc<RPCClient>) -> Self {
+            fn new_instance_with_service_id(service_id: u64, client: &Arc<RPCClient>) -> Self {
                 AsyncServiceClient{
                     service_id: service_id,
                     client: client.clone()
