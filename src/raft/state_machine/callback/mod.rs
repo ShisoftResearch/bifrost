@@ -1,4 +1,5 @@
 use bifrost_plugins::hash_ident;
+use server::SMCallback;
 
 pub mod client;
 pub mod server;
@@ -11,9 +12,6 @@ service! {
     rpc notify(key: SubKey, data: &Vec<u8>);
 }
 
-impl ServiceClientWithId for AsyncServiceClient {
-    const SERVICE_ID: u64 = DEFAULT_SERVICE_ID;
-}
 
 #[cfg(test)]
 mod test {
@@ -80,7 +78,7 @@ mod test {
         };
         let sm_id = dummy_sm.id();
         server
-            .register_service(DEFAULT_SERVICE_ID, &raft_service)
+            .register_service(&raft_service)
             .await;
         Server::listen_and_resume(&server).await;
         RaftService::start(&raft_service).await;

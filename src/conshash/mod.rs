@@ -419,7 +419,7 @@ mod test {
         let server = Server::new(&addr);
         info!("Creating membership service");
         let _membership = Membership::new(&server, &raft_service).await;
-        server.register_service(0, &raft_service).await;
+        server.register_service_with_id(0, &raft_service).await;
         Server::listen_and_resume(&server).await;
         RaftService::start(&raft_service).await;
         raft_service.bootstrap().await;

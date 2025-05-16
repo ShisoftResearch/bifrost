@@ -39,6 +39,7 @@ impl Service for SubscriptionService {
     }
 }
 dispatch_rpc_service_functions!(SubscriptionService);
+service_with_id!(SubscriptionService, DEFAULT_SERVICE_ID);
 
 impl SubscriptionService {
     pub async fn initialize(server: &Arc<Server>) -> Arc<SubscriptionService> {
@@ -47,7 +48,7 @@ impl SubscriptionService {
             server_address: server.address().clone(),
             session_id: get_time() as u64,
         });
-        server.register_service(DEFAULT_SERVICE_ID, &service).await;
+        server.register_service(&service).await;
         service
     }
 }

@@ -69,7 +69,7 @@ mod test {
         let server = Server::new(&addr);
         info!("Register service");
         server
-            .register_service(DEFAULT_SERVICE_ID, &raft_service)
+            .register_service(&raft_service)
             .await;
         info!("Server listen and resume");
         Server::listen_and_resume(&server).await;

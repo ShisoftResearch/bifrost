@@ -207,6 +207,18 @@ macro_rules! service {
     }
 }
 
+#[macro_export]
+macro_rules! service_with_id {
+    ($s:ty, $id:expr) => {
+        impl $crate::rpc::RPCServiceWithId for $s {
+            const SERVICE_ID: u64 = $id;
+        }
+        impl $crate::rpc::ServiceClientWithId for AsyncServiceClient {
+            const SERVICE_ID: u64 = $id;
+        }
+    };
+}
+
 mod syntax_test {
     service! {
         rpc test(a: u32, b: u32) -> bool;

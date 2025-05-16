@@ -137,7 +137,7 @@ impl Server {
         sleep(Duration::from_secs(1)).await
     }
 
-    pub async fn register_service<T>(&self, service_id: u64, service: &Arc<T>)
+    pub async fn register_service_with_id<T>(&self, service_id: u64, service: &Arc<T>)
     where
         T: RPCService + Sized + 'static,
     {
@@ -153,6 +153,13 @@ impl Server {
         self.services.insert(service_id, service);
     }
 
+    pub async fn register_service<T>(&self, service: &Arc<T>)
+    where
+        T: RPCServiceWithId + Sized + 'static,
+    {
+        self.register_service_with_id(T::SERVICE_ID, service).await
+    }
+    
     pub async fn remove_service(&self, service_id: u64) {
         self.services.remove(&service_id);
     }
@@ -250,6 +257,10 @@ pub trait ServiceClientWithId: ServiceClient {
     }
 }
 
+pub trait RPCServiceWithId: RPCService {
+    const SERVICE_ID: u64;
+}
+
 #[cfg(test)]
 mod test {
     use futures::future::BoxFuture;
@@ -286,7 +297,7 @@ mod test {
             {
                 let addr = addr.clone();
                 let server = Server::new(&addr);
-                server.register_service(0, &Arc::new(HelloServer)).await;
+                server.register_service_with_id(0, &Arc::new(HelloServer)).await;
                 Server::listen_and_resume(&server).await;
             }
             sleep(Duration::from_millis(1000)).await;
@@ -343,7 +354,7 @@ mod test {
             {
                 let addr = addr.clone();
                 let server = Server::new(&addr); // 0 is service id
-                server.register_service(0, &Arc::new(HelloServer)).await;
+                server.register_service_with_id(0, &Arc::new(HelloServer)).await;
                 Server::listen_and_resume(&server).await;
             }
             sleep(Duration::from_millis(1000)).await;
@@ -433,7 +444,7 @@ mod test {
                     let addr = addr.clone();
                     let server = Server::new(&addr); // 0 is service id
                     server
-                        .register_service(id, &Arc::new(IdServer { id: id }))
+                        .register_service_with_id(id, &Arc::new(IdServer { id: id }))
                         .await;
                     Server::listen_and_resume(&server).await;
                     id += 1;
@@ -483,7 +494,7 @@ mod test {
             {
                 let addr = addr.clone();
                 let server = Server::new(&addr); // 0 is service id
-                server.register_service(0, &Arc::new(HelloServer)).await;
+                server.register_service_with_id(0, &Arc::new(HelloServer)).await;
                 Server::listen_and_resume(&server).await;
             }
             sleep(Duration::from_millis(1000)).await;

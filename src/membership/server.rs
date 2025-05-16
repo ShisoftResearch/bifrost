@@ -91,7 +91,7 @@ impl HeartbeatService {
     }
 }
 dispatch_rpc_service_functions!(HeartbeatService);
-
+service_with_id!(HeartbeatService, DEFAULT_SERVICE_ID);
 #[derive(Debug)]
 struct Member {
     pub address: String,
@@ -209,7 +209,7 @@ impl Membership {
             .register_state_machine(Box::new(membership_service))
             .await;
         server
-            .register_service(DEFAULT_SERVICE_ID, &service_clone)
+            .register_service(&service_clone)
             .await;
     }
     async fn compose_client_member(&self, id: u64) -> ClientMember {
