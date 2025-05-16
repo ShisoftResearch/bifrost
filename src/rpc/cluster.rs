@@ -21,17 +21,17 @@ where
             return Err(format!("Failed to get all members: {:?}", e));
         }
     };
-    let server_ids = members.into_iter().map(|m| m.id);
+    let server_ids = members.iter().map(|m| &m.id);
     broadcast_with_server_ids(server_ids, &conshash, func).await
 }
 
-pub async fn broadcast_with_server_ids<C, F, R, I, Fut>(
+pub async fn broadcast_with_server_ids<'a, C, F, R, I, Fut>(
     server_ids: I,
     conshash: &Arc<ConsistentHashing>,
     func: F,
 ) -> Result<Vec<(u64, Result<R, RPCError>)>, String>
 where
-    I: Iterator<Item = u64>,
+    I: Iterator<Item = &'a u64>,
     C: ServiceClientWithId,
     F: Fn(Arc<C>) -> Fut + Clone + Send + 'static,
     Fut: Future<Output = Result<R, RPCError>> + Send,
@@ -40,14 +40,14 @@ where
         .map(|sid| {
             let func = func.clone();
             async move {
-                let client = match client_by_server_id(&conshash, sid).await {
+                let client = match client_by_server_id(&conshash, *sid).await {
                     Ok(client) => client,
                     Err(e) => {
                         error!("Failed to get client by server id {}: {:?}", sid, e);
-                        return (sid, Err(e));
+                        return (*sid, Err(e));
                     }
                 };
-                return (sid, func(client).await);
+                return (*sid, func(client).await);
             }
         })
         .collect();
