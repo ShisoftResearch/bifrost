@@ -10,7 +10,10 @@ use bifrost_plugins::hash_ident;
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_MEMBERSHIP_SERVICE) as u64;
 
 pub mod raft {
+    use super::server::MemberGroup;
     use super::*;
+    use std::collections::BTreeMap;
+
     raft_state_machine! {
         def cmd hb_online_changed(online: Vec<u64>, offline: Vec<u64>);
         def cmd join(address: String) -> Option<u64>;
@@ -22,6 +25,7 @@ pub mod raft {
         def qry group_leader(group: u64) -> Option<(Option<ClientMember>, u64)>;
         def qry group_members (group: u64, online_only: bool) -> Option<(Vec<ClientMember>, u64)>;
         def qry all_members (online_only: bool) -> (Vec<ClientMember>, u64);
+        def qry all_groups() -> BTreeMap<u64, MemberGroup>;
         def sub on_group_member_offline(group: u64) -> (ClientMember, u64); //
         def sub on_any_member_offline() -> (ClientMember, u64); //
         def sub on_group_member_online(group: u64) -> (ClientMember, u64); //
@@ -68,9 +72,7 @@ mod test {
         info!("Creating server");
         let server = Server::new(&addr);
         info!("Register service");
-        server
-            .register_service(&raft_service)
-            .await;
+        server.register_service(&raft_service).await;
         info!("Server listen and resume");
         Server::listen_and_resume(&server).await;
         info!("Start raft service");
@@ -233,7 +235,8 @@ mod test {
             .unwrap();
         let member1_addr = String::from("server1");
         info!("New member service {}", member1_addr);
-        let member1_svr = MemberService::new(&member1_addr, &member1_raft_client, &raft_service).await;
+        let member1_svr =
+            MemberService::new(&member1_addr, &member1_raft_client, &raft_service).await;
 
         info!("New member2_raft_client");
         let member2_raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID)
@@ -241,7 +244,8 @@ mod test {
             .unwrap();
         let member2_addr = String::from("server2");
         info!("New member service {}", member2_addr);
-        let member2_svr = MemberService::new(&member2_addr, &member2_raft_client, &raft_service).await;
+        let member2_svr =
+            MemberService::new(&member2_addr, &member2_raft_client, &raft_service).await;
 
         info!("New member3_raft_client");
         let member3_raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID)
@@ -249,7 +253,8 @@ mod test {
             .unwrap();
         let member3_addr = String::from("server3");
         info!("New member service {}", member3_addr);
-        let member3_svr = MemberService::new(&member3_addr, &member3_raft_client, &raft_service).await;
+        let member3_svr =
+            MemberService::new(&member3_addr, &member3_raft_client, &raft_service).await;
 
         info!("Member 1 join group 1");
         member1_svr.join_group(&group_1).await.unwrap();

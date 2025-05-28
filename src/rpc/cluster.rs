@@ -1,6 +1,10 @@
 use std::{future::Future, sync::Arc};
 
-use crate::{conshash::ConsistentHashing, raft::state_machine::master::ExecError, rpc::{RPCError, DEFAULT_CLIENT_POOL}};
+use crate::{
+    conshash::ConsistentHashing,
+    raft::state_machine::master::ExecError,
+    rpc::{RPCError, DEFAULT_CLIENT_POOL},
+};
 use futures::stream::FuturesUnordered;
 use tokio_stream::StreamExt;
 
@@ -19,11 +23,12 @@ where
     broadcast_with_server_ids(server_ids, &conshash, func).await
 }
 
-pub async fn all_server_ids(conshash: &Arc<ConsistentHashing>) -> Result<impl Iterator<Item = u64>, ExecError> {
+pub async fn all_server_ids(
+    conshash: &Arc<ConsistentHashing>,
+) -> Result<impl Iterator<Item = u64>, ExecError> {
     let (members, _) = conshash.membership().all_members(true).await?;
     Ok(members.into_iter().map(|m| m.id))
 }
-
 
 pub async fn broadcast_with_server_ids<C, F, R, I, Fut>(
     server_ids: I,

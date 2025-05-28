@@ -54,7 +54,10 @@ impl StateMachineCmds for Configures {
                         self.members.insert(
                             id,
                             RaftMember {
-                                rpc: AsyncServiceClient::new_with_service_id(self.service_id, &client),
+                                rpc: AsyncServiceClient::new_with_service_id(
+                                    self.service_id,
+                                    &client,
+                                ),
                                 address,
                                 id,
                             },

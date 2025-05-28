@@ -69,7 +69,7 @@ impl ConsistentHashing {
             watchers: RwLock::new(Vec::new()),
             version: AtomicU64::new(0),
             update_lock: async_std::sync::Mutex::new(()),
-            num_addrs: AtomicUsize::new(0)
+            num_addrs: AtomicUsize::new(0),
         });
         {
             let ch = ch.clone();
@@ -344,7 +344,11 @@ impl ConsistentHashing {
                 }
             }
         } else {
-            error!("No group {} existed in table", group_name);
+            error!(
+                "No group {} existed in table, groups {:?}",
+                group_name,
+                self.membership.all_groups().await
+            );
             Err(InitTableError::GroupNotExisted)
         }
     }
@@ -374,7 +378,14 @@ async fn server_changed(ch: Arc<ConsistentHashing>, member: Member, action: Acti
             debug!("Reinit conshash table");
             let reinit_res = ch.init_table().await;
             if !reinit_res.is_ok() {
-                error!("Cannot reinit table {:?}, member {:?}, action {:?}, version {}", reinit_res.err().unwrap(), member, action, version);
+                error!(
+                    "Cannot reinit table {:?}, member {:?}, action {:?}, version {} -> {}",
+                    reinit_res.err().unwrap(),
+                    member,
+                    action,
+                    ch_version,
+                    version
+                );
             }
             debug!("Triggering conshash watchers");
             let new_nodes = (&*ch.tables.read()).nodes.clone();

@@ -1408,9 +1408,7 @@ mod test {
         info!("Starting server 1");
         let server1 = Server::new(&s1_addr);
         info!("Register raft service for server 1");
-        server1
-            .register_service(&service1)
-            .await;
+        server1.register_service(&service1).await;
         info!("Listening server 1");
         Server::listen_and_resume(&server1).await;
         info!("Start raft service server 1");
@@ -1427,9 +1425,7 @@ mod test {
             address: s2_addr.clone(),
             service_id: DEFAULT_SERVICE_ID,
         });
-        server2
-            .register_service(&service2)
-            .await;
+        server2.register_service(&service2).await;
         info!("Listening server 2");
         Server::listen_and_resume(&server2).await;
         info!("Start raft service for server 2");
@@ -1455,9 +1451,7 @@ mod test {
         let server3 = Server::new(&s3_addr);
         Server::listen_and_resume(&server3).await;
         info!("Register raft service for server 3");
-        server3
-            .register_service(&service3)
-            .await;
+        server3.register_service(&service3).await;
         info!("Start raft service for server 3");
         assert!(RaftService::start(&service3).await);
         info!("Server 3 join server 1 and server 2");
@@ -1543,9 +1537,7 @@ mod test {
         info!("Start server 1");
         let server1 = Server::new(&s1_addr);
         info!("Register raft service for server 1");
-        server1
-            .register_service(&service1)
-            .await;
+        server1.register_service(&service1).await;
         info!("Listen server 1");
         Server::listen_and_resume(&server1).await;
         info!("Starting raft service for server 1");
@@ -1558,9 +1550,7 @@ mod test {
         info!("Listening server 2");
         Server::listen_and_resume(&server2).await;
         info!("Register raft service for server 2");
-        server2
-            .register_service(&service2)
-            .await;
+        server2.register_service(&service2).await;
         info!("Start raft service for server 2");
         assert!(RaftService::start(&service2).await);
         info!("Server 2 join cluster");
@@ -1570,9 +1560,7 @@ mod test {
         info!("Starting server 3");
         let server3 = Server::new(&s3_addr);
         info!("Register raft service for server 3");
-        server3
-            .register_service(&service3)
-            .await;
+        server3.register_service(&service3).await;
         info!("Listening for server 3");
         Server::listen_and_resume(&server3).await;
         info!("Starting raft service for server 3");
@@ -1584,9 +1572,7 @@ mod test {
         info!("Starting server 4");
         let server4 = Server::new(&s4_addr);
         info!("Register raft service for server 4");
-        server4
-            .register_service(&service4)
-            .await;
+        server4.register_service(&service4).await;
         info!("Listening for server 4");
         Server::listen_and_resume(&server4).await;
         info!("Starting raft service for server 4");
@@ -1598,9 +1584,7 @@ mod test {
         info!("Starting server 5");
         let server5 = Server::new(&s5_addr);
         info!("Register raft service for server 5");
-        server5
-            .register_service(&service5)
-            .await;
+        server5.register_service(&service5).await;
         info!("Listening for server 5");
         Server::listen_and_resume(&server5).await;
         info!("Starting raft service for server 5");
@@ -1686,9 +1670,7 @@ mod test {
             let sm = SM { shots: 10 };
             let server = Server::new(&addr);
             let sm_id = sm.id();
-            server
-                .register_service(&raft_service)
-                .await;
+            server.register_service(&raft_service).await;
             Server::listen_and_resume(&server).await;
             RaftService::start(&raft_service).await;
             raft_service.register_state_machine(Box::new(sm)).await;
@@ -1736,9 +1718,7 @@ mod test {
                         });
                         let sm = SM { shots: 10 };
                         let server = Server::new(&addr);
-                        server
-                            .register_service(&raft_service)
-                            .await;
+                        server.register_service(&raft_service).await;
                         Server::listen_and_resume(&server).await;
                         RaftService::start(&raft_service).await;
                         raft_service.register_state_machine(Box::new(sm)).await;

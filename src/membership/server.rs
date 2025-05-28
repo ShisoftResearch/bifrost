@@ -14,6 +14,9 @@ use futures::prelude::*;
 use futures::stream::FuturesUnordered;
 use lightning::map::Map;
 use lightning::map::PtrHashMap;
+use serde::Deserialize;
+use serde::Serialize;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
@@ -98,15 +101,17 @@ struct Member {
     pub groups: HashSet<u64>,
 }
 
-struct MemberGroup {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MemberGroup {
     members: BTreeSet<u64>,
     leader: Option<u64>,
+    name: String,
 }
 
 pub struct Membership {
     heartbeat: Arc<HeartbeatService>,
-    groups: HashMap<u64, MemberGroup>,
-    members: HashMap<u64, Member>,
+    groups: BTreeMap<u64, MemberGroup>,
+    members: BTreeMap<u64, Member>,
     callback: Option<SMCallback>,
     version: u64,
 }
@@ -199,8 +204,8 @@ impl Membership {
         });
         let mut membership_service = Membership {
             heartbeat: service_clone.clone(),
-            groups: HashMap::new(),
-            members: HashMap::new(),
+            groups: BTreeMap::new(),
+            members: BTreeMap::new(),
             callback: None,
             version: 0,
         };
@@ -208,9 +213,7 @@ impl Membership {
         raft_service
             .register_state_machine(Box::new(membership_service))
             .await;
-        server
-            .register_service(&service_clone)
-            .await;
+        server.register_service(&service_clone).await;
     }
     async fn compose_client_member(&self, id: u64) -> ClientMember {
         let member = self.members.get(&id).unwrap();
@@ -548,6 +551,7 @@ impl StateMachineCmds for Membership {
                 MemberGroup {
                     members: BTreeSet::new(),
                     leader: None,
+                    name: name.clone(),
                 }
             });
             if inserted {
@@ -638,6 +642,9 @@ impl StateMachineCmds for Membership {
             )
         }
         .boxed()
+    }
+    fn all_groups(&self) -> BoxFuture<BTreeMap<u64, MemberGroup>> {
+        future::ready(self.groups.clone()).boxed()
     }
 }
 impl StateMachineCtl for Membership {

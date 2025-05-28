@@ -8,9 +8,9 @@ use std::sync::Arc;
 use tokio::{runtime, time};
 
 use crate::membership::DEFAULT_SERVICE_ID;
-use crate::raft::RaftService;
 use crate::raft::client::RaftClient;
 use crate::raft::state_machine::master::ExecError;
+use crate::raft::RaftService;
 use crate::utils::time::get_time;
 
 static PING_INTERVAL: u64 = 500;
@@ -24,7 +24,11 @@ pub struct MemberService {
 }
 
 impl MemberService {
-    pub async fn new(server_address: &String, raft_client: &Arc<RaftClient>, raft_service: &Arc<RaftService>) -> Arc<MemberService> {
+    pub async fn new(
+        server_address: &String,
+        raft_client: &Arc<RaftClient>,
+        raft_service: &Arc<RaftService>,
+    ) -> Arc<MemberService> {
         let server_id = hash_str(server_address);
         let sm_client = Arc::new(SMClient::new(DEFAULT_SERVICE_ID, &raft_client));
         let service = Arc::new(MemberService {
@@ -35,7 +39,7 @@ impl MemberService {
             },
             raft_client: raft_client.clone(),
             closed: AtomicBool::new(false),
-            id: server_id, 
+            id: server_id,
         });
         let _join_res = sm_client.join(&server_address).await;
         let service_clone = service.clone();

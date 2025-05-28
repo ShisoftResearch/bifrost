@@ -159,7 +159,7 @@ impl Server {
     {
         self.register_service_with_id(T::SERVICE_ID, service).await
     }
-    
+
     pub async fn remove_service(&self, service_id: u64) {
         self.services.remove(&service_id);
     }
@@ -297,7 +297,9 @@ mod test {
             {
                 let addr = addr.clone();
                 let server = Server::new(&addr);
-                server.register_service_with_id(0, &Arc::new(HelloServer)).await;
+                server
+                    .register_service_with_id(0, &Arc::new(HelloServer))
+                    .await;
                 Server::listen_and_resume(&server).await;
             }
             sleep(Duration::from_millis(1000)).await;
@@ -354,7 +356,9 @@ mod test {
             {
                 let addr = addr.clone();
                 let server = Server::new(&addr); // 0 is service id
-                server.register_service_with_id(0, &Arc::new(HelloServer)).await;
+                server
+                    .register_service_with_id(0, &Arc::new(HelloServer))
+                    .await;
                 Server::listen_and_resume(&server).await;
             }
             sleep(Duration::from_millis(1000)).await;
@@ -494,7 +498,9 @@ mod test {
             {
                 let addr = addr.clone();
                 let server = Server::new(&addr); // 0 is service id
-                server.register_service_with_id(0, &Arc::new(HelloServer)).await;
+                server
+                    .register_service_with_id(0, &Arc::new(HelloServer))
+                    .await;
                 Server::listen_and_resume(&server).await;
             }
             sleep(Duration::from_millis(1000)).await;

@@ -5,7 +5,10 @@ use crate::raft::state_machine::master::ExecError;
 use bifrost_hasher::hash_str;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::Arc;
+
+use super::server::MemberGroup;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Member {
@@ -172,5 +175,8 @@ impl ObserverClient {
         self.sm_client
             .on_group_leader_changed(f, &hash_str(group))
             .await
+    }
+    pub async fn all_groups(&self) -> Result<BTreeMap<u64, MemberGroup>, ExecError> {
+        self.sm_client.all_groups().await
     }
 }

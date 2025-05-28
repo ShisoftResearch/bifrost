@@ -12,7 +12,6 @@ service! {
     rpc notify(key: SubKey, data: &Vec<u8>);
 }
 
-
 #[cfg(test)]
 mod test {
     use crate::raft::client::RaftClient;
@@ -77,9 +76,7 @@ mod test {
             callback: SMCallback::new(10, raft_service.clone()).await,
         };
         let sm_id = dummy_sm.id();
-        server
-            .register_service(&raft_service)
-            .await;
+        server.register_service(&raft_service).await;
         Server::listen_and_resume(&server).await;
         RaftService::start(&raft_service).await;
         raft_service
