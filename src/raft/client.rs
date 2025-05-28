@@ -414,6 +414,7 @@ impl RaftClient {
                         ClientQryResponse::LeftBehind => {
                             debug!("Found left behind record...{}", depth);
                             if depth >= num_members {
+                                error!("Too many retry on query, num_members {}, due to left behind record {}", num_members, depth);
                                 return Err(ExecError::TooManyRetry);
                             } else {
                                 depth += 1;
@@ -473,6 +474,7 @@ impl RaftClient {
                     let members = self.members.read().await;
                     let num_members = members.clients.len();
                     if depth >= max(num_members + 1, 5) {
+                        error!("Too many retry on command, num_members {}, due to left behind record {}", num_members, depth);
                         return Err(ExecError::TooManyRetry);
                     };
                 }
