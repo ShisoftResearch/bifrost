@@ -374,7 +374,7 @@ async fn server_changed(ch: Arc<ConsistentHashing>, member: Member, action: Acti
             debug!("Reinit conshash table");
             let reinit_res = ch.init_table().await;
             if !reinit_res.is_ok() {
-                error!("Cannot reinit table {:?}", reinit_res.err().unwrap());
+                error!("Cannot reinit table {:?}, member {:?}, action {:?}, version {}", reinit_res.err().unwrap(), member, action, version);
             }
             debug!("Triggering conshash watchers");
             let new_nodes = (&*ch.tables.read()).nodes.clone();
