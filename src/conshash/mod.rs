@@ -240,6 +240,10 @@ impl ConsistentHashing {
         let rand = rand::random::<u64>();
         self.get_server(rand)
     }
+    pub fn rand_server_id(&self) -> Option<u64> {
+        let rand = rand::random::<u64>();
+        self.get_server_id(rand)
+    }
     pub fn nodes_count(&self) -> usize {
         let lookup_table = self.tables.read();
         return lookup_table.nodes.len();
