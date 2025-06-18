@@ -122,7 +122,11 @@ impl Server {
                             encode_res(svr_res)
                         }
                         None => {
-                            error!("Service {} not found, have {:?}", svr_id, server.services.keys());
+                            let service_list = server.services.entries()
+                                .into_iter()
+                                .map(|(sid, service)| format!("{}:{}", sid, service.service_symbol()))
+                                .collect::<Vec<_>>();
+                            error!("Service {} not found, have {:?}", svr_id, service_list.join(", "));
                             encode_res(Err(RPCRequestError::ServiceIdNotFound))
                         },
                     }
