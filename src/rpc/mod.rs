@@ -10,6 +10,7 @@ use futures::prelude::*;
 use futures::Future;
 use lightning::map::*;
 use serde::{Deserialize, Serialize};
+use std::backtrace;
 use std::error::Error;
 use std::io;
 use std::pin::Pin;
@@ -122,13 +123,22 @@ impl Server {
                             encode_res(svr_res)
                         }
                         None => {
-                            let service_list = server.services.entries()
+                            let service_list = server
+                                .services
+                                .entries()
                                 .into_iter()
-                                .map(|(sid, service)| format!("{}:{}", sid, service.service_symbol()))
+                                .map(|(sid, service)| {
+                                    format!("{}:{}", sid, service.service_symbol())
+                                })
                                 .collect::<Vec<_>>();
-                            error!("Service {} not found, have {:?}", svr_id, service_list.join(", "));
+                            error!(
+                                "Service {} not found, have {:?}, backtrace: {:?}",
+                                svr_id,
+                                service_list.join(", "),
+                                backtrace::Backtrace::capture()
+                            );
                             encode_res(Err(RPCRequestError::ServiceIdNotFound))
-                        },
+                        }
                     }
                 }
                 .boxed()
@@ -158,7 +168,11 @@ impl Server {
         } else {
             debug!("SERVICE SHORTCUT DISABLED");
         }
-        info!("Registering service {} with id {}", service.service_symbol(), service_id);
+        info!(
+            "Registering service {} with id {}",
+            service.service_symbol(),
+            service_id
+        );
         self.services.insert(service_id, service);
     }
 
