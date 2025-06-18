@@ -45,6 +45,7 @@ pub trait RPCService: Sync + Send {
         server_id: u64,
         service_id: u64,
     ) -> ::std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
+    fn service_symbol(&self) -> &'static str;
 }
 
 pub struct Server {
@@ -153,6 +154,7 @@ impl Server {
         } else {
             debug!("SERVICE SHORTCUT DISABLED");
         }
+        info!("Registering service {} with id {}", service.service_symbol(), service_id);
         self.services.insert(service_id, service);
     }
 

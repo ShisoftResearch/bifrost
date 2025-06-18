@@ -32,6 +32,9 @@ macro_rules! dispatch_rpc_service_functions {
                 }
                 .boxed()
             }
+            fn service_symbol(&self) -> &'static str {
+                stringify!($s)
+            }
         }
     };
 }
