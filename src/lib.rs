@@ -1,7 +1,6 @@
 #![crate_type = "lib"]
 #![feature(proc_macro_hygiene)]
 #![feature(trait_alias)]
-#![feature(core_intrinsics)]
 
 #[cfg(disable_shortcut)]
 pub static DISABLE_SHORTCUT: bool = true;

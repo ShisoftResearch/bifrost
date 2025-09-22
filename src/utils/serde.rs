@@ -22,7 +22,7 @@ where
         Err(e) => {
             warn!(
                 "Error on decoding data for type '{}', {}",
-                std::intrinsics::type_name::<T>(),
+                std::any::type_name::<T>(),
                 e
             );
             None
@@ -46,7 +46,7 @@ pub fn deserialize<'a, T>(data: &'a [u8]) -> Option<T>
 where
     T: serde::Deserialize<'a>,
 {
-    let type_name = std::intrinsics::type_name::<T>();
+    let type_name = std::any::type_name::<T>();
     match serde_json::from_slice(data) {
         Ok(obj) => Some(obj),
         Err(e) => {
