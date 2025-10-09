@@ -384,7 +384,7 @@ impl RaftService {
         let server_address = server.options.address.clone();
         
         // Load and recover from snapshot if it exists
-        server.load_snapshot_on_startup().await;
+        let recovered_from_disk = server.load_snapshot_on_startup().await;
         
         info!("Waiting for raft server to be initialized");
         {
@@ -402,6 +402,44 @@ impl RaftService {
             }
             if !inited {
                 return false;
+            }
+            
+            // FIX: Single-node cluster recovery from disk
+            // If we recovered state from disk and we're the only member,
+            // immediately become leader (no election needed)
+            let num_members = sm.configs.members.len();
+            let has_logs = !meta.logs.read().await.is_empty();
+            let has_term = meta.term > 0;
+            
+            debug!(
+                "Post-recovery check: recovered_from_disk={}, num_members={}, has_logs={}, has_term={}, membership={:?}",
+                recovered_from_disk, num_members, has_logs, has_term,
+                match &meta.membership {
+                    Membership::Leader(_) => "Leader",
+                    Membership::Follower => "Follower",
+                    Membership::Candidate => "Candidate",
+                    Membership::Offline => "Offline",
+                    Membership::Undefined => "Undefined",
+                }
+            );
+            
+            if (recovered_from_disk || has_logs || has_term) && num_members == 1 {
+                info!(
+                    "Single-node cluster detected after recovery (term={}, logs={}, members={}). Becoming leader immediately.",
+                    meta.term, has_logs, num_members
+                );
+                let (last_log_id, _) = {
+                    let logs = meta.logs.read().await;
+                    get_last_log_info!(server, logs)
+                };
+                drop(sm); // Release state machine lock before become_leader
+                server.become_leader(&mut meta, last_log_id).await;
+                info!("Successfully transitioned to Leader state");
+            } else {
+                debug!(
+                    "Not transitioning to leader: condition not met (recovered={} || logs={} || term={}) && members==1: {}",
+                    recovered_from_disk, has_logs, has_term, num_members
+                );
             }
         }
         let checker_ref = server.clone();

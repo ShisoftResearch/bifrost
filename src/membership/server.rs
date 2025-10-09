@@ -119,6 +119,16 @@ pub struct MemberGroup {
     name: String,
 }
 
+/// Membership service manages member groups and heartbeat status.
+/// 
+/// IMPORTANT: This service does NOT persist its state to disk. On each restart,
+/// it starts with empty state and rebuilds membership through:
+/// 1. Members sending join() commands
+/// 2. Heartbeat ping() messages updating online/offline status
+/// 3. Group membership operations (join_group, leave_group, etc.)
+/// 
+/// This design ensures membership always reflects current network reality,
+/// not stale persisted state that might be outdated after crashes.
 pub struct Membership {
     heartbeat: Arc<HeartbeatService>,
     groups: BTreeMap<u64, MemberGroup>,
@@ -133,6 +143,14 @@ impl Drop for Membership {
 }
 
 impl Membership {
+    /// Creates a new Membership service with fresh, empty state.
+    /// 
+    /// The service will discover members through:
+    /// - join() commands from members joining the cluster
+    /// - ping() heartbeats indicating member liveness
+    /// - join_group/leave_group commands for group management
+    /// 
+    /// No state is recovered from disk - all membership is learned from the network.
     pub async fn new(server: &Arc<Server>, raft_service: &Arc<RaftService>) {
         let service = Arc::new(HeartbeatService {
             status: PtrHashMap::with_capacity(32),
@@ -144,7 +162,7 @@ impl Membership {
         let service_clone = service.clone();
         let service_for_task = service.clone();
         let handle = raft_service.rt.spawn(async move {
-            info!("Starting membership heartbeat watcher");
+            info!("Starting membership heartbeat watcher (fresh state, learning from network)");
             while !service_for_task.closed.load(Ordering::Relaxed) {
                 let service = &service_for_task;
                 let start_time = get_time();
@@ -221,12 +239,17 @@ impl Membership {
         // Store the handle for graceful shutdown
         *service.watcher_handle.lock().unwrap() = Some(handle);
         
+        // Create membership service with EMPTY state.
+        // It will learn all membership from the network through:
+        // 1. join() commands as members join
+        // 2. ping() heartbeats for liveness tracking
+        // 3. Group operations (join_group, leave_group, etc.)
         let mut membership_service = Membership {
             heartbeat: service_clone.clone(),
-            groups: BTreeMap::new(),
-            members: BTreeMap::new(),
+            groups: BTreeMap::new(),       // Empty groups - will be populated as groups are created
+            members: BTreeMap::new(),      // Empty members - will be populated as members join
             callback: None,
-            version: 0,
+            version: 0,                    // Version starts at 0
         };
         membership_service.init_callback(raft_service).await;
         raft_service
@@ -672,11 +695,15 @@ impl StateMachineCtl for Membership {
         DEFAULT_SERVICE_ID
     }
     fn snapshot(&self) -> Option<Vec<u8>> {
-        //Some(serialize!(&self.map))
-        None // TODO: Backup members
+        // Membership service intentionally does NOT persist its state.
+        // It starts fresh on each restart and learns membership from the network
+        // via heartbeats and join/leave commands.
+        // This ensures membership reflects current network reality, not stale disk state.
+        None
     }
     fn recover(&mut self, _: Vec<u8>) -> BoxFuture<()> {
+        // Membership service does not recover from snapshots.
+        // It rebuilds its state from network discovery and heartbeats.
         future::ready(()).boxed()
-        //self.map = deserialize!(&data);
     }
 }
