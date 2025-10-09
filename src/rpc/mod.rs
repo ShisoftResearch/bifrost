@@ -15,6 +15,7 @@ use std::error::Error;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tokio::time::sleep;
 use tokio::time::*;
@@ -53,6 +54,8 @@ pub struct Server {
     services: PtrHashMap<u64, Arc<dyn RPCService>>,
     pub address: String,
     pub server_id: u64,
+    tcp_server: StdMutex<Option<Arc<tcp::server::Server>>>,
+    shutdown_handle: StdMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 unsafe impl Sync for Server {}
@@ -104,15 +107,23 @@ impl Server {
             services: PtrHashMap::with_capacity(16),
             address: address.clone(),
             server_id: hash_str(address),
+            tcp_server: StdMutex::new(None),
+            shutdown_handle: StdMutex::new(None),
         })
     }
+    
     pub async fn listen(server: &Arc<Server>) -> Result<(), Box<dyn Error>> {
         let address = &server.address;
-        let server = server.clone();
-        tcp::server::Server::new(
+        let tcp_server = Arc::new(tcp::server::Server::new());
+        
+        // Store tcp_server reference
+        *server.tcp_server.lock().unwrap() = Some(tcp_server.clone());
+        
+        let server_clone = server.clone();
+        tcp_server.listen(
             address,
             Arc::new(move |data| {
-                let server = server.clone();
+                let server = server_clone.clone();
                 async move {
                     let (svr_id, data) = read_u64_head(data);
                     let service = server.services.get(&svr_id);
@@ -148,11 +159,69 @@ impl Server {
     }
 
     pub async fn listen_and_resume(server: &Arc<Server>) {
-        let server = server.clone();
-        tokio::spawn(async move {
-            Self::listen(&server).await.unwrap();
+        let address = server.address.clone();
+        let tcp_server = Arc::new(tcp::server::Server::new());
+        
+        // Store tcp_server in the server struct
+        *server.tcp_server.lock().unwrap() = Some(tcp_server.clone());
+        
+        let server_clone = server.clone();
+        let handle = tokio::spawn(async move {
+            let result = tcp_server.listen(
+                &address,
+                Arc::new(move |data| {
+                    let server = server_clone.clone();
+                    async move {
+                        let (svr_id, data) = read_u64_head(data);
+                        let service = server.services.get(&svr_id);
+                        trace!("Processing request for service {}", svr_id);
+                        match service {
+                            Some(service) => {
+                                let svr_res = service.dispatch(data).await;
+                                encode_res(svr_res)
+                            }
+                            None => {
+                                let service_list = server
+                                    .services
+                                    .entries()
+                                    .into_iter()
+                                    .map(|(sid, service)| {
+                                        format!("{}:{}", sid, service.service_symbol())
+                                    })
+                                    .collect::<Vec<_>>();
+                                error!(
+                                    "Service {} not found, have {:?}, backtrace: {:?}",
+                                    svr_id,
+                                    service_list.join(", "),
+                                    backtrace::Backtrace::capture()
+                                );
+                                encode_res(Err(RPCRequestError::ServiceIdNotFound))
+                            }
+                        }
+                    }
+                    .boxed()
+                }),
+            )
+            .await;
+            
+            if let Err(e) = result {
+                error!("RPC server error: {:?}", e);
+            }
         });
+        
+        // Store handle
+        *server.shutdown_handle.lock().unwrap() = Some(handle);
+        
         sleep(Duration::from_secs(1)).await
+    }
+    
+    pub async fn shutdown(&self) {
+        info!("Shutting down RPC server on {}", self.address);
+        if let Some(ref tcp_server) = *self.tcp_server.lock().unwrap() {
+            tcp_server.shutdown();
+        }
+        // Give it a moment to shut down gracefully
+        sleep(Duration::from_millis(100)).await;
     }
 
     pub async fn register_service_with_id<T>(&self, service_id: u64, service: &Arc<T>)

@@ -185,6 +185,7 @@ pub struct RaftService {
     pub options: Options,
     pub rt: runtime::Runtime,
     _is_leader: AtomicBool,
+    checker_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 dispatch_rpc_service_functions!(RaftService);
 
@@ -314,6 +315,7 @@ impl RaftService {
                 .build()
                 .unwrap(),
             _is_leader: AtomicBool::new(false),
+            checker_task: std::sync::Mutex::new(None),
         };
         Arc::new(server_obj)
     }
@@ -403,7 +405,8 @@ impl RaftService {
             }
         }
         let checker_ref = server.clone();
-        server.rt.spawn(async {
+        let handle = server.rt.spawn(async {
+            info!("Starting Raft checker/heartbeat task");
             let server = checker_ref;
             loop {
                 let start_time = get_time();
@@ -483,7 +486,12 @@ impl RaftService {
                     sleep(Duration::from_millis(time_to_sleep as u64)).await;
                 }
             }
+            info!("Raft checker/heartbeat task stopped gracefully");
         });
+        
+        // Store the handle for graceful shutdown
+        *server.checker_task.lock().unwrap() = Some(handle);
+        
         return true;
     }
     pub async fn new_server(opts: Options) -> (bool, Arc<RaftService>, Arc<Server>) {
@@ -700,6 +708,27 @@ impl RaftService {
     pub fn get_server_id(&self) -> u64 {
         self.id
     }
+    
+    pub async fn shutdown(&self) {
+        info!("Shutting down RaftService on {}", self.options.address);
+        
+        // Set membership to Offline to signal the checker task to exit
+        {
+            let mut meta = self.meta.write().await;
+            meta.membership = Membership::Offline;
+            info!("Set RaftService membership to Offline");
+        }
+        
+        // Wait for the checker task to complete
+        if let Some(handle) = self.checker_task.lock().unwrap().take() {
+            info!("Waiting for Raft checker task to complete...");
+            let _ = handle.await;
+            info!("Raft checker task completed");
+        }
+        
+        info!("RaftService shutdown complete");
+    }
+    
     pub async fn register_state_machine(&self, state_machine: SubStateMachine) {
         let meta = self.meta.read().await;
         let mut master_sm = meta.state_machine.write().await;

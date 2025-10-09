@@ -38,6 +38,7 @@ pub struct HeartbeatService {
     raft_service: Arc<RaftService>,
     closed: AtomicBool,
     was_leader: AtomicBool,
+    watcher_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Service for HeartbeatService {
@@ -92,6 +93,16 @@ impl HeartbeatService {
             }
         }
     }
+    
+    pub async fn shutdown(&self) {
+        info!("Shutting down heartbeat service");
+        self.closed.store(true, Ordering::Relaxed);
+        
+        // Wait for the watcher task to complete
+        if let Some(handle) = self.watcher_handle.lock().unwrap().take() {
+            let _ = handle.await;
+        }
+    }
 }
 dispatch_rpc_service_functions!(HeartbeatService);
 service_with_id!(HeartbeatService, DEFAULT_SERVICE_ID);
@@ -128,10 +139,14 @@ impl Membership {
             closed: AtomicBool::new(false),
             raft_service: raft_service.clone(),
             was_leader: AtomicBool::new(false),
+            watcher_handle: std::sync::Mutex::new(None),
         });
         let service_clone = service.clone();
-        raft_service.rt.spawn(async move {
-            while !service.closed.load(Ordering::Relaxed) {
+        let service_for_task = service.clone();
+        let handle = raft_service.rt.spawn(async move {
+            info!("Starting membership heartbeat watcher");
+            while !service_for_task.closed.load(Ordering::Relaxed) {
+                let service = &service_for_task;
                 let start_time = get_time();
                 let is_leader = service.raft_service.is_leader();
                 let was_leader = service.was_leader.load(Ordering::Relaxed);
@@ -200,8 +215,12 @@ impl Membership {
                     );
                 }
             }
-            debug!("Membership server stopped");
+            info!("Membership heartbeat watcher stopped gracefully");
         });
+        
+        // Store the handle for graceful shutdown
+        *service.watcher_handle.lock().unwrap() = Some(handle);
+        
         let mut membership_service = Membership {
             heartbeat: service_clone.clone(),
             groups: BTreeMap::new(),
