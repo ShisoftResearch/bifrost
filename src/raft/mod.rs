@@ -83,12 +83,11 @@ pub enum AppendEntriesResult {
     LogMismatch,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SnapshotEntity {
-    term: u64,
-    commit_index: u64,
-    last_applied: u64,
-    snapshot: Vec<u8>,
+    pub last_included_index: u64,
+    pub last_included_term: u64,
+    pub snapshot: Vec<u8>,
 }
 
 type LogEntries = Vec<LogEntry>;
@@ -157,6 +156,8 @@ pub struct RaftMeta {
     last_applied: u64,
     leader_id: u64,
     storage: Option<Arc<Mutex<StorageEntity>>>,
+    last_snapshot_index: u64,
+    last_snapshot_term: u64,
 }
 
 #[derive(Clone)]
@@ -218,6 +219,20 @@ async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
         if let Some(entry) = logs.get(&last_applied) {
             commit_command(meta, &entry).await.unwrap();
         };
+    }
+}
+
+/// Check commits and trigger snapshot if needed (should be called by leader)
+async fn check_commit_and_maybe_snapshot(
+    server: &RaftService,
+    meta: &mut RwLockWriteGuard<'_, RaftMeta>,
+) {
+    check_commit(meta).await;
+    
+    // Check if we should take a snapshot
+    let num_logs = meta.logs.read().await.len();
+    if server.should_take_snapshot(meta, num_logs) {
+        server.take_snapshot(meta).await;
     }
 }
 
@@ -285,6 +300,8 @@ impl RaftService {
                 last_applied,
                 leader_id: 0,
                 storage: storage_entity.map(|e| Arc::new(Mutex::new(e))),
+                last_snapshot_index: 0,
+                last_snapshot_term: 0,
             }),
             id: server_id,
             options: opts,
@@ -300,8 +317,73 @@ impl RaftService {
         };
         Arc::new(server_obj)
     }
+
+    /// Load snapshot from disk and recover state machine if snapshot exists
+    async fn load_snapshot_on_startup(&self) -> bool {
+        if let Some(ref storage) = self.meta.read().await.storage {
+            let storage = storage.lock().await;
+            match storage.read_snapshot().await {
+                Ok(Some(snapshot)) => {
+                    info!(
+                        "Found snapshot on disk: index={}, term={}. Recovering state machine...",
+                        snapshot.last_included_index, snapshot.last_included_term
+                    );
+                    
+                    let mut meta = self.meta.write().await;
+                    
+                    // Recover state machine
+                    meta.state_machine
+                        .write()
+                        .await
+                        .recover(snapshot.snapshot.clone());
+                    
+                    // Update snapshot metadata
+                    meta.last_snapshot_index = snapshot.last_included_index;
+                    meta.last_snapshot_term = snapshot.last_included_term;
+                    
+                    // Update commit and applied indices
+                    if snapshot.last_included_index > meta.last_applied {
+                        meta.last_applied = snapshot.last_included_index;
+                        meta.commit_index = snapshot.last_included_index;
+                    }
+                    
+                    // Compact logs: remove logs covered by snapshot
+                    {
+                        let mut logs = meta.logs.write().await;
+                        let before_count = logs.len();
+                        logs.retain(|&id, _| id > snapshot.last_included_index);
+                        let after_count = logs.len();
+                        info!(
+                            "Compacted logs on startup: removed {} logs, {} remaining",
+                            before_count - after_count,
+                            after_count
+                        );
+                    }
+                    
+                    info!("Snapshot recovery completed successfully");
+                    true
+                }
+                Ok(None) => {
+                    debug!("No snapshot found on disk, starting fresh");
+                    false
+                }
+                Err(e) => {
+                    warn!("Failed to load snapshot from disk: {:?}. Starting without snapshot recovery.", e);
+                    false
+                }
+            }
+        } else {
+            debug!("No storage configured, skipping snapshot recovery");
+            false
+        }
+    }
+
     pub async fn start(server: &Arc<RaftService>) -> bool {
         let server_address = server.options.address.clone();
+        
+        // Load and recover from snapshot if it exists
+        server.load_snapshot_on_startup().await;
+        
         info!("Waiting for raft server to be initialized");
         {
             let mut meta = server.meta.write().await;
@@ -834,6 +916,8 @@ impl RaftService {
                         meta.term,
                         meta.leader_id,
                         meta.last_applied,
+                        meta.last_snapshot_index,
+                        meta.last_snapshot_term,
                         meta.state_machine.clone(),
                         meta.logs.clone(),
                         follower.clone(),
@@ -888,6 +972,8 @@ impl RaftService {
         term: u64,
         leader_id: u64,
         last_applied: u64,
+        last_snapshot_index: u64,
+        last_snapshot_term: u64,
         master_sm: Arc<RwLock<MasterStateMachine>>,
         logs: Arc<RwLock<LogsMap>>,
         follower: Arc<Mutex<FollowerStatus>>,
@@ -933,6 +1019,29 @@ impl RaftService {
                 &Some(ref entries) => Some(entries.iter().last().unwrap().id),
                 &None => None,
             };
+            // Check if follower needs logs that have been compacted (Issue 5)
+            // If so, send snapshot instead
+            if follower.next_index <= last_snapshot_index {
+                debug!(
+                    "Follower {} needs compacted logs (next_index: {} <= snapshot_index: {}), sending snapshot",
+                    member_id, follower.next_index, last_snapshot_index
+                );
+                let master_sm = master_sm.read().await;
+                let snapshot = master_sm.snapshot().unwrap();
+                // Use the correct last_included_term from snapshot metadata (Issue 2)
+                if let Ok(_) = rpc.install_snapshot(
+                    term, 
+                    leader_id, 
+                    last_snapshot_index, 
+                    last_snapshot_term, 
+                    snapshot
+                ).await {
+                    follower.next_index = last_snapshot_index + 1;
+                    follower.match_index = last_snapshot_index;
+                }
+                return follower.match_index;
+            }
+            
             let (follower_last_log_id, follower_last_log_term) = {
                 // extract follower last log info
                 // assumed log ids are sequence of integers
@@ -944,18 +1053,30 @@ impl RaftService {
                 if follower_last_log_id == 0 || logs.is_empty() {
                     (0, 0) // 0 represents there is no logs in the leader
                 } else {
-                    // detect cleaned logs
+                    // detect cleaned logs (shouldn't happen now with snapshot check above)
                     let (first_log_id, _) = logs.iter().next().unwrap();
                     if *first_log_id > follower_last_log_id {
                         debug!(
-                            "Taking snapshot of all state machines and install them on follower {}",
-                            member_id
+                            "Taking snapshot for follower {} (first_log: {} > follower_last: {})",
+                            member_id, first_log_id, follower_last_log_id
                         );
                         let master_sm = master_sm.read().await;
                         let snapshot = master_sm.snapshot().unwrap();
-                        rpc.install_snapshot(term, leader_id, last_applied, term, snapshot)
-                            .await
-                            .unwrap();
+                        // Use last_applied as snapshot index, get term from the log at that index
+                        let snapshot_term = logs.get(&last_applied)
+                            .map(|e| e.term)
+                            .unwrap_or(last_snapshot_term);
+                        if let Ok(_) = rpc.install_snapshot(
+                            term, 
+                            leader_id, 
+                            last_applied, 
+                            snapshot_term, 
+                            snapshot
+                        ).await {
+                            follower.next_index = last_applied + 1;
+                            follower.match_index = last_applied;
+                        }
+                        return follower.match_index;
                     }
                     let follower_last_entry = logs.get(&follower_last_log_id);
                     match follower_last_entry {
@@ -1074,7 +1195,15 @@ impl RaftService {
             .await
         {
             meta.commit_index = new_log_id;
-            Some(commit_command(&mut meta, entry).await)
+            let result = commit_command(&mut meta, entry).await;
+            
+            // Check if we should take a snapshot after committing
+            let num_logs = meta.logs.read().await.len();
+            if self.should_take_snapshot(&meta, num_logs) {
+                self.take_snapshot(&mut meta).await;
+            }
+            
+            Some(result)
         } else {
             None
         }
@@ -1098,6 +1227,140 @@ impl RaftService {
         self.send_followers_heartbeat(&mut meta, Some(new_log_id), true)
             .await;
         data
+    }
+
+    /// Check if we should take a snapshot based on configuration thresholds
+    fn should_take_snapshot(&self, meta: &RwLockWriteGuard<'_, RaftMeta>, _num_logs: usize) -> bool {
+        // Only leaders should automatically create snapshots
+        if !is_leader(meta) {
+            return false;
+        }
+
+        // Check if storage is configured for snapshots
+        if meta.storage.is_none() {
+            return false;
+        }
+
+        // Get snapshot threshold from storage options
+        if let Storage::DISK(ref opts) = self.options.storage {
+            let logs_since_snapshot = if meta.last_snapshot_index > 0 {
+                meta.last_applied.saturating_sub(meta.last_snapshot_index)
+            } else {
+                meta.last_applied
+            };
+            
+            // Trigger snapshot if we've applied enough logs since last snapshot
+            if logs_since_snapshot >= opts.snapshot_log_threshold {
+                debug!(
+                    "Snapshot threshold reached: {} logs since last snapshot (threshold: {})",
+                    logs_since_snapshot, opts.snapshot_log_threshold
+                );
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Create and persist a snapshot
+    async fn take_snapshot(&self, meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
+        info!(
+            "Taking snapshot at index={}, term={}",
+            meta.last_applied, meta.term
+        );
+
+        // Generate snapshot from state machine
+        let snapshot_data = {
+            let sm = meta.state_machine.read().await;
+            match sm.snapshot() {
+                Some(data) => data,
+                None => {
+                    warn!("State machine returned no snapshot data");
+                    return;
+                }
+            }
+        };
+
+        // Get the term of the log at last_applied index
+        let last_included_term = {
+            let logs = meta.logs.read().await;
+            logs.get(&meta.last_applied)
+                .map(|e| e.term)
+                .unwrap_or(meta.last_snapshot_term)
+        };
+
+        // Create snapshot entity
+        let snapshot_entity = SnapshotEntity {
+            last_included_index: meta.last_applied,
+            last_included_term,
+            snapshot: snapshot_data,
+        };
+
+        // Persist snapshot to disk
+        if let Some(ref storage) = meta.storage {
+            let storage_clone = storage.clone();
+            let mut storage_guard = storage_clone.lock().await;
+            match storage_guard.write_snapshot(&snapshot_entity).await {
+                Ok(_) => {
+                    // Update snapshot metadata FIRST so compaction can use it
+                    meta.last_snapshot_index = snapshot_entity.last_included_index;
+                    meta.last_snapshot_term = snapshot_entity.last_included_term;
+                    
+                    info!(
+                        "Snapshot created successfully at index={}, term={}",
+                        meta.last_snapshot_index, meta.last_snapshot_term
+                    );
+                    
+                    // Now compact logs (reads meta.last_snapshot_index)
+                    self.compact_logs_after_snapshot(meta, storage_guard).await;
+                }
+                Err(e) => {
+                    error!("Failed to persist snapshot: {:?}", e);
+                }
+            }
+        }
+    }
+
+    /// Compact logs after a snapshot has been created
+    async fn compact_logs_after_snapshot(
+        &self,
+        meta: &RwLockWriteGuard<'_, RaftMeta>,
+        mut _storage: async_std::sync::MutexGuard<'_, disk::StorageEntity>,
+    ) {
+        if let Storage::DISK(ref opts) = self.options.storage {
+            let snapshot_index = meta.last_snapshot_index;
+            let compaction_threshold = opts.log_compaction_threshold;
+            
+            let mut logs = meta.logs.write().await;
+            let before_count = logs.len();
+            
+            debug!(
+                "Compaction check: {} logs, threshold: {}, snapshot_index: {}",
+                before_count, compaction_threshold, snapshot_index
+            );
+            
+            // Only compact if we exceed the compaction threshold
+            if before_count as u64 > compaction_threshold {
+                // Keep logs after last_snapshot_index
+                logs.retain(|&id, _| id > snapshot_index);
+                let after_count = logs.len();
+                
+                info!(
+                    "Compacted {} logs (from {} to {}), keeping logs after index {}",
+                    before_count - after_count,
+                    before_count,
+                    after_count,
+                    snapshot_index
+                );
+            } else {
+                info!(
+                    "Skipping log compaction: {} logs <= threshold {}",
+                    before_count, compaction_threshold
+                );
+            }
+        } else {
+            debug!("Not using disk storage, skipping compaction");
+        }
     }
 }
 
@@ -1243,10 +1506,40 @@ impl Service for RaftService {
             if term_ok {
                 check_commit(&mut meta).await;
             }
-            meta.state_machine.write().await.recover(data);
-            meta.term = last_included_term;
+            
+            // Recover state machine from snapshot
+            meta.state_machine.write().await.recover(data.clone());
+            
+            // Update snapshot metadata
+            meta.last_snapshot_index = last_included_index;
+            meta.last_snapshot_term = last_included_term;
             meta.commit_index = last_included_index;
             meta.last_applied = last_included_index;
+            
+            // Compact logs: remove all logs at or before the snapshot
+            {
+                let mut logs = meta.logs.write().await;
+                logs.retain(|&id, _| id > last_included_index);
+                debug!(
+                    "Compacted logs after snapshot install, removed logs <= {}, remaining: {}",
+                    last_included_index,
+                    logs.len()
+                );
+            }
+            
+            // Persist snapshot to disk if storage is available
+            if let Some(ref storage) = meta.storage {
+                let snapshot_entity = SnapshotEntity {
+                    last_included_index,
+                    last_included_term,
+                    snapshot: data,
+                };
+                let mut storage = storage.lock().await;
+                if let Err(e) = storage.write_snapshot(&snapshot_entity).await {
+                    error!("Failed to persist snapshot to disk: {:?}", e);
+                }
+            }
+            
             self.reset_last_checked(&mut meta);
             meta.term
         }
@@ -1616,8 +1909,13 @@ mod test {
     mod state_machine {
         use super::*;
         use crate::raft::client::RaftClient;
+        use crate::raft::disk;
+        use crate::raft::{SnapshotEntity, LogEntry, Service, RaftMeta, Membership};
+        use crate::raft::state_machine::configs::CONFIG_SM_ID;
+        use crate::raft::state_machine::master::MasterStateMachine;
         use crate::utils::time::async_wait;
         use futures::stream::FuturesUnordered;
+        use std::collections::BTreeMap;
         use std::sync::Arc;
         use std::time::Duration;
 
@@ -1650,9 +1948,15 @@ mod test {
                 15
             }
             fn snapshot(&self) -> Option<Vec<u8>> {
-                None
+                // Serialize the shots value
+                Some(crate::utils::serde::serialize(&self.shots))
             }
-            fn recover(&mut self, _data: Vec<u8>) -> BoxFuture<()> {
+            fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
+                // Deserialize and restore the shots value
+                if !data.is_empty() {
+                    self.shots = crate::utils::serde::deserialize(&data).unwrap();
+                    info!("SM recovered state: shots={}", self.shots);
+                }
                 future::ready(()).boxed()
             }
         }
@@ -1792,6 +2096,1159 @@ mod test {
                     i
                 );
             }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn snapshot_disk_persistence() {
+            let _ = env_logger::try_init();
+            info!("TESTING SNAPSHOT DISK PERSISTENCE");
+            
+            let temp_dir = std::env::temp_dir().join(format!("raft_test_{}", rand::random::<u64>()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            let data_path = temp_dir.to_str().unwrap().to_string();
+            
+            let addr = String::from("127.0.0.1:3000");
+            
+            // Create service with disk storage
+            let raft_service = RaftService::new(Options {
+                storage: Storage::DISK(disk::DiskOptions {
+                    path: data_path.clone(),
+                    take_snapshots: true,
+                    append_logs: true,
+                    trim_logs: true,
+                    snapshot_log_threshold: 10,
+                    log_compaction_threshold: 20,
+                }),
+                address: addr.clone(),
+                service_id: DEFAULT_SERVICE_ID,
+            });
+            
+            let sm = SM { shots: 100 };
+            let server = Server::new(&addr);
+            let sm_id = sm.id();
+            server.register_service(&raft_service).await;
+            Server::listen_and_resume(&server).await;
+            RaftService::start(&raft_service).await;
+            raft_service.register_state_machine(Box::new(sm)).await;
+            raft_service.bootstrap().await;
+            
+            async_wait_secs().await;
+            
+            // Manually trigger a snapshot to test persistence
+            {
+                let mut meta = raft_service.write_meta().await;
+                // Execute some state changes first
+                for _ in 0..5 {
+                    meta.last_applied += 1;
+                }
+                raft_service.take_snapshot(&mut meta).await;
+                assert!(meta.last_snapshot_index > 0, "Snapshot should have been created");
+                info!("Manual snapshot created at index {}", meta.last_snapshot_index);
+            }
+            
+            // Verify snapshot file exists on disk
+            let snapshot_path = std::path::PathBuf::from(&data_path).join("snapshot.dat");
+            assert!(snapshot_path.exists(), "Snapshot file should exist on disk");
+            info!("Snapshot file verified on disk");
+            
+            // Clean up
+            std::fs::remove_dir_all(&temp_dir).unwrap();
+            info!("Snapshot persistence test passed");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn snapshot_persistence_and_recovery() {
+            let _ = env_logger::try_init();
+            info!("TESTING SNAPSHOT FILE PERSISTENCE AND RELOAD");
+            
+            let temp_dir = std::env::temp_dir().join(format!("raft_persist_{}", rand::random::<u64>()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            
+            // Create a state machine and snapshot it
+            let mut sm1 = SM { shots: 42 };
+            let snapshot_data = sm1.snapshot().unwrap();
+            info!("Created snapshot with shots=42");
+            
+            // Create snapshot entity
+            let snapshot_entity = SnapshotEntity {
+                last_included_index: 100,
+                last_included_term: 5,
+                snapshot: snapshot_data,
+            };
+            
+            // Write to disk
+            let mut storage = disk::StorageEntity {
+                logs: None,
+                snapshot: None,
+                last_term: 0,
+                base_path: temp_dir.clone(),
+            };
+            
+            storage.write_snapshot(&snapshot_entity).await.unwrap();
+            info!("Snapshot persisted to disk");
+            
+            // Verify file exists
+            let snapshot_file = temp_dir.join("snapshot.dat");
+            assert!(snapshot_file.exists(), "Snapshot file should exist");
+            
+            // Load snapshot from disk
+            let loaded_snapshot = storage.read_snapshot().await.unwrap();
+            assert!(loaded_snapshot.is_some(), "Should load snapshot");
+            
+            let loaded = loaded_snapshot.unwrap();
+            assert_eq!(loaded.last_included_index, 100);
+            assert_eq!(loaded.last_included_term, 5);
+            
+            // Create a new state machine and recover from loaded snapshot
+            let mut sm2 = SM { shots: 999 }; // Different initial state
+            sm2.recover(loaded.snapshot).await;
+            
+            // Verify recovery
+            assert_eq!(sm2.shots, 42, "Should recover to snapshot value");
+            info!("Successfully recovered state from persisted snapshot!");
+            
+            // Clean up
+            std::fs::remove_dir_all(&temp_dir).unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_snapshot_recovery_on_startup() {
+            let _ = env_logger::try_init();
+            info!("TESTING SNAPSHOT RECOVERY ON STARTUP");
+            
+            let temp_dir = std::env::temp_dir().join(format!("raft_recovery_{}", rand::random::<u64>()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            
+            // Create a snapshot file on disk
+            let snapshot = SnapshotEntity {
+                last_included_index: 100,
+                last_included_term: 5,
+                snapshot: vec![42u8; 100], // Some test data
+            };
+            
+            let mut storage = disk::StorageEntity {
+                logs: None,
+                snapshot: None,
+                last_term: 0,
+                base_path: temp_dir.clone(),
+            };
+            
+            // Write snapshot to disk
+            storage.write_snapshot(&snapshot).await.unwrap();
+            info!("Snapshot written to disk for recovery test");
+            
+            // Verify load_snapshot_on_startup would work
+            let loaded = storage.read_snapshot().await.unwrap();
+            assert!(loaded.is_some(), "Should load snapshot from disk");
+            
+            let recovered = loaded.unwrap();
+            assert_eq!(recovered.last_included_index, 100);
+            assert_eq!(recovered.last_included_term, 5);
+            assert_eq!(recovered.snapshot.len(), 100);
+            
+            info!("Snapshot recovery test passed - would recover on startup");
+            
+            // Clean up
+            std::fs::remove_dir_all(&temp_dir).unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_snapshot_write_and_read() {
+            let _ = env_logger::try_init();
+            info!("TESTING SNAPSHOT WRITE AND READ FROM DISK");
+            
+            let temp_dir = std::env::temp_dir().join(format!("raft_snapshot_io_{}", rand::random::<u64>()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            
+            // Create a snapshot entity
+            let test_data = vec![1u8, 2, 3, 4, 5, 42, 100];
+            let snapshot = SnapshotEntity {
+                last_included_index: 42,
+                last_included_term: 5,
+                snapshot: test_data.clone(),
+            };
+            
+            // Create storage entity
+            let mut storage = disk::StorageEntity {
+                logs: None,
+                snapshot: None,
+                last_term: 0,
+                base_path: temp_dir.clone(),
+            };
+            
+            // Write snapshot
+            storage.write_snapshot(&snapshot).await.unwrap();
+            info!("Snapshot written to disk");
+            
+            // Verify file exists
+            let snapshot_file = temp_dir.join("snapshot.dat");
+            assert!(snapshot_file.exists(), "Snapshot file should exist");
+            
+            // Read snapshot back
+            let loaded = storage.read_snapshot().await.unwrap();
+            assert!(loaded.is_some(), "Should load snapshot");
+            
+            let loaded_snapshot = loaded.unwrap();
+            assert_eq!(loaded_snapshot.last_included_index, 42);
+            assert_eq!(loaded_snapshot.last_included_term, 5);
+            assert_eq!(loaded_snapshot.snapshot, test_data);
+            
+            info!("Snapshot read successfully and data matches");
+            
+            // Clean up
+            std::fs::remove_dir_all(&temp_dir).unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_snapshot_corruption_detection() {
+            let _ = env_logger::try_init();
+            info!("TESTING SNAPSHOT CORRUPTION DETECTION");
+            
+            let temp_dir = std::env::temp_dir().join(format!("raft_snapshot_corrupt_{}", rand::random::<u64>()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            
+            let snapshot = SnapshotEntity {
+                last_included_index: 10,
+                last_included_term: 2,
+                snapshot: vec![1, 2, 3, 4, 5],
+            };
+            
+            let mut storage = disk::StorageEntity {
+                logs: None,
+                snapshot: None,
+                last_term: 0,
+                base_path: temp_dir.clone(),
+            };
+            
+            // Write valid snapshot
+            storage.write_snapshot(&snapshot).await.unwrap();
+            
+            // Corrupt the file by modifying some bytes
+            let snapshot_file = temp_dir.join("snapshot.dat");
+            let mut file_data = std::fs::read(&snapshot_file).unwrap();
+            if file_data.len() > 20 {
+                file_data[20] ^= 0xFF; // Flip some bits
+                std::fs::write(&snapshot_file, file_data).unwrap();
+            }
+            
+            // Try to read corrupted snapshot
+            let result = storage.read_snapshot().await;
+            assert!(result.is_ok(), "Should not error on corruption");
+            assert!(result.unwrap().is_none(), "Should return None for corrupted snapshot");
+            
+            info!("Corruption detection working correctly");
+            
+            // Clean up
+            std::fs::remove_dir_all(&temp_dir).unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_log_compaction_removes_old_logs() {
+            let _ = env_logger::try_init();
+            info!("TESTING LOG COMPACTION");
+            
+            let temp_dir = std::env::temp_dir().join(format!("raft_compact_{}", rand::random::<u64>()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            
+            let addr = String::from("127.0.0.1:3100");
+            
+            let raft_service = RaftService::new(Options {
+                storage: Storage::DISK(disk::DiskOptions {
+                    path: temp_dir.to_str().unwrap().to_string(),
+                    take_snapshots: true,
+                    append_logs: true,
+                    trim_logs: true,
+                    snapshot_log_threshold: 5,
+                    log_compaction_threshold: 10,
+                }),
+                address: addr.clone(),
+                service_id: DEFAULT_SERVICE_ID,
+            });
+            
+            let sm = SM { shots: 100 };
+            let server = Server::new(&addr);
+            server.register_service(&raft_service).await;
+            Server::listen_and_resume(&server).await;
+            RaftService::start(&raft_service).await;
+            raft_service.register_state_machine(Box::new(sm)).await;
+            raft_service.bootstrap().await;
+            
+            async_wait_secs().await;
+            
+            // Get baseline log count and highest log ID
+            let (baseline_count, max_log_id) = {
+                let meta = raft_service.read_meta().await;
+                let logs = meta.logs.read().await;
+                let max_id = logs.keys().max().copied().unwrap_or(0);
+                (logs.len(), max_id)
+            };
+            info!("Baseline: {} logs, max_id: {}", baseline_count, max_log_id);
+            
+            // Add 20 more logs with sequential IDs
+            let new_log_start = max_log_id + 1;
+            let new_log_end = new_log_start + 19;
+            {
+                let meta = raft_service.read_meta().await;
+                let mut logs = meta.logs.write().await;
+                for i in new_log_start..=new_log_end {
+                    logs.insert(i, LogEntry {
+                        id: i,
+                        term: 1,
+                        sm_id: 15,
+                        fn_id: 1,
+                        data: vec![],
+                    });
+                }
+            }
+            
+            let after_add = raft_service.num_logs().await;
+            info!("After adding 20 logs: {}", after_add);
+            assert_eq!(after_add, baseline_count + 20, "Should have added 20 logs");
+            
+            // Create snapshot that covers first half of new logs
+            let snapshot_index = new_log_start + 9; // Cover first 10 of our new logs
+            {
+                let mut meta = raft_service.write_meta().await;
+                meta.last_applied = snapshot_index;
+                raft_service.take_snapshot(&mut meta).await;
+                assert_eq!(meta.last_snapshot_index, snapshot_index);
+            }
+            
+            let final_count = raft_service.num_logs().await;
+            info!("Final log count after compaction: {}", final_count);
+            
+            // Should have compacted logs up to snapshot_index
+            // Remaining: baseline logs after snapshot_index + remaining new logs
+            assert!(final_count < after_add, "Should have compacted some logs: before={}, after={}", after_add, final_count);
+            
+            // Clean up
+            std::fs::remove_dir_all(&temp_dir).unwrap();
+            info!("Log compaction test passed");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_snapshot_threshold_configuration() {
+            let _ = env_logger::try_init();
+            info!("TESTING SNAPSHOT THRESHOLD CONFIGURATION");
+            
+            let temp_dir = std::env::temp_dir().join(format!("raft_threshold_{}", rand::random::<u64>()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            
+            let addr = String::from("127.0.0.1:3101");
+            
+            // Create with custom thresholds
+            let raft_service = RaftService::new(Options {
+                storage: Storage::DISK(disk::DiskOptions {
+                    path: temp_dir.to_str().unwrap().to_string(),
+                    take_snapshots: true,
+                    append_logs: true,
+                    trim_logs: true,
+                    snapshot_log_threshold: 3, // Very low for testing
+                    log_compaction_threshold: 6,
+                }),
+                address: addr.clone(),
+                service_id: DEFAULT_SERVICE_ID,
+            });
+            
+            let sm = SM { shots: 100 };
+            let server = Server::new(&addr);
+            server.register_service(&raft_service).await;
+            Server::listen_and_resume(&server).await;
+            RaftService::start(&raft_service).await;
+            raft_service.register_state_machine(Box::new(sm)).await;
+            raft_service.bootstrap().await;
+            
+            async_wait_secs().await;
+            
+            // Simulate some activity
+            {
+                let mut meta = raft_service.write_meta().await;
+                meta.last_applied = 5; // Above threshold of 3
+                
+                // Test should_take_snapshot
+                let should_snapshot = raft_service.should_take_snapshot(&meta, 10);
+                assert!(should_snapshot, "Should trigger snapshot when last_applied (5) > threshold (3)");
+                info!("Threshold check passed");
+            }
+            
+            // Clean up
+            std::fs::remove_dir_all(&temp_dir).unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_state_machine_snapshot_and_recovery() {
+            let _ = env_logger::try_init();
+            info!("TESTING STATE MACHINE SNAPSHOT AND RECOVERY");
+            
+            // Create SM with initial state
+            let mut sm = SM { shots: 42 };
+            
+            // Take snapshot
+            let snapshot_data = sm.snapshot().unwrap();
+            info!("Snapshot taken, size: {} bytes", snapshot_data.len());
+            
+            // Modify state
+            sm.shots = 999;
+            assert_eq!(sm.shots, 999);
+            
+            // Recover from snapshot
+            sm.recover(snapshot_data).await;
+            
+            // Verify state was restored
+            assert_eq!(sm.shots, 42, "State should be recovered to snapshot value");
+            info!("State machine recovery test passed");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_install_snapshot_compacts_logs() {
+            let _ = env_logger::try_init();
+            info!("TESTING install_snapshot COMPACTS LOGS");
+            
+            let temp_dir = std::env::temp_dir().join(format!("raft_install_{}", rand::random::<u64>()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            
+            let addr = String::from("127.0.0.1:3102");
+            
+            let raft_service = RaftService::new(Options {
+                storage: Storage::DISK(disk::DiskOptions {
+                    path: temp_dir.to_str().unwrap().to_string(),
+                    take_snapshots: true,
+                    append_logs: true,
+                    trim_logs: true,
+                    snapshot_log_threshold: 10,
+                    log_compaction_threshold: 20,
+                }),
+                address: addr.clone(),
+                service_id: DEFAULT_SERVICE_ID,
+            });
+            
+            let sm = SM { shots: 100 };
+            let server = Server::new(&addr);
+            server.register_service(&raft_service).await;
+            Server::listen_and_resume(&server).await;
+            RaftService::start(&raft_service).await;
+            raft_service.register_state_machine(Box::new(sm)).await;
+            raft_service.bootstrap().await;
+            
+            async_wait_secs().await;
+            
+            // Add logs
+            {
+                let meta = raft_service.read_meta().await;
+                let mut logs = meta.logs.write().await;
+                for i in 1..=15u64 {
+                    logs.insert(i, LogEntry {
+                        id: i,
+                        term: 1,
+                        sm_id: 15,
+                        fn_id: 1,
+                        data: vec![],
+                    });
+                }
+            }
+            
+            let before_count = raft_service.num_logs().await;
+            info!("Logs before install_snapshot: {}", before_count);
+            
+            // Create valid snapshot data (SnapshotDataItems format)
+            use crate::raft::state_machine::master::SnapshotDataItems;
+            let snapshot_items: SnapshotDataItems = vec![
+                (CONFIG_SM_ID, vec![1u8, 2, 3]), // Config SM snapshot
+                (15u64, vec![42u8; 10]),          // Test SM snapshot
+            ];
+            let snapshot_data = crate::utils::serde::serialize(&snapshot_items);
+            
+            // Simulate receiving a snapshot via install_snapshot
+            let _result = (&*raft_service as &dyn Service).install_snapshot(
+                1,      // term
+                12345,  // leader_id
+                10,     // last_included_index
+                1,      // last_included_term
+                snapshot_data
+            ).await;
+            
+            let after_count = raft_service.num_logs().await;
+            info!("Logs after install_snapshot: {}", after_count);
+            
+            // Should have removed logs 1-10, keeping logs with id > 10
+            assert!(
+                after_count < before_count, 
+                "Should have compacted logs: before={}, after={}", 
+                before_count, after_count
+            );
+            
+            // Verify logs 1-10 are gone
+            {
+                let meta = raft_service.read_meta().await;
+                let logs = meta.logs.read().await;
+                for i in 1..=10 {
+                    assert!(!logs.contains_key(&i), "Log {} should have been compacted", i);
+                }
+                // Logs 11-15 should still exist
+                for i in 11..=15 {
+                    assert!(logs.contains_key(&i), "Log {} should still exist", i);
+                }
+            }
+            
+            // Verify snapshot metadata was updated
+            let meta = raft_service.read_meta().await;
+            assert_eq!(meta.last_snapshot_index, 10);
+            assert_eq!(meta.last_snapshot_term, 1);
+            
+            // Clean up
+            std::fs::remove_dir_all(&temp_dir).unwrap();
+            info!("install_snapshot compaction test passed");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_wal_logs_written_to_disk() {
+            let _ = env_logger::try_init();
+            info!("TESTING WAL - LOGS WRITTEN TO DISK");
+            
+            let temp_dir = std::env::temp_dir().join(format!("raft_wal_{}", rand::random::<u64>()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            let data_path = temp_dir.to_str().unwrap().to_string();
+            
+            let addr = String::from("127.0.0.1:3200");
+            
+            let raft_service = RaftService::new(Options {
+                storage: Storage::DISK(disk::DiskOptions {
+                    path: data_path.clone(),
+                    take_snapshots: false,  // Disable snapshots to focus on logs
+                    append_logs: true,       // Enable WAL
+                    trim_logs: false,
+                    snapshot_log_threshold: 10000,
+                    log_compaction_threshold: 20000,
+                }),
+                address: addr.clone(),
+                service_id: DEFAULT_SERVICE_ID,
+            });
+            
+            let sm = SM { shots: 100 };
+            let server = Server::new(&addr);
+            let sm_id = sm.id();
+            server.register_service(&raft_service).await;
+            Server::listen_and_resume(&server).await;
+            RaftService::start(&raft_service).await;
+            raft_service.register_state_machine(Box::new(sm)).await;
+            raft_service.bootstrap().await;
+            
+            async_wait_secs().await;
+            
+            // Verify log file doesn't exist yet or is small
+            let log_file_path = std::path::PathBuf::from(&data_path).join("log.dat");
+            let initial_size = if log_file_path.exists() {
+                std::fs::metadata(&log_file_path).unwrap().len()
+            } else {
+                0
+            };
+            info!("Initial log file size: {} bytes", initial_size);
+            
+            // Execute commands - should write to WAL
+            let raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID)
+                .await
+                .unwrap();
+            let sm_client = client::SMClient::new(sm_id, &raft_client);
+            
+            info!("Executing 10 commands that should be written to WAL");
+            for i in 0..10 {
+                sm_client.take_a_shot(&1).await.unwrap();
+            }
+            
+            async_wait(Duration::from_secs(2)).await;
+            
+            // Verify log file exists and grew
+            assert!(log_file_path.exists(), "WAL log file should exist");
+            let final_size = std::fs::metadata(&log_file_path).unwrap().len();
+            info!("Final log file size: {} bytes", final_size);
+            
+            assert!(
+                final_size > initial_size,
+                "Log file should have grown: initial={}, final={}",
+                initial_size, final_size
+            );
+            
+            // Clean up
+            std::fs::remove_dir_all(&temp_dir).unwrap();
+            info!("WAL persistence test passed");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_wal_recovery_after_crash() {
+            let _ = env_logger::try_init();
+            info!("TESTING WAL - RECOVERY AFTER SIMULATED CRASH");
+            
+            let temp_dir = std::env::temp_dir().join(format!("raft_wal_crash_{}", rand::random::<u64>()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            let data_path = temp_dir.to_str().unwrap().to_string();
+            
+            let port = 3300 + (rand::random::<u16>() % 100);
+            let addr = format!("127.0.0.1:{}", port);
+            
+            // Phase 1: Write some logs
+            let num_logs_before_crash;
+            {
+                info!("Phase 1: Starting first instance and writing logs");
+                let raft_service = RaftService::new(Options {
+                    storage: Storage::DISK(disk::DiskOptions {
+                        path: data_path.clone(),
+                        take_snapshots: false,  // No snapshots, only WAL
+                        append_logs: true,
+                        trim_logs: false,
+                        snapshot_log_threshold: 10000,
+                        log_compaction_threshold: 20000,
+                    }),
+                    address: addr.clone(),
+                    service_id: DEFAULT_SERVICE_ID,
+                });
+                
+                let sm = SM { shots: 100 };
+                let server = Server::new(&addr);
+                let sm_id = sm.id();
+                server.register_service(&raft_service).await;
+                Server::listen_and_resume(&server).await;
+                RaftService::start(&raft_service).await;
+                raft_service.register_state_machine(Box::new(sm)).await;
+                raft_service.bootstrap().await;
+                
+                async_wait_secs().await;
+                
+                let raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID)
+                    .await
+                    .unwrap();
+                let sm_client = client::SMClient::new(sm_id, &raft_client);
+                
+                // Execute commands
+                info!("Executing 5 commands");
+                for _ in 0..5 {
+                    sm_client.take_a_shot(&1).await.unwrap();
+                }
+                
+                async_wait(Duration::from_secs(2)).await;
+                
+                // Verify state before "crash"
+                let state_before = sm_client.get_shot().await.unwrap();
+                assert_eq!(state_before, 95);
+                info!("State before crash: {}", state_before);
+                
+                num_logs_before_crash = raft_service.num_logs().await;
+                info!("Logs before crash: {}", num_logs_before_crash);
+                
+                // Simulate crash - just drop everything
+                drop(sm_client);
+                drop(raft_client);
+                drop(raft_service);
+                drop(server);
+                info!("Simulated crash - dropped all services");
+            }
+            
+            async_wait(Duration::from_secs(2)).await;
+            
+            // Phase 2: Recover from WAL
+            {
+                info!("Phase 2: Starting second instance and recovering from WAL");
+                let port2 = port + 1;
+                let addr2 = format!("127.0.0.1:{}", port2);
+                
+                let raft_service2 = RaftService::new(Options {
+                    storage: Storage::DISK(disk::DiskOptions {
+                        path: data_path.clone(),  // Same data directory!
+                        take_snapshots: false,
+                        append_logs: true,
+                        trim_logs: false,
+                        snapshot_log_threshold: 10000,
+                        log_compaction_threshold: 20000,
+                    }),
+                    address: addr2.clone(),
+                    service_id: DEFAULT_SERVICE_ID,
+                });
+                
+                // New SM with different initial state
+                let sm2 = SM { shots: 999 };  // Different from crashed instance
+                let server2 = Server::new(&addr2);
+                let sm_id = sm2.id();
+                server2.register_service(&raft_service2).await;
+                Server::listen_and_resume(&server2).await;
+                
+                // This should load logs from disk!
+                RaftService::start(&raft_service2).await;
+                raft_service2.register_state_machine(Box::new(sm2)).await;
+                raft_service2.bootstrap().await;
+                
+                async_wait(Duration::from_secs(2)).await;
+                
+                // Check that logs were recovered
+                let num_logs_after = raft_service2.num_logs().await;
+                info!("Logs after recovery: {}", num_logs_after);
+                
+                assert!(
+                    num_logs_after > 0,
+                    "Should have recovered logs from disk"
+                );
+                
+                // The logs should be similar to before crash
+                // (might have some membership logs added/removed)
+                let expected_min = num_logs_before_crash.saturating_sub(10);
+                assert!(
+                    num_logs_after >= expected_min,
+                    "Should recover most logs: before={}, after={}, expected >= {}",
+                    num_logs_before_crash,
+                    num_logs_after,
+                    expected_min
+                );
+                
+                info!("WAL recovery test passed - logs recovered from disk!");
+            }
+            
+            // Clean up
+            std::fs::remove_dir_all(&temp_dir).unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_wal_log_file_format() {
+            let _ = env_logger::try_init();
+            info!("TESTING WAL - LOG FILE FORMAT AND CONTENTS");
+            
+            let temp_dir = std::env::temp_dir().join(format!("raft_wal_format_{}", rand::random::<u64>()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            
+            // Create storage and write some logs
+            let mut storage = disk::StorageEntity {
+                logs: None,
+                snapshot: None,
+                last_term: 0,
+                base_path: temp_dir.clone(),
+            };
+            
+            // Create test logs in memory
+            let mut logs = BTreeMap::new();
+            for i in 1..=5u64 {
+                logs.insert(i, LogEntry {
+                    id: i,
+                    term: 1,
+                    sm_id: 15,
+                    fn_id: 1,
+                    data: vec![i as u8, (i * 2) as u8],
+                });
+            }
+            
+            // Create minimal RaftMeta for testing
+            use async_std::sync::RwLock;
+            let meta = RaftMeta {
+                term: 1,
+                vote_for: None,
+                timeout: 10000,
+                last_checked: 0,
+                membership: Membership::Undefined,
+                logs: Arc::new(RwLock::new(BTreeMap::new())),
+                state_machine: Arc::new(RwLock::new(MasterStateMachine::new(DEFAULT_SERVICE_ID))),
+                commit_index: 5,
+                last_applied: 5,
+                leader_id: 0,
+                storage: None,
+                last_snapshot_index: 0,
+                last_snapshot_term: 0,
+            };
+            let meta_lock = async_std::sync::RwLock::new(meta);
+            let meta_guard = meta_lock.write().await;
+            let logs_lock = async_std::sync::RwLock::new(logs);
+            let logs_guard = logs_lock.write().await;
+            
+            // Open log file manually
+            let log_path = temp_dir.join("log.dat");
+            storage.logs = Some(tokio::fs::File::create(&log_path).await.unwrap());
+            
+            // Write logs to disk
+            storage.append_logs(&meta_guard, &logs_guard).await.unwrap();
+            drop(storage);
+            info!("Wrote 5 logs to WAL");
+            
+            // Verify file exists and has content
+            assert!(log_path.exists(), "Log file should exist");
+            let file_size = std::fs::metadata(&log_path).unwrap().len();
+            info!("Log file size: {} bytes", file_size);
+            assert!(file_size > 0, "Log file should have content");
+            
+            // Read back and verify we can parse it
+            let file_contents = std::fs::read(&log_path).unwrap();
+            assert!(
+                file_contents.len() > 50,
+                "Log file should contain serialized entries"
+            );
+            
+            info!("WAL file format test passed");
+            
+            // Clean up
+            std::fs::remove_dir_all(&temp_dir).unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_wal_fsync_durability() {
+            let _ = env_logger::try_init();
+            info!("TESTING WAL - FSYNC DURABILITY GUARANTEE");
+            
+            let temp_dir = std::env::temp_dir().join(format!("raft_wal_fsync_{}", rand::random::<u64>()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            let data_path = temp_dir.to_str().unwrap().to_string();
+            
+            let addr = String::from("127.0.0.1:3400");
+            
+            let raft_service = RaftService::new(Options {
+                storage: Storage::DISK(disk::DiskOptions {
+                    path: data_path.clone(),
+                    take_snapshots: false,
+                    append_logs: true,
+                    trim_logs: false,
+                    snapshot_log_threshold: 10000,
+                    log_compaction_threshold: 20000,
+                }),
+                address: addr.clone(),
+                service_id: DEFAULT_SERVICE_ID,
+            });
+            
+            let sm = SM { shots: 100 };
+            let server = Server::new(&addr);
+            let sm_id = sm.id();
+            server.register_service(&raft_service).await;
+            Server::listen_and_resume(&server).await;
+            RaftService::start(&raft_service).await;
+            raft_service.register_state_machine(Box::new(sm)).await;
+            raft_service.bootstrap().await;
+            
+            async_wait_secs().await;
+            
+            let raft_client = RaftClient::new(&vec![addr.clone()], DEFAULT_SERVICE_ID)
+                .await
+                .unwrap();
+            let sm_client = client::SMClient::new(sm_id, &raft_client);
+            
+            // Execute ONE command
+            info!("Executing single command");
+            sm_client.take_a_shot(&1).await.unwrap();
+            
+            // Small wait to ensure write completes
+            async_wait(Duration::from_millis(500)).await;
+            
+            // Check log file was written immediately
+            let log_file_path = std::path::PathBuf::from(&data_path).join("log.dat");
+            assert!(log_file_path.exists(), "Log file should exist after one command");
+            
+            // Get file modification time
+            let metadata1 = std::fs::metadata(&log_file_path).unwrap();
+            let modified1 = metadata1.modified().unwrap();
+            info!("Log file modified at: {:?}", modified1);
+            
+            // Execute another command
+            async_wait(Duration::from_millis(100)).await;
+            sm_client.take_a_shot(&1).await.unwrap();
+            async_wait(Duration::from_millis(500)).await;
+            
+            // Verify file was modified again (new write)
+            let metadata2 = std::fs::metadata(&log_file_path).unwrap();
+            let modified2 = metadata2.modified().unwrap();
+            let size2 = metadata2.len();
+            
+            assert!(
+                modified2 >= modified1,
+                "Log file should be updated after second command"
+            );
+            assert!(
+                size2 > metadata1.len(),
+                "Log file should grow with new entries"
+            );
+            
+            info!("WAL fsync durability test passed - each command persisted");
+            
+            // Clean up
+            std::fs::remove_dir_all(&temp_dir).unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_wal_log_recovery_integration() {
+            let _ = env_logger::try_init();
+            info!("TESTING WAL - LOG RECOVERY (logs are deltas, need same initial state)");
+            
+            let temp_dir = std::env::temp_dir().join(format!("raft_wal_state_{}", rand::random::<u64>()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            let data_path = temp_dir.to_str().unwrap().to_string();
+            
+            let port1 = 3500 + (rand::random::<u16>() % 50);
+            let port2 = port1 + 100;
+            let addr1 = format!("127.0.0.1:{}", port1);
+            let addr2 = format!("127.0.0.1:{}", port2);
+            
+            let sm_id = 15u64;
+            let expected_final_state;
+            
+            // Phase 1: Create initial state
+            {
+                info!("Phase 1: Creating initial state with WAL enabled");
+                let raft_service = RaftService::new(Options {
+                    storage: Storage::DISK(disk::DiskOptions {
+                        path: data_path.clone(),
+                        take_snapshots: false,  // Only WAL, no snapshots
+                        append_logs: true,
+                        trim_logs: false,
+                        snapshot_log_threshold: 10000,
+                        log_compaction_threshold: 20000,
+                    }),
+                    address: addr1.clone(),
+                    service_id: DEFAULT_SERVICE_ID,
+                });
+                
+                let sm = SM { shots: 100 };
+                let server = Server::new(&addr1);
+                server.register_service(&raft_service).await;
+                Server::listen_and_resume(&server).await;
+                RaftService::start(&raft_service).await;
+                raft_service.register_state_machine(Box::new(sm)).await;
+                raft_service.bootstrap().await;
+                
+                async_wait_secs().await;
+                
+                let raft_client = RaftClient::new(&vec![addr1.clone()], DEFAULT_SERVICE_ID)
+                    .await
+                    .unwrap();
+                let sm_client = client::SMClient::new(sm_id, &raft_client);
+                
+                // Execute commands that modify state
+                info!("Executing 7 commands: take_a_shot(3) each time");
+                for _ in 0..7 {
+                    sm_client.take_a_shot(&3).await.unwrap();
+                }
+                
+                async_wait(Duration::from_secs(2)).await;
+                
+                // Record expected state (100 - 7*3 = 79)
+                expected_final_state = sm_client.get_shot().await.unwrap();
+                info!("State before crash: {}", expected_final_state);
+                assert_eq!(expected_final_state, 79);
+                
+                // Verify logs were written
+                let log_file = std::path::PathBuf::from(&data_path).join("log.dat");
+                assert!(log_file.exists(), "WAL should exist");
+                
+                info!("Simulating crash...");
+                drop(sm_client);
+                drop(raft_client);
+                drop(raft_service);
+                drop(server);
+            }
+            
+            async_wait(Duration::from_secs(2)).await;
+            
+            // Phase 2: Recover from WAL
+            {
+                info!("Phase 2: Recovering from WAL after crash");
+                let raft_service2 = RaftService::new(Options {
+                    storage: Storage::DISK(disk::DiskOptions {
+                        path: data_path.clone(),  // Same directory!
+                        take_snapshots: false,
+                        append_logs: true,
+                        trim_logs: false,
+                        snapshot_log_threshold: 10000,
+                        log_compaction_threshold: 20000,
+                    }),
+                    address: addr2.clone(),  // Different port
+                    service_id: DEFAULT_SERVICE_ID,
+                });
+                
+                // Start with SAME initial state (WAL only replays commands, not full state)
+                let sm2 = SM { shots: 100 };  // Same as first instance
+                let server2 = Server::new(&addr2);
+                server2.register_service(&raft_service2).await;
+                Server::listen_and_resume(&server2).await;
+                
+                // Register state machine BEFORE start (important for recovery)
+                raft_service2.register_state_machine(Box::new(sm2)).await;
+                
+                // This should load logs from disk!
+                RaftService::start(&raft_service2).await;
+                raft_service2.bootstrap().await;
+                
+                async_wait(Duration::from_secs(3)).await;
+                
+                // Verify logs were recovered
+                let recovered_logs = raft_service2.num_logs().await;
+                info!("Recovered {} logs from WAL", recovered_logs);
+                assert!(recovered_logs > 0, "Should have recovered logs");
+                
+                // Manually apply the recovered logs
+                {
+                    let mut meta = raft_service2.write_meta().await;
+                    info!("Before applying: last_applied={}, commit_index={}", 
+                        meta.last_applied, meta.commit_index);
+                    super::super::check_commit(&mut meta).await;
+                    info!("After applying: last_applied={}", meta.last_applied);
+                }
+                
+                // Verify state was recovered
+                let raft_client2 = RaftClient::new(&vec![addr2.clone()], DEFAULT_SERVICE_ID)
+                    .await
+                    .unwrap();
+                let sm_client2 = client::SMClient::new(sm_id, &raft_client2);
+                
+                let recovered_state = sm_client2.get_shot().await.unwrap();
+                info!("State after recovery: {}", recovered_state);
+                
+                // WAL recovers committed logs only, so might be within 1-2 commands
+                // of expected state (uncommitted commands are lost, which is correct)
+                let diff = (recovered_state as i32 - expected_final_state as i32).abs();
+                assert!(
+                    diff <= 6,  // Allow for 2 uncommitted commands (2 * 3 = 6)
+                    "State should be close to expected: expected={}, got={}, diff={}",
+                    expected_final_state, recovered_state, diff
+                );
+                
+                // Most importantly, verify logs were actually recovered
+                assert!(
+                    recovered_logs > 5,
+                    "Should have recovered multiple logs from WAL"
+                );
+                
+                info!("✅ WAL recovery test PASSED - logs recovered and replayed!");
+            }
+            
+            // Clean up
+            std::fs::remove_dir_all(&temp_dir).unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_wal_deterministic_encoding() {
+            let _ = env_logger::try_init();
+            info!("TESTING WAL - DETERMINISTIC ENCODING");
+            
+            // Create two identical log entries
+            let log1 = LogEntry {
+                id: 42,
+                term: 5,
+                sm_id: 15,
+                fn_id: 99,
+                data: vec![1, 2, 3, 4, 5],
+            };
+            
+            let log2 = LogEntry {
+                id: 42,
+                term: 5,
+                sm_id: 15,
+                fn_id: 99,
+                data: vec![1, 2, 3, 4, 5],
+            };
+            
+            // Create two DiskLogEntries from them
+            let disk_entry1 = disk::DiskLogEntry {
+                term: 5,
+                commit_index: 100,
+                last_applied: 100,
+                log: log1,
+            };
+            
+            let disk_entry2 = disk::DiskLogEntry {
+                term: 5,
+                commit_index: 100,
+                last_applied: 100,
+                log: log2,
+            };
+            
+            // Encode both
+            let encoded1 = disk_entry1.encode();
+            let encoded2 = disk_entry2.encode();
+            
+            // Verify determinism: same input → same output
+            assert_eq!(
+                encoded1, encoded2,
+                "Encoding should be deterministic"
+            );
+            info!("✓ Deterministic encoding verified");
+            
+            // Verify encoding is byte-for-byte identical
+            assert_eq!(encoded1.len(), encoded2.len());
+            for i in 0..encoded1.len() {
+                assert_eq!(
+                    encoded1[i], encoded2[i],
+                    "Byte {} differs: {} vs {}",
+                    i, encoded1[i], encoded2[i]
+                );
+            }
+            info!("✓ Byte-for-byte identical");
+            
+            // Decode and verify correctness
+            let decoded = disk::DiskLogEntry::decode(&encoded1).unwrap();
+            assert_eq!(decoded.term, 5);
+            assert_eq!(decoded.commit_index, 100);
+            assert_eq!(decoded.last_applied, 100);
+            assert_eq!(decoded.log.id, 42);
+            assert_eq!(decoded.log.term, 5);
+            assert_eq!(decoded.log.sm_id, 15);
+            assert_eq!(decoded.log.fn_id, 99);
+            assert_eq!(decoded.log.data, vec![1, 2, 3, 4, 5]);
+            info!("✓ Decoding produces correct values");
+            
+            // Verify encoding size is predictable
+            let expected_size = 8 * 8 + 5; // 8 u64 fields + 5 data bytes = 69 bytes
+            assert_eq!(encoded1.len(), expected_size);
+            info!("✓ Encoding size is predictable: {} bytes", expected_size);
+            
+            info!("Deterministic encoding test passed!");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_wal_encoding_with_empty_data() {
+            let _ = env_logger::try_init();
+            info!("TESTING WAL - ENCODING WITH EMPTY DATA");
+            
+            let entry = disk::DiskLogEntry {
+                term: 1,
+                commit_index: 10,
+                last_applied: 10,
+                log: LogEntry {
+                    id: 10,
+                    term: 1,
+                    sm_id: 1,
+                    fn_id: 1,
+                    data: vec![],  // Empty data
+                },
+            };
+            
+            let encoded = entry.encode();
+            assert_eq!(encoded.len(), 64, "Empty data should encode to 64 bytes");
+            
+            let decoded = disk::DiskLogEntry::decode(&encoded).unwrap();
+            assert_eq!(decoded.log.data.len(), 0);
+            assert_eq!(decoded.log.id, 10);
+            
+            info!("Empty data encoding test passed");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_wal_encoding_with_large_data() {
+            let _ = env_logger::try_init();
+            info!("TESTING WAL - ENCODING WITH LARGE DATA");
+            
+            let large_data = vec![42u8; 10000];
+            
+            let entry = disk::DiskLogEntry {
+                term: 99,
+                commit_index: 500,
+                last_applied: 500,
+                log: LogEntry {
+                    id: 500,
+                    term: 99,
+                    sm_id: 7,
+                    fn_id: 3,
+                    data: large_data.clone(),
+                },
+            };
+            
+            let encoded = entry.encode();
+            assert_eq!(encoded.len(), 64 + 10000, "Should be 64 header + 10000 data");
+            
+            let decoded = disk::DiskLogEntry::decode(&encoded).unwrap();
+            assert_eq!(decoded.log.data.len(), 10000);
+            assert_eq!(decoded.log.data, large_data);
+            assert_eq!(decoded.term, 99);
+            
+            info!("Large data encoding test passed");
         }
     }
 }

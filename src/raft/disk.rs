@@ -1,14 +1,15 @@
 // Now only offers log persistent
 
-use crate::raft::{LogEntry, LogsMap, Options, RaftMeta, Storage};
+use crate::raft::{LogEntry, LogsMap, Options, RaftMeta, SnapshotEntity, Storage};
 use async_std::sync::*;
 use serde::{Deserialize, Serialize};
 
+use std::convert::TryInto;
 use std::fs::OpenOptions;
 use std::io;
 use std::io::Read;
 use std::ops::Bound::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::fs::*;
 use tokio::io::*;
 
@@ -20,20 +21,114 @@ pub struct DiskOptions {
     pub take_snapshots: bool,
     pub append_logs: bool,
     pub trim_logs: bool,
+    // Snapshot configuration
+    pub snapshot_log_threshold: u64,  // Trigger snapshot after N logs
+    pub log_compaction_threshold: u64, // Compact when logs exceed this
+}
+
+impl DiskOptions {
+    pub fn new(path: String) -> Self {
+        Self {
+            path,
+            take_snapshots: true,
+            append_logs: true,
+            trim_logs: true,
+            snapshot_log_threshold: 1000,
+            log_compaction_threshold: 2000,
+        }
+    }
 }
 
 pub struct StorageEntity {
     pub logs: Option<File>,
     pub snapshot: Option<File>,
     pub last_term: u64,
+    pub base_path: PathBuf,
 }
 
-#[derive(Serialize, Deserialize)]
-struct DiskLogEntry {
-    term: u64,
-    commit_index: u64,
-    last_applied: u64,
-    log: LogEntry,
+pub struct DiskLogEntry {
+    pub term: u64,
+    pub commit_index: u64,
+    pub last_applied: u64,
+    pub log: LogEntry,
+}
+
+impl DiskLogEntry {
+    /// Encode to deterministic binary format
+    /// Format:
+    /// [8 bytes] term
+    /// [8 bytes] commit_index
+    /// [8 bytes] last_applied
+    /// [8 bytes] log.id
+    /// [8 bytes] log.term
+    /// [8 bytes] log.sm_id
+    /// [8 bytes] log.fn_id
+    /// [8 bytes] log.data.len()
+    /// [N bytes] log.data
+    pub fn encode(&self) -> Vec<u8> {
+        let data_len = self.log.data.len();
+        let total_size = 8 * 8 + data_len; // 8 u64 fields + data
+        let mut buf = Vec::with_capacity(total_size);
+        
+        // Write fixed-size fields in little-endian
+        buf.extend_from_slice(&self.term.to_le_bytes());
+        buf.extend_from_slice(&self.commit_index.to_le_bytes());
+        buf.extend_from_slice(&self.last_applied.to_le_bytes());
+        buf.extend_from_slice(&self.log.id.to_le_bytes());
+        buf.extend_from_slice(&self.log.term.to_le_bytes());
+        buf.extend_from_slice(&self.log.sm_id.to_le_bytes());
+        buf.extend_from_slice(&self.log.fn_id.to_le_bytes());
+        buf.extend_from_slice(&(data_len as u64).to_le_bytes());
+        
+        // Write variable-length data
+        buf.extend_from_slice(&self.log.data);
+        
+        buf
+    }
+    
+    /// Decode from deterministic binary format
+    pub fn decode(data: &[u8]) -> io::Result<Self> {
+        if data.len() < 64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "DiskLogEntry too short"
+            ));
+        }
+        
+        // Read fixed-size fields
+        let term = u64::from_le_bytes(data[0..8].try_into().unwrap());
+        let commit_index = u64::from_le_bytes(data[8..16].try_into().unwrap());
+        let last_applied = u64::from_le_bytes(data[16..24].try_into().unwrap());
+        let log_id = u64::from_le_bytes(data[24..32].try_into().unwrap());
+        let log_term = u64::from_le_bytes(data[32..40].try_into().unwrap());
+        let log_sm_id = u64::from_le_bytes(data[40..48].try_into().unwrap());
+        let log_fn_id = u64::from_le_bytes(data[48..56].try_into().unwrap());
+        let data_len = u64::from_le_bytes(data[56..64].try_into().unwrap()) as usize;
+        
+        // Validate data length
+        if data.len() < 64 + data_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("DiskLogEntry data truncated: expected {}, got {}", 64 + data_len, data.len())
+            ));
+        }
+        
+        // Read variable-length data
+        let log_data = data[64..64 + data_len].to_vec();
+        
+        Ok(DiskLogEntry {
+            term,
+            commit_index,
+            last_applied,
+            log: LogEntry {
+                id: log_id,
+                term: log_term,
+                sm_id: log_sm_id,
+                fn_id: log_fn_id,
+                data: log_data,
+            },
+        })
+    }
 }
 
 impl StorageEntity {
@@ -48,8 +143,8 @@ impl StorageEntity {
             &Storage::DISK(ref options) => {
                 let base_path = Path::new(&options.path);
                 let _ = std::fs::create_dir_all(base_path);
-                let log_path = base_path.with_file_name("log.dat");
-                let snapshot_path = base_path.with_file_name("snapshot.dat");
+                let log_path = base_path.join("log.dat");
+                let snapshot_path = base_path.join("snapshot.dat");
                 let mut open_opts = OpenOptions::new();
                 open_opts
                     .write(true)
@@ -70,10 +165,8 @@ impl StorageEntity {
                             if log_file.read_exact(&mut data_buf).is_err() {
                                 break;
                             }
-                            let entry = crate::utils::serde::deserialize::<DiskLogEntry>(
-                                data_buf.as_slice(),
-                            )
-                            .unwrap();
+                            let entry = DiskLogEntry::decode(&data_buf)
+                                .expect("Failed to decode log entry from disk");
                             *term = entry.term;
                             *commit_index = entry.commit_index;
                             *last_applied = entry.last_applied;
@@ -91,6 +184,7 @@ impl StorageEntity {
                         None
                     },
                     last_term: 0,
+                    base_path: base_path.to_path_buf(),
                 })
             }
             _ => None,
@@ -113,7 +207,7 @@ impl StorageEntity {
                     last_applied: meta.last_applied,
                     log: log.clone(),
                 };
-                let entry_data = crate::utils::serde::serialize(&entry);
+                let entry_data = entry.encode();  // Use deterministic encoding
                 f.write(&(entry_data.len() as u64).to_le_bytes()).await?;
                 f.write(entry_data.as_slice()).await?;
                 self.last_term = *term;
@@ -176,5 +270,102 @@ impl StorageEntity {
         //     storage.logs.write_all(logs_data.as_slice())?;
         //     storage.logs.sync_all().unwrap();
         // }
+    }
+
+    /// Write snapshot to disk using atomic write pattern (temp file + rename)
+    pub async fn write_snapshot(&mut self, snapshot: &SnapshotEntity) -> io::Result<()> {
+        let snapshot_path = self.base_path.join("snapshot.dat");
+        let temp_path = self.base_path.join("snapshot.dat.tmp");
+        
+        // Serialize snapshot
+        let snapshot_data = crate::utils::serde::serialize(snapshot);
+        
+        // Calculate CRC32 checksum
+        let checksum = crc32fast::hash(&snapshot_data);
+        
+        // Write to temp file
+        let mut temp_file = File::create(&temp_path).await?;
+        
+        // Write checksum first
+        temp_file.write_all(&checksum.to_le_bytes()).await?;
+        
+        // Write length
+        temp_file.write_all(&(snapshot_data.len() as u64).to_le_bytes()).await?;
+        
+        // Write data
+        temp_file.write_all(&snapshot_data).await?;
+        
+        // Sync to disk
+        temp_file.sync_all().await?;
+        drop(temp_file);
+        
+        // Atomic rename
+        std::fs::rename(&temp_path, &snapshot_path)?;
+        
+        info!(
+            "Snapshot persisted to disk: index={}, term={}, size={} bytes",
+            snapshot.last_included_index,
+            snapshot.last_included_term,
+            snapshot_data.len()
+        );
+        
+        Ok(())
+    }
+
+    /// Read and validate snapshot from disk
+    pub async fn read_snapshot(&self) -> io::Result<Option<SnapshotEntity>> {
+        let snapshot_path = self.base_path.join("snapshot.dat");
+        
+        // Check if snapshot file exists
+        if !snapshot_path.exists() {
+            debug!("No snapshot file found at {:?}", snapshot_path);
+            return Ok(None);
+        }
+        
+        let mut file = File::open(&snapshot_path).await?;
+        
+        // Read checksum
+        let mut checksum_buf = [0u8; 4];
+        if file.read_exact(&mut checksum_buf).await.is_err() {
+            warn!("Failed to read snapshot checksum, file may be corrupted");
+            return Ok(None);
+        }
+        let expected_checksum = u32::from_le_bytes(checksum_buf);
+        
+        // Read length
+        let mut len_buf = [0u8; 8];
+        if file.read_exact(&mut len_buf).await.is_err() {
+            warn!("Failed to read snapshot length, file may be corrupted");
+            return Ok(None);
+        }
+        let len = u64::from_le_bytes(len_buf);
+        
+        // Read data
+        let mut data_buf = vec![0u8; len as usize];
+        if file.read_exact(&mut data_buf).await.is_err() {
+            warn!("Failed to read snapshot data, file may be corrupted");
+            return Ok(None);
+        }
+        
+        // Verify checksum
+        let actual_checksum = crc32fast::hash(&data_buf);
+        if actual_checksum != expected_checksum {
+            error!(
+                "Snapshot checksum mismatch! Expected: {}, Got: {}. File is corrupted.",
+                expected_checksum, actual_checksum
+            );
+            return Ok(None);
+        }
+        
+        // Deserialize
+        let snapshot = crate::utils::serde::deserialize::<SnapshotEntity>(&data_buf).unwrap();
+        
+        info!(
+            "Snapshot loaded from disk: index={}, term={}, size={} bytes",
+            snapshot.last_included_index,
+            snapshot.last_included_term,
+            data_buf.len()
+        );
+        Ok(Some(snapshot))
     }
 }
