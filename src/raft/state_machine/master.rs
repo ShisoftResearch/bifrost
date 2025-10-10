@@ -10,7 +10,7 @@ use std::fmt::Formatter;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ExecError {
     SmNotFound(u64),
-    FnNotFound,
+    FnNotFound(u64, u64), // (sm_id, fn_id)
     ServersUnreachable,
     CannotConstructClient,
     NotCommitted,
@@ -66,11 +66,12 @@ impl StateMachineCtl for MasterStateMachine {
     }
 }
 
-fn parse_output(r: Option<Vec<u8>>) -> ExecResult {
+pub fn parse_output<'a>(r: Option<Vec<u8>>) -> ExecResult {
     if let Some(d) = r {
         Ok(d)
     } else {
-        Err(ExecError::FnNotFound)
+        // Caller will wrap with correct (sm_id, fn_id); default to (0,0) if unknown
+        Err(ExecError::FnNotFound(0, 0))
     }
 }
 
@@ -106,12 +107,32 @@ impl MasterStateMachine {
     pub async fn commit_cmd(&mut self, entry: &LogEntry) -> ExecResult {
         match entry.sm_id {
             CONFIG_SM_ID => {
-                parse_output(self.configs.fn_dispatch_cmd(entry.fn_id, &entry.data).await)
+                let out = self.configs.fn_dispatch_cmd(entry.fn_id, &entry.data).await;
+                match out {
+                    Some(d) => Ok(d),
+                    None => {
+                        warn!(
+                            "FN not found for cmd sm_id={}, fn_id={} at log_id={}",
+                            entry.sm_id, entry.fn_id, entry.id
+                        );
+                        Err(ExecError::FnNotFound(entry.sm_id, entry.fn_id))
+                    }
+                }
             }
             _ => {
                 match self.subs.get_mut(&entry.sm_id) {
                     Some(sm) => {
-                        parse_output(sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data).await)
+                        let out = sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data).await;
+                        match out {
+                            Some(data) => Ok(data),
+                            None => {
+                                warn!(
+                                    "FN not found for cmd sm_id={}, fn_id={} at log_id={}",
+                                    entry.sm_id, entry.fn_id, entry.id
+                                );
+                                Err(ExecError::FnNotFound(entry.sm_id, entry.fn_id))
+                            }
+                        }
                     }
                     None => {
                         warn!(
@@ -129,12 +150,32 @@ impl MasterStateMachine {
     pub async fn exec_qry(&self, entry: &LogEntry) -> ExecResult {
         match entry.sm_id {
             CONFIG_SM_ID => {
-                parse_output(self.configs.fn_dispatch_qry(entry.fn_id, &entry.data).await)
+                let out = self.configs.fn_dispatch_qry(entry.fn_id, &entry.data).await;
+                match out {
+                    Some(d) => Ok(d),
+                    None => {
+                        warn!(
+                            "FN not found for qry sm_id={}, fn_id={} at log_id={}",
+                            entry.sm_id, entry.fn_id, entry.id
+                        );
+                        Err(ExecError::FnNotFound(entry.sm_id, entry.fn_id))
+                    }
+                }
             }
             _ => {
                 match self.subs.get(&entry.sm_id) {
                     Some(sm) => {
-                        parse_output(sm.fn_dispatch_qry(entry.fn_id, &entry.data).await)
+                        let out = sm.fn_dispatch_qry(entry.fn_id, &entry.data).await;
+                        match out {
+                            Some(data) => Ok(data),
+                            None => {
+                                warn!(
+                                    "FN not found for qry sm_id={}, fn_id={} at log_id={}",
+                                    entry.sm_id, entry.fn_id, entry.id
+                                );
+                                Err(ExecError::FnNotFound(entry.sm_id, entry.fn_id))
+                            }
+                        }
                     }
                     None => {
                         warn!(
