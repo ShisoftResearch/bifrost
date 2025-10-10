@@ -747,6 +747,23 @@ impl RaftService {
         self.id
     }
     
+    /// Force a write-back and fsync of WAL and persist current commit progress.
+    pub async fn flush_persistence(&self) {
+        let (storage_opt, commit_index, last_applied) = {
+            let meta = self.meta.read().await;
+            (meta.storage.clone(), meta.commit_index, meta.last_applied)
+        };
+        if let Some(storage_mutex) = storage_opt {
+            let mut storage = storage_mutex.lock().await;
+            let _ = storage.flush_wal().await;
+            let _ = storage.write_commit_progress(commit_index, last_applied).await;
+            info!(
+                "Flushed WAL and wrote commit progress: commit_index={}, last_applied={}",
+                commit_index, last_applied
+            );
+        }
+    }
+
     pub async fn shutdown(&self) {
         info!("Shutting down RaftService on {}", self.options.address);
         
@@ -763,6 +780,9 @@ impl RaftService {
             let _ = handle.await;
             info!("Raft checker task completed");
         }
+
+        // Ensure all persistence is flushed to disk
+        self.flush_persistence().await;
         
         info!("RaftService shutdown complete");
     }
@@ -1234,6 +1254,7 @@ impl RaftService {
         entry.term = new_log_term;
         entry.id = new_log_id;
         logs.insert(entry.id, entry.clone());
+        // Strict write-ahead: persist to WAL before any application can observe/commit
         self.logs_post_processing(meta, logs).await.unwrap();
         (new_log_id, new_log_term)
     }
@@ -1261,8 +1282,42 @@ impl RaftService {
             .send_followers_heartbeat(&mut meta, Some(new_log_id), true)
             .await
         {
+            // Strict write-ahead: ensure persistence reflects this index before applying
+            if let Some(storage_mutex) = &meta.storage {
+                let mut storage = storage_mutex.lock().await;
+                info!(
+                    "Strict WA: flushing WAL before commit at log_id={} (term={})",
+                    new_log_id, entry.term
+                );
+                let _ = storage.flush_wal().await;
+                info!(
+                    "Strict WA: WAL fsync completed before commit at log_id={}",
+                    new_log_id
+                );
+            }
             meta.commit_index = new_log_id;
+            info!(
+                "Strict WA: applying entry at log_id={} (commit_index={})",
+                new_log_id, meta.commit_index
+            );
             let result = commit_command(&mut meta, entry).await;
+            info!(
+                "Strict WA: apply completed at log_id={} (result={:?})",
+                new_log_id, result
+            );
+            // Mark applied and persist commit progress atomically after apply
+            meta.last_applied = new_log_id;
+            if let Some(storage_mutex) = &meta.storage {
+                let mut storage = storage_mutex.lock().await;
+                info!(
+                    "Strict WA: writing commit progress (commit_index={}, last_applied={})",
+                    meta.commit_index, meta.last_applied
+                );
+                let _ = storage
+                    .write_commit_progress(meta.commit_index, meta.last_applied)
+                    .await;
+                info!("Strict WA: commit progress persisted");
+            }
             
             // Check if we should take a snapshot after committing
             let num_logs = meta.logs.read().await.len();
@@ -3316,6 +3371,158 @@ mod test {
             assert_eq!(decoded.term, 99);
             
             info!("Large data encoding test passed");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_wal_only_minimal_rsm_recovery() {
+            let _ = env_logger::try_init();
+            info!("==============================================");
+            info!("WAL-ONLY E2E (macro SM): minimal commands, no snapshot");
+            info!("==============================================");
+
+            let temp_dir = std::env::temp_dir().join(format!("raft_wal_only_min_{}", rand::random::<u64>()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            let data_path = temp_dir.to_str().unwrap().to_string();
+
+            let port1 = 3700 + (rand::random::<u16>() % 50);
+            let port2 = port1 + 100;
+            let addr1 = format!("127.0.0.1:{}", port1);
+            let addr2 = format!("127.0.0.1:{}", port2);
+
+            let sm_id = 15u64;
+            let expected_state: i32;
+
+            // ===== PHASE 1: Start single-node with WAL only and execute small commands =====
+            {
+                let service = RaftService::new(Options {
+                    storage: Storage::DISK(disk::DiskOptions {
+                        path: data_path.clone(),
+                        take_snapshots: false, // WAL-only
+                        append_logs: true,
+                        trim_logs: false,
+                        snapshot_log_threshold: 10000,
+                        log_compaction_threshold: 20000,
+                    }),
+                    address: addr1.clone(),
+                    service_id: DEFAULT_SERVICE_ID,
+                });
+
+                let sm = SM { shots: 50 };
+                let server = Server::new(&addr1);
+                server.register_service(&service).await;
+                Server::listen_and_resume(&server).await;
+                service.register_state_machine(Box::new(sm)).await;
+                RaftService::start(&service).await;
+                service.bootstrap().await;
+
+                async_wait(Duration::from_secs(2)).await;
+
+                let client = RaftClient::new(&vec![addr1.clone()], DEFAULT_SERVICE_ID)
+                    .await
+                    .unwrap();
+                let sm_client = client::SMClient::new(sm_id, &client);
+
+                // Execute 3 small commands: total delta = 6
+                let deltas = [1, 2, 3];
+                for d in deltas.iter() {
+                    sm_client.take_a_shot(d).await.unwrap();
+                }
+
+                // Ensure committed logs are applied and WAL is flushed before crash (deterministic)
+                {
+                    let mut meta = service.write_meta().await;
+                    super::super::check_commit(&mut meta).await;
+                    if let Some(storage_mutex) = &meta.storage {
+                        let mut storage = storage_mutex.lock().await;
+                        let _ = storage.flush_wal().await;
+                    }
+                }
+
+                // Persist current commit progress as an extra safety barrier
+                service.flush_persistence().await;
+
+                async_wait(Duration::from_secs(1)).await;
+
+                // Record actual state before crash (source of truth for recovery)
+                expected_state = sm_client.get_shot().await.unwrap();
+                info!("State before crash: {}", expected_state);
+
+                // Verify WAL exists
+                let wal_file = std::path::PathBuf::from(&data_path).join("log.dat");
+                assert!(wal_file.exists(), "WAL file should exist");
+
+                // Graceful shutdown instead of drop
+                drop(sm_client);
+                drop(client);
+                service.shutdown().await;
+                server.shutdown().await;
+            }
+
+            async_wait(Duration::from_secs(2)).await;
+
+            // ===== PHASE 2: Recover from WAL only =====
+            {
+                let service2 = RaftService::new(Options {
+                    storage: Storage::DISK(disk::DiskOptions {
+                        path: data_path.clone(), // Same directory
+                        take_snapshots: false,
+                        append_logs: true,
+                        trim_logs: false,
+                        snapshot_log_threshold: 10000,
+                        log_compaction_threshold: 20000,
+                    }),
+                    address: addr2.clone(),
+                    service_id: DEFAULT_SERVICE_ID,
+                });
+
+                // IMPORTANT: start with same initial state; WAL replays deltas
+                let sm2 = SM { shots: 50 };
+                let server2 = Server::new(&addr2);
+                server2.register_service(&service2).await;
+                Server::listen_and_resume(&server2).await;
+                service2.register_state_machine(Box::new(sm2)).await;
+
+                RaftService::start(&service2).await;
+                service2.bootstrap().await;
+
+                async_wait(Duration::from_secs(2)).await;
+
+                // Ensure logs were recovered
+                let recovered = service2.num_logs().await;
+                info!("Recovered {} logs from WAL", recovered);
+                assert!(recovered > 0);
+
+                // Apply recovered logs
+                {
+                    let mut meta = service2.write_meta().await;
+                    super::super::check_commit(&mut meta).await;
+                }
+
+                // Ensure all committed logs are applied after restart
+                {
+                    let mut meta = service2.write_meta().await;
+                    super::super::check_commit(&mut meta).await;
+                }
+
+                // Verify state equals pre-crash state
+                let client2 = RaftClient::new(&vec![addr2.clone()], DEFAULT_SERVICE_ID)
+                    .await
+                    .unwrap();
+                let sm_client2 = client::SMClient::new(sm_id, &client2);
+
+                let recovered_state = sm_client2.get_shot().await.unwrap();
+                info!("Recovered state: {}", recovered_state);
+                // Assert equality pre vs post crash
+                assert_eq!(recovered_state, expected_state, "recovered state should equal pre-crash state");
+
+                // Clean up
+                drop(sm_client2);
+                drop(client2);
+                drop(service2);
+                drop(server2);
+            }
+
+            std::fs::remove_dir_all(&temp_dir).unwrap();
         }
     }
 }

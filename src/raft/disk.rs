@@ -151,7 +151,7 @@ impl StorageEntity {
                     .create(true)
                     .read(true)
                     .truncate(false);
-                Some(Self {
+                let mut storage = Self {
                     logs: if options.append_logs {
                         let mut log_file = open_opts.open(log_path.as_path())?;
                         let mut len_buf = [0u8; 8];
@@ -168,8 +168,8 @@ impl StorageEntity {
                             let entry = DiskLogEntry::decode(&data_buf)
                                 .expect("Failed to decode log entry from disk");
                             *term = entry.term;
-                            *commit_index = entry.commit_index;
-                            *last_applied = entry.last_applied;
+                            // Do not trust commit/last_applied embedded in WAL for SM reconstruction
+                            // We'll derive commit_index from commit.idx and force replay from last_applied=0
                             logs.insert(entry.log.id, entry.log);
                             counter += 1;
                         }
@@ -185,7 +185,20 @@ impl StorageEntity {
                     },
                     last_term: 0,
                     base_path: base_path.to_path_buf(),
-                })
+                };
+
+                // If commit progress side file exists, load it to ensure accurate indices
+                // Force full replay by resetting last_applied to 0 on startup
+                *last_applied = 0;
+                if let Ok(Some((ci, _la))) = futures::executor::block_on(storage.read_commit_progress()) {
+                    *commit_index = ci;
+                    debug!("Recovered commit progress: commit_index={} (will replay to rebuild state)", ci);
+                } else {
+                    // If no commit progress found, default to 0 to avoid partial state
+                    *commit_index = 0;
+                }
+
+                Some(storage)
             }
             _ => None,
         })
@@ -270,6 +283,41 @@ impl StorageEntity {
         //     storage.logs.write_all(logs_data.as_slice())?;
         //     storage.logs.sync_all().unwrap();
         // }
+    }
+
+    /// Ensure WAL file is fully synced to disk.
+    pub async fn flush_wal(&mut self) -> io::Result<()> {
+        if let Some(f) = &mut self.logs {
+            info!("WAL fsync: syncing log.dat to disk");
+            f.sync_all().await?;
+            info!("WAL fsync: completed");
+        }
+        Ok(())
+    }
+
+    /// Persist commit progress atomically to a side file (commit.idx)
+    pub async fn write_commit_progress(&mut self, commit_index: u64, last_applied: u64) -> io::Result<()> {
+        let commit_path = self.base_path.join("commit.idx");
+        let temp_path = self.base_path.join("commit.idx.tmp");
+        let mut f = File::create(&temp_path).await?;
+        f.write_all(&commit_index.to_le_bytes()).await?;
+        f.write_all(&last_applied.to_le_bytes()).await?;
+        f.sync_all().await?;
+        drop(f);
+        std::fs::rename(&temp_path, &commit_path)?;
+        Ok(())
+    }
+
+    /// Read commit progress if available
+    pub async fn read_commit_progress(&self) -> io::Result<Option<(u64, u64)>> {
+        let commit_path = self.base_path.join("commit.idx");
+        if !commit_path.exists() { return Ok(None); }
+        let mut f = File::open(&commit_path).await?;
+        let mut buf = [0u8; 16];
+        if f.read_exact(&mut buf).await.is_err() { return Ok(None); }
+        let commit_index = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+        let last_applied = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+        Ok(Some((commit_index, last_applied)))
     }
 
     /// Write snapshot to disk using atomic write pattern (temp file + rename)
