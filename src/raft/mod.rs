@@ -223,6 +223,23 @@ async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
     }
 }
 
+impl RaftService {
+    /// Public helper for applications to trigger commit replay after registering
+    /// their state machines. This ensures replay happens when SMs are ready.
+    async fn apply_committed_after_register(&self) {
+        let mut meta = self.meta.write().await;
+        info!(
+            "Manual apply: applying committed logs (commit_index={}, last_applied={})",
+            meta.commit_index, meta.last_applied
+        );
+        check_commit(&mut meta).await;
+        info!(
+            "Manual apply: applied logs up to last_applied={}",
+            meta.last_applied
+        );
+    }
+}
+
 /// Check commits and trigger snapshot if needed (should be called by leader)
 async fn check_commit_and_maybe_snapshot(
     server: &RaftService,
@@ -442,6 +459,9 @@ impl RaftService {
                 );
             }
         }
+        
+        server.apply_committed_after_register().await;
+
         let checker_ref = server.clone();
         let handle = server.rt.spawn(async {
             info!("Starting Raft checker/heartbeat task");
@@ -2829,8 +2849,8 @@ mod test {
                 let sm_id = sm.id();
                 server.register_service(&raft_service).await;
                 Server::listen_and_resume(&server).await;
-                RaftService::start(&raft_service).await;
                 raft_service.register_state_machine(Box::new(sm)).await;
+                RaftService::start(&raft_service).await;
                 raft_service.bootstrap().await;
                 
                 async_wait_secs().await;
@@ -2892,9 +2912,9 @@ mod test {
                 server2.register_service(&raft_service2).await;
                 Server::listen_and_resume(&server2).await;
                 
+                raft_service2.register_state_machine(Box::new(sm2)).await;
                 // This should load logs from disk!
                 RaftService::start(&raft_service2).await;
-                raft_service2.register_state_machine(Box::new(sm2)).await;
                 raft_service2.bootstrap().await;
                 
                 async_wait(Duration::from_secs(2)).await;
