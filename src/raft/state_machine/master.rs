@@ -9,7 +9,7 @@ use std::fmt::Formatter;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ExecError {
-    SmNotFound,
+    SmNotFound(u64),
     FnNotFound,
     ServersUnreachable,
     CannotConstructClient,
@@ -109,15 +109,19 @@ impl MasterStateMachine {
                 parse_output(self.configs.fn_dispatch_cmd(entry.fn_id, &entry.data).await)
             }
             _ => {
-                if let Some(sm) = self.subs.get_mut(&entry.sm_id) {
-                    parse_output(sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data).await)
-                } else {
-                    debug!(
-                        "Cannot find state machine {} for command, we have {:?}",
-                        entry.id,
-                        self.subs.keys().collect::<Vec<_>>()
-                    );
-                    Err(ExecError::SmNotFound)
+                match self.subs.get_mut(&entry.sm_id) {
+                    Some(sm) => {
+                        parse_output(sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data).await)
+                    }
+                    None => {
+                        warn!(
+                            "SM not found for cmd sm_id={} at log_id={}, have SMs: {:?}",
+                            entry.sm_id,
+                            entry.id,
+                            self.subs.keys().collect::<Vec<_>>()
+                        );
+                        Err(ExecError::SmNotFound(entry.sm_id))
+                    }
                 }
             }
         }
@@ -128,15 +132,19 @@ impl MasterStateMachine {
                 parse_output(self.configs.fn_dispatch_qry(entry.fn_id, &entry.data).await)
             }
             _ => {
-                if let Some(sm) = self.subs.get(&entry.sm_id) {
-                    parse_output(sm.fn_dispatch_qry(entry.fn_id, &entry.data).await)
-                } else {
-                    debug!(
-                        "Cannot find state machine {} for query, we have {:?}",
-                        entry.id,
-                        self.subs.keys().collect::<Vec<_>>()
-                    );
-                    Err(ExecError::SmNotFound)
+                match self.subs.get(&entry.sm_id) {
+                    Some(sm) => {
+                        parse_output(sm.fn_dispatch_qry(entry.fn_id, &entry.data).await)
+                    }
+                    None => {
+                        warn!(
+                            "SM not found for qry sm_id={} at log_id={}, have SMs: {:?}",
+                            entry.sm_id,
+                            entry.id,
+                            self.subs.keys().collect::<Vec<_>>()
+                        );
+                        Err(ExecError::SmNotFound(entry.sm_id))
+                    }
                 }
             }
         }
