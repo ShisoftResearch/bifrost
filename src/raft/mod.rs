@@ -1134,7 +1134,7 @@ impl RaftService {
                     member_id, follower.next_index, last_snapshot_index
                 );
                 let master_sm = master_sm.read().await;
-                let snapshot = master_sm.snapshot().unwrap();
+                let snapshot = master_sm.snapshot();
                 // Use the correct last_included_term from snapshot metadata (Issue 2)
                 if let Ok(_) = rpc.install_snapshot(
                     term, 
@@ -1168,7 +1168,7 @@ impl RaftService {
                             member_id, first_log_id, follower_last_log_id
                         );
                         let master_sm = master_sm.read().await;
-                        let snapshot = master_sm.snapshot().unwrap();
+                        let snapshot = master_sm.snapshot();
                         // Use last_applied as snapshot index, get term from the log at that index
                         let snapshot_term = logs.get(&last_applied)
                             .map(|e| e.term)
@@ -1411,16 +1411,10 @@ impl RaftService {
             meta.last_applied, meta.term
         );
 
-        // Generate snapshot from state machine
+        // Generate snapshot from state machine (Master SM decides which subs are recoverable)
         let snapshot_data = {
             let sm = meta.state_machine.read().await;
-            match sm.snapshot() {
-                Some(data) => data,
-                None => {
-                    warn!("State machine returned no snapshot data");
-                    return;
-                }
-            }
+            sm.snapshot()
         };
 
         // Get the term of the log at last_applied index
@@ -2089,9 +2083,9 @@ mod test {
             fn id(&self) -> u64 {
                 15
             }
-            fn snapshot(&self) -> Option<Vec<u8>> {
+            fn snapshot(&self) -> Vec<u8> {
                 // Serialize the shots value
-                Some(crate::utils::serde::serialize(&self.shots))
+                crate::utils::serde::serialize(&self.shots)
             }
             fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
                 // Deserialize and restore the shots value
@@ -2100,6 +2094,9 @@ mod test {
                     info!("SM recovered state: shots={}", self.shots);
                 }
                 future::ready(()).boxed()
+            }
+            fn recoverable(&self) -> bool {
+                true
             }
         }
 
@@ -2308,7 +2305,7 @@ mod test {
             
             // Create a state machine and snapshot it
             let mut sm1 = SM { shots: 42 };
-            let snapshot_data = sm1.snapshot().unwrap();
+            let snapshot_data = sm1.snapshot();
             info!("Created snapshot with shots=42");
             
             // Create snapshot entity
@@ -2626,7 +2623,7 @@ mod test {
             let mut sm = SM { shots: 42 };
             
             // Take snapshot
-            let snapshot_data = sm.snapshot().unwrap();
+            let snapshot_data = sm.snapshot();
             info!("Snapshot taken, size: {} bytes", snapshot_data.len());
             
             // Modify state

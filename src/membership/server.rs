@@ -694,16 +694,19 @@ impl StateMachineCtl for Membership {
     fn id(&self) -> u64 {
         DEFAULT_SERVICE_ID
     }
-    fn snapshot(&self) -> Option<Vec<u8>> {
+    fn snapshot(&self) -> Vec<u8> {
         // Membership service intentionally does NOT persist its state.
         // It starts fresh on each restart and learns membership from the network
         // via heartbeats and join/leave commands.
         // This ensures membership reflects current network reality, not stale disk state.
-        None
+        unreachable!()
     }
     fn recover(&mut self, _: Vec<u8>) -> BoxFuture<()> {
         // Membership service does not recover from snapshots.
         // It rebuilds its state from network discovery and heartbeats.
         future::ready(()).boxed()
+    }
+    fn recoverable(&self) -> bool {
+        false
     }
 }

@@ -213,7 +213,12 @@ impl StorageEntity {
             let was_last_term = self.last_term;
             let mut counter = 0;
             let mut terms_appended = vec![];
+            let master = meta.state_machine.read().await;
             for (term, log) in logs.range((Excluded(self.last_term), Unbounded)) {
+                // Skip non-recoverable state machines
+                if !master.is_recoverable(log.sm_id) {
+                    continue;
+                }
                 let entry = DiskLogEntry {
                     term: *term,
                     commit_index: meta.commit_index,

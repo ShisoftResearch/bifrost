@@ -16,8 +16,9 @@ pub enum OpType {
 
 pub trait StateMachineCtl: Sync + Send + Any {
     fn id(&self) -> u64;
-    fn snapshot(&self) -> Option<Vec<u8>>;
+    fn snapshot(&self) -> Vec<u8>;
     fn recover(&mut self, data: Vec<u8>) -> ::futures::future::BoxFuture<()>;
+    fn recoverable(&self) -> bool;
     fn fn_dispatch_qry<'a>(
         &'a self,
         fn_id: u64,

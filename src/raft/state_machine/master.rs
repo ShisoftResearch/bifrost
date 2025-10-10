@@ -45,17 +45,18 @@ impl StateMachineCtl for MasterStateMachine {
     fn id(&self) -> u64 {
         0
     }
-    fn snapshot(&self) -> Option<Vec<u8>> {
+    fn snapshot(&self) -> Vec<u8> {
         let mut sms: SnapshotDataItems = Vec::with_capacity(self.subs.len());
         for (sm_id, smc) in self.subs.iter() {
-            let sub_snapshot = smc.snapshot();
-            if let Some(snapshot) = sub_snapshot {
-                sms.push((*sm_id, snapshot));
+            if !smc.recoverable() {
+                continue;
             }
+            let sub_snapshot = smc.snapshot();
+            sms.push((*sm_id, sub_snapshot));
         }
-        sms.push((self.configs.id(), self.configs.snapshot().unwrap()));
+        sms.push((self.configs.id(), self.configs.snapshot()));
         let data = crate::utils::serde::serialize(&sms);
-        Some(data)
+        data
     }
     fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
         let sms: SnapshotDataItems = crate::utils::serde::deserialize(data.as_slice()).unwrap();
@@ -63,6 +64,9 @@ impl StateMachineCtl for MasterStateMachine {
             self.snapshots.insert(sm_id, snapshot);
         }
         future::ready(()).boxed()
+    }
+    fn recoverable(&self) -> bool {
+        true
     }
 }
 
@@ -83,6 +87,18 @@ impl MasterStateMachine {
             configs: Configures::new(service_id),
         };
         msm
+    }
+
+    /// Whether a given state machine id should be persisted/recovered.
+    pub fn is_recoverable(&self, sm_id: u64) -> bool {
+        if sm_id == CONFIG_SM_ID {
+            return self.configs.recoverable();
+        }
+        if let Some(sm) = self.subs.get(&sm_id) {
+            return sm.recoverable();
+        }
+        // Default to true if SM is not yet registered so we don't skip WAL
+        true
     }
 
     pub fn register(&mut self, mut smc: SubStateMachine) -> RegisterResult {

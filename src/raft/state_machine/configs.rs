@@ -107,18 +107,21 @@ impl StateMachineCtl for Configures {
     fn id(&self) -> u64 {
         CONFIG_SM_ID
     }
-    fn snapshot(&self) -> Option<Vec<u8>> {
+    fn snapshot(&self) -> Vec<u8> {
         let mut snapshot = ConfigSnapshot {
             members: HashSet::with_capacity(self.members.len()),
         };
         for (_, member) in self.members.iter() {
             snapshot.members.insert(member.address.clone());
         }
-        Some(crate::utils::serde::serialize(&snapshot))
+        crate::utils::serde::serialize(&snapshot)
     }
     fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
         let snapshot: ConfigSnapshot = crate::utils::serde::deserialize(&data).unwrap();
         self.recover_members(snapshot.members).boxed()
+    }
+    fn recoverable(&self) -> bool {
+        true
     }
 }
 

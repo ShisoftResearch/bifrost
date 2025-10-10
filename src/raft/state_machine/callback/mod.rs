@@ -52,11 +52,14 @@ mod test {
         fn id(&self) -> u64 {
             10
         }
-        fn snapshot(&self) -> Option<Vec<u8>> {
-            None
+        fn snapshot(&self) -> Vec<u8> {
+            unreachable!()
         }
         fn recover(&mut self, _: Vec<u8>) -> BoxFuture<()> {
             future::ready(()).boxed()
+        }
+        fn recoverable(&self) -> bool {
+            false
         }
     }
 
