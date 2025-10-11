@@ -436,7 +436,7 @@ mod test {
         let _membership = Membership::new(&server, &raft_service).await;
         server.register_service_with_id(0, &raft_service).await;
         Server::listen_and_resume(&server).await;
-        RaftService::start(&raft_service).await;
+        RaftService::start(&raft_service, false).await;
         raft_service.bootstrap().await;
 
         let group_1 = String::from("test_group_1");

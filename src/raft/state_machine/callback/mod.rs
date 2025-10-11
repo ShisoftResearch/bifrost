@@ -81,7 +81,7 @@ mod test {
         let sm_id = dummy_sm.id();
         server.register_service(&raft_service).await;
         Server::listen_and_resume(&server).await;
-        RaftService::start(&raft_service).await;
+        RaftService::start(&raft_service, false).await;
         raft_service
             .register_state_machine(Box::new(dummy_sm))
             .await;

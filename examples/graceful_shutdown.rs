@@ -33,7 +33,7 @@ async fn main() {
     server.register_service(&raft_service).await;
     
     // Start Raft service
-    if RaftService::start(&raft_service).await {
+    if RaftService::start(&raft_service, false).await {
         println!("Raft service started successfully");
         raft_service.bootstrap().await;
         println!("Raft cluster bootstrapped");

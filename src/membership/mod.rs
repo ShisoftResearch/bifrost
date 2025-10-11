@@ -76,7 +76,7 @@ mod test {
         info!("Server listen and resume");
         Server::listen_and_resume(&server).await;
         info!("Start raft service");
-        RaftService::start(&raft_service).await;
+        RaftService::start(&raft_service, false).await;
         info!("Bootstrap raft service");
         raft_service.bootstrap().await;
         info!("Creating membership service");

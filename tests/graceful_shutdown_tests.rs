@@ -149,7 +149,7 @@ async fn test_raft_service_shutdown_stops_tasks() {
         // Give initialization more time
         sleep(Duration::from_millis(100)).await;
         
-        let started = RaftService::start(&raft_service).await;
+        let started = RaftService::start(&raft_service, false).await;
         if !started {
             println!("Warning: Raft service failed to start, skipping test");
             return; // Skip this test if it fails to start
@@ -202,7 +202,7 @@ async fn test_full_stack_shutdown_releases_port() {
         Server::listen_and_resume(&server).await;
         server.register_service(&raft_service).await;
         
-        let started = RaftService::start(&raft_service).await;
+        let started = RaftService::start(&raft_service, false).await;
         assert!(started, "Raft service should start");
         
         raft_service.bootstrap().await;
@@ -341,7 +341,7 @@ async fn test_shutdown_completes_within_timeout() {
     let server = Server::new(&address);
     Server::listen_and_resume(&server).await;
     server.register_service(&raft_service).await;
-    RaftService::start(&raft_service).await;
+    RaftService::start(&raft_service, false).await;
     raft_service.bootstrap().await;
     
     sleep(Duration::from_millis(500)).await;

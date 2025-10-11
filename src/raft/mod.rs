@@ -226,7 +226,7 @@ async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
 impl RaftService {
     /// Public helper for applications to trigger commit replay after registering
     /// their state machines. This ensures replay happens when SMs are ready.
-    async fn apply_committed_after_register(&self) {
+    async fn recover_after_register(&self) {
         let mut meta = self.meta.write().await;
         info!(
             "Manual apply: applying committed logs (commit_index={}, last_applied={})",
@@ -397,7 +397,7 @@ impl RaftService {
         }
     }
 
-    pub async fn start(server: &Arc<RaftService>) -> bool {
+    pub async fn start(server: &Arc<RaftService>, recover_registered: bool) -> bool {
         let server_address = server.options.address.clone();
         
         // Load and recover from snapshot if it exists
@@ -460,7 +460,9 @@ impl RaftService {
             }
         }
         
-        server.apply_committed_after_register().await;
+        if recover_registered {
+            server.recover_after_register().await;
+        }
 
         let checker_ref = server.clone();
         let handle = server.rt.spawn(async {
@@ -552,6 +554,8 @@ impl RaftService {
         
         return true;
     }
+
+    /// New server without recovery from registered state machine
     pub async fn new_server(opts: Options) -> (bool, Arc<RaftService>, Arc<Server>) {
         let address = opts.address.clone();
         let svr_id = opts.service_id;
@@ -559,7 +563,7 @@ impl RaftService {
         let server = Server::new(&address);
         Server::listen_and_resume(&server).await;
         server.register_service_with_id(svr_id, &service).await;
-        (RaftService::start(&service).await, service, server)
+        (RaftService::start(&service, false).await, service, server)
     }
     pub async fn probe_and_join(&self, servers: &Vec<String>) -> Result<bool, ExecError> {
         debug!("Probing and try to join servers: {:?}", servers);
@@ -1841,7 +1845,7 @@ mod test {
         info!("Listening server 1");
         Server::listen_and_resume(&server1).await;
         info!("Start raft service server 1");
-        assert!(RaftService::start(&service1).await);
+        assert!(RaftService::start(&service1, false).await);
         info!("Bootstrap raft service server 1");
         service1.bootstrap().await;
         let num_members = service1.num_members().await;
@@ -1858,7 +1862,7 @@ mod test {
         info!("Listening server 2");
         Server::listen_and_resume(&server2).await;
         info!("Start raft service for server 2");
-        assert!(RaftService::start(&service2).await);
+        assert!(RaftService::start(&service2, false).await);
         info!("Server 2 join with server 1");
         let join_result = service2.join(&vec![s1_addr.clone()]).await;
         match join_result {
@@ -1882,7 +1886,7 @@ mod test {
         info!("Register raft service for server 3");
         server3.register_service(&service3).await;
         info!("Start raft service for server 3");
-        assert!(RaftService::start(&service3).await);
+        assert!(RaftService::start(&service3, false).await);
         info!("Server 3 join server 1 and server 2");
         let join_result = service3.join(&vec![s1_addr.clone(), s2_addr.clone()]).await;
         assert!(join_result.unwrap());
@@ -1970,7 +1974,7 @@ mod test {
         info!("Listen server 1");
         Server::listen_and_resume(&server1).await;
         info!("Starting raft service for server 1");
-        assert!(RaftService::start(&service1).await);
+        assert!(RaftService::start(&service1, false).await);
         info!("Bootstrap raft for server 1");
         assert_eq!(service1.probe_and_join(&server_list).await.unwrap(), false);
 
@@ -1981,7 +1985,7 @@ mod test {
         info!("Register raft service for server 2");
         server2.register_service(&service2).await;
         info!("Start raft service for server 2");
-        assert!(RaftService::start(&service2).await);
+        assert!(RaftService::start(&service2, false).await);
         info!("Server 2 join cluster");
         let join_result = service2.probe_and_join(&server_list).await;
         join_result.unwrap();
@@ -1993,7 +1997,7 @@ mod test {
         info!("Listening for server 3");
         Server::listen_and_resume(&server3).await;
         info!("Starting raft service for server 3");
-        assert!(RaftService::start(&service3).await);
+        assert!(RaftService::start(&service3, false).await);
         info!("Server 3 join the cluster");
         let join_result = service3.probe_and_join(&server_list).await;
         join_result.unwrap();
@@ -2005,7 +2009,7 @@ mod test {
         info!("Listening for server 4");
         Server::listen_and_resume(&server4).await;
         info!("Starting raft service for server 4");
-        assert!(RaftService::start(&service4).await);
+        assert!(RaftService::start(&service4, false).await);
         info!("Server 4 join cluster");
         let join_result = service4.probe_and_join(&server_list).await;
         join_result.unwrap();
@@ -2017,7 +2021,7 @@ mod test {
         info!("Listening for server 5");
         Server::listen_and_resume(&server5).await;
         info!("Starting raft service for server 5");
-        assert!(RaftService::start(&service5).await);
+        assert!(RaftService::start(&service5, false).await);
         info!("Server 5 join cluster");
         let join_result = service5.probe_and_join(&server_list).await;
         join_result.unwrap();
@@ -2115,7 +2119,7 @@ mod test {
             let sm_id = sm.id();
             server.register_service(&raft_service).await;
             Server::listen_and_resume(&server).await;
-            RaftService::start(&raft_service).await;
+            RaftService::start(&raft_service, false).await;
             raft_service.register_state_machine(Box::new(sm)).await;
             raft_service.bootstrap().await;
 
@@ -2163,7 +2167,7 @@ mod test {
                         let server = Server::new(&addr);
                         server.register_service(&raft_service).await;
                         Server::listen_and_resume(&server).await;
-                        RaftService::start(&raft_service).await;
+                        RaftService::start(&raft_service, false).await;
                         raft_service.register_state_machine(Box::new(sm)).await;
                         raft_service
                     }
@@ -2267,7 +2271,7 @@ mod test {
             let sm_id = sm.id();
             server.register_service(&raft_service).await;
             Server::listen_and_resume(&server).await;
-            RaftService::start(&raft_service).await;
+            RaftService::start(&raft_service, false).await;
             raft_service.register_state_machine(Box::new(sm)).await;
             raft_service.bootstrap().await;
             
@@ -2508,7 +2512,7 @@ mod test {
             let server = Server::new(&addr);
             server.register_service(&raft_service).await;
             Server::listen_and_resume(&server).await;
-            RaftService::start(&raft_service).await;
+            RaftService::start(&raft_service, false).await;
             raft_service.register_state_machine(Box::new(sm)).await;
             raft_service.bootstrap().await;
             
@@ -2593,7 +2597,7 @@ mod test {
             let server = Server::new(&addr);
             server.register_service(&raft_service).await;
             Server::listen_and_resume(&server).await;
-            RaftService::start(&raft_service).await;
+            RaftService::start(&raft_service, false).await;
             raft_service.register_state_machine(Box::new(sm)).await;
             raft_service.bootstrap().await;
             
@@ -2665,7 +2669,7 @@ mod test {
             let server = Server::new(&addr);
             server.register_service(&raft_service).await;
             Server::listen_and_resume(&server).await;
-            RaftService::start(&raft_service).await;
+            RaftService::start(&raft_service, false).await;
             raft_service.register_state_machine(Box::new(sm)).await;
             raft_service.bootstrap().await;
             
@@ -2768,7 +2772,7 @@ mod test {
             let sm_id = sm.id();
             server.register_service(&raft_service).await;
             Server::listen_and_resume(&server).await;
-            RaftService::start(&raft_service).await;
+            RaftService::start(&raft_service, false).await;
             raft_service.register_state_machine(Box::new(sm)).await;
             raft_service.bootstrap().await;
             
@@ -2847,7 +2851,7 @@ mod test {
                 server.register_service(&raft_service).await;
                 Server::listen_and_resume(&server).await;
                 raft_service.register_state_machine(Box::new(sm)).await;
-                RaftService::start(&raft_service).await;
+                RaftService::start(&raft_service, false).await;
                 raft_service.bootstrap().await;
                 
                 async_wait_secs().await;
@@ -2911,7 +2915,7 @@ mod test {
                 
                 raft_service2.register_state_machine(Box::new(sm2)).await;
                 // This should load logs from disk!
-                RaftService::start(&raft_service2).await;
+                RaftService::start(&raft_service2, false).await;
                 raft_service2.bootstrap().await;
                 
                 async_wait(Duration::from_secs(2)).await;
@@ -3050,7 +3054,7 @@ mod test {
             let sm_id = sm.id();
             server.register_service(&raft_service).await;
             Server::listen_and_resume(&server).await;
-            RaftService::start(&raft_service).await;
+            RaftService::start(&raft_service, false).await;
             raft_service.register_state_machine(Box::new(sm)).await;
             raft_service.bootstrap().await;
             
@@ -3139,7 +3143,7 @@ mod test {
                 let server = Server::new(&addr1);
                 server.register_service(&raft_service).await;
                 Server::listen_and_resume(&server).await;
-                RaftService::start(&raft_service).await;
+                RaftService::start(&raft_service, false).await;
                 raft_service.register_state_machine(Box::new(sm)).await;
                 raft_service.bootstrap().await;
                 
@@ -3202,7 +3206,7 @@ mod test {
                 raft_service2.register_state_machine(Box::new(sm2)).await;
                 
                 // This should load logs from disk!
-                RaftService::start(&raft_service2).await;
+                RaftService::start(&raft_service2, false).await;
                 raft_service2.bootstrap().await;
                 
                 async_wait(Duration::from_secs(3)).await;
@@ -3429,7 +3433,7 @@ mod test {
                 server.register_service(&service).await;
                 Server::listen_and_resume(&server).await;
                 service.register_state_machine(Box::new(sm)).await;
-                RaftService::start(&service).await;
+                RaftService::start(&service, false).await;
                 service.bootstrap().await;
 
                 async_wait(Duration::from_secs(2)).await;
@@ -3499,7 +3503,7 @@ mod test {
                 Server::listen_and_resume(&server2).await;
                 service2.register_state_machine(Box::new(sm2)).await;
 
-                RaftService::start(&service2).await;
+                RaftService::start(&service2, false).await;
                 service2.bootstrap().await;
 
                 async_wait(Duration::from_secs(2)).await;

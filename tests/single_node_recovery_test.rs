@@ -45,7 +45,7 @@ async fn test_single_node_cluster_recovery_becomes_leader() {
         server.register_service(&raft_service).await;
         
         // Start and bootstrap
-        let started = RaftService::start(&raft_service).await;
+        let started = RaftService::start(&raft_service, true).await;
         assert!(started, "Phase 1: Should start successfully");
         
         raft_service.bootstrap().await;
@@ -125,7 +125,7 @@ async fn test_single_node_cluster_recovery_becomes_leader() {
         server2.register_service(&raft_service2).await;
         
         // Start - should recover and immediately become leader
-        let started2 = RaftService::start(&raft_service2).await;
+        let started2 = RaftService::start(&raft_service2, true).await;
         assert!(started2, "Phase 2: Should start successfully");
         
         // Give it a moment to stabilize
@@ -199,7 +199,7 @@ async fn test_single_node_multiple_restart_cycles() {
         Server::listen_and_resume(&server).await;
         server.register_service(&raft_service).await;
         
-        let started = RaftService::start(&raft_service).await;
+        let started = RaftService::start(&raft_service, true).await;
         assert!(started, "Cycle {}: Should start", cycle);
         
         if cycle == 1 {
