@@ -226,7 +226,7 @@ async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
 impl RaftService {
     /// Public helper for applications to trigger commit replay after registering
     /// their state machines. This ensures replay happens when SMs are ready.
-    async fn recover_after_register(&self) {
+    pub async fn recover_after_register(&self) {
         let mut meta = self.meta.write().await;
         info!(
             "Manual apply: applying committed logs (commit_index={}, last_applied={})",
