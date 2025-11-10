@@ -223,7 +223,10 @@ async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
         // TODO: Get rid of frequent locking and clone?
         let logs = meta.logs.read().await;
         if let Some(entry) = logs.get(&last_applied) {
-            commit_command(meta, &entry).await.unwrap();
+            if let Err(e) = commit_command(meta, &entry).await {
+                error!("Failed to commit command for log entry {}: {:?}", last_applied, e);
+                // Continue processing other entries despite this failure
+            }
         };
     }
 }
@@ -299,14 +302,18 @@ impl RaftService {
         let mut commit_index = 0;
         let mut last_applied = 0;
 
-        let storage_entity = StorageEntity::new_with_options(
+        let storage_entity = match StorageEntity::new_with_options(
             &opts,
             &mut term,
             &mut commit_index,
             &mut last_applied,
             &mut logs,
-        )
-        .unwrap();
+        ) {
+            Ok(entity) => entity,
+            Err(e) => {
+                panic!("Failed to initialize storage entity: {:?}. Cannot proceed without storage.", e);
+            }
+        };
 
         let master_sm = MasterStateMachine::new(opts.service_id);
 
@@ -335,7 +342,7 @@ impl RaftService {
                 .max_blocking_threads(num_cpus::get())
                 .event_interval(31)
                 .build()
-                .unwrap(),
+                .expect("Failed to build tokio runtime for Raft service"),
             _is_leader: AtomicBool::new(false),
             checker_task: std::sync::Mutex::new(None),
         };
@@ -557,7 +564,10 @@ impl RaftService {
         });
         
         // Store the handle for graceful shutdown
-        *server.checker_task.lock().unwrap() = Some(handle);
+        match server.checker_task.lock() {
+            Ok(mut guard) => *guard = Some(handle),
+            Err(e) => error!("Failed to store checker task handle: {}", e),
+        }
         
         return true;
     }
@@ -602,7 +612,9 @@ impl RaftService {
             if storage.lock().await.last_term > 0 {
                 debug!("There are logged term, will probe and join or bootstrap");
                 drop(meta);
-                self.probe_and_join(servers).await.unwrap();
+                if let Err(e) = self.probe_and_join(servers).await {
+                    error!("Failed to probe and join cluster during conservative bootstrap: {:?}", e);
+                }
             } else {
                 debug!("Log is empty, bootstrap");
                 drop(meta);
@@ -611,7 +623,9 @@ impl RaftService {
         } else {
             debug!("No storage, will probe and join or bootstrap");
             drop(meta);
-            self.probe_and_join(servers).await.unwrap();
+            if let Err(e) = self.probe_and_join(servers).await {
+                error!("Failed to probe and join cluster during conservative bootstrap: {:?}", e);
+            }
         }
     }
     pub async fn join(&self, servers: &Vec<String>) -> Result<bool, ExecError> {
@@ -645,11 +659,10 @@ impl RaftService {
             self.become_follower(&mut meta, 0, client.leader_id());
             debug!("Resetting last checked for join: {}", self.id);
             self.reset_last_checked(&mut meta);
-            debug!(
-                "Completed join for {}, result {:}",
-                self.id,
-                result.is_ok() && *result.as_ref().unwrap()
-            );
+            match &result {
+                Ok(joined) => debug!("Completed join for {}, result {}", self.id, joined),
+                Err(e) => debug!("Join failed for {}, error: {:?}", self.id, e),
+            }
             result
         } else {
             Err(ExecError::CannotConstructClient)
@@ -672,10 +685,16 @@ impl RaftService {
                 "Temporary client for leaving, leader: {}. Sending removal message.",
                 client.leader_id()
             );
-            client
+            match client
                 .execute(CONFIG_SM_ID, del_member_::new(&self.options.address))
                 .await
-                .unwrap();
+            {
+                Ok(_) => info!("Successfully removed member {} from cluster", self.options.address),
+                Err(e) => {
+                    error!("Failed to remove member {} from cluster: {:?}", self.options.address, e);
+                    return false;
+                }
+            }
         } else {
             error!("Cannot obtain temporary client for leaving");
             return false;
@@ -806,10 +825,15 @@ impl RaftService {
         }
         
         // Wait for the checker task to complete
-        if let Some(handle) = self.checker_task.lock().unwrap().take() {
-            info!("Waiting for Raft checker task to complete...");
-            let _ = handle.await;
-            info!("Raft checker task completed");
+        match self.checker_task.lock() {
+            Ok(mut guard) => {
+                if let Some(handle) = guard.take() {
+                    info!("Waiting for Raft checker task to complete...");
+                    let _ = handle.await;
+                    info!("Raft checker task completed");
+                }
+            }
+            Err(e) => error!("Failed to acquire checker task lock during shutdown: {}", e),
         }
 
         // Ensure all persistence is flushed to disk

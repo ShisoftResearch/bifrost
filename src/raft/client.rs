@@ -123,14 +123,15 @@ impl RaftClient {
                             }
                         }
                         debug!("Getting server info from {}, id {}", server_addr, id);
-                        let member_client = members.clients.get(&id);
-                        debug!("Checking server client {}, id {}", server_addr, id);
-                        if member_client.is_none() {
-                            debug!("Server not found, skip {}, id {}", server_addr, id);
-                            return None;
-                        }
+                        let member_client = match members.clients.get(&id) {
+                            Some(client) => client,
+                            None => {
+                                debug!("Server not found, skip {}, id {}", server_addr, id);
+                                return None;
+                            }
+                        };
                         debug!("Invoking server_cluster_info on {}, id {}", server_addr, id);
-                        let info_res = member_client.unwrap().c_server_cluster_info().await;
+                        let info_res = member_client.c_server_cluster_info().await;
                         debug!("Checking response from {}", server_addr);
                         return match info_res {
                             Ok(info) => {
@@ -204,7 +205,13 @@ impl RaftClient {
                     members.clients.remove(id);
                 }
                 for id in remote_ids.difference(&connected_ids) {
-                    let addr = members.id_map.get(id).unwrap().clone();
+                    let addr = match members.id_map.get(id) {
+                        Some(addr) => addr.clone(),
+                        None => {
+                            error!("Cannot find address for server id {}", id);
+                            continue;
+                        }
+                    };
                     if !members.clients.contains_key(id) {
                         if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(&addr).await {
                             info!("Having new server addr {} id {}", addr, id);
@@ -394,7 +401,13 @@ impl RaftClient {
             let num_members = members.clients.len();
             if num_members >= 1 {
                 let node_index = pos as usize % num_members;
-                let rpc_client = members.clients.values().nth(node_index).unwrap();
+                let rpc_client = match members.clients.values().nth(node_index) {
+                    Some(client) => client,
+                    None => {
+                        error!("Cannot find client at index {} (total: {})", node_index, num_members);
+                        return Err(ExecError::ServersUnreachable);
+                    }
+                };
                 trace!(
                     "Query from node {} for sm_id {}, fn_id {}",
                     node_index,
@@ -544,14 +557,20 @@ impl RaftClient {
                     let members = self.members.read().await;
                     let num_members = members.clients.len();
                     let leader_id = self.leader_id.load(ORDERING);
-                    let new_leader_id = members
+                    let new_leader_id = match members
                         .clients
                         .keys()
                         .nth(depth as usize % num_members)
-                        .unwrap();
+                    {
+                        Some(id) => *id,
+                        None => {
+                            error!("Cannot find new leader at index {} (total: {})", depth as usize % num_members, num_members);
+                            return Err(ExecError::ServersUnreachable);
+                        }
+                    };
                     let leadder_switch = self.leader_id.compare_exchange(
                         leader_id,
-                        *new_leader_id,
+                        new_leader_id,
                         ORDERING,
                         Relaxed,
                     );
@@ -602,7 +621,10 @@ impl RaftClient {
                 let members = self.members.read().await;
                 Vec::from_iter(members.id_map.values().cloned())
             };
-            self.update_info(&servers).await.unwrap();
+            if let Err(e) = self.update_info(&servers).await {
+                error!("Failed to update cluster info: {:?}", e);
+                return None;
+            }
             let leader_id = self.leader_id.load(ORDERING);
             let members = self.members.read().await;
             if let Some(client) = members.clients.get(&leader_id) {
@@ -676,9 +698,19 @@ impl<T: StateMachineClient> CachedStateMachine<T> {
                         "Creating state machine client instance, service {}, state machine id {}",
                         self.raft_service_id, self.state_machine_id
                     );
-                    let raft_client = RaftClient::new(&self.server_list, self.raft_service_id)
-                        .await
-                        .unwrap();
+                    let raft_client = match RaftClient::new(&self.server_list, self.raft_service_id).await {
+                        Ok(client) => client,
+                        Err(e) => {
+                            error!(
+                                "Failed to create RaftClient for service {} and sm {}: {:?}",
+                                self.raft_service_id, self.state_machine_id, e
+                            );
+                            // Drop the lock and retry after a delay
+                            drop(place_holder);
+                            sleep(Duration::from_millis(100)).await;
+                            continue;
+                        }
+                    };
                     // Create a client for the state machine on the raft service
                     *place_holder = Some(Arc::new(T::new_instance(
                         self.state_machine_id,
