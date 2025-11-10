@@ -39,6 +39,8 @@ pub trait RaftMsg<R>: Send + Sync {
 
 const CHECKER_MS: i64 = 200;
 const HEARTBEAT_MS: i64 = 1000;
+// Timeout for heartbeat task - increased to prevent timeouts under stress
+const HEARTBEAT_TASK_TIMEOUT_MS: i64 = 5000;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LogEntry {
@@ -66,7 +68,10 @@ pub enum ClientQryResponse {
         last_log_term: u64,
         last_log_id: u64,
     },
-    LeftBehind,
+    LeftBehind {
+        last_log_term: u64,
+        last_log_id: u64,
+    },
 }
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ClientClusterInfo {
@@ -505,9 +510,11 @@ impl RaftService {
                     server._is_leader.store(is_leader, Relaxed);
                     match action {
                         CheckerAction::SendHeartbeat => {
+                            // Send heartbeat synchronously - increased timeout prevents cancellation under stress
                             server
                                 .send_followers_heartbeat(&mut meta, None, false)
                                 .await;
+                            meta.last_checked = get_time();
                         }
                         CheckerAction::BecomeCandidate => {
                             server.become_candidate(&mut meta).await;
@@ -520,7 +527,7 @@ impl RaftService {
                     return true;
                 };
                 let timed_heartbeat = timeout(
-                    Duration::from_millis(HEARTBEAT_MS as u64),
+                    Duration::from_millis(HEARTBEAT_TASK_TIMEOUT_MS as u64),
                     heartbeat_task_continue,
                 )
                 .await;
@@ -1737,7 +1744,10 @@ impl Service for RaftService {
             let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
             if entry.term > last_log_term || entry.id > last_log_id {
                 trace!("Client query for raft sm_id {}, fn_id {} with term {}, id {} have left behind. Extected term {}, id {}", entry.sm_id, entry.fn_id, entry.term, entry.id, last_log_term, last_log_id);
-                ClientQryResponse::LeftBehind
+                ClientQryResponse::LeftBehind {
+                    last_log_term,
+                    last_log_id,
+                }
             } else {
                 trace!("Client query for raft sm_id {}, fn_id {} with term {}, id {}. Reading state machine for query result.", entry.sm_id, entry.fn_id, entry.term, entry.id);
                 let qry_res = meta.state_machine.read().await.exec_qry(&entry).await;

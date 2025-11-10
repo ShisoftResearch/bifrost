@@ -25,12 +25,18 @@ use std::sync::Arc;
 use std::time as std_time;
 use tokio::time as async_time;
 
-static MAX_TIMEOUT: i64 = 10_000; //5 secs for 500ms heartbeat
+static MAX_TIMEOUT: i64 = 10_000; // 10 secs timeout before considering a member potentially offline
+static OFFLINE_GRACE_CHECKS: u8 = 3; // Number of consecutive timeout checks before marking offline
+static ONLINE_GRACE_CHECKS: u8 = 2; // Number of consecutive successful checks before marking back online
+static MIN_STATE_CHANGE_INTERVAL: i64 = 5_000; // Minimum 5 seconds between state changes (anti-flapping)
 
 #[derive(Clone, Copy)]
 struct HBStatus {
     last_updated: i64,
     online: bool,
+    consecutive_failures: u8, // Count of consecutive timeout checks while supposedly online
+    consecutive_successes: u8, // Count of consecutive successful checks while supposedly offline
+    last_state_change: i64, // Timestamp of last online/offline state change
 }
 
 pub struct HeartbeatService {
@@ -45,24 +51,31 @@ impl Service for HeartbeatService {
     fn ping(&self, id: u64) -> BoxFuture<()> {
         async move {
             let current_time = time::get_time();
-            let elapsed_time = self
-                .status
-                .insert(
-                    id,
-                    HBStatus {
-                        online: true,
-                        last_updated: current_time,
-                        //orthodoxy info will trigger the watcher thread to update
-                    },
-                )
-                .map(|s| current_time - s.last_updated)
-                .unwrap_or(0);
-            trace!(
-                "Updated heartbeat time to {}, elapsed {}ms",
-                current_time,
-                elapsed_time
-            );
-            // only update the timestamp, let the watcher thread to decide
+            // Update existing status or create new one
+            let old_status = self.status.get(&id);
+            let new_status = if let Some(mut status) = old_status {
+                let elapsed = current_time - status.last_updated;
+                status.last_updated = current_time;
+                // Reset failure counter on successful ping, but keep other fields
+                status.consecutive_failures = 0;
+                if !status.online {
+                    // Member is recovering, increment success counter
+                    status.consecutive_successes += 1;
+                }
+                trace!("Updated heartbeat for member {}, elapsed {}ms", id, elapsed);
+                status
+            } else {
+                // First time seeing this member
+                trace!("First heartbeat from member {}", id);
+                HBStatus {
+                    online: true,
+                    last_updated: current_time,
+                    consecutive_failures: 0,
+                    consecutive_successes: 0,
+                    last_state_change: current_time,
+                }
+            };
+            self.status.insert(id, new_status);
         }
         .boxed()
     }
@@ -83,15 +96,21 @@ impl HeartbeatService {
             .await;
     }
     async fn transfer_leadership(&self) {
-        //update timestamp for every alive server
+        //update timestamp for every alive server to give them a grace period
         let all_entries = self.status.entries();
         let current_time = get_time();
+        let mut online_count = 0;
         for (id, mut stat) in all_entries {
             if stat.online {
                 stat.last_updated = current_time;
+                // Reset counters to give all members a fresh start under new leader
+                stat.consecutive_failures = 0;
+                stat.consecutive_successes = 0;
                 self.status.insert(id, stat);
+                online_count += 1;
             }
         }
+        info!("Leadership transferred, reset heartbeat status for {} online members", online_count);
     }
     
     pub async fn shutdown(&self) {
@@ -99,8 +118,15 @@ impl HeartbeatService {
         self.closed.store(true, Ordering::Relaxed);
         
         // Wait for the watcher task to complete
-        if let Some(handle) = self.watcher_handle.lock().unwrap().take() {
-            let _ = handle.await;
+        match self.watcher_handle.lock() {
+            Ok(mut guard) => {
+                if let Some(handle) = guard.take() {
+                    let _ = handle.await;
+                }
+            }
+            Err(e) => {
+                error!("Failed to acquire watcher handle lock during shutdown: {}", e);
+            }
         }
     }
 }
@@ -186,19 +212,66 @@ impl Membership {
                             let last_updated = status.last_updated;
                             let alive = (start_time < last_updated)
                                 || ((start_time - last_updated) < MAX_TIMEOUT);
-                            // Finding new offline servers
+                            let time_since_last_change = start_time - status.last_state_change;
+                            
+                            // Finding new offline servers (with grace period)
                             if status.online && !alive {
-                                debug!("Found dead member {}", id);
-                                status.online = false;
-                                outdated_members.push(id);
+                                status.consecutive_failures += 1;
+                                status.consecutive_successes = 0;
+                                
+                                // Only mark offline after multiple consecutive failures AND minimum interval
+                                if status.consecutive_failures >= OFFLINE_GRACE_CHECKS 
+                                    && time_since_last_change >= MIN_STATE_CHANGE_INTERVAL {
+                                    warn!(
+                                        "Marking member {} as offline after {} consecutive timeout checks ({}ms since last update)",
+                                        id, status.consecutive_failures, start_time - last_updated
+                                    );
+                                    status.online = false;
+                                    status.last_state_change = start_time;
+                                    status.consecutive_failures = 0;
+                                    outdated_members.push(id);
+                                } else {
+                                    debug!(
+                                        "Member {} timeout check {}/{} ({}ms since last update, {}ms since last state change)",
+                                        id, status.consecutive_failures, OFFLINE_GRACE_CHECKS,
+                                        start_time - last_updated, time_since_last_change
+                                    );
+                                }
                                 members_to_update.push((id, status));
                             }
-                            // Finding new online servers
-                            if !status.online && alive {
-                                debug!("Found alive member {}", id);
-                                status.online = true;
-                                back_in_members.push(id);
+                            // Finding new online servers (with grace period)
+                            else if !status.online && alive {
+                                status.consecutive_successes += 1;
+                                status.consecutive_failures = 0;
+                                
+                                // Only mark online after multiple consecutive successes AND minimum interval
+                                if status.consecutive_successes >= ONLINE_GRACE_CHECKS
+                                    && time_since_last_change >= MIN_STATE_CHANGE_INTERVAL {
+                                    info!(
+                                        "Marking member {} as back online after {} consecutive successful checks",
+                                        id, status.consecutive_successes
+                                    );
+                                    status.online = true;
+                                    status.last_state_change = start_time;
+                                    status.consecutive_successes = 0;
+                                    back_in_members.push(id);
+                                } else {
+                                    debug!(
+                                        "Member {} recovery check {}/{} ({}ms since last state change)",
+                                        id, status.consecutive_successes, ONLINE_GRACE_CHECKS,
+                                        time_since_last_change
+                                    );
+                                }
                                 members_to_update.push((id, status));
+                            }
+                            // Member is consistently online or offline
+                            else if alive {
+                                // Member is online and responsive - reset counters
+                                if status.consecutive_failures > 0 || status.consecutive_successes > 0 {
+                                    status.consecutive_failures = 0;
+                                    status.consecutive_successes = 0;
+                                    members_to_update.push((id, status));
+                                }
                             }
                         }
                         for (id, s) in members_to_update {
@@ -237,7 +310,14 @@ impl Membership {
         });
         
         // Store the handle for graceful shutdown
-        *service.watcher_handle.lock().unwrap() = Some(handle);
+        match service.watcher_handle.lock() {
+            Ok(mut guard) => {
+                *guard = Some(handle);
+            }
+            Err(e) => {
+                error!("Failed to acquire watcher handle lock during initialization: {}", e);
+            }
+        }
         
         // Create membership service with EMPTY state.
         // It will learn all membership from the network through:
@@ -257,20 +337,27 @@ impl Membership {
             .await;
         server.register_service(&service_clone).await;
     }
-    async fn compose_client_member(&self, id: u64) -> ClientMember {
-        let member = self.members.get(&id).unwrap();
-        ClientMember {
+    async fn compose_client_member(&self, id: u64) -> Option<ClientMember> {
+        let member = self.members.get(&id)?;
+        let status = self.heartbeat.status.get(&id)?;
+        Some(ClientMember {
             id,
             address: member.address.clone(),
-            online: self.heartbeat.status.get(&id).unwrap().online,
-        }
+            online: status.online,
+        })
     }
     async fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
         self.callback = Some(SMCallback::new(self.id(), raft_service.clone()).await);
     }
     async fn notify_for_member_online(&self, id: u64) {
         debug!("Notifying member {} online", id);
-        let client_member = self.compose_client_member(id).await;
+        let client_member = match self.compose_client_member(id).await {
+            Some(member) => member,
+            None => {
+                error!("Failed to compose client member {} for online notification", id);
+                return;
+            }
+        };
         let version = self.version;
         cb_notify(
             &self.callback,
@@ -291,7 +378,13 @@ impl Membership {
     }
     async fn notify_for_member_offline(&self, id: u64) {
         debug!("Notifying member {} offline", id);
-        let client_member = self.compose_client_member(id).await;
+        let client_member = match self.compose_client_member(id).await {
+            Some(member) => member,
+            None => {
+                error!("Failed to compose client member {} for offline notification", id);
+                return;
+            }
+        };
         let version = self.version;
         cb_notify(
             &self.callback,
@@ -312,7 +405,13 @@ impl Membership {
     }
     async fn notify_for_member_left(&self, id: u64) {
         debug!("Notifying member {} left", id);
-        let client_member = self.compose_client_member(id).await;
+        let client_member = match self.compose_client_member(id).await {
+            Some(member) => member,
+            None => {
+                error!("Failed to compose client member {} for left notification", id);
+                return;
+            }
+        };
         let version = self.version;
         cb_notify(&self.callback, commands::on_any_member_left::new(), || {
             (client_member.clone(), version)
@@ -345,8 +444,11 @@ impl Membership {
         }
         if success {
             if need_notify {
-                self.notify_for_group_member_left(group_id, &self.compose_client_member(id).await)
-                    .await;
+                if let Some(client_member) = self.compose_client_member(id).await {
+                    self.notify_for_group_member_left(group_id, &client_member).await;
+                } else {
+                    error!("Failed to compose client member {} for group {} leave notification", id, group_id);
+                }
             }
             self.group_leader_candidate_unavailable(group_id, id).await;
             true
@@ -378,7 +480,7 @@ impl Membership {
     async fn change_leader(&mut self, group_id: u64, new: Option<u64>) -> Result<(), ()> {
         let mut old: Option<u64> = None;
         let mut changed = false;
-        if let Some(mut group) = self.groups.get_mut(&group_id) {
+        if let Some(group) = self.groups.get_mut(&group_id) {
             old = group.leader;
             if old != new {
                 group.leader = new;
@@ -388,12 +490,12 @@ impl Membership {
         if changed {
             let version = self.version;
             let old_leader = if let Some(id_opt) = old {
-                Some(self.compose_client_member(id_opt).await)
+                self.compose_client_member(id_opt).await
             } else {
                 None
             };
             let new_leader = if let Some(id_opt) = new {
-                Some(self.compose_client_member(id_opt).await)
+                self.compose_client_member(id_opt).await
             } else {
                 None
             };
@@ -417,7 +519,9 @@ impl Membership {
             }
         }
         if leader_changed {
-            self.change_leader(group_id, Some(member)).await.unwrap();
+            if let Err(_) = self.change_leader(group_id, Some(member)).await {
+                error!("Failed to change leader for group {} to member {}", group_id, member);
+            }
         }
     }
     async fn group_leader_candidate_unavailable(&mut self, group_id: u64, member: u64) {
@@ -429,8 +533,16 @@ impl Membership {
             }
         }
         if reelected {
-            let online_id = self.group_first_online_member_id(group_id).await.unwrap();
-            self.change_leader(group_id, online_id).await.unwrap();
+            match self.group_first_online_member_id(group_id).await {
+                Ok(online_id) => {
+                    if let Err(_) = self.change_leader(group_id, online_id).await {
+                        error!("Failed to change leader for group {} after member {} became unavailable", group_id, member);
+                    }
+                }
+                Err(_) => {
+                    error!("Failed to find online member for group {} after member {} became unavailable", group_id, member);
+                }
+            }
         }
     }
     async fn leader_candidate_available(&mut self, member: u64) {
@@ -458,16 +570,25 @@ impl StateMachineCmds for Membership {
         );
         async move {
             self.version += 1;
+            let current_time = time::get_time();
             {
                 for id in &online {
                     if let Some(mut stat) = self.heartbeat.status.get(&id) {
                         stat.online = true;
+                        stat.last_state_change = current_time;
+                        // Reset counters after state change is confirmed
+                        stat.consecutive_failures = 0;
+                        stat.consecutive_successes = 0;
                         self.heartbeat.status.insert(*id, stat);
                     }
                 }
                 for id in &offline {
                     if let Some(mut stat) = self.heartbeat.status.get(&id) {
                         stat.online = false;
+                        stat.last_state_change = current_time;
+                        // Reset counters after state change is confirmed
+                        stat.consecutive_failures = 0;
+                        stat.consecutive_successes = 0;
                         self.heartbeat.status.insert(*id, stat);
                     }
                 }
@@ -502,18 +623,28 @@ impl StateMachineCmds for Membership {
                     HBStatus {
                         last_updated: current_time,
                         online: true,
+                        consecutive_failures: 0,
+                        consecutive_successes: 0,
+                        last_state_change: current_time,
                     },
                 );
             }
             if joined {
-                let composed_client_member = self.compose_client_member(id).await;
-                cb_notify(
-                    &self.callback,
-                    commands::on_any_member_joined::new(),
-                    || (composed_client_member, self.version),
-                )
-                .await;
-                Some(id)
+                match self.compose_client_member(id).await {
+                    Some(composed_client_member) => {
+                        cb_notify(
+                            &self.callback,
+                            commands::on_any_member_joined::new(),
+                            || (composed_client_member, self.version),
+                        )
+                        .await;
+                        Some(id)
+                    }
+                    None => {
+                        error!("Failed to compose client member {} after join", id);
+                        None
+                    }
+                }
             } else {
                 None
             }
@@ -551,7 +682,9 @@ impl StateMachineCmds for Membership {
             self.version += 1;
             let mut success = false;
             if !self.groups.contains_key(&group_id) {
-                self.new_group(group_name).await.unwrap();
+                if let Err(existing_id) = self.new_group(group_name.clone()).await {
+                    debug!("Group {} already exists with id {}", group_name, existing_id);
+                }
             } // create group if not exists
             if let Some(ref mut group) = self.groups.get_mut(&group_id) {
                 if let Some(ref mut member) = self.members.get_mut(&id) {
@@ -561,15 +694,22 @@ impl StateMachineCmds for Membership {
                 }
             }
             if success {
-                let composed_member = self.compose_client_member(id).await;
-                cb_notify(
-                    &self.callback,
-                    commands::on_group_member_joined::new(&group_id),
-                    || (composed_member, self.version),
-                )
-                .await;
-                self.group_leader_candidate_available(group_id, id).await;
-                true
+                match self.compose_client_member(id).await {
+                    Some(composed_member) => {
+                        cb_notify(
+                            &self.callback,
+                            commands::on_group_member_joined::new(&group_id),
+                            || (composed_member, self.version),
+                        )
+                        .await;
+                        self.group_leader_candidate_available(group_id, id).await;
+                        true
+                    }
+                    None => {
+                        error!("Failed to compose client member {} for group {} join notification", id, group_id);
+                        false
+                    }
+                }
             } else {
                 false
             }
@@ -630,7 +770,7 @@ impl StateMachineCmds for Membership {
             if let Some(group) = self.groups.get(&group_id) {
                 Some((
                     match group.leader {
-                        Some(id) => Some(self.compose_client_member(id).await),
+                        Some(id) => self.compose_client_member(id).await,
                         None => None,
                     },
                     self.version,
@@ -657,6 +797,7 @@ impl StateMachineCmds for Membership {
                 Some((
                     members
                         .into_iter()
+                        .filter_map(|member| member)
                         .filter(|member| !online_only || member.online)
                         .collect(),
                     self.version,
@@ -678,6 +819,7 @@ impl StateMachineCmds for Membership {
             (
                 members
                     .into_iter()
+                    .filter_map(|member| member)
                     .filter(|member| !online_only || member.online)
                     .collect(),
                 self.version,

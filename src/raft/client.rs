@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::iter::FromIterator;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::time::sleep;
 
 const ORDERING: Ordering = Ordering::Relaxed;
@@ -411,8 +412,18 @@ impl RaftClient {
                 );
                 match res {
                     Ok(res) => match res {
-                        ClientQryResponse::LeftBehind => {
-                            debug!("Found left behind record...{}", depth);
+                        ClientQryResponse::LeftBehind {
+                            last_log_term,
+                            last_log_id,
+                        } => {
+                            debug!("Found left behind record...{}, updating client state: server has log_id={}, term={}", depth, last_log_id, last_log_term);
+                            // Update client state from server to avoid retry loop
+                            swap_when_greater(&self.last_log_id, last_log_id);
+                            swap_when_greater(&self.last_log_term, last_log_term);
+                            // Add a small delay to allow server to catch up if under stress
+                            if depth > 0 {
+                                sleep(Duration::from_millis(50)).await;
+                            }
                             if depth >= num_members {
                                 error!("Too many retry on query, num_members {}, due to left behind record {}", num_members, depth);
                                 return Err(ExecError::TooManyRetry);
