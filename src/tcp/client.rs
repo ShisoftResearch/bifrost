@@ -63,9 +63,15 @@ impl Client {
                         if let Ok(mut data) = res {
                             let res_msg_id = data.get_u64_le();
                             trace!("Received msg for {}, size {}", res_msg_id, data.len());
-                            let sender: oneshot::Sender<BytesMut> =
-                                cloned_senders.lock().remove(&res_msg_id).unwrap();
-                            sender.send(data).unwrap();
+                            if let Ok(mut senders) = cloned_senders.lock() {
+                                if let Some(sender) = senders.remove(&res_msg_id) {
+                                    if let Err(e) = sender.send(data) {
+                                        error!("Failed to send response for msg {}: {:?}", res_msg_id, e);
+                                    }
+                                } else {
+                                    error!("No sender found for response msg {}", res_msg_id);
+                                }
+                            }
                         }
                     }
                     debug!("Stream from TCP server {} broken", address);
@@ -99,7 +105,13 @@ impl Client {
             trace!("Sending msg {}, size {}", msg_id, frame.len());
             time::timeout(self.timeout, transport.lock().await.send(frame.freeze())).await??;
             trace!("Sent msg {}", msg_id);
-            Ok(time::timeout(self.timeout, rx).await?.unwrap())
+            match time::timeout(self.timeout, rx).await? {
+                Ok(response) => Ok(response),
+                Err(e) => {
+                    error!("Failed to receive response for msg {}: {:?}", msg_id, e);
+                    Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Response channel closed"))
+                }
+            }
         } else {
             Ok(shortcut::call(self.server_id, msg).await?)
         }

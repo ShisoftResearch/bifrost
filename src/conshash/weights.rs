@@ -53,7 +53,13 @@ impl StateMachineCtl for Weights {
         crate::utils::serde::serialize(&self.groups)
     }
     fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
-        self.groups = crate::utils::serde::deserialize(data.as_slice()).unwrap();
+        match crate::utils::serde::deserialize(data.as_slice()) {
+            Ok(groups) => self.groups = groups,
+            Err(e) => {
+                error!("Failed to deserialize weights state machine snapshot: {:?}. Starting with empty groups.", e);
+                self.groups.clear();
+            }
+        }
         future::ready(()).boxed()
     }
     fn recoverable(&self) -> bool {

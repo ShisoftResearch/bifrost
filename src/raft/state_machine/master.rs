@@ -59,9 +59,17 @@ impl StateMachineCtl for MasterStateMachine {
         data
     }
     fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
-        let sms: SnapshotDataItems = crate::utils::serde::deserialize(data.as_slice()).unwrap();
-        for (sm_id, snapshot) in sms {
-            self.snapshots.insert(sm_id, snapshot);
+        match crate::utils::serde::deserialize(data.as_slice()) {
+            Ok(sms) => {
+                for (sm_id, snapshot) in sms {
+                    self.snapshots.insert(sm_id, snapshot);
+                }
+            }
+            Err(e) => {
+                error!("Failed to deserialize master state machine snapshot: {:?}. State machine recovery failed.", e);
+                // Clear snapshots to start fresh - this is safer than leaving corrupted state
+                self.snapshots.clear();
+            }
         }
         future::ready(()).boxed()
     }

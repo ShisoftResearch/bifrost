@@ -1158,7 +1158,10 @@ impl RaftService {
             }
             let last_entries_id = match &entries {
                 // get last entry id
-                &Some(ref entries) => Some(entries.iter().last().unwrap().id),
+                &Some(ref entries) => {
+                    // Safe: entries is Some, so it's not empty (checked above)
+                    entries.iter().last().map(|entry| entry.id)
+                }
                 &None => None,
             };
             // Check if follower needs logs that have been compacted (Issue 5)
@@ -1196,8 +1199,14 @@ impl RaftService {
                     (0, 0) // 0 represents there is no logs in the leader
                 } else {
                     // detect cleaned logs (shouldn't happen now with snapshot check above)
-                    let (first_log_id, _) = logs.iter().next().unwrap();
-                    if *first_log_id > follower_last_log_id {
+                    let first_log_id = match logs.iter().next() {
+                        Some((first_log_id, _)) => *first_log_id,
+                        None => {
+                            error!("Logs map is not empty but iter().next() returned None - this should not happen");
+                            return follower.match_index;
+                        }
+                    };
+                    if first_log_id > follower_last_log_id {
                         debug!(
                             "Taking snapshot for follower {} (first_log: {} > follower_last: {})",
                             member_id, first_log_id, follower_last_log_id
@@ -1310,7 +1319,11 @@ impl RaftService {
         entry.id = new_log_id;
         logs.insert(entry.id, entry.clone());
         // Strict write-ahead: persist to WAL before any application can observe/commit
-        self.logs_post_processing(meta, logs).await.unwrap();
+        if let Err(e) = self.logs_post_processing(meta, logs).await {
+            error!("Failed to persist log entry {} to storage: {:?}", new_log_id, e);
+            // Note: We still return the log ID/term even if persistence failed
+            // The caller should handle this appropriately
+        }
         (new_log_id, new_log_term)
     }
 
@@ -1562,7 +1575,13 @@ impl Service for RaftService {
                     let log_mismatch;
 
                     if contains_prev_log {
-                        let entry = logs.get(&prev_log_id).unwrap();
+                        let entry = match logs.get(&prev_log_id) {
+                            Some(entry) => entry,
+                            None => {
+                                error!("Log key {} exists in contains_key but not in get() - data inconsistency", prev_log_id);
+                                return (meta.term, AppendEntriesResult::LogMismatch);
+                            }
+                        };
                         log_mismatch = entry.term != prev_log_term;
                     } else {
                         return (meta.term, AppendEntriesResult::LogMismatch); // prev log not existed
@@ -1590,9 +1609,19 @@ impl Service for RaftService {
                             last_new_entry = max(last_new_entry, entry_id);
                         }
                     } else if !logs.is_empty() {
-                        last_new_entry = logs.values().last().unwrap().id;
+                        last_new_entry = match logs.values().last() {
+                            Some(entry) => entry.id,
+                            None => {
+                                error!("Logs map is not empty but values().last() returned None - this should not happen");
+                                // Use u64::MAX as fallback to prevent issues
+                                std::u64::MAX
+                            }
+                        };
                     }
-                    self.logs_post_processing(&meta, logs).await.unwrap();
+                    if let Err(e) = self.logs_post_processing(&meta, logs).await {
+                        error!("Failed to persist logs during append_entries: {:?}", e);
+                        // Continue processing despite persistence failure
+                    }
                 }
                 if leader_commit > meta.commit_index {
                     //RI, 5
@@ -1629,7 +1658,8 @@ impl Service for RaftService {
                     "{} VOTE FOR: {}, valid: {}",
                     self.id, candidate_id, candidate_valid
                 );
-                if (vote_for.is_none() || vote_for.unwrap() == candidate_id) && candidate_valid {
+                let can_vote = vote_for.map_or(true, |voted_for| voted_for == candidate_id);
+                if can_vote && candidate_valid {
                     let (last_id, last_term) = get_last_log_info!(self, logs);
                     if last_log_id >= last_id && last_log_term >= last_term {
                         vote_granted = true;

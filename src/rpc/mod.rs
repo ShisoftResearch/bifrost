@@ -117,7 +117,10 @@ impl Server {
         let tcp_server = Arc::new(tcp::server::Server::new());
         
         // Store tcp_server reference
-        *server.tcp_server.lock().unwrap() = Some(tcp_server.clone());
+        match server.tcp_server.lock() {
+            Ok(mut guard) => *guard = Some(tcp_server.clone()),
+            Err(e) => error!("Failed to store tcp_server reference: {}", e),
+        }
         
         let server_clone = server.clone();
         tcp_server.listen(
@@ -163,7 +166,10 @@ impl Server {
         let tcp_server = Arc::new(tcp::server::Server::new());
         
         // Store tcp_server in the server struct
-        *server.tcp_server.lock().unwrap() = Some(tcp_server.clone());
+        match server.tcp_server.lock() {
+            Ok(mut guard) => *guard = Some(tcp_server.clone()),
+            Err(e) => error!("Failed to store tcp_server reference: {}", e),
+        }
         
         let server_clone = server.clone();
         let handle = tokio::spawn(async move {
@@ -210,15 +216,23 @@ impl Server {
         });
         
         // Store handle
-        *server.shutdown_handle.lock().unwrap() = Some(handle);
+        match server.shutdown_handle.lock() {
+            Ok(mut guard) => *guard = Some(handle),
+            Err(e) => error!("Failed to store shutdown handle: {}", e),
+        }
         
         sleep(Duration::from_secs(1)).await
     }
     
     pub async fn shutdown(&self) {
         info!("Shutting down RPC server on {}", self.address);
-        if let Some(ref tcp_server) = *self.tcp_server.lock().unwrap() {
-            tcp_server.shutdown();
+        match self.tcp_server.lock() {
+            Ok(guard) => {
+                if let Some(ref tcp_server) = *guard {
+                    tcp_server.shutdown();
+                }
+            }
+            Err(e) => error!("Failed to acquire tcp_server lock during shutdown: {}", e),
         }
         // Give it a moment to shut down gracefully
         sleep(Duration::from_millis(100)).await;
@@ -312,9 +326,8 @@ impl ClientPool {
         F: FnOnce(u64) -> String,
     {
         let clients = &self.clients;
-        if clients.contains_key(&server_id) {
-            let client = clients.get(&server_id).unwrap().clone();
-            Ok(client)
+        if let Some(client) = clients.get(&server_id) {
+            Ok(client.clone())
         } else {
             let client = timeout(
                 Duration::from_secs(5),

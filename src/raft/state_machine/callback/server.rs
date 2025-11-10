@@ -52,13 +52,21 @@ impl Subscriptions {
             key, suber_id, address, fn_id, pattern_id
         );
         let require_reload_suber = if suber_exists {
-            let suber_session_id = self.subscribers.get(&suber_id).unwrap().session_id;
-            let session_match = suber_session_id == session_id;
-            if !session_match {
-                self.remove_subscriber(suber_id);
-                true
-            } else {
-                false
+            match self.subscribers.get(&suber_id) {
+                Some(subscriber) => {
+                    let session_match = subscriber.session_id == session_id;
+                    if !session_match {
+                        self.remove_subscriber(suber_id);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => {
+                    error!("Subscriber {} exists flag is true but not found in map - data inconsistency", suber_id);
+                    // Treat as if subscriber doesn't exist - require reload
+                    true
+                }
             }
         } else {
             true
@@ -219,17 +227,26 @@ impl SMCallback {
                         })
                         .collect();
                     let sub_result: Vec<_> = sub_result_futs.collect().await;
-                    let errors = sub_result
+                    let errors: Vec<NotifyError> = sub_result
                         .iter()
-                        .filter(|r| r.is_err())
-                        .map(|r| if let &Err(e) = r { Some(e) } else { None })
-                        .map(|o| o.unwrap())
-                        .collect::<Vec<NotifyError>>();
-                    let response = sub_result
+                        .filter_map(|r| {
+                            if let Err(e) = r {
+                                Some(e.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    let response: Vec<_> = sub_result
                         .into_iter()
-                        .filter(|r| r.is_ok())
-                        .map(|r| r.unwrap())
-                        .collect::<Vec<_>>();
+                        .filter_map(|r| {
+                            if let Ok(value) = r {
+                                Some(value)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
                     Ok((sub_ids.len(), errors, response))
                 } else {
                     Err(NotifyError::CannotFindSubscription)

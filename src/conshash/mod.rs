@@ -181,7 +181,7 @@ impl ConsistentHashing {
     pub fn to_server_name_option(&self, server_id: Option<u64>) -> Option<String> {
         if let Some(sid) = server_id {
             let lookup_table = self.tables.read();
-            Some(lookup_table.addrs.get(&sid).unwrap().clone())
+            lookup_table.addrs.get(&sid).cloned()
         } else {
             None
         }
@@ -284,8 +284,8 @@ impl ConsistentHashing {
                     }
                 }
             }
-            if start.is_some() {
-                f((start.unwrap(), weight));
+            if let Some(start_node) = start {
+                f((start_node, weight));
             } else {
                 warn!("No node exists for watch");
             }
@@ -381,14 +381,10 @@ async fn server_changed(ch: Arc<ConsistentHashing>, member: Member, action: Acti
             let old_nodes = (&*ch.tables.read()).nodes.clone();
             debug!("Reinit conshash table");
             let reinit_res = ch.init_table().await;
-            if !reinit_res.is_ok() {
+            if let Err(e) = &reinit_res {
                 error!(
                     "Cannot reinit table {:?}, member {:?}, action {:?}, version {} -> {}",
-                    reinit_res.err().unwrap(),
-                    member,
-                    action,
-                    ch_version,
-                    version
+                    e, member, action, ch_version, version
                 );
             }
             debug!("Triggering conshash watchers");
