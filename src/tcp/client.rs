@@ -33,7 +33,7 @@ pub struct Client {
 impl Client {
     pub async fn connect_with_timeout(address: &String, timeout: Duration) -> io::Result<Self> {
         let server_id = hash_str(address);
-        let senders = Arc::new(SyncMutex::new(HashMap::new()));
+        let senders = Arc::new(SyncMutex::new(HashMap::<u64, oneshot::Sender<BytesMut>>::new()));
         debug!(
             "TCP connect to {}, server id {}, timeout {}ms",
             address,
@@ -63,14 +63,13 @@ impl Client {
                         if let Ok(mut data) = res {
                             let res_msg_id = data.get_u64_le();
                             trace!("Received msg for {}, size {}", res_msg_id, data.len());
-                            if let Ok(mut senders) = cloned_senders.lock() {
-                                if let Some(sender) = senders.remove(&res_msg_id) {
-                                    if let Err(e) = sender.send(data) {
-                                        error!("Failed to send response for msg {}: {:?}", res_msg_id, e);
-                                    }
-                                } else {
-                                    error!("No sender found for response msg {}", res_msg_id);
+                            let mut senders = cloned_senders.lock();
+                            if let Some(sender) = senders.remove(&res_msg_id) {
+                                if let Err(e) = sender.send(data) {
+                                    error!("Failed to send response for msg {}: {:?}", res_msg_id, e);
                                 }
+                            } else {
+                                error!("No sender found for response msg {}", res_msg_id);
                             }
                         }
                     }

@@ -117,10 +117,10 @@ impl StateMachineCtl for Configures {
         crate::utils::serde::serialize(&snapshot)
     }
     fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
-        match crate::utils::serde::deserialize(&data) {
-            Ok(snapshot) => self.recover_members(snapshot.members).boxed(),
-            Err(e) => {
-                error!("Failed to deserialize config state machine snapshot: {:?}. Config recovery failed.", e);
+        match crate::utils::serde::deserialize::<ConfigSnapshot>(&data) {
+            Some(snapshot) => self.recover_members(snapshot.members).boxed(),
+            None => {
+                error!("Failed to deserialize config state machine snapshot. Config recovery failed.");
                 // Return empty future - state machine will start with empty config
                 future::ready(()).boxed()
             }
