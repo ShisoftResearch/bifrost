@@ -52,7 +52,10 @@ macro_rules! raft_fn_op_type {
 #[macro_export]
 macro_rules! raft_dispatch_fn {
     ($fn_name:ident $s: ident $d: ident ( $( $arg:ident : $in_:ty ),* )) => {{
-        let decoded: ($($in_,)*) = $crate::utils::serde::deserialize($d).unwrap();
+        let decoded: ($($in_,)*) = match $crate::utils::serde::deserialize($d) {
+            Some(decoded) => decoded,
+            None => panic!("Failed to deserialize function call data for function: {}, s: {}, d: {}", stringify!($fn_name), stringify!($s), stringify!($d)),
+        };
         let ($($arg,)*) = decoded;
         let f_result = $s.$fn_name($($arg),*).await;
         Some($crate::utils::serde::serialize(&f_result))
