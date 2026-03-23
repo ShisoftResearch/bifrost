@@ -9,6 +9,7 @@ use crate::raft::state_machine::StateMachineClient;
 use crate::rpc;
 use bifrost_hasher::{hash_bytes, hash_str};
 use futures::future::BoxFuture;
+use rand::RngExt;
 use std::clone::Clone;
 use std::cmp::max;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -167,8 +168,8 @@ impl RaftClient {
                     attempt_remains
                 );
                 let delay_sec = {
-                    let mut rng = rand::thread_rng();
-                    rng.gen_range(1..10)
+                    let mut rng = rand::rng();
+                    rng.random_range(1..10)
                 };
                 sleep(Duration::from_secs(delay_sec)).await;
                 attempt_remains -= 1;

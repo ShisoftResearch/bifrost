@@ -13,7 +13,7 @@ use bifrost_plugins::hash_ident;
 use futures::future::BoxFuture;
 use futures::prelude::*;
 use futures::stream::FuturesUnordered;
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::cmp::{max, min};
 use std::collections::Bound::{Included, Unbounded};
@@ -114,8 +114,8 @@ service! {
 service_with_id!(RaftService, DEFAULT_SERVICE_ID);
 
 fn gen_rand(lower: i64, higher: i64) -> i64 {
-    let mut rng = rand::thread_rng();
-    rng.gen_range(lower..higher)
+    let mut rng = rand::rng();
+    rng.random_range(lower..higher)
 }
 
 fn gen_timeout() -> i64 {
