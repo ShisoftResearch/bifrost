@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
 use std::fs::OpenOptions;
 use std::io;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::ops::Bound::*;
 use std::path::{Path, PathBuf};
 use tokio::fs::*;
@@ -54,23 +54,27 @@ pub struct DiskLogEntry {
 }
 
 impl DiskLogEntry {
-    /// Encode to deterministic binary format
-    /// Format:
-    /// [8 bytes] term
-    /// [8 bytes] commit_index
-    /// [8 bytes] last_applied
-    /// [8 bytes] log.id
-    /// [8 bytes] log.term
-    /// [8 bytes] log.sm_id
-    /// [8 bytes] log.fn_id
-    /// [8 bytes] log.data.len()
-    /// [N bytes] log.data
+    /// Encode to deterministic binary format with CRC32 checksum.
+    ///
+    /// On-disk record layout (written by `append_logs`):
+    ///   [8 bytes]  record length  (= 4 + payload length, does NOT include these 8 bytes)
+    ///   [4 bytes]  CRC32 of payload
+    ///   [N bytes]  payload:
+    ///     [8 bytes] term
+    ///     [8 bytes] commit_index
+    ///     [8 bytes] last_applied
+    ///     [8 bytes] log.id
+    ///     [8 bytes] log.term
+    ///     [8 bytes] log.sm_id
+    ///     [8 bytes] log.fn_id
+    ///     [8 bytes] log.data.len()
+    ///     [M bytes] log.data
+    ///
+    /// `encode()` returns only the payload (the CRC and length prefix are added by the caller).
     pub fn encode(&self) -> Vec<u8> {
         let data_len = self.log.data.len();
-        let total_size = 8 * 8 + data_len; // 8 u64 fields + data
+        let total_size = 8 * 8 + data_len;
         let mut buf = Vec::with_capacity(total_size);
-        
-        // Write fixed-size fields in little-endian
         buf.extend_from_slice(&self.term.to_le_bytes());
         buf.extend_from_slice(&self.commit_index.to_le_bytes());
         buf.extend_from_slice(&self.last_applied.to_le_bytes());
@@ -79,43 +83,33 @@ impl DiskLogEntry {
         buf.extend_from_slice(&self.log.sm_id.to_le_bytes());
         buf.extend_from_slice(&self.log.fn_id.to_le_bytes());
         buf.extend_from_slice(&(data_len as u64).to_le_bytes());
-        
-        // Write variable-length data
         buf.extend_from_slice(&self.log.data);
-        
         buf
     }
-    
-    /// Decode from deterministic binary format
+
+    /// Decode payload bytes (without the length prefix or CRC — the caller strips those).
     pub fn decode(data: &[u8]) -> io::Result<Self> {
         if data.len() < 64 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "DiskLogEntry too short"
+                format!("DiskLogEntry too short: {} bytes", data.len()),
             ));
         }
-        
-        // Read fixed-size fields
-        let term = u64::from_le_bytes(data[0..8].try_into().unwrap());
-        let commit_index = u64::from_le_bytes(data[8..16].try_into().unwrap());
-        let last_applied = u64::from_le_bytes(data[16..24].try_into().unwrap());
-        let log_id = u64::from_le_bytes(data[24..32].try_into().unwrap());
-        let log_term = u64::from_le_bytes(data[32..40].try_into().unwrap());
-        let log_sm_id = u64::from_le_bytes(data[40..48].try_into().unwrap());
-        let log_fn_id = u64::from_le_bytes(data[48..56].try_into().unwrap());
-        let data_len = u64::from_le_bytes(data[56..64].try_into().unwrap()) as usize;
-        
-        // Validate data length
+        let term          = u64::from_le_bytes(data[0..8].try_into().unwrap());
+        let commit_index  = u64::from_le_bytes(data[8..16].try_into().unwrap());
+        let last_applied  = u64::from_le_bytes(data[16..24].try_into().unwrap());
+        let log_id        = u64::from_le_bytes(data[24..32].try_into().unwrap());
+        let log_term      = u64::from_le_bytes(data[32..40].try_into().unwrap());
+        let log_sm_id     = u64::from_le_bytes(data[40..48].try_into().unwrap());
+        let log_fn_id     = u64::from_le_bytes(data[48..56].try_into().unwrap());
+        let data_len      = u64::from_le_bytes(data[56..64].try_into().unwrap()) as usize;
         if data.len() < 64 + data_len {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("DiskLogEntry data truncated: expected {}, got {}", 64 + data_len, data.len())
+                format!("DiskLogEntry data truncated: expected {}, got {}", 64 + data_len, data.len()),
             ));
         }
-        
-        // Read variable-length data
         let log_data = data[64..64 + data_len].to_vec();
-        
         Ok(DiskLogEntry {
             term,
             commit_index,
@@ -155,24 +149,66 @@ impl StorageEntity {
                     logs: if options.append_logs {
                         let mut log_file = open_opts.open(log_path.as_path())?;
                         let mut len_buf = [0u8; 8];
+                        let mut crc_buf = [0u8; 4];
                         let mut counter = 0;
+                        let mut last_valid_pos: u64 = 0;
                         loop {
+                            let pos_before = log_file.seek(SeekFrom::Current(0))
+                                .unwrap_or(last_valid_pos);
                             if log_file.read_exact(&mut len_buf).is_err() {
                                 break;
                             }
-                            let len = u64::from_le_bytes(len_buf);
-                            let mut data_buf = vec![0u8; len as usize];
-                            if log_file.read_exact(&mut data_buf).is_err() {
+                            let record_len = u64::from_le_bytes(len_buf);
+                            // record_len = 4 (CRC) + payload_len
+                            if record_len < 4 {
+                                warn!("WAL corrupt: invalid record length {} at pos {}, truncating", record_len, pos_before);
                                 break;
                             }
-                            let entry = DiskLogEntry::decode(&data_buf)
-                                .expect("Failed to decode log entry from disk");
-                            *term = entry.term;
-                            // Do not trust commit/last_applied embedded in WAL for SM reconstruction
-                            // We'll derive commit_index from commit.idx and force replay from last_applied=0
-                            logs.insert(entry.log.id, entry.log);
-                            counter += 1;
+                            let payload_len = record_len - 4;
+                            if log_file.read_exact(&mut crc_buf).is_err() {
+                                warn!("WAL truncated: missing CRC at pos {}, truncating", pos_before);
+                                break;
+                            }
+                            let expected_crc = u32::from_le_bytes(crc_buf);
+                            let mut data_buf = vec![0u8; payload_len as usize];
+                            if log_file.read_exact(&mut data_buf).is_err() {
+                                warn!("WAL truncated: missing payload at pos {}, truncating", pos_before);
+                                break;
+                            }
+                            let actual_crc = crc32fast::hash(&data_buf);
+                            if actual_crc != expected_crc {
+                                warn!(
+                                    "WAL CRC mismatch at pos {}: expected {:#010x}, got {:#010x}, truncating",
+                                    pos_before, expected_crc, actual_crc
+                                );
+                                break;
+                            }
+                            match DiskLogEntry::decode(&data_buf) {
+                                Ok(entry) => {
+                                    *term = entry.term;
+                                    // Do not trust commit/last_applied embedded in WAL for SM reconstruction
+                                    // We'll derive commit_index from commit.idx and force replay from last_applied=0
+                                    logs.insert(entry.log.id, entry.log);
+                                    counter += 1;
+                                    last_valid_pos = log_file.seek(SeekFrom::Current(0))
+                                        .unwrap_or(last_valid_pos);
+                                }
+                                Err(e) => {
+                                    warn!("WAL decode error at pos {}: {:?}, truncating", pos_before, e);
+                                    break;
+                                }
+                            }
                         }
+                        // Truncate WAL at last valid entry to remove any corrupt tail,
+                        // then seek to end so appends start at the correct position
+                        let current_len = log_file.seek(SeekFrom::End(0)).unwrap_or(last_valid_pos);
+                        if current_len > last_valid_pos {
+                            info!("WAL has corrupt tail ({} extra bytes), truncating to {}", current_len - last_valid_pos, last_valid_pos);
+                            if let Err(e) = log_file.set_len(last_valid_pos) {
+                                warn!("Failed to truncate WAL to {} bytes: {:?}", last_valid_pos, e);
+                            }
+                        }
+                        let _ = log_file.seek(SeekFrom::End(0));
                         debug!("Recovered {} raft logs", counter);
                         Some(File::from_std(log_file))
                     } else {
@@ -225,9 +261,13 @@ impl StorageEntity {
                     last_applied: meta.last_applied,
                     log: log.clone(),
                 };
-                let entry_data = entry.encode();  // Use deterministic encoding
-                f.write(&(entry_data.len() as u64).to_le_bytes()).await?;
-                f.write(entry_data.as_slice()).await?;
+                let entry_data = entry.encode();
+                let checksum = crc32fast::hash(&entry_data);
+                // Write: [8 bytes record_len = 4+payload_len][4 bytes CRC32][N bytes payload]
+                let record_len = 4u64 + entry_data.len() as u64;
+                f.write_all(&record_len.to_le_bytes()).await?;
+                f.write_all(&checksum.to_le_bytes()).await?;
+                f.write_all(entry_data.as_slice()).await?;
                 self.last_term = *term;
                 terms_appended.push(self.last_term);
                 counter += 1;

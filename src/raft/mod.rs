@@ -351,60 +351,76 @@ impl RaftService {
 
     /// Load snapshot from disk and recover state machine if snapshot exists
     async fn load_snapshot_on_startup(&self) -> bool {
-        if let Some(ref storage) = self.meta.read().await.storage {
-            let storage = storage.lock().await;
-            match storage.read_snapshot().await {
-                Ok(Some(snapshot)) => {
-                    info!(
-                        "Found snapshot on disk: index={}, term={}. Recovering state machine...",
-                        snapshot.last_included_index, snapshot.last_included_term
-                    );
-                    
-                    let mut meta = self.meta.write().await;
-                    
-                    // Recover state machine
-                    meta.state_machine
-                        .write()
-                        .await
-                        .recover(snapshot.snapshot.clone());
-                    
-                    // Update snapshot metadata
-                    meta.last_snapshot_index = snapshot.last_included_index;
-                    meta.last_snapshot_term = snapshot.last_included_term;
-                    
-                    // Update commit and applied indices
-                    if snapshot.last_included_index > meta.last_applied {
-                        meta.last_applied = snapshot.last_included_index;
-                        meta.commit_index = snapshot.last_included_index;
+        // IMPORTANT: read the snapshot from disk while holding only a read lock, then
+        // drop the read lock before acquiring the write lock.  If we tried to acquire
+        // meta.write() while still inside the `if let … = meta.read().await.storage {`
+        // block the borrow of `storage` would keep the read guard alive and we would
+        // deadlock waiting for our own read guard to be released.
+        let maybe_snapshot = {
+            let meta = self.meta.read().await;
+            match meta.storage {
+                Some(ref storage) => {
+                    let storage = storage.lock().await;
+                    match storage.read_snapshot().await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!("Failed to load snapshot from disk: {:?}. Starting without snapshot recovery.", e);
+                            None
+                        }
                     }
-                    
-                    // Compact logs: remove logs covered by snapshot
-                    {
-                        let mut logs = meta.logs.write().await;
-                        let before_count = logs.len();
-                        logs.retain(|&id, _| id > snapshot.last_included_index);
-                        let after_count = logs.len();
-                        info!(
-                            "Compacted logs on startup: removed {} logs, {} remaining",
-                            before_count - after_count,
-                            after_count
-                        );
-                    }
-                    
-                    info!("Snapshot recovery completed successfully");
-                    true
                 }
-                Ok(None) => {
-                    debug!("No snapshot found on disk, starting fresh");
-                    false
-                }
-                Err(e) => {
-                    warn!("Failed to load snapshot from disk: {:?}. Starting without snapshot recovery.", e);
-                    false
+                None => {
+                    debug!("No storage configured, skipping snapshot recovery");
+                    None
                 }
             }
+        }; // ← read guard dropped here before the write lock below
+
+        if let Some(snapshot) = maybe_snapshot {
+            info!(
+                "Found snapshot on disk: index={}, term={}. Recovering state machine...",
+                snapshot.last_included_index, snapshot.last_included_term
+            );
+
+            let mut meta = self.meta.write().await; // safe: read guard already released
+
+            // Recover state machine (stores sub-SM snapshots; applied when they register)
+            meta.state_machine
+                .write()
+                .await
+                .recover(snapshot.snapshot.clone());
+
+            // Update snapshot metadata
+            meta.last_snapshot_index = snapshot.last_included_index;
+            meta.last_snapshot_term = snapshot.last_included_term;
+
+            // Update commit and applied indices.
+            // Preserve commit_index from commit.idx if it is already higher than the
+            // snapshot index — this ensures post-snapshot WAL entries can be replayed.
+            if snapshot.last_included_index > meta.last_applied {
+                meta.last_applied = snapshot.last_included_index;
+                if meta.commit_index < snapshot.last_included_index {
+                    meta.commit_index = snapshot.last_included_index;
+                }
+            }
+
+            // Compact logs: remove entries already covered by the snapshot
+            {
+                let mut logs = meta.logs.write().await;
+                let before_count = logs.len();
+                logs.retain(|&id, _| id > snapshot.last_included_index);
+                let after_count = logs.len();
+                info!(
+                    "Compacted logs on startup: removed {} logs, {} remaining",
+                    before_count - after_count,
+                    after_count
+                );
+            }
+
+            info!("Snapshot recovery completed successfully");
+            true
         } else {
-            debug!("No storage configured, skipping snapshot recovery");
+            debug!("No snapshot found on disk, starting fresh");
             false
         }
     }
@@ -420,6 +436,43 @@ impl RaftService {
             let mut meta = server.meta.write().await;
             meta.last_checked = get_time() + (CHECKER_MS * 10);
             let mut sm = meta.state_machine.write().await;
+
+            // After snapshot recovery the ConfigSM may contain stale members (the cluster
+            // as it existed when the snapshot was taken).  All RPC clients inside those
+            // RaftMember values are dead after a crash; we need to rebuild them.
+            //
+            // Two sub-cases:
+            //  a) Single-node cluster that crashed and restarts on the SAME address:
+            //     our address is already in the map → remove it so new_member() re-adds
+            //     it with a fresh RPC connection.
+            //  b) Single-node cluster that crashed and restarts on a DIFFERENT address
+            //     (e.g. in tests or when a node moves to new hardware):
+            //     the map has exactly one entry and it is NOT our new address → that
+            //     entry is a stale reference to our old address; clear it so we can
+            //     bootstrap cleanly as a fresh single-node cluster.
+            //
+            // Multi-node clusters where one node crashes but the others are still alive
+            // are not affected: the snapshot will typically have >1 member and the
+            // surviving members will re-establish contact via their own heartbeat logic.
+            if recovered_from_disk {
+                let server_id = hash_str(&server_address);
+                if sm.configs.member_existed(server_id) {
+                    // Case (a): our own address was in the snapshot – refresh its connection.
+                    info!("Removing stale self-entry from ConfigSM (snapshot recovery), will re-add with fresh connection");
+                    sm.configs.del_member(server_address.clone()).await;
+                } else if sm.configs.members.len() == 1 {
+                    // Case (b): exactly one stale member that is NOT us (old address of
+                    // this node).  Clear it so we become the sole member.
+                    let stale_addrs: Vec<String> = sm.configs.members.values()
+                        .map(|m| m.address.clone())
+                        .collect();
+                    for addr in stale_addrs {
+                        info!("Removing stale single-member entry '{}' from ConfigSM (snapshot recovery at new address)", addr);
+                        sm.configs.del_member(addr).await;
+                    }
+                }
+            }
+
             let mut inited = false;
             let start_time = get_time();
             while get_time() < start_time + 5000 {
@@ -3609,5 +3662,445 @@ mod test {
 
             std::fs::remove_dir_all(&temp_dir).unwrap();
         }
+
+        // ── NEW RECOVERY TESTS ───────────────────────────────────────────────
+
+        /// Simulate abrupt crash (drop without shutdown/flush) and verify the SM
+        /// recovers to the exact pre-crash state via WAL + commit.idx.
+        /// Asserts "not start over": recovered state ≠ fresh initial state.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_abrupt_crash_full_recovery() {
+            let _ = env_logger::try_init();
+            info!("=== TEST: abrupt crash → full WAL recovery ===");
+
+            let temp_dir = std::env::temp_dir().join(format!("raft_abrupt_{}", rand::random::<u64>()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            let data_path = temp_dir.to_str().unwrap().to_string();
+            let sm_id = 15u64;
+            let initial_shots = 100i32;
+            let num_cmds = 8i32;
+            let expected = initial_shots - num_cmds; // 92
+
+            let port1 = 4001u16 + (rand::random::<u16>() % 20);
+            let addr1 = format!("127.0.0.1:{}", port1);
+
+            // ─── Phase 1: run commands then drop abruptly (no shutdown/flush) ───
+            {
+                let svc = RaftService::new(Options {
+                    storage: Storage::DISK(disk::DiskOptions {
+                        path: data_path.clone(),
+                        take_snapshots: false,
+                        append_logs: true,
+                        trim_logs: false,
+                        snapshot_log_threshold: 10000,
+                        log_compaction_threshold: 20000,
+                    }),
+                    address: addr1.clone(),
+                    service_id: DEFAULT_SERVICE_ID,
+                });
+                let server = Server::new(&addr1);
+                server.register_service(&svc).await;
+                Server::listen_and_resume(&server).await;
+                svc.register_state_machine(Box::new(SM { shots: initial_shots })).await;
+                RaftService::start(&svc, false).await;
+                svc.bootstrap().await;
+                async_wait_secs().await;
+
+                let client = RaftClient::new(&vec![addr1.clone()], DEFAULT_SERVICE_ID).await.unwrap();
+                let sm_client = client::SMClient::new(sm_id, &client);
+                for _ in 0..num_cmds {
+                    sm_client.take_a_shot(&1).await.unwrap();
+                }
+                async_wait(Duration::from_secs(2)).await;
+
+                let before = sm_client.get_shot().await.unwrap();
+                assert_eq!(before, expected, "pre-crash state wrong");
+                info!("State before crash: {}", before);
+
+                // Verify WAL and commit.idx exist
+                assert!(temp_dir.join("log.dat").exists(), "WAL must exist");
+                assert!(temp_dir.join("commit.idx").exists(), "commit.idx must exist (written per-command)");
+
+                // ABRUPT CRASH — no shutdown(), no flush_persistence()
+                drop(sm_client); drop(client); drop(svc); drop(server);
+                info!("Abrupt crash simulated (all handles dropped)");
+            }
+            async_wait(Duration::from_secs(2)).await;
+
+            // ─── Phase 2: restart with same initial state, recover ───
+            let port2 = port1 + 50;
+            let addr2 = format!("127.0.0.1:{}", port2);
+            {
+                let svc2 = RaftService::new(Options {
+                    storage: Storage::DISK(disk::DiskOptions {
+                        path: data_path.clone(),
+                        take_snapshots: false,
+                        append_logs: true,
+                        trim_logs: false,
+                        snapshot_log_threshold: 10000,
+                        log_compaction_threshold: 20000,
+                    }),
+                    address: addr2.clone(),
+                    service_id: DEFAULT_SERVICE_ID,
+                });
+                let server2 = Server::new(&addr2);
+                server2.register_service(&svc2).await;
+                Server::listen_and_resume(&server2).await;
+                // Register SM with SAME initial shots so replay produces the right result
+                svc2.register_state_machine(Box::new(SM { shots: initial_shots })).await;
+                RaftService::start(&svc2, false).await;
+                svc2.bootstrap().await;
+
+                // Replay committed WAL logs into the SM
+                svc2.recover_after_register().await;
+                async_wait(Duration::from_secs(2)).await;
+
+                let client2 = RaftClient::new(&vec![addr2.clone()], DEFAULT_SERVICE_ID).await.unwrap();
+                let sm_client2 = client::SMClient::new(sm_id, &client2);
+                let recovered = sm_client2.get_shot().await.unwrap();
+                info!("Recovered state: {} (expected {})", recovered, expected);
+
+                assert_ne!(recovered, initial_shots, "Must not equal untouched initial state");
+                assert_eq!(recovered, expected, "Must recover exact pre-crash state via WAL");
+
+                drop(sm_client2); drop(client2); drop(svc2); drop(server2);
+            }
+            std::fs::remove_dir_all(&temp_dir).unwrap();
+            info!("=== PASS: abrupt crash recovery ===");
+        }
+
+        /// Write N valid WAL entries, then append partial bytes to simulate a power cut
+        /// mid-entry.  Recovery must load all N good entries and truncate the corrupt tail.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_wal_partial_write_truncation() {
+            let _ = env_logger::try_init();
+            info!("=== TEST: partial WAL write → truncation on recovery ===");
+
+            let temp_dir = std::env::temp_dir().join(format!("raft_partial_{}", rand::random::<u64>()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            let log_path = temp_dir.join("log.dat");
+            const N: usize = 5;
+            const DATA_LEN: usize = 8; // bytes per entry's data field
+
+            // ─── Phase 1: write N complete entries via StorageEntity ───
+            {
+                let mut logs = BTreeMap::new();
+                for i in 1..=N as u64 {
+                    logs.insert(i, LogEntry { id: i, term: 1, sm_id: 15, fn_id: 1,
+                        data: vec![i as u8; DATA_LEN] });
+                }
+                let meta = RaftMeta {
+                    term: 1, vote_for: None, timeout: 10000, last_checked: 0,
+                    membership: Membership::Undefined,
+                    logs: Arc::new(async_std::sync::RwLock::new(BTreeMap::new())),
+                    state_machine: Arc::new(async_std::sync::RwLock::new(
+                        MasterStateMachine::new(DEFAULT_SERVICE_ID))),
+                    commit_index: N as u64, last_applied: N as u64,
+                    leader_id: 0, storage: None,
+                    last_snapshot_index: 0, last_snapshot_term: 0,
+                };
+                let meta_lock = async_std::sync::RwLock::new(meta);
+                let meta_guard = meta_lock.write().await;
+                let logs_lock = async_std::sync::RwLock::new(logs);
+                let logs_guard = logs_lock.write().await;
+
+                let mut storage = disk::StorageEntity {
+                    logs: Some(tokio::fs::File::create(&log_path).await.unwrap()),
+                    snapshot: None, last_term: 0, base_path: temp_dir.clone(),
+                };
+                storage.append_logs(&meta_guard, &logs_guard).await.unwrap();
+                // drop storage to flush/close
+            }
+
+            let size_good = std::fs::metadata(&log_path).unwrap().len();
+            assert!(size_good > 0, "WAL must have content after {} entries", N);
+            info!("WAL size after {} complete entries: {} bytes", N, size_good);
+
+            // ─── Phase 2: append 5 garbage bytes (partial length prefix) ───
+            {
+                use std::io::Write as _;
+                let mut f = std::fs::OpenOptions::new().append(true).open(&log_path).unwrap();
+                f.write_all(&[0xDE, 0xAD, 0xBE, 0xEF, 0xCA]).unwrap();
+                f.sync_all().unwrap();
+            }
+            let size_with_garbage = std::fs::metadata(&log_path).unwrap().len();
+            assert_eq!(size_with_garbage, size_good + 5,
+                "File should be exactly 5 bytes larger after injecting garbage");
+
+            // ─── Phase 3: recover using new_with_options ───
+            let mut term = 0u64;
+            let mut commit_index = 0u64;
+            let mut last_applied = 0u64;
+            let mut recovered_logs = BTreeMap::new();
+            let opts = Options {
+                storage: Storage::DISK(disk::DiskOptions {
+                    path: temp_dir.to_str().unwrap().to_string(),
+                    take_snapshots: false, append_logs: true, trim_logs: false,
+                    snapshot_log_threshold: 10000, log_compaction_threshold: 20000,
+                }),
+                address: "127.0.0.1:0".to_string(),
+                service_id: DEFAULT_SERVICE_ID,
+            };
+            let _storage = disk::StorageEntity::new_with_options(
+                &opts, &mut term, &mut commit_index, &mut last_applied, &mut recovered_logs
+            ).unwrap();
+
+            // All N good entries must be present
+            assert_eq!(recovered_logs.len(), N,
+                "Should recover exactly {} entries; got {}", N, recovered_logs.len());
+
+            // The corrupt 5-byte tail must have been truncated
+            let size_after = std::fs::metadata(&log_path).unwrap().len();
+            assert_eq!(size_after, size_good,
+                "WAL file must be truncated back to {} bytes; got {}", size_good, size_after);
+
+            info!("Recovered {} entries; corrupt tail truncated ({} → {} bytes)",
+                N, size_with_garbage, size_after);
+            std::fs::remove_dir_all(&temp_dir).unwrap();
+            info!("=== PASS: partial write truncation ===");
+        }
+
+        /// Write N WAL entries, then flip bytes in the CRC field of entry K.
+        /// Recovery must stop at entry K (recovering K entries, not K+1..N)
+        /// and the file must be truncated at the corruption boundary.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_wal_crc_corruption_stops_at_bad_entry() {
+            let _ = env_logger::try_init();
+            info!("=== TEST: CRC corruption → partial recovery stops at bad entry ===");
+
+            let temp_dir = std::env::temp_dir().join(format!("raft_crc_{}", rand::random::<u64>()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            let log_path = temp_dir.join("log.dat");
+
+            const N: usize = 6;
+            const DATA_LEN: usize = 8;
+            // Corrupt entry at 0-based index CORRUPT_IDX; first CORRUPT_IDX entries should survive.
+            const CORRUPT_IDX: usize = 3;
+            // On-disk layout per entry: [8 len][4 CRC][64 fixed][DATA_LEN data]
+            const RECORD_SIZE: usize = 8 + 4 + 64 + DATA_LEN; // = 84 bytes
+
+            // ─── Phase 1: write N complete entries ───
+            {
+                let mut logs = BTreeMap::new();
+                for i in 1..=N as u64 {
+                    logs.insert(i, LogEntry { id: i, term: 1, sm_id: 15, fn_id: 1,
+                        data: vec![i as u8; DATA_LEN] });
+                }
+                let meta = RaftMeta {
+                    term: 1, vote_for: None, timeout: 10000, last_checked: 0,
+                    membership: Membership::Undefined,
+                    logs: Arc::new(async_std::sync::RwLock::new(BTreeMap::new())),
+                    state_machine: Arc::new(async_std::sync::RwLock::new(
+                        MasterStateMachine::new(DEFAULT_SERVICE_ID))),
+                    commit_index: N as u64, last_applied: N as u64,
+                    leader_id: 0, storage: None,
+                    last_snapshot_index: 0, last_snapshot_term: 0,
+                };
+                let meta_lock = async_std::sync::RwLock::new(meta);
+                let meta_guard = meta_lock.write().await;
+                let logs_lock = async_std::sync::RwLock::new(logs);
+                let logs_guard = logs_lock.write().await;
+                let mut storage = disk::StorageEntity {
+                    logs: Some(tokio::fs::File::create(&log_path).await.unwrap()),
+                    snapshot: None, last_term: 0, base_path: temp_dir.clone(),
+                };
+                storage.append_logs(&meta_guard, &logs_guard).await.unwrap();
+            }
+
+            let size_before = std::fs::metadata(&log_path).unwrap().len();
+            assert_eq!(size_before, (N * RECORD_SIZE) as u64,
+                "WAL size mismatch: expected {} bytes for {} entries", N * RECORD_SIZE, N);
+
+            // ─── Phase 2: flip all 4 CRC bytes of entry CORRUPT_IDX ───
+            {
+                let mut file_data = std::fs::read(&log_path).unwrap();
+                // CRC starts at byte 8 (after 8-byte length prefix) within each record
+                let crc_offset = CORRUPT_IDX * RECORD_SIZE + 8;
+                file_data[crc_offset]     ^= 0xFF;
+                file_data[crc_offset + 1] ^= 0xFF;
+                file_data[crc_offset + 2] ^= 0xFF;
+                file_data[crc_offset + 3] ^= 0xFF;
+                std::fs::write(&log_path, &file_data).unwrap();
+                info!("Corrupted CRC of entry {} at byte offset {}", CORRUPT_IDX, crc_offset);
+            }
+
+            // ─── Phase 3: recover ───
+            let mut term = 0u64;
+            let mut commit_index = 0u64;
+            let mut last_applied = 0u64;
+            let mut recovered_logs = BTreeMap::new();
+            let opts = Options {
+                storage: Storage::DISK(disk::DiskOptions {
+                    path: temp_dir.to_str().unwrap().to_string(),
+                    take_snapshots: false, append_logs: true, trim_logs: false,
+                    snapshot_log_threshold: 10000, log_compaction_threshold: 20000,
+                }),
+                address: "127.0.0.1:0".to_string(),
+                service_id: DEFAULT_SERVICE_ID,
+            };
+            let _storage = disk::StorageEntity::new_with_options(
+                &opts, &mut term, &mut commit_index, &mut last_applied, &mut recovered_logs
+            ).unwrap();
+
+            // Only the CORRUPT_IDX entries before the corruption survive
+            assert_eq!(recovered_logs.len(), CORRUPT_IDX,
+                "Should recover exactly {} entries before corruption; got {}",
+                CORRUPT_IDX, recovered_logs.len());
+
+            // Verify the recovered entries are the correct ones (ids 1..CORRUPT_IDX)
+            for id in 1..=CORRUPT_IDX as u64 {
+                assert!(recovered_logs.contains_key(&id), "Entry id={} should be present", id);
+            }
+            for id in (CORRUPT_IDX + 1) as u64..=N as u64 {
+                assert!(!recovered_logs.contains_key(&id),
+                    "Entry id={} should have been dropped (after corruption)", id);
+            }
+
+            // File truncated at the corruption boundary
+            let expected_truncated_size = (CORRUPT_IDX * RECORD_SIZE) as u64;
+            let actual_size = std::fs::metadata(&log_path).unwrap().len();
+            assert_eq!(actual_size, expected_truncated_size,
+                "WAL must be truncated to {} bytes at corruption; got {}",
+                expected_truncated_size, actual_size);
+
+            info!("CRC corruption test: {} good entries recovered, {} corrupt entries dropped, \
+                file truncated from {} to {} bytes",
+                CORRUPT_IDX, N - CORRUPT_IDX, size_before, actual_size);
+            std::fs::remove_dir_all(&temp_dir).unwrap();
+            info!("=== PASS: CRC corruption stops recovery at bad entry ===");
+        }
+
+        /// Crash after snapshot + additional WAL entries.
+        /// On restart the SM must recover from the snapshot and then replay the
+        /// post-snapshot WAL log entries — proving "partial recovery, not start over".
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_snapshot_plus_wal_not_start_over() {
+            let _ = env_logger::try_init();
+            info!("=== TEST: snapshot + post-snapshot WAL crash recovery ===");
+
+            let temp_dir = std::env::temp_dir().join(format!("raft_snap_wal_{}", rand::random::<u64>()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            let data_path = temp_dir.to_str().unwrap().to_string();
+            let sm_id = 15u64;
+
+            const INITIAL: i32 = 100;
+            const CMDS_BEFORE_SNAP: i32 = 5;  // shots: 100 → 95
+            const CMDS_AFTER_SNAP: i32  = 3;  // shots: 95  → 92
+            let expected = INITIAL - CMDS_BEFORE_SNAP - CMDS_AFTER_SNAP; // 92
+
+            let port1 = 4050u16 + (rand::random::<u16>() % 20);
+            let addr1 = format!("127.0.0.1:{}", port1);
+
+            // ─── Phase 1: commands → snapshot → more commands → abrupt crash ───
+            {
+                let svc = RaftService::new(Options {
+                    storage: Storage::DISK(disk::DiskOptions {
+                        path: data_path.clone(),
+                        take_snapshots: true,
+                        append_logs: true,
+                        trim_logs: false,
+                        snapshot_log_threshold: 10000, // won't auto-trigger; we do it manually
+                        log_compaction_threshold: 20000,
+                    }),
+                    address: addr1.clone(),
+                    service_id: DEFAULT_SERVICE_ID,
+                });
+                let server = Server::new(&addr1);
+                server.register_service(&svc).await;
+                Server::listen_and_resume(&server).await;
+                svc.register_state_machine(Box::new(SM { shots: INITIAL })).await;
+                RaftService::start(&svc, false).await;
+                svc.bootstrap().await;
+                async_wait_secs().await;
+
+                let client = RaftClient::new(&vec![addr1.clone()], DEFAULT_SERVICE_ID).await.unwrap();
+                let sm_client = client::SMClient::new(sm_id, &client);
+
+                // Execute CMDS_BEFORE_SNAP commands
+                for _ in 0..CMDS_BEFORE_SNAP {
+                    sm_client.take_a_shot(&1).await.unwrap();
+                }
+                async_wait(Duration::from_secs(1)).await;
+                let state_before_snap = sm_client.get_shot().await.unwrap();
+                assert_eq!(state_before_snap, INITIAL - CMDS_BEFORE_SNAP);
+                info!("State before snapshot: {}", state_before_snap);
+
+                // Explicitly take a snapshot at this point
+                {
+                    let mut meta = svc.write_meta().await;
+                    svc.take_snapshot(&mut meta).await;
+                    info!("Snapshot taken at state {}", state_before_snap);
+                }
+                assert!(temp_dir.join("snapshot.dat").exists(), "snapshot.dat must exist");
+
+                // Execute CMDS_AFTER_SNAP more commands (post-snapshot WAL entries)
+                for _ in 0..CMDS_AFTER_SNAP {
+                    sm_client.take_a_shot(&1).await.unwrap();
+                }
+                async_wait(Duration::from_secs(1)).await;
+                let state_before_crash = sm_client.get_shot().await.unwrap();
+                assert_eq!(state_before_crash, expected);
+                info!("State before crash: {}", state_before_crash);
+
+                assert!(temp_dir.join("log.dat").exists(), "WAL must exist");
+                assert!(temp_dir.join("commit.idx").exists(), "commit.idx must exist");
+
+                // Abrupt crash
+                drop(sm_client); drop(client); drop(svc); drop(server);
+                info!("Abrupt crash (post snapshot + {} WAL entries)", CMDS_AFTER_SNAP);
+            }
+            async_wait(Duration::from_secs(2)).await;
+
+            // ─── Phase 2: restart with DIFFERENT initial state (999) ───
+            // If the SM "starts over", it would show 999 (no recovery) or 996 (999 - CMDS_AFTER_SNAP,
+            // only post-snapshot WAL replay from wrong base). Correct recovery gives exactly 92.
+            let port2 = port1 + 50;
+            let addr2 = format!("127.0.0.1:{}", port2);
+            {
+                let svc2 = RaftService::new(Options {
+                    storage: Storage::DISK(disk::DiskOptions {
+                        path: data_path.clone(),
+                        take_snapshots: true,
+                        append_logs: true,
+                        trim_logs: false,
+                        snapshot_log_threshold: 10000,
+                        log_compaction_threshold: 20000,
+                    }),
+                    address: addr2.clone(),
+                    service_id: DEFAULT_SERVICE_ID,
+                });
+                let server2 = Server::new(&addr2);
+                server2.register_service(&svc2).await;
+                Server::listen_and_resume(&server2).await;
+                // IMPORTANT: register SM AFTER start() so that load_snapshot_on_startup()
+                // stores the snapshot bytes before register() applies them.
+                // start() loads snapshot → stores snapshot[15] → register() applies snapshot → SM.shots=95
+                RaftService::start(&svc2, false).await;
+                svc2.register_state_machine(Box::new(SM { shots: 999 })).await;
+                svc2.bootstrap().await;
+
+                // Replay post-snapshot WAL entries (entries after snapshot index → shots 95→92)
+                svc2.recover_after_register().await;
+                async_wait(Duration::from_secs(2)).await;
+
+                let client2 = RaftClient::new(&vec![addr2.clone()], DEFAULT_SERVICE_ID).await.unwrap();
+                let sm_client2 = client::SMClient::new(sm_id, &client2);
+                let recovered = sm_client2.get_shot().await.unwrap();
+                info!("Recovered state: {} (expected {})", recovered, expected);
+
+                // Core assertions
+                assert_ne!(recovered, 999,
+                    "SM must NOT show initial 999 — that would be 'starting over'");
+                assert_ne!(recovered, INITIAL,
+                    "SM must NOT show {} — that would mean snapshot was ignored", INITIAL);
+                assert_eq!(recovered, expected,
+                    "SM must recover to exact pre-crash state via snapshot + WAL replay");
+
+                drop(sm_client2); drop(client2); drop(svc2); drop(server2);
+            }
+            std::fs::remove_dir_all(&temp_dir).unwrap();
+            info!("=== PASS: snapshot + WAL crash recovery (not start over) ===");
+        }
     }
 }
+
