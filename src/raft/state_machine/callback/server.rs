@@ -300,3 +300,168 @@ where
         warn!("Cannot send notification, callback handler is empty");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_subscriptions_new() {
+        let subs = Subscriptions::new();
+
+        assert_eq!(subs.next_id, 0);
+        assert!(subs.subscribers.is_empty());
+        assert!(subs.suber_subs.is_empty());
+        assert!(subs.subscriptions.is_empty());
+        assert!(subs.sub_suber.is_empty());
+        assert!(subs.sub_to_key.is_empty());
+    }
+
+    #[test]
+    fn test_remove_subscription_nonexistent() {
+        let mut subs = Subscriptions::new();
+
+        // Remove non-existent subscription should not crash
+        subs.remove_subscription(999);
+
+        assert!(subs.sub_to_key.is_empty());
+        assert!(subs.subscriptions.is_empty());
+    }
+
+    #[test]
+    fn test_remove_subscription() {
+        let mut subs = Subscriptions::new();
+
+        // Manually add a subscription
+        let sub_id = 1u64;
+        let sub_key = (0u64, 0u64, 100u64, 200u64);
+
+        subs.sub_to_key.insert(sub_id, sub_key);
+        subs.subscriptions
+            .entry(sub_key)
+            .or_insert_with(HashSet::new)
+            .insert(sub_id);
+        subs.sub_suber.insert(sub_id, 42u64);
+
+        // Now remove it
+        subs.remove_subscription(sub_id);
+
+        assert!(!subs.sub_to_key.contains_key(&sub_id));
+        assert!(!subs.sub_suber.contains_key(&sub_id));
+        if let Some(subs_set) = subs.subscriptions.get(&sub_key) {
+            assert!(!subs_set.contains(&sub_id));
+        }
+    }
+
+    #[test]
+    fn test_remove_subscriber() {
+        let mut subs = Subscriptions::new();
+
+        let suber_id = 42u64;
+        let sub_id = 1u64;
+        let sub_key = (0u64, 0u64, 100u64, 200u64);
+
+        // Manually set up subscriber with subscription
+        subs.suber_subs
+            .entry(suber_id)
+            .or_insert_with(HashSet::new)
+            .insert(sub_id);
+        subs.sub_to_key.insert(sub_id, sub_key);
+        subs.subscriptions
+            .entry(sub_key)
+            .or_insert_with(HashSet::new)
+            .insert(sub_id);
+        subs.sub_suber.insert(sub_id, suber_id);
+
+        // Remove the subscriber
+        subs.remove_subscriber(suber_id);
+
+        assert!(!subs.suber_subs.contains_key(&suber_id));
+        assert!(!subs.subscribers.contains_key(&suber_id));
+        assert!(!subs.sub_to_key.contains_key(&sub_id));
+        assert!(!subs.sub_suber.contains_key(&sub_id));
+    }
+
+    #[test]
+    fn test_remove_subscriber_nonexistent() {
+        let mut subs = Subscriptions::new();
+
+        // Remove non-existent subscriber should not crash
+        subs.remove_subscriber(999);
+
+        assert!(subs.subscribers.is_empty());
+    }
+
+    #[test]
+    fn test_notify_error_debug() {
+        // Test that NotifyError can be debugged and cloned
+        let error = NotifyError::IsNotLeader;
+        let cloned = error.clone();
+
+        assert!(matches!(cloned, NotifyError::IsNotLeader));
+
+        // Test all variants
+        let _ = NotifyError::OpTypeNotSubscribe;
+        let _ = NotifyError::CannotFindSubscription;
+        let _ = NotifyError::CannotFindSubscribers;
+        let _ = NotifyError::CannotFindSubscriber;
+        let _ = NotifyError::CannotCastInternalSub;
+    }
+
+    #[test]
+    fn test_subscriptions_next_id_increment() {
+        let mut subs = Subscriptions::new();
+
+        assert_eq!(subs.next_id, 0);
+
+        // Simulate what subscribe does with next_id
+        let first_id = subs.next_id;
+        subs.next_id += 1;
+
+        let second_id = subs.next_id;
+        subs.next_id += 1;
+
+        assert_eq!(first_id, 0);
+        assert_eq!(second_id, 1);
+        assert_eq!(subs.next_id, 2);
+    }
+
+    #[test]
+    fn test_subscriptions_multiple_subs_per_subscriber() {
+        let mut subs = Subscriptions::new();
+
+        let suber_id = 42u64;
+        let sub_id1 = 1u64;
+        let sub_id2 = 2u64;
+        let sub_key1 = (0u64, 0u64, 100u64, 200u64);
+        let sub_key2 = (0u64, 0u64, 101u64, 201u64);
+
+        // Add two subscriptions for same subscriber
+        subs.suber_subs
+            .entry(suber_id)
+            .or_insert_with(HashSet::new)
+            .insert(sub_id1);
+        subs.suber_subs
+            .entry(suber_id)
+            .or_insert_with(HashSet::new)
+            .insert(sub_id2);
+
+        subs.sub_to_key.insert(sub_id1, sub_key1);
+        subs.sub_to_key.insert(sub_id2, sub_key2);
+        subs.sub_suber.insert(sub_id1, suber_id);
+        subs.sub_suber.insert(sub_id2, suber_id);
+
+        // Verify both subscriptions are tracked
+        let subscriber_subs = subs.suber_subs.get(&suber_id).unwrap();
+        assert_eq!(subscriber_subs.len(), 2);
+        assert!(subscriber_subs.contains(&sub_id1));
+        assert!(subscriber_subs.contains(&sub_id2));
+
+        // Remove the subscriber - should remove both subscriptions
+        subs.remove_subscriber(suber_id);
+
+        assert!(!subs.sub_to_key.contains_key(&sub_id1));
+        assert!(!subs.sub_to_key.contains_key(&sub_id2));
+        assert!(!subs.suber_subs.contains_key(&suber_id));
+    }
+}

@@ -9,7 +9,6 @@ use crate::raft::state_machine::StateMachineClient;
 use crate::rpc;
 use bifrost_hasher::{hash_bytes, hash_str};
 use futures::future::BoxFuture;
-use rand::RngExt;
 use std::clone::Clone;
 use std::cmp::max;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -167,10 +166,7 @@ impl RaftClient {
                     "This fail attempt have zero leader id, retry...{}",
                     attempt_remains
                 );
-                let delay_sec = {
-                    let mut rng = rand::rng();
-                    rng.random_range(1..10)
-                };
+                let delay_sec = 1 + (rand::random::<u64>() % 9);
                 sleep(Duration::from_secs(delay_sec)).await;
                 attempt_remains -= 1;
                 continue;
@@ -486,20 +482,32 @@ impl RaftClient {
         fn_id: u64,
         data: Vec<u8>,
     ) -> Result<ExecResult, ExecError> {
+        const NOT_COMMITTED_RETRY_LIMIT: i32 = 64;
+        const NOT_COMMITTED_RETRY_DELAY_MS: u64 = 10;
+        const UPDATE_INFO_RETRY_LIMIT: i32 = 64;
+        const UPDATE_INFO_RETRY_DELAY_MS: u64 = 10;
+
         enum FailureAction {
             SwitchLeader,
             NotCommitted,
             UpdateInfo,
             NotLeader,
+            ShuttingDown,
         }
-        let mut depth = 0;
+        let mut leader_retry_depth = 0;
+        let mut not_committed_depth = 0;
+        let mut update_info_depth = 0;
         loop {
             let failure = {
-                if depth > 0 {
+                if leader_retry_depth > 0 {
                     let members = self.members.read().await;
                     let num_members = members.clients.len();
-                    if depth >= max(num_members + 1, 5) {
-                        error!("Too many retry on command, num_members {}, due to left behind record {}", num_members, depth);
+                    if leader_retry_depth >= max(num_members + 1, 5) {
+                        error!(
+                            "Too many retry on command, num_members {}, due to leader retry attempts {}",
+                            num_members,
+                            leader_retry_depth
+                        );
                         return Err(ExecError::TooManyRetry);
                     };
                 }
@@ -519,13 +527,27 @@ impl RaftClient {
                                 return Ok(data);
                             }
                             Ok(ClientCmdResponse::NotLeader(new_leader_id)) => {
-                                if new_leader_id == 0 || leader_id == leader_id {
+                                if new_leader_id == 0 || new_leader_id == leader_id {
+                                    warn!(
+                                        "RAFTDBG_V2 client notleader-zero_or_same leader_id={} suggested={} depth={} update_info_depth={} not_committed_depth={}",
+                                        leader_id,
+                                        new_leader_id,
+                                        leader_retry_depth,
+                                        update_info_depth,
+                                        not_committed_depth
+                                    );
                                     debug!(
-                                        "CLIENT: NOT LEADER, SUGGESTION NOT USEFUL, PROBE. GOT: {}",
+                                        "CLIENT: NOT LEADER, SUGGESTION NOT USEFUL, REFRESH INFO. GOT: {}",
                                         new_leader_id
                                     );
-                                    FailureAction::SwitchLeader
+                                    FailureAction::UpdateInfo
                                 } else {
+                                    warn!(
+                                        "RAFTDBG_V3 client notleader-redirect current_leader={} suggested_leader={} depth={}",
+                                        leader_id,
+                                        new_leader_id,
+                                        leader_retry_depth
+                                    );
                                     debug!(
                                         "CLIENT: NOT LEADER, REMOTE SUGGEST SWITCH TO {}",
                                         new_leader_id
@@ -539,8 +561,28 @@ impl RaftClient {
                                     FailureAction::NotLeader
                                 }
                             }
-                            Ok(ClientCmdResponse::NotCommitted) => FailureAction::NotCommitted,
+                            Ok(ClientCmdResponse::NotCommitted {
+                                last_log_term,
+                                last_log_id,
+                            }) => {
+                                debug!(
+                                    "CLIENT: NOT COMMITTED at leader {}, refreshing client log cursor to term {}, id {}",
+                                    leader_id,
+                                    last_log_term,
+                                    last_log_id
+                                );
+                                swap_when_greater(&self.last_log_id, last_log_id);
+                                swap_when_greater(&self.last_log_term, last_log_term);
+                                FailureAction::NotCommitted
+                            }
+                            Ok(ClientCmdResponse::ShuttingDown) => FailureAction::ShuttingDown,
                             Err(e) => {
+                                warn!(
+                                    "RAFTDBG_V3 client transport_or_rpc_error leader_id={} depth={} error={:?}",
+                                    leader_id,
+                                    leader_retry_depth,
+                                    e
+                                );
                                 debug!("CLIENT: ERROR - {} - {:?}", leader_id, e);
                                 FailureAction::SwitchLeader // need switch server for leader
                             }
@@ -553,7 +595,64 @@ impl RaftClient {
                 }
             }; //
             match failure {
+                FailureAction::NotCommitted => {
+                    not_committed_depth += 1;
+                    update_info_depth = 0;
+                    if not_committed_depth >= NOT_COMMITTED_RETRY_LIMIT {
+                        error!(
+                            "Too many retry on command due to NotCommitted responses {}",
+                            not_committed_depth
+                        );
+                        return Err(ExecError::TooManyRetry);
+                    }
+                    debug!(
+                        "Retrying command after NotCommitted response {}/{}",
+                        not_committed_depth,
+                        NOT_COMMITTED_RETRY_LIMIT
+                    );
+                    sleep(Duration::from_millis(NOT_COMMITTED_RETRY_DELAY_MS)).await;
+                    continue;
+                }
+                FailureAction::UpdateInfo => {
+                    update_info_depth += 1;
+                    not_committed_depth = 0;
+                    warn!(
+                        "RAFTDBG_V2 client update_info_retry count={} depth={}",
+                        update_info_depth,
+                        leader_retry_depth
+                    );
+                    if update_info_depth >= UPDATE_INFO_RETRY_LIMIT {
+                        error!(
+                            "Too many retry on command due to cluster-info refresh attempts {}",
+                            update_info_depth
+                        );
+                        return Err(ExecError::TooManyRetry);
+                    }
+                    let servers = {
+                        let members = self.members.read().await;
+                        Vec::from_iter(members.id_map.values().cloned())
+                    };
+                    if servers.is_empty() {
+                        warn!("Cannot refresh cluster info: no known servers");
+                        return Err(ExecError::ServersUnreachable);
+                    }
+                    debug!(
+                        "Refreshing cluster info after transient NotLeader/leader-miss {}/{} from {:?}",
+                        update_info_depth,
+                        UPDATE_INFO_RETRY_LIMIT,
+                        servers
+                    );
+                    if let Err(e) = self.update_info(&servers).await {
+                        warn!("Failed to refresh cluster info during command retry: {:?}", e);
+                    }
+                    sleep(Duration::from_millis(UPDATE_INFO_RETRY_DELAY_MS)).await;
+                    continue;
+                }
                 FailureAction::SwitchLeader => {
+                    not_committed_depth = 0;
+                    update_info_depth = 0;
+                    leader_retry_depth += 1;
+                    warn!("RAFTDBG_V3 client switch_leader depth={}", leader_retry_depth);
                     debug!("Switch leader by probing");
                     let members = self.members.read().await;
                     let num_members = members.clients.len();
@@ -561,11 +660,15 @@ impl RaftClient {
                     let new_leader_id = match members
                         .clients
                         .keys()
-                        .nth(depth as usize % num_members)
+                        .nth(leader_retry_depth as usize % num_members)
                     {
                         Some(id) => *id,
                         None => {
-                            error!("Cannot find new leader at index {} (total: {})", depth as usize % num_members, num_members);
+                            error!(
+                                "Cannot find new leader at index {} (total: {})",
+                                leader_retry_depth as usize % num_members,
+                                num_members
+                            );
                             return Err(ExecError::ServersUnreachable);
                         }
                     };
@@ -581,9 +684,16 @@ impl RaftClient {
                     );
                     debug!("CLIENT: Switch leader {}", new_leader_id);
                 }
-                _ => {}
+                FailureAction::NotLeader => {
+                    leader_retry_depth += 1;
+                    not_committed_depth = 0;
+                    update_info_depth = 0;
+                    continue;
+                }
+                FailureAction::ShuttingDown => {
+                    return Err(ExecError::ShuttingDown);
+                }
             }
-            depth += 1;
         }
     }
 

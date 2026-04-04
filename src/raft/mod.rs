@@ -13,7 +13,6 @@ use bifrost_plugins::hash_ident;
 use futures::future::BoxFuture;
 use futures::prelude::*;
 use futures::stream::FuturesUnordered;
-use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::cmp::{max, min};
 use std::collections::Bound::{Included, Unbounded};
@@ -23,6 +22,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::Duration;
 use tokio::runtime;
+use tokio::sync::{watch, Mutex as TokioMutex};
 use tokio::time::*;
 
 #[macro_use]
@@ -59,7 +59,11 @@ pub enum ClientCmdResponse {
         last_log_id: u64,
     },
     NotLeader(u64),
-    NotCommitted,
+    NotCommitted {
+        last_log_term: u64,
+        last_log_id: u64,
+    },
+    ShuttingDown,
 }
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ClientQryResponse {
@@ -114,8 +118,8 @@ service! {
 service_with_id!(RaftService, DEFAULT_SERVICE_ID);
 
 fn gen_rand(lower: i64, higher: i64) -> i64 {
-    let mut rng = rand::rng();
-    rng.random_range(lower..higher)
+    let span = (higher - lower).max(1) as u64;
+    lower + (rand::random::<u64>() % span) as i64
 }
 
 fn gen_timeout() -> i64 {
@@ -149,6 +153,13 @@ pub enum Membership {
     Undefined,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LifecycleState {
+    Running,
+    Stopping,
+    Stopped,
+}
+
 pub struct RaftMeta {
     term: u64,
     vote_for: Option<u64>,
@@ -163,6 +174,7 @@ pub struct RaftMeta {
     storage: Option<Arc<Mutex<StorageEntity>>>,
     last_snapshot_index: u64,
     last_snapshot_term: u64,
+    lifecycle: LifecycleState,
 }
 
 #[derive(Clone)]
@@ -190,7 +202,8 @@ pub struct RaftService {
     pub options: Options,
     pub rt: runtime::Runtime,
     _is_leader: AtomicBool,
-    checker_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    checker_task: TokioMutex<Option<tokio::task::JoinHandle<()>>>,
+    shutdown_tx: watch::Sender<LifecycleState>,
 }
 dispatch_rpc_service_functions!(RaftService);
 
@@ -232,6 +245,10 @@ async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
 }
 
 impl RaftService {
+    fn lifecycle_is_stopping(state: LifecycleState) -> bool {
+        matches!(state, LifecycleState::Stopping | LifecycleState::Stopped)
+    }
+
     /// Public helper for applications to trigger commit replay after registering
     /// their state machines. This ensures replay happens when SMs are ready.
     pub async fn recover_after_register(&self) {
@@ -317,6 +334,7 @@ impl RaftService {
 
         let master_sm = MasterStateMachine::new(opts.service_id);
 
+        let (shutdown_tx, _shutdown_rx) = watch::channel(LifecycleState::Running);
         let server_obj = RaftService {
             meta: RwLock::new(RaftMeta {
                 term,
@@ -332,6 +350,7 @@ impl RaftService {
                 storage: storage_entity.map(|e| Arc::new(Mutex::new(e))),
                 last_snapshot_index: 0,
                 last_snapshot_term: 0,
+                lifecycle: LifecycleState::Running,
             }),
             id: server_id,
             options: opts,
@@ -344,7 +363,8 @@ impl RaftService {
                 .build()
                 .expect("Failed to build tokio runtime for Raft service"),
             _is_leader: AtomicBool::new(false),
-            checker_task: std::sync::Mutex::new(None),
+            checker_task: TokioMutex::new(None),
+            shutdown_tx,
         };
         Arc::new(server_obj)
     }
@@ -477,14 +497,22 @@ impl RaftService {
         }
 
         let checker_ref = server.clone();
-        let handle = server.rt.spawn(async {
+        let mut shutdown_rx = server.shutdown_tx.subscribe();
+        let handle = server.rt.spawn(async move {
             info!("Starting Raft checker/heartbeat task");
             let server = checker_ref;
             loop {
+                if Self::lifecycle_is_stopping(*shutdown_rx.borrow()) {
+                    debug!("Heartbeat loop exiting because shutdown was requested");
+                    break;
+                }
                 let start_time = get_time();
                 let expected_ends = start_time + CHECKER_MS;
                 let heartbeat_task_continue = async {
                     let mut meta = server.meta.write().await; //WARNING: Reentering not supported
+                    if Self::lifecycle_is_stopping(meta.lifecycle) {
+                        return false;
+                    }
                     let current_time = get_time();
                     let mut is_leader = false;
                     let action = match meta.membership {
@@ -533,11 +561,25 @@ impl RaftService {
                     }
                     return true;
                 };
-                let timed_heartbeat = timeout(
-                    Duration::from_millis(HEARTBEAT_TASK_TIMEOUT_MS as u64),
-                    heartbeat_task_continue,
-                )
-                .await;
+                let timed_heartbeat = tokio::select! {
+                    changed = shutdown_rx.changed() => {
+                        match changed {
+                            Ok(_) if Self::lifecycle_is_stopping(*shutdown_rx.borrow()) => {
+                                debug!("Heartbeat loop observed shutdown signal");
+                                break;
+                            }
+                            Ok(_) => continue,
+                            Err(_) => {
+                                debug!("Heartbeat loop exiting because shutdown channel closed");
+                                break;
+                            }
+                        }
+                    }
+                    result = timeout(
+                        Duration::from_millis(HEARTBEAT_TASK_TIMEOUT_MS as u64),
+                        heartbeat_task_continue,
+                    ) => result,
+                };
                 let end_time = get_time();
                 let time_to_sleep = expected_ends - end_time - 1;
                 match timed_heartbeat {
@@ -556,17 +598,28 @@ impl RaftService {
                     }
                 }
                 if time_to_sleep > 0 {
-                    // Use thread sleep here because we want system scheduler for precision
-                    sleep(Duration::from_millis(time_to_sleep as u64)).await;
+                    tokio::select! {
+                        changed = shutdown_rx.changed() => {
+                            match changed {
+                                Ok(_) if Self::lifecycle_is_stopping(*shutdown_rx.borrow()) => {
+                                    debug!("Heartbeat sleep interrupted by shutdown");
+                                    break;
+                                }
+                                Ok(_) => {}
+                                Err(_) => break,
+                            }
+                        }
+                        _ = sleep(Duration::from_millis(time_to_sleep as u64)) => {}
+                    }
                 }
             }
             info!("Raft checker/heartbeat task stopped gracefully");
         });
         
         // Store the handle for graceful shutdown
-        match server.checker_task.lock() {
-            Ok(mut guard) => *guard = Some(handle),
-            Err(e) => error!("Failed to store checker task handle: {}", e),
+        {
+            let mut guard = server.checker_task.lock().await;
+            *guard = Some(handle);
         }
         
         return true;
@@ -814,31 +867,77 @@ impl RaftService {
         }
     }
 
+    async fn wait_for_apply_drain(&self, timeout_duration: Duration) -> bool {
+        let deadline = Instant::now() + timeout_duration;
+        loop {
+            {
+                let meta = self.meta.read().await;
+                if meta.commit_index == meta.last_applied {
+                    info!(
+                        "Raft apply drain complete: commit_index={}, last_applied={}",
+                        meta.commit_index, meta.last_applied
+                    );
+                    return true;
+                }
+                debug!(
+                    "Waiting for apply drain: commit_index={}, last_applied={}",
+                    meta.commit_index, meta.last_applied
+                );
+            }
+
+            if Instant::now() >= deadline {
+                let meta = self.meta.read().await;
+                warn!(
+                    "Timed out waiting for apply drain: commit_index={}, last_applied={}",
+                    meta.commit_index, meta.last_applied
+                );
+                return false;
+            }
+
+            sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     pub async fn shutdown(&self) {
         info!("Shutting down RaftService on {}", self.options.address);
-        
-        // Set membership to Offline to signal the checker task to exit
-        {
+
+        let already_stopping = {
             let mut meta = self.meta.write().await;
-            meta.membership = Membership::Offline;
-            info!("Set RaftService membership to Offline");
-        }
-        
-        // Wait for the checker task to complete
-        match self.checker_task.lock() {
-            Ok(mut guard) => {
-                if let Some(handle) = guard.take() {
-                    info!("Waiting for Raft checker task to complete...");
-                    let _ = handle.await;
-                    info!("Raft checker task completed");
-                }
+            if meta.lifecycle != LifecycleState::Running {
+                true
+            } else {
+                meta.lifecycle = LifecycleState::Stopping;
+                meta.membership = Membership::Offline;
+                info!("RaftService entered stopping state");
+                false
             }
-            Err(e) => error!("Failed to acquire checker task lock during shutdown: {}", e),
+        };
+        if already_stopping {
+            info!("RaftService shutdown requested while already stopping");
+        } else {
+            let _ = self.shutdown_tx.send(LifecycleState::Stopping);
+        }
+
+        let _ = self.wait_for_apply_drain(Duration::from_secs(5)).await;
+
+        let handle = {
+            let mut guard = self.checker_task.lock().await;
+            guard.take()
+        };
+        if let Some(handle) = handle {
+            info!("Waiting for Raft checker task to complete...");
+            let _ = handle.await;
+            info!("Raft checker task completed");
         }
 
         // Ensure all persistence is flushed to disk
         self.flush_persistence().await;
-        
+
+        {
+            let mut meta = self.meta.write().await;
+            meta.lifecycle = LifecycleState::Stopped;
+        }
+        let _ = self.shutdown_tx.send(LifecycleState::Stopped);
         info!("RaftService shutdown complete");
     }
     
@@ -1749,15 +1848,86 @@ impl Service for RaftService {
 
     fn c_command<'a>(&'a self, entry: LogEntry) -> BoxFuture<'a, ClientCmdResponse> {
         async move {
-            let meta = self.write_meta().await;
+            let mut meta = self.write_meta().await;
             let mut entry = entry;
-            if !is_leader(&meta) {
+            if Self::lifecycle_is_stopping(meta.lifecycle) {
                 debug!(
-                    "Command sent to non-leader node, {}, should be {}",
-                    self.id, meta.leader_id
+                    "Rejecting raft command during shutdown on {}, sm_id={}, fn_id={}",
+                    self.id, entry.sm_id, entry.fn_id
+                );
+                return ClientCmdResponse::ShuttingDown;
+            }
+            if !is_leader(&meta) {
+                let member_count = {
+                    let member_sm = meta.state_machine.read().await;
+                    member_sm.configs.members.len()
+                };
+                if member_count == 1 && meta.leader_id == self.id {
+                    let last_log_id = {
+                        let logs = meta.logs.read().await;
+                        let (last_log_id, _last_log_term) = get_last_log_info!(self, logs);
+                        last_log_id
+                    };
+                    warn!(
+                        "RAFTDBG_V2 server single_node_self_heal self={} sm_id={} fn_id={} term={} leader_id={} lifecycle={:?}",
+                        self.id,
+                        entry.sm_id,
+                        entry.fn_id,
+                        meta.term,
+                        meta.leader_id,
+                        meta.lifecycle
+                    );
+                    warn!(
+                        "Single-node raft command hit transient non-leader state on {}; re-promoting to leader before executing sm_id={}, fn_id={}, term={}, last_log_id={}",
+                        self.id,
+                        entry.sm_id,
+                        entry.fn_id,
+                        meta.term,
+                        last_log_id
+                    );
+                    self.become_leader(&mut meta, last_log_id).await;
+                }
+            }
+            if !is_leader(&meta) {
+                warn!(
+                    "RAFTDBG_V2 server non_leader_after_heal self={} leader_id={} lifecycle={:?} membership_is_leader={} sm_id={} fn_id={} term={} entry_term={} entry_id={}",
+                    self.id,
+                    meta.leader_id,
+                    meta.lifecycle,
+                    matches!(meta.membership, Membership::Leader(_)),
+                    entry.sm_id,
+                    entry.fn_id,
+                    meta.term,
+                    entry.term,
+                    entry.id
+                );
+                warn!(
+                    "Command sent to non-leader node, self={}, leader_id={}, lifecycle={:?}, membership_is_leader={}, sm_id={}, fn_id={}, term={}, entry_term={}, entry_id={}",
+                    self.id,
+                    meta.leader_id,
+                    meta.lifecycle,
+                    matches!(meta.membership, Membership::Leader(_)),
+                    entry.sm_id,
+                    entry.fn_id,
+                    meta.term,
+                    entry.term,
+                    entry.id
                 );
                 return if meta.leader_id == self.id {
-                    debug!("Found outdated leader id, will return 0");
+                    warn!(
+                        "RAFTDBG_V2 server returning_notleader_zero self={} sm_id={} fn_id={} term={} entry_id={}",
+                        self.id,
+                        entry.sm_id,
+                        entry.fn_id,
+                        meta.term,
+                        entry.id
+                    );
+                    warn!(
+                        "Returning NotLeader(0) because membership is not leader while leader_id still points to self {}; sm_id={}, fn_id={}",
+                        self.id,
+                        entry.sm_id,
+                        entry.fn_id
+                    );
                     ClientCmdResponse::NotLeader(0)
                 } else {
                     ClientCmdResponse::NotLeader(meta.leader_id)
@@ -1782,7 +1952,10 @@ impl Service for RaftService {
                     last_log_term: new_log_term,
                 }
             } else {
-                ClientCmdResponse::NotCommitted
+                ClientCmdResponse::NotCommitted {
+                    last_log_id: new_log_id,
+                    last_log_term: new_log_term,
+                }
             }
         }
         .boxed()
@@ -2114,7 +2287,9 @@ mod test {
         use super::*;
         use crate::raft::client::RaftClient;
         use crate::raft::disk;
-        use crate::raft::{SnapshotEntity, LogEntry, Service, RaftMeta, Membership};
+        use crate::raft::{
+            LifecycleState, LogEntry, Membership, RaftMeta, Service, SnapshotEntity,
+        };
         use crate::raft::state_machine::configs::CONFIG_SM_ID;
         use crate::raft::state_machine::master::MasterStateMachine;
         use crate::utils::time::async_wait;
@@ -3055,6 +3230,7 @@ mod test {
                 storage: None,
                 last_snapshot_index: 0,
                 last_snapshot_term: 0,
+                lifecycle: LifecycleState::Running,
             };
             let meta_lock = async_std::sync::RwLock::new(meta);
             let meta_guard = meta_lock.write().await;
