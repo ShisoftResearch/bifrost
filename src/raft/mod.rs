@@ -371,7 +371,12 @@ impl RaftService {
 
     /// Load snapshot from disk and recover state machine if snapshot exists
     async fn load_snapshot_on_startup(&self) -> bool {
-        if let Some(ref storage) = self.meta.read().await.storage {
+        let storage = {
+            let meta = self.meta.read().await;
+            meta.storage.clone()
+        };
+
+        if let Some(storage) = storage {
             let storage = storage.lock().await;
             match storage.read_snapshot().await {
                 Ok(Some(snapshot)) => {
@@ -386,7 +391,8 @@ impl RaftService {
                     meta.state_machine
                         .write()
                         .await
-                        .recover(snapshot.snapshot.clone());
+                        .recover(snapshot.snapshot.clone())
+                        .await;
                     
                     // Update snapshot metadata
                     meta.last_snapshot_index = snapshot.last_included_index;
