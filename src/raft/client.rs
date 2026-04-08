@@ -3,8 +3,7 @@ use crate::raft::state_machine::callback::client::SubscriptionService;
 use crate::raft::state_machine::callback::SubKey;
 use crate::raft::state_machine::configs::commands::{
     del_member_ as conf_del_member, member_address as conf_member_address,
-    new_member_ as conf_new_member, subscribe as conf_subscribe,
-    unsubscribe as conf_unsubscribe,
+    new_member_ as conf_new_member, subscribe as conf_subscribe, unsubscribe as conf_unsubscribe,
 };
 use crate::raft::state_machine::master::ExecError;
 use crate::raft::state_machine::StateMachineClient;
@@ -84,7 +83,9 @@ impl RaftPlaneClient {
         R: 'static,
         M: RaftMsg<R> + 'static,
     {
-        self.client.execute_on_plane(self.plane_id, sm_id, msg).await
+        self.client
+            .execute_on_plane(self.plane_id, sm_id, msg)
+            .await
     }
 
     pub async fn subscribe<M, R, F>(
@@ -98,7 +99,9 @@ impl RaftPlaneClient {
         R: 'static + Send,
         F: Fn(R) -> BoxFuture<'static, ()> + 'static + Send + Sync,
     {
-        self.client.subscribe_on_plane(self.plane_id, sm_id, msg, f).await
+        self.client
+            .subscribe_on_plane(self.plane_id, sm_id, msg, f)
+            .await
     }
 
     pub async fn unsubscribe(
@@ -113,7 +116,9 @@ impl RaftPlaneClient {
     }
 
     pub async fn have_state_machine(&self, sm_id: u64) -> Result<bool, ExecError> {
-        self.client.have_state_machine_on_plane(self.plane_id, sm_id).await
+        self.client
+            .have_state_machine_on_plane(self.plane_id, sm_id)
+            .await
     }
 }
 
@@ -191,11 +196,13 @@ impl RaftClient {
     }
 
     pub async fn add_root_member(&self, address: &String) -> Result<bool, ExecError> {
-        self.execute(CONFIG_SM_ID, conf_new_member::new(address)).await
+        self.execute(CONFIG_SM_ID, conf_new_member::new(address))
+            .await
     }
 
     pub async fn remove_root_member(&self, address: &String) -> Result<(), ExecError> {
-        self.execute(CONFIG_SM_ID, conf_del_member::new(address)).await
+        self.execute(CONFIG_SM_ID, conf_del_member::new(address))
+            .await
     }
 
     pub async fn root_member_addresses(&self) -> Result<Vec<String>, ExecError> {
@@ -238,12 +245,12 @@ impl RaftClient {
                     let server_addr = server_addr.clone();
                     async move {
                         let mut members = self.members.write().await;
-                        debug!("Checking server info on {}", server_addr);
+                        debug!("Checking server info for plane {} on {}", plane_id.raw(), server_addr);
                         if !members.clients.contains_key(&id) {
-                            debug!("Connecting to node {}", server_addr);
+                            debug!("Connecting to node {} for plane {}", server_addr, plane_id.raw());
                             match rpc::DEFAULT_CLIENT_POOL.get(&server_addr).await {
                                 Ok(client) => {
-                                    debug!("Added server info on {} to members", server_addr);
+                                    debug!("Added server info on {} to members for plane {}", server_addr, plane_id.raw());
                                     members.clients.insert(
                                         id,
                                         AsyncServiceClient::new_with_service_id(
@@ -251,39 +258,39 @@ impl RaftClient {
                                             &client,
                                         ),
                                     );
-                                    debug!("Member {} added", server_addr);
+                                    debug!("Member {} added for plane {}", server_addr, plane_id.raw());
                                 }
                                 Err(e) => {
-                                    warn!("Cannot find server info from {}, {}", server_addr, e);
+                                    warn!("Cannot find server info for plane {} from {}, {}", plane_id.raw(), server_addr, e);
                                     return None;
                                 }
                             }
                         }
-                        debug!("Getting server info from {}, id {}", server_addr, id);
+                        debug!("Getting server info for plane {} from {}, id {}", plane_id.raw(), server_addr, id);
                         let member_client = match members.clients.get(&id) {
                             Some(client) => client,
                             None => {
-                                debug!("Server not found, skip {}, id {}", server_addr, id);
+                                debug!("Server not found for plane {}, skip {}, id {}", plane_id.raw(), server_addr, id);
                                 return None;
                             }
                         };
-                        debug!("Invoking server_cluster_info on {}, id {}", server_addr, id);
+                        debug!("Invoking server_cluster_info for plane {} on {}, id {}", plane_id.raw(), server_addr, id);
                         let info_res = member_client.c_server_cluster_info(plane_id).await;
-                        debug!("Checking response from {}", server_addr);
+                        debug!("Checking cluster info response for plane {} from {}", plane_id.raw(), server_addr);
                         return match info_res {
                             Ok(info) => {
                                 if info.leader_id != 0 {
-                                    debug!("Found server info with leader id {}", info.leader_id);
+                                    debug!("Found server info for plane {} with leader id {}", plane_id.raw(), info.leader_id);
                                     Some(info)
                                 } else {
-                                    debug!("Discovered zero leader id from {}", server_addr);
+                                    debug!("Discovered zero leader id for plane {} from {}", plane_id.raw(), server_addr);
                                     None
                                 }
                             }
                             Err(e) => {
                                 debug!(
-                                    "Error on getting cluster info from {}, {:?}",
-                                    server_addr, e
+                                    "Error on getting cluster info for plane {} from {}, {:?}",
+                                    plane_id.raw(), server_addr, e
                                 );
                                 None
                             }
@@ -300,7 +307,8 @@ impl RaftClient {
                 // We found an uninitialized node, should try again
                 // Random sleep
                 debug!(
-                    "This fail attempt have zero leader id, retry...{}",
+                    "Plane {} fail attempt had zero leader id, retry...{}",
+                    plane_id.raw(),
                     attempt_remains
                 );
                 let delay_sec = 1 + (rand::random::<u64>() % 9);
@@ -308,7 +316,7 @@ impl RaftClient {
                 attempt_remains -= 1;
                 continue;
             } else {
-                debug!("Continuously getting zero leader id, give up");
+                debug!("Continuously getting zero leader id for plane {}, give up", plane_id.raw());
                 break;
             }
         }
@@ -321,7 +329,7 @@ impl RaftClient {
     }
 
     async fn update_info(&self, servers: &Vec<String>) -> Result<(), ClientError> {
-        debug!("Updating cluster info from servers: {:?}", servers);
+        debug!("Updating cluster info for plane {} from servers: {:?}", PlaneId::type1().raw(), servers);
         let cluster_info = self.cluster_info(PlaneId::type1(), servers).await;
         match cluster_info {
             Some(info) => {
@@ -339,31 +347,32 @@ impl RaftClient {
                 }
                 let ids_to_remove = connected_ids.difference(&remote_ids);
                 for id in ids_to_remove {
-                    warn!("Removed server with id {}", id);
+                    warn!("Removed server with id {} while refreshing plane {}", id, PlaneId::type1().raw());
                     members.clients.remove(id);
                 }
                 for id in remote_ids.difference(&connected_ids) {
                     let addr = match members.id_map.get(id) {
                         Some(addr) => addr.clone(),
                         None => {
-                            error!("Cannot find address for server id {}", id);
+                            error!("Cannot find address for server id {} while refreshing plane {}", id, PlaneId::type1().raw());
                             continue;
                         }
                     };
                     if !members.clients.contains_key(id) {
                         if let Ok(client) = rpc::DEFAULT_CLIENT_POOL.get(&addr).await {
-                            info!("Having new server addr {} id {}", addr, id);
+                            info!("Having new server addr {} id {} for plane {}", addr, id, PlaneId::type1().raw());
                             members.clients.insert(
                                 *id,
                                 AsyncServiceClient::new_with_service_id(self.service_id, &client),
                             );
                         } else {
-                            error!("Cannot connect to new server addr {}, id {}", addr, id);
+                            error!("Cannot connect to new server addr {}, id {} for plane {}", addr, id, PlaneId::type1().raw());
                         }
                     }
                 }
                 info!(
-                    "UPDATE_INFO Setting leader to {}, was {}",
+                    "UPDATE_INFO Setting plane {} leader to {}, was {}",
+                    PlaneId::type1().raw(),
                     info.leader_id,
                     self.type1_state.leader_id.load(Relaxed)
                 );
@@ -373,7 +382,7 @@ impl RaftClient {
                 Ok(())
             }
             None => {
-                error!("Cannot update info, cannot get cluster info");
+                error!("Cannot update info for plane {}, cannot get cluster info", PlaneId::type1().raw());
                 Err(ClientError::ServerUnreachable)
             }
         }
@@ -464,7 +473,8 @@ impl RaftClient {
         let response = match op {
             OpType::QUERY => self.query_on_plane(plane_id, sm_id, fn_id, req_data).await,
             OpType::COMMAND | OpType::SUBSCRIBE => {
-                self.command_on_plane(plane_id, sm_id, fn_id, req_data).await
+                self.command_on_plane(plane_id, sm_id, fn_id, req_data)
+                    .await
             }
         };
         match response {
@@ -513,7 +523,8 @@ impl RaftClient {
         R: 'static + Send,
         F: Fn(R) -> BoxFuture<'static, ()> + 'static + Send + Sync,
     {
-        self.subscribe_on_plane(PlaneId::type1(), sm_id, msg, f).await
+        self.subscribe_on_plane(PlaneId::type1(), sm_id, msg, f)
+            .await
     }
 
     pub async fn subscribe_on_plane<M, R, F>(
@@ -604,9 +615,9 @@ impl RaftClient {
         let mut depth = 0;
         loop {
             if depth == 0 {
-                trace!("Raft client query sm_id {}, fn_id {}", sm_id, fn_id);
+                trace!("Raft client query plane_id={} sm_id {}, fn_id {}", plane_id.raw(), sm_id, fn_id);
             } else {
-                warn!("Retry client query sm_id {}, fn_id {}", sm_id, fn_id);
+                warn!("Retry client query plane_id={} sm_id {}, fn_id {}", plane_id.raw(), sm_id, fn_id);
             }
             let pos = state.pos.fetch_add(1, ORDERING);
             let members = self.members.read().await;
@@ -616,12 +627,16 @@ impl RaftClient {
                 let rpc_client = match members.clients.values().nth(node_index) {
                     Some(client) => client,
                     None => {
-                        error!("Cannot find client at index {} (total: {})", node_index, num_members);
+                        error!(
+                            "Cannot find client for plane {} at index {} (total: {})",
+                            plane_id.raw(), node_index, num_members
+                        );
                         return Err(ExecError::ServersUnreachable);
                     }
                 };
                 trace!(
-                    "Query from node {} for sm_id {}, fn_id {}",
+                    "Query for plane {} from node {} for sm_id {}, fn_id {}",
+                    plane_id.raw(),
                     node_index,
                     sm_id,
                     fn_id
@@ -630,7 +645,8 @@ impl RaftClient {
                     .c_query(plane_id, &self.gen_log_entry(&state, sm_id, fn_id, &data))
                     .await;
                 trace!(
-                    "Query from node {} for sm_id {}, fn_id {} completed",
+                    "Query for plane {} from node {} for sm_id {}, fn_id {} completed",
+                    plane_id.raw(),
                     node_index,
                     sm_id,
                     fn_id
@@ -641,7 +657,7 @@ impl RaftClient {
                             last_log_term,
                             last_log_id,
                         } => {
-                            debug!("Found left behind record...{}, updating client state: server has log_id={}, term={}", depth, last_log_id, last_log_term);
+                            debug!("Found left behind record on plane {}...{}, updating client state: server has log_id={}, term={}", plane_id.raw(), depth, last_log_id, last_log_term);
                             // Update client state from server to avoid retry loop
                             swap_when_greater(&state.last_log_id, last_log_id);
                             swap_when_greater(&state.last_log_term, last_log_term);
@@ -650,7 +666,7 @@ impl RaftClient {
                                 sleep(Duration::from_millis(50)).await;
                             }
                             if depth >= num_members {
-                                error!("Too many retry on query, num_members {}, due to left behind record {}", num_members, depth);
+                                error!("Too many retry on query for plane {}, num_members {}, due to left behind record {}", plane_id.raw(), num_members, depth);
                                 return Err(ExecError::TooManyRetry);
                             } else {
                                 depth += 1;
@@ -665,21 +681,21 @@ impl RaftClient {
                             swap_when_greater(&state.last_log_id, last_log_id);
                             swap_when_greater(&state.last_log_term, last_log_term);
                             if depth > 0 {
-                                warn!("Retry successful...{}", depth);
+                                warn!("Retry successful on plane {}...{}", plane_id.raw(), depth);
                             }
-                            trace!("Query from node {} for sm_id {}, fn_id {}, successful at log id {}, term {}", node_index, sm_id, fn_id, last_log_id, last_log_term);
+                            trace!("Query for plane {} from node {} for sm_id {}, fn_id {}, successful at log id {}, term {}", plane_id.raw(), node_index, sm_id, fn_id, last_log_id, last_log_term);
                             return Ok(data);
                         }
                     },
                     Err(e) => {
                         error!(
-                            "Got unknown error on query: {:?}, server {}",
-                            e, rpc_client.client.address
+                            "Got unknown error on query for plane {}: {:?}, server {}",
+                            plane_id.raw(), e, rpc_client.client.address
                         );
                         if depth >= num_members {
                             return Err(ExecError::Unknown);
                         } else {
-                            debug!("Retry query...{}", depth);
+                            debug!("Retry query on plane {}...{}", plane_id.raw(), depth);
                             depth += 1;
                             continue;
                         }
@@ -727,8 +743,8 @@ impl RaftClient {
                     let num_members = members.clients.len();
                     if leader_retry_depth >= max(num_members + 1, 5) {
                         error!(
-                            "Too many retry on command, num_members {}, due to leader retry attempts {}",
-                            num_members,
+                            "Too many retry on command for plane {}, num_members {}, due to leader retry attempts {}",
+                            plane_id.raw(), num_members,
                             leader_retry_depth
                         );
                         return Err(ExecError::TooManyRetry);
@@ -737,10 +753,7 @@ impl RaftClient {
                 match self.preferred_client_on_plane(&state).await {
                     Some((leader_id, client)) => {
                         let cmd_res = client
-                            .c_command(
-                                plane_id,
-                                self.gen_log_entry(&state, sm_id, fn_id, &data),
-                            )
+                            .c_command(plane_id, self.gen_log_entry(&state, sm_id, fn_id, &data))
                             .await;
                         match cmd_res {
                             Ok(ClientCmdResponse::Success {
@@ -755,28 +768,28 @@ impl RaftClient {
                             Ok(ClientCmdResponse::NotLeader(new_leader_id)) => {
                                 if new_leader_id == 0 || new_leader_id == leader_id {
                                     warn!(
-                                        "RAFTDBG_V2 client notleader-zero_or_same leader_id={} suggested={} depth={} update_info_depth={} not_committed_depth={}",
-                                        leader_id,
+                                        "RAFTDBG_V2 client plane_id={} notleader-zero_or_same leader_id={} suggested={} depth={} update_info_depth={} not_committed_depth={}",
+                                        plane_id.raw(), leader_id,
                                         new_leader_id,
                                         leader_retry_depth,
                                         update_info_depth,
                                         not_committed_depth
                                     );
                                     debug!(
-                                        "CLIENT: NOT LEADER, SUGGESTION NOT USEFUL, REFRESH INFO. GOT: {}",
-                                        new_leader_id
+                                        "CLIENT plane_id={}: NOT LEADER, SUGGESTION NOT USEFUL, REFRESH INFO. GOT: {}",
+                                        plane_id.raw(), new_leader_id
                                     );
                                     FailureAction::UpdateInfo
                                 } else {
                                     warn!(
-                                        "RAFTDBG_V3 client notleader-redirect current_leader={} suggested_leader={} depth={}",
-                                        leader_id,
+                                        "RAFTDBG_V3 client plane_id={} notleader-redirect current_leader={} suggested_leader={} depth={}",
+                                        plane_id.raw(), leader_id,
                                         new_leader_id,
                                         leader_retry_depth
                                     );
                                     debug!(
-                                        "CLIENT: NOT LEADER, REMOTE SUGGEST SWITCH TO {}",
-                                        new_leader_id
+                                        "CLIENT plane_id={}: NOT LEADER, REMOTE SUGGEST SWITCH TO {}",
+                                        plane_id.raw(), new_leader_id
                                     );
                                     info!(
                                         "CMD Setting plane {} leader to {}, was {}",
@@ -793,8 +806,8 @@ impl RaftClient {
                                 last_log_id,
                             }) => {
                                 debug!(
-                                    "CLIENT: NOT COMMITTED at leader {}, refreshing client log cursor to term {}, id {}",
-                                    leader_id,
+                                    "CLIENT plane_id={}: NOT COMMITTED at leader {}, refreshing client log cursor to term {}, id {}",
+                                    plane_id.raw(), leader_id,
                                     last_log_term,
                                     last_log_id
                                 );
@@ -805,18 +818,18 @@ impl RaftClient {
                             Ok(ClientCmdResponse::ShuttingDown) => FailureAction::ShuttingDown,
                             Err(e) => {
                                 warn!(
-                                    "RAFTDBG_V3 client transport_or_rpc_error leader_id={} depth={} error={:?}",
-                                    leader_id,
+                                    "RAFTDBG_V3 client plane_id={} transport_or_rpc_error leader_id={} depth={} error={:?}",
+                                    plane_id.raw(), leader_id,
                                     leader_retry_depth,
                                     e
                                 );
-                                debug!("CLIENT: ERROR - {} - {:?}", leader_id, e);
+                                debug!("CLIENT plane_id={}: ERROR - {} - {:?}", plane_id.raw(), leader_id, e);
                                 FailureAction::SwitchLeader // need switch server for leader
                             }
                         }
                     }
                     None => {
-                        warn!("Need update members");
+                        warn!("Need update members for plane {}", plane_id.raw());
                         FailureAction::UpdateInfo
                     }
                 }
@@ -827,15 +840,14 @@ impl RaftClient {
                     update_info_depth = 0;
                     if not_committed_depth >= not_committed_retry_limit {
                         error!(
-                            "Too many retry on command due to NotCommitted responses {}",
-                            not_committed_depth
+                            "Too many retry on command for plane {} due to NotCommitted responses {}",
+                            plane_id.raw(), not_committed_depth
                         );
                         return Err(ExecError::TooManyRetry);
                     }
                     debug!(
-                        "Retrying command after NotCommitted response {}/{}",
-                        not_committed_depth,
-                        not_committed_retry_limit
+                        "Retrying command for plane {} after NotCommitted response {}/{}",
+                        plane_id.raw(), not_committed_depth, not_committed_retry_limit
                     );
                     sleep(Duration::from_millis(NOT_COMMITTED_RETRY_DELAY_MS)).await;
                     continue;
@@ -844,14 +856,13 @@ impl RaftClient {
                     update_info_depth += 1;
                     not_committed_depth = 0;
                     warn!(
-                        "RAFTDBG_V2 client update_info_retry count={} depth={}",
-                        update_info_depth,
-                        leader_retry_depth
+                        "RAFTDBG_V2 client plane_id={} update_info_retry count={} depth={}",
+                        plane_id.raw(), update_info_depth, leader_retry_depth
                     );
                     if update_info_depth >= update_info_retry_limit {
                         error!(
-                            "Too many retry on command due to cluster-info refresh attempts {}",
-                            update_info_depth
+                            "Too many retry on command for plane {} due to cluster-info refresh attempts {}",
+                            plane_id.raw(), update_info_depth
                         );
                         return Err(ExecError::TooManyRetry);
                     }
@@ -860,17 +871,20 @@ impl RaftClient {
                         Vec::from_iter(members.id_map.values().cloned())
                     };
                     if servers.is_empty() {
-                        warn!("Cannot refresh cluster info: no known servers");
+                        warn!("Cannot refresh cluster info for plane {}: no known servers", plane_id.raw());
                         return Err(ExecError::ServersUnreachable);
                     }
                     debug!(
-                        "Refreshing cluster info after transient NotLeader/leader-miss {}/{} from {:?}",
-                        update_info_depth,
+                        "Refreshing cluster info for plane {} after transient NotLeader/leader-miss {}/{} from {:?}",
+                        plane_id.raw(), update_info_depth,
                         update_info_retry_limit,
                         servers
                     );
                     if let Err(e) = self.update_plane_info(plane_id, &servers).await {
-                        warn!("Failed to refresh cluster info during command retry: {:?}", e);
+                        warn!(
+                            "Failed to refresh cluster info for plane {} during command retry: {:?}",
+                            plane_id.raw(), e
+                        );
                     }
                     sleep(Duration::from_millis(UPDATE_INFO_RETRY_DELAY_MS)).await;
                     continue;
@@ -879,8 +893,11 @@ impl RaftClient {
                     not_committed_depth = 0;
                     update_info_depth = 0;
                     leader_retry_depth += 1;
-                    warn!("RAFTDBG_V3 client switch_leader depth={}", leader_retry_depth);
-                    debug!("Switch leader by probing");
+                    warn!(
+                        "RAFTDBG_V3 client plane_id={} switch_leader depth={}",
+                        plane_id.raw(), leader_retry_depth
+                    );
+                    debug!("Switch leader for plane {} by probing", plane_id.raw());
                     let members = self.members.read().await;
                     let num_members = members.clients.len();
                     let leader_id = state.leader_id.load(ORDERING);
@@ -892,8 +909,8 @@ impl RaftClient {
                         Some(id) => *id,
                         None => {
                             error!(
-                                "Cannot find new leader at index {} (total: {})",
-                                leader_retry_depth as usize % num_members,
+                                "Cannot find new leader for plane {} at index {} (total: {})",
+                                plane_id.raw(), leader_retry_depth as usize % num_members,
                                 num_members
                             );
                             return Err(ExecError::ServersUnreachable);
@@ -906,10 +923,10 @@ impl RaftClient {
                         Relaxed,
                     );
                     info!(
-                        "SWITCH Excahnge leader to {}, was {:?}",
-                        new_leader_id, leadder_switch
+                        "SWITCH plane {} exchange leader to {}, was {:?}",
+                        plane_id.raw(), new_leader_id, leadder_switch
                     );
-                    debug!("CLIENT: Switch leader {}", new_leader_id);
+                    debug!("CLIENT plane_id={}: Switch leader {}", plane_id.raw(), new_leader_id);
                 }
                 FailureAction::NotLeader => {
                     leader_retry_depth += 1;
@@ -954,10 +971,7 @@ impl RaftClient {
         members.clients.values().next().cloned()
     }
 
-    async fn preferred_client_on_plane(
-        &self,
-        state: &PlaneClientState,
-    ) -> Option<(u64, Client)> {
+    async fn preferred_client_on_plane(&self, state: &PlaneClientState) -> Option<(u64, Client)> {
         if let Some((leader_id, client)) = self.leader_client_on_plane(state).await {
             return Some((leader_id, client));
         }
@@ -965,10 +979,7 @@ impl RaftClient {
         self.any_known_client().await.map(|client| (0, client))
     }
 
-    async fn leader_client_on_plane(
-        &self,
-        state: &PlaneClientState,
-    ) -> Option<(u64, Client)> {
+    async fn leader_client_on_plane(&self, state: &PlaneClientState) -> Option<(u64, Client)> {
         let members = self.members.read().await;
         let leader_id = state.leader_id.load(ORDERING);
         if let Some(client) = members.clients.get(&leader_id) {
@@ -1041,7 +1052,10 @@ impl RaftClient {
         let state = self.plane_state(plane_id).await;
         let client = match self.leader_client_on_plane(&state).await {
             Some((_, client)) => client,
-            None => self.any_known_client().await.ok_or(ExecError::ServersUnreachable)?,
+            None => self
+                .any_known_client()
+                .await
+                .ok_or(ExecError::ServersUnreachable)?,
         };
         client
             .c_server_cluster_info(plane_id)
@@ -1057,7 +1071,10 @@ impl RaftClient {
         let state = self.plane_state(plane_id).await;
         let client = match self.leader_client_on_plane(&state).await {
             Some((_, client)) => client,
-            None => self.any_known_client().await.ok_or(ExecError::ServersUnreachable)?,
+            None => self
+                .any_known_client()
+                .await
+                .ok_or(ExecError::ServersUnreachable)?,
         };
         client
             .c_have_state_machine(plane_id, sm_id)
@@ -1128,19 +1145,20 @@ impl<T: StateMachineClient> CachedStateMachine<T> {
                         "Creating state machine client instance, service {}, state machine id {}",
                         self.raft_service_id, self.state_machine_id
                     );
-                    let raft_client = match RaftClient::new(&self.server_list, self.raft_service_id).await {
-                        Ok(client) => client,
-                        Err(e) => {
-                            error!(
-                                "Failed to create RaftClient for service {} and sm {}: {:?}",
-                                self.raft_service_id, self.state_machine_id, e
-                            );
-                            // Drop the lock and retry after a delay
-                            drop(place_holder);
-                            sleep(Duration::from_millis(100)).await;
-                            continue;
-                        }
-                    };
+                    let raft_client =
+                        match RaftClient::new(&self.server_list, self.raft_service_id).await {
+                            Ok(client) => client,
+                            Err(e) => {
+                                error!(
+                                    "Failed to create RaftClient for service {} and sm {}: {:?}",
+                                    self.raft_service_id, self.state_machine_id, e
+                                );
+                                // Drop the lock and retry after a delay
+                                drop(place_holder);
+                                sleep(Duration::from_millis(100)).await;
+                                continue;
+                            }
+                        };
                     let plane_client = raft_client.plane(self.plane_id);
                     // Create a client for the state machine on the raft service
                     *place_holder = Some(Arc::new(T::new_instance(

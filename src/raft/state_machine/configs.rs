@@ -120,7 +120,9 @@ impl StateMachineCtl for Configures {
         match crate::utils::serde::deserialize::<ConfigSnapshot>(&data) {
             Some(snapshot) => self.recover_members(snapshot.members).boxed(),
             None => {
-                error!("Failed to deserialize config state machine snapshot. Config recovery failed.");
+                error!(
+                    "Failed to deserialize config state machine snapshot. Config recovery failed."
+                );
                 // Return empty future - state machine will start with empty config
                 future::ready(()).boxed()
             }
@@ -216,8 +218,7 @@ mod tests {
 
         assert!(!snapshot.is_empty());
 
-        let deserialized: Option<ConfigSnapshot> =
-            crate::utils::serde::deserialize(&snapshot);
+        let deserialized: Option<ConfigSnapshot> = crate::utils::serde::deserialize(&snapshot);
         assert!(deserialized.is_some());
 
         let snapshot_data = deserialized.unwrap();

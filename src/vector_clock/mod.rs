@@ -396,7 +396,10 @@ mod test {
         clock_a.merge_with(&clock_b);
 
         // After merge, clock_a should have max values
-        assert_eq!(clock_a, StandardVectorClock::from_vec(vec![(1, 5), (2, 3), (3, 4)]));
+        assert_eq!(
+            clock_a,
+            StandardVectorClock::from_vec(vec![(1, 5), (2, 3), (3, 4)])
+        );
     }
 
     #[test]

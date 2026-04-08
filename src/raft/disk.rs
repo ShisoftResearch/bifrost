@@ -1,8 +1,7 @@
 // Now only offers log persistent
 
-use crate::raft::{LogEntry, LogsMap, Options, RaftMeta, SnapshotEntity, Storage};
+use crate::raft::{LogEntry, LogsMap, Options, PlaneId, RaftMeta, SnapshotEntity, Storage};
 use async_std::sync::*;
-use serde::{Deserialize, Serialize};
 
 use std::convert::TryInto;
 use std::fs::OpenOptions;
@@ -22,7 +21,7 @@ pub struct DiskOptions {
     pub append_logs: bool,
     pub trim_logs: bool,
     // Snapshot configuration
-    pub snapshot_log_threshold: u64,  // Trigger snapshot after N logs
+    pub snapshot_log_threshold: u64, // Trigger snapshot after N logs
     pub log_compaction_threshold: u64, // Compact when logs exceed this
 }
 
@@ -44,6 +43,7 @@ pub struct StorageEntity {
     pub snapshot: Option<File>,
     pub last_term: u64,
     pub base_path: PathBuf,
+    pub plane_id: PlaneId,
 }
 
 pub struct DiskLogEntry {
@@ -69,7 +69,7 @@ impl DiskLogEntry {
         let data_len = self.log.data.len();
         let total_size = 8 * 8 + data_len; // 8 u64 fields + data
         let mut buf = Vec::with_capacity(total_size);
-        
+
         // Write fixed-size fields in little-endian
         buf.extend_from_slice(&self.term.to_le_bytes());
         buf.extend_from_slice(&self.commit_index.to_le_bytes());
@@ -79,22 +79,22 @@ impl DiskLogEntry {
         buf.extend_from_slice(&self.log.sm_id.to_le_bytes());
         buf.extend_from_slice(&self.log.fn_id.to_le_bytes());
         buf.extend_from_slice(&(data_len as u64).to_le_bytes());
-        
+
         // Write variable-length data
         buf.extend_from_slice(&self.log.data);
-        
+
         buf
     }
-    
+
     /// Decode from deterministic binary format
     pub fn decode(data: &[u8]) -> io::Result<Self> {
         if data.len() < 64 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "DiskLogEntry too short"
+                "DiskLogEntry too short",
             ));
         }
-        
+
         // Read fixed-size fields
         let term = u64::from_le_bytes(data[0..8].try_into().unwrap());
         let commit_index = u64::from_le_bytes(data[8..16].try_into().unwrap());
@@ -104,18 +104,22 @@ impl DiskLogEntry {
         let log_sm_id = u64::from_le_bytes(data[40..48].try_into().unwrap());
         let log_fn_id = u64::from_le_bytes(data[48..56].try_into().unwrap());
         let data_len = u64::from_le_bytes(data[56..64].try_into().unwrap()) as usize;
-        
+
         // Validate data length
         if data.len() < 64 + data_len {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("DiskLogEntry data truncated: expected {}, got {}", 64 + data_len, data.len())
+                format!(
+                    "DiskLogEntry data truncated: expected {}, got {}",
+                    64 + data_len,
+                    data.len()
+                ),
             ));
         }
-        
+
         // Read variable-length data
         let log_data = data[64..64 + data_len].to_vec();
-        
+
         Ok(DiskLogEntry {
             term,
             commit_index,
@@ -139,6 +143,24 @@ impl StorageEntity {
         last_applied: &mut u64,
         logs: &mut LogsMap,
     ) -> io::Result<Option<Self>> {
+        Self::new_with_options_on_plane(
+            PlaneId::type1(),
+            opts,
+            term,
+            commit_index,
+            last_applied,
+            logs,
+        )
+    }
+
+    pub fn new_with_options_on_plane(
+        plane_id: PlaneId,
+        opts: &Options,
+        term: &mut u64,
+        commit_index: &mut u64,
+        last_applied: &mut u64,
+        logs: &mut LogsMap,
+    ) -> io::Result<Option<Self>> {
         Ok(match &opts.storage {
             &Storage::DISK(ref options) => {
                 let base_path = Path::new(&options.path);
@@ -151,6 +173,7 @@ impl StorageEntity {
                     .create(true)
                     .read(true)
                     .truncate(false);
+                let mut last_log_id = 0;
                 let mut storage = Self {
                     logs: if options.append_logs {
                         let mut log_file = open_opts.open(log_path.as_path())?;
@@ -167,13 +190,14 @@ impl StorageEntity {
                             }
                             let entry = DiskLogEntry::decode(&data_buf)
                                 .expect("Failed to decode log entry from disk");
-                            *term = entry.term;
+                            *term = entry.log.term;
                             // Do not trust commit/last_applied embedded in WAL for SM reconstruction
                             // We'll derive commit_index from commit.idx and force replay from last_applied=0
+                            last_log_id = entry.log.id;
                             logs.insert(entry.log.id, entry.log);
                             counter += 1;
                         }
-                        debug!("Recovered {} raft logs", counter);
+                        debug!("Recovered {} raft logs for plane {}", counter, plane_id.raw());
                         Some(File::from_std(log_file))
                     } else {
                         None
@@ -185,14 +209,22 @@ impl StorageEntity {
                     },
                     last_term: 0,
                     base_path: base_path.to_path_buf(),
+                    plane_id,
                 };
+                storage.last_term = last_log_id;
 
                 // If commit progress side file exists, load it to ensure accurate indices
                 // Force full replay by resetting last_applied to 0 on startup
                 *last_applied = 0;
-                if let Ok(Some((ci, _la))) = futures::executor::block_on(storage.read_commit_progress()) {
+                if let Ok(Some((ci, _la))) =
+                    futures::executor::block_on(storage.read_commit_progress())
+                {
                     *commit_index = ci;
-                    debug!("Recovered commit progress: commit_index={} (will replay to rebuild state)", ci);
+                    debug!(
+                        "Recovered commit progress for plane {}: commit_index={} (will replay to rebuild state)",
+                        plane_id.raw(),
+                        ci
+                    );
                 } else {
                     // If no commit progress found, default to 0 to avoid partial state
                     *commit_index = 0;
@@ -225,7 +257,7 @@ impl StorageEntity {
                     last_applied: meta.last_applied,
                     log: log.clone(),
                 };
-                let entry_data = entry.encode();  // Use deterministic encoding
+                let entry_data = entry.encode(); // Use deterministic encoding
                 f.write(&(entry_data.len() as u64).to_le_bytes()).await?;
                 f.write(entry_data.as_slice()).await?;
                 self.last_term = *term;
@@ -235,8 +267,8 @@ impl StorageEntity {
             if counter > 0 {
                 f.sync_all().await?;
                 debug!(
-                    "Appended and persisted {} logs, was {}, appended {:?}",
-                    counter, was_last_term, terms_appended
+                    "Appended and persisted {} logs for plane {}, was {}, appended {:?}",
+                    counter, self.plane_id.raw(), was_last_term, terms_appended
                 );
             }
         }
@@ -293,15 +325,19 @@ impl StorageEntity {
     /// Ensure WAL file is fully synced to disk.
     pub async fn flush_wal(&mut self) -> io::Result<()> {
         if let Some(f) = &mut self.logs {
-            info!("WAL fsync: syncing log.dat to disk");
+            info!("WAL fsync for plane {}: syncing log.dat to disk", self.plane_id.raw());
             f.sync_all().await?;
-            info!("WAL fsync: completed");
+            info!("WAL fsync for plane {}: completed", self.plane_id.raw());
         }
         Ok(())
     }
 
     /// Persist commit progress atomically to a side file (commit.idx)
-    pub async fn write_commit_progress(&mut self, commit_index: u64, last_applied: u64) -> io::Result<()> {
+    pub async fn write_commit_progress(
+        &mut self,
+        commit_index: u64,
+        last_applied: u64,
+    ) -> io::Result<()> {
         let commit_path = self.base_path.join("commit.idx");
         let temp_path = self.base_path.join("commit.idx.tmp");
         let mut f = File::create(&temp_path).await?;
@@ -316,10 +352,14 @@ impl StorageEntity {
     /// Read commit progress if available
     pub async fn read_commit_progress(&self) -> io::Result<Option<(u64, u64)>> {
         let commit_path = self.base_path.join("commit.idx");
-        if !commit_path.exists() { return Ok(None); }
+        if !commit_path.exists() {
+            return Ok(None);
+        }
         let mut f = File::open(&commit_path).await?;
         let mut buf = [0u8; 16];
-        if f.read_exact(&mut buf).await.is_err() { return Ok(None); }
+        if f.read_exact(&mut buf).await.is_err() {
+            return Ok(None);
+        }
         let commit_index = u64::from_le_bytes(buf[0..8].try_into().unwrap());
         let last_applied = u64::from_le_bytes(buf[8..16].try_into().unwrap());
         Ok(Some((commit_index, last_applied)))
@@ -329,92 +369,96 @@ impl StorageEntity {
     pub async fn write_snapshot(&mut self, snapshot: &SnapshotEntity) -> io::Result<()> {
         let snapshot_path = self.base_path.join("snapshot.dat");
         let temp_path = self.base_path.join("snapshot.dat.tmp");
-        
+
         // Serialize snapshot
         let snapshot_data = crate::utils::serde::serialize(snapshot);
-        
+
         // Calculate CRC32 checksum
         let checksum = crc32fast::hash(&snapshot_data);
-        
+
         // Write to temp file
         let mut temp_file = File::create(&temp_path).await?;
-        
+
         // Write checksum first
         temp_file.write_all(&checksum.to_le_bytes()).await?;
-        
+
         // Write length
-        temp_file.write_all(&(snapshot_data.len() as u64).to_le_bytes()).await?;
-        
+        temp_file
+            .write_all(&(snapshot_data.len() as u64).to_le_bytes())
+            .await?;
+
         // Write data
         temp_file.write_all(&snapshot_data).await?;
-        
+
         // Sync to disk
         temp_file.sync_all().await?;
         drop(temp_file);
-        
+
         // Atomic rename
         std::fs::rename(&temp_path, &snapshot_path)?;
-        
+
         info!(
-            "Snapshot persisted to disk: index={}, term={}, size={} bytes",
+            "Snapshot persisted to disk for plane {}: index={}, term={}, size={} bytes",
+            self.plane_id.raw(),
             snapshot.last_included_index,
             snapshot.last_included_term,
             snapshot_data.len()
         );
-        
+
         Ok(())
     }
 
     /// Read and validate snapshot from disk
     pub async fn read_snapshot(&self) -> io::Result<Option<SnapshotEntity>> {
         let snapshot_path = self.base_path.join("snapshot.dat");
-        
+
         // Check if snapshot file exists
         if !snapshot_path.exists() {
-            debug!("No snapshot file found at {:?}", snapshot_path);
+            debug!("No snapshot file found for plane {} at {:?}", self.plane_id.raw(), snapshot_path);
             return Ok(None);
         }
-        
+
         let mut file = File::open(&snapshot_path).await?;
-        
+
         // Read checksum
         let mut checksum_buf = [0u8; 4];
         if file.read_exact(&mut checksum_buf).await.is_err() {
-            warn!("Failed to read snapshot checksum, file may be corrupted");
+            warn!("Failed to read snapshot checksum for plane {}, file may be corrupted", self.plane_id.raw());
             return Ok(None);
         }
         let expected_checksum = u32::from_le_bytes(checksum_buf);
-        
+
         // Read length
         let mut len_buf = [0u8; 8];
         if file.read_exact(&mut len_buf).await.is_err() {
-            warn!("Failed to read snapshot length, file may be corrupted");
+            warn!("Failed to read snapshot length for plane {}, file may be corrupted", self.plane_id.raw());
             return Ok(None);
         }
         let len = u64::from_le_bytes(len_buf);
-        
+
         // Read data
         let mut data_buf = vec![0u8; len as usize];
         if file.read_exact(&mut data_buf).await.is_err() {
-            warn!("Failed to read snapshot data, file may be corrupted");
+            warn!("Failed to read snapshot data for plane {}, file may be corrupted", self.plane_id.raw());
             return Ok(None);
         }
-        
+
         // Verify checksum
         let actual_checksum = crc32fast::hash(&data_buf);
         if actual_checksum != expected_checksum {
             error!(
-                "Snapshot checksum mismatch! Expected: {}, Got: {}. File is corrupted.",
-                expected_checksum, actual_checksum
+                "Snapshot checksum mismatch on plane {}! Expected: {}, Got: {}. File is corrupted.",
+                self.plane_id.raw(), expected_checksum, actual_checksum
             );
             return Ok(None);
         }
-        
+
         // Deserialize
         let snapshot = crate::utils::serde::deserialize::<SnapshotEntity>(&data_buf).unwrap();
-        
+
         info!(
-            "Snapshot loaded from disk: index={}, term={}, size={} bytes",
+            "Snapshot loaded from disk for plane {}: index={}, term={}, size={} bytes",
+            self.plane_id.raw(),
             snapshot.last_included_index,
             snapshot.last_included_term,
             data_buf.len()

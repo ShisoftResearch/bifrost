@@ -33,7 +33,9 @@ pub struct Client {
 impl Client {
     pub async fn connect_with_timeout(address: &String, timeout: Duration) -> io::Result<Self> {
         let server_id = hash_str(address);
-        let senders = Arc::new(SyncMutex::new(HashMap::<u64, oneshot::Sender<BytesMut>>::new()));
+        let senders = Arc::new(SyncMutex::new(
+            HashMap::<u64, oneshot::Sender<BytesMut>>::new(),
+        ));
         debug!(
             "TCP connect to {}, server id {}, timeout {}ms",
             address,
@@ -66,7 +68,10 @@ impl Client {
                             let mut senders = cloned_senders.lock();
                             if let Some(sender) = senders.remove(&res_msg_id) {
                                 if let Err(e) = sender.send(data) {
-                                    error!("Failed to send response for msg {}: {:?}", res_msg_id, e);
+                                    error!(
+                                        "Failed to send response for msg {}: {:?}",
+                                        res_msg_id, e
+                                    );
                                 }
                             } else {
                                 error!("No sender found for response msg {}", res_msg_id);
@@ -108,7 +113,10 @@ impl Client {
                 Ok(response) => Ok(response),
                 Err(e) => {
                     error!("Failed to receive response for msg {}: {:?}", msg_id, e);
-                    Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Response channel closed"))
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "Response channel closed",
+                    ))
                 }
             }
         } else {
@@ -135,7 +143,10 @@ mod tests {
 
         let result = Client::connect_with_timeout(&addr, timeout).await;
         // This should fail since there's no server
-        assert!(result.is_err(), "Connection to non-existent server should fail");
+        assert!(
+            result.is_err(),
+            "Connection to non-existent server should fail"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

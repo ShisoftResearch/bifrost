@@ -1,4 +1,4 @@
-use crate::raft::client::RaftClient;
+use crate::raft::client::RaftPlaneClient;
 use std::any::Any;
 use std::sync::Arc;
 
@@ -37,7 +37,15 @@ pub trait OpTypes {
 }
 
 pub trait StateMachineClient {
-    fn new_instance(sm_id: u64, client: &Arc<RaftClient>) -> Self;
+    fn new_instance(sm_id: u64, client: &Arc<RaftPlaneClient>) -> Self;
+}
+
+pub const MASTER_SM_ID: u64 = 0;
+pub const CONFIG_SM_ID: u64 = 1;
+pub const RESERVED_INTERNAL_SM_ID_END: u64 = 2;
+
+pub const fn is_reserved_internal_sm_id(sm_id: u64) -> bool {
+    sm_id <= RESERVED_INTERNAL_SM_ID_END
 }
 
 #[macro_use]

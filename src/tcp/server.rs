@@ -39,9 +39,9 @@ impl Server {
         if !addr.eq(&STANDALONE_ADDRESS) {
             let listener = TcpListener::bind(&addr).await?;
             let mut shutdown_rx = self.shutdown_tx.subscribe();
-            
+
             info!("TCP server listening on {}", addr);
-            
+
             loop {
                 tokio::select! {
                     accept_result = listener.accept() => {
@@ -50,7 +50,7 @@ impl Server {
                                 debug!("Accepted connection from {}", addr);
                                 let callback = callback.clone();
                                 let mut conn_shutdown_rx = self.shutdown_tx.subscribe();
-                                
+
                                 tokio::spawn(async move {
                                     let mut transport = Framed::new(socket, LengthDelimitedCodec::new());
                                     loop {
@@ -119,7 +119,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_server_creation() {
         let server = Server::new();
-        assert!(server.shutdown_tx.receiver_count() == 0, "Should start with no subscribers");
+        assert!(
+            server.shutdown_tx.receiver_count() == 0,
+            "Should start with no subscribers"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -147,7 +150,8 @@ mod tests {
                 let mut response = BytesMut::new();
                 response.put_slice(b"pong");
                 response
-            }.boxed()
+            }
+            .boxed()
         });
 
         let server_clone = server.clone();
@@ -182,7 +186,8 @@ mod tests {
                 let mut response = BytesMut::new();
                 response.put_slice(&data);
                 response
-            }.boxed()
+            }
+            .boxed()
         });
 
         let server_clone = server.clone();

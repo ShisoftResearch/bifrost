@@ -111,70 +111,21 @@ impl Server {
             shutdown_handle: StdMutex::new(None),
         })
     }
-    
+
     pub async fn listen(server: &Arc<Server>) -> Result<(), Box<dyn Error>> {
         let address = &server.address;
         let tcp_server = Arc::new(tcp::server::Server::new());
-        
+
         // Store tcp_server reference
         match server.tcp_server.lock() {
             Ok(mut guard) => *guard = Some(tcp_server.clone()),
             Err(e) => error!("Failed to store tcp_server reference: {}", e),
         }
-        
-        let server_clone = server.clone();
-        tcp_server.listen(
-            address,
-            Arc::new(move |data| {
-                let server = server_clone.clone();
-                async move {
-                    let (svr_id, data) = read_u64_head(data);
-                    let service = server.services.get(&svr_id);
-                    trace!("Processing request for service {}", svr_id);
-                    match service {
-                        Some(service) => {
-                            let svr_res = service.dispatch(data).await;
-                            encode_res(svr_res)
-                        }
-                        None => {
-                            let service_list = server
-                                .services
-                                .entries()
-                                .into_iter()
-                                .map(|(sid, service)| {
-                                    format!("{}:{}", sid, service.service_symbol())
-                                })
-                                .collect::<Vec<_>>();
-                            error!(
-                                "Service {} not found, have {:?}, backtrace: {:?}",
-                                svr_id,
-                                service_list.join(", "),
-                                backtrace::Backtrace::capture()
-                            );
-                            encode_res(Err(RPCRequestError::ServiceIdNotFound))
-                        }
-                    }
-                }
-                .boxed()
-            }),
-        )
-        .await
-    }
 
-    pub async fn listen_and_resume(server: &Arc<Server>) {
-        let address = server.address.clone();
-        let tcp_server = Arc::new(tcp::server::Server::new());
-        
-        // Store tcp_server in the server struct
-        match server.tcp_server.lock() {
-            Ok(mut guard) => *guard = Some(tcp_server.clone()),
-            Err(e) => error!("Failed to store tcp_server reference: {}", e),
-        }
-        
         let server_clone = server.clone();
-        let handle = tokio::spawn(async move {
-            let result = tcp_server.listen(
-                &address,
+        tcp_server
+            .listen(
+                address,
                 Arc::new(move |data| {
                     let server = server_clone.clone();
                     async move {
@@ -208,22 +159,73 @@ impl Server {
                     .boxed()
                 }),
             )
-            .await;
-            
+            .await
+    }
+
+    pub async fn listen_and_resume(server: &Arc<Server>) {
+        let address = server.address.clone();
+        let tcp_server = Arc::new(tcp::server::Server::new());
+
+        // Store tcp_server in the server struct
+        match server.tcp_server.lock() {
+            Ok(mut guard) => *guard = Some(tcp_server.clone()),
+            Err(e) => error!("Failed to store tcp_server reference: {}", e),
+        }
+
+        let server_clone = server.clone();
+        let handle = tokio::spawn(async move {
+            let result = tcp_server
+                .listen(
+                    &address,
+                    Arc::new(move |data| {
+                        let server = server_clone.clone();
+                        async move {
+                            let (svr_id, data) = read_u64_head(data);
+                            let service = server.services.get(&svr_id);
+                            trace!("Processing request for service {}", svr_id);
+                            match service {
+                                Some(service) => {
+                                    let svr_res = service.dispatch(data).await;
+                                    encode_res(svr_res)
+                                }
+                                None => {
+                                    let service_list = server
+                                        .services
+                                        .entries()
+                                        .into_iter()
+                                        .map(|(sid, service)| {
+                                            format!("{}:{}", sid, service.service_symbol())
+                                        })
+                                        .collect::<Vec<_>>();
+                                    error!(
+                                        "Service {} not found, have {:?}, backtrace: {:?}",
+                                        svr_id,
+                                        service_list.join(", "),
+                                        backtrace::Backtrace::capture()
+                                    );
+                                    encode_res(Err(RPCRequestError::ServiceIdNotFound))
+                                }
+                            }
+                        }
+                        .boxed()
+                    }),
+                )
+                .await;
+
             if let Err(e) = result {
                 error!("RPC server error: {:?}", e);
             }
         });
-        
+
         // Store handle
         match server.shutdown_handle.lock() {
             Ok(mut guard) => *guard = Some(handle),
             Err(e) => error!("Failed to store shutdown handle: {}", e),
         }
-        
+
         sleep(Duration::from_secs(1)).await
     }
-    
+
     pub async fn shutdown(&self) {
         info!("Shutting down RPC server on {}", self.address);
         match self.tcp_server.lock() {

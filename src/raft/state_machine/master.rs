@@ -37,6 +37,7 @@ pub struct MasterStateMachine {
     subs: HashMap<u64, SubStateMachine>,
     snapshots: HashMap<u64, Vec<u8>>,
     pub configs: Configures,
+    plane_id: PlaneId,
 }
 
 impl StateMachineCmds for MasterStateMachine {}
@@ -67,7 +68,10 @@ impl StateMachineCtl for MasterStateMachine {
                 }
             }
             None => {
-                error!("Failed to deserialize master state machine snapshot. State machine recovery failed.");
+                error!(
+                    "Failed to deserialize master state machine snapshot for plane {}. State machine recovery failed.",
+                    self.plane_id.raw()
+                );
                 // Clear snapshots to start fresh - this is safer than leaving corrupted state
                 self.snapshots.clear();
             }
@@ -90,10 +94,15 @@ pub fn parse_output<'a>(r: Option<Vec<u8>>) -> ExecResult {
 
 impl MasterStateMachine {
     pub fn new(service_id: u64) -> MasterStateMachine {
+        Self::new_on_plane(service_id, PlaneId::type1())
+    }
+
+    pub fn new_on_plane(service_id: u64, plane_id: PlaneId) -> MasterStateMachine {
         let msm = MasterStateMachine {
             subs: HashMap::new(),
             snapshots: HashMap::new(),
             configs: Configures::new(service_id),
+            plane_id,
         };
         msm
     }
@@ -154,39 +163,38 @@ impl MasterStateMachine {
                     Some(d) => Ok(d),
                     None => {
                         warn!(
-                            "FN not found for cmd sm_id={}, fn_id={} at log_id={}",
-                            entry.sm_id, entry.fn_id, entry.id
+                            "FN not found for cmd on plane {} sm_id={}, fn_id={} at log_id={}",
+                            self.plane_id.raw(), entry.sm_id, entry.fn_id, entry.id
                         );
                         Err(ExecError::FnNotFound(entry.sm_id, entry.fn_id))
                     }
                 }
             }
-            _ => {
-                match self.subs.get_mut(&entry.sm_id) {
-                    Some(sm) => {
-                        let out = sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data).await;
-                        match out {
-                            Some(data) => Ok(data),
-                            None => {
-                                warn!(
-                                    "FN not found for cmd sm_id={}, fn_id={} at log_id={}",
-                                    entry.sm_id, entry.fn_id, entry.id
-                                );
-                                Err(ExecError::FnNotFound(entry.sm_id, entry.fn_id))
-                            }
+            _ => match self.subs.get_mut(&entry.sm_id) {
+                Some(sm) => {
+                    let out = sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data).await;
+                    match out {
+                        Some(data) => Ok(data),
+                        None => {
+                            warn!(
+                                "FN not found for cmd on plane {} sm_id={}, fn_id={} at log_id={}",
+                                self.plane_id.raw(), entry.sm_id, entry.fn_id, entry.id
+                            );
+                            Err(ExecError::FnNotFound(entry.sm_id, entry.fn_id))
                         }
                     }
-                    None => {
-                        warn!(
-                            "SM not found for cmd sm_id={} at log_id={}, have SMs: {:?}",
-                            entry.sm_id,
-                            entry.id,
-                            self.subs.keys().collect::<Vec<_>>()
-                        );
-                        Err(ExecError::SmNotFound(entry.sm_id))
-                    }
                 }
-            }
+                None => {
+                    warn!(
+                        "SM not found for cmd on plane {} sm_id={} at log_id={}, have SMs: {:?}",
+                        self.plane_id.raw(),
+                        entry.sm_id,
+                        entry.id,
+                        self.subs.keys().collect::<Vec<_>>()
+                    );
+                    Err(ExecError::SmNotFound(entry.sm_id))
+                }
+            },
         }
     }
     pub async fn exec_qry(&self, entry: &LogEntry) -> ExecResult {
@@ -197,39 +205,38 @@ impl MasterStateMachine {
                     Some(d) => Ok(d),
                     None => {
                         warn!(
-                            "FN not found for qry sm_id={}, fn_id={} at log_id={}",
-                            entry.sm_id, entry.fn_id, entry.id
+                            "FN not found for qry on plane {} sm_id={}, fn_id={} at log_id={}",
+                            self.plane_id.raw(), entry.sm_id, entry.fn_id, entry.id
                         );
                         Err(ExecError::FnNotFound(entry.sm_id, entry.fn_id))
                     }
                 }
             }
-            _ => {
-                match self.subs.get(&entry.sm_id) {
-                    Some(sm) => {
-                        let out = sm.fn_dispatch_qry(entry.fn_id, &entry.data).await;
-                        match out {
-                            Some(data) => Ok(data),
-                            None => {
-                                warn!(
-                                    "FN not found for qry sm_id={}, fn_id={} at log_id={}",
-                                    entry.sm_id, entry.fn_id, entry.id
-                                );
-                                Err(ExecError::FnNotFound(entry.sm_id, entry.fn_id))
-                            }
+            _ => match self.subs.get(&entry.sm_id) {
+                Some(sm) => {
+                    let out = sm.fn_dispatch_qry(entry.fn_id, &entry.data).await;
+                    match out {
+                        Some(data) => Ok(data),
+                        None => {
+                            warn!(
+                                "FN not found for qry on plane {} sm_id={}, fn_id={} at log_id={}",
+                                self.plane_id.raw(), entry.sm_id, entry.fn_id, entry.id
+                            );
+                            Err(ExecError::FnNotFound(entry.sm_id, entry.fn_id))
                         }
                     }
-                    None => {
-                        warn!(
-                            "SM not found for qry sm_id={} at log_id={}, have SMs: {:?}",
-                            entry.sm_id,
-                            entry.id,
-                            self.subs.keys().collect::<Vec<_>>()
-                        );
-                        Err(ExecError::SmNotFound(entry.sm_id))
-                    }
                 }
-            }
+                None => {
+                    warn!(
+                        "SM not found for qry on plane {} sm_id={} at log_id={}, have SMs: {:?}",
+                        self.plane_id.raw(),
+                        entry.sm_id,
+                        entry.id,
+                        self.subs.keys().collect::<Vec<_>>()
+                    );
+                    Err(ExecError::SmNotFound(entry.sm_id))
+                }
+            },
         }
     }
     pub fn clear_subs(&mut self) {
@@ -717,7 +724,9 @@ mod tests {
                 match fn_id {
                     1 => {
                         // SET command
-                        if let Some((key, value)) = crate::utils::serde::deserialize::<(String, String)>(data) {
+                        if let Some((key, value)) =
+                            crate::utils::serde::deserialize::<(String, String)>(data)
+                        {
                             self.data.insert(key, value);
                             Some(crate::utils::serde::serialize(&true))
                         } else {
@@ -784,7 +793,8 @@ mod tests {
         assert!(matches!(result, RegisterResult::OK));
 
         // Simulate SET command: key="user:123", value="Alice"
-        let set_data = crate::utils::serde::serialize(&(String::from("user:123"), String::from("Alice")));
+        let set_data =
+            crate::utils::serde::serialize(&(String::from("user:123"), String::from("Alice")));
         let set_entry = LogEntry {
             id: 1,
             term: 1,
@@ -950,7 +960,10 @@ mod tests {
         msm.register(sessions_sm);
 
         // Add user
-        let user_data = crate::utils::serde::serialize(&(String::from("user:1"), String::from("alice@example.com")));
+        let user_data = crate::utils::serde::serialize(&(
+            String::from("user:1"),
+            String::from("alice@example.com"),
+        ));
         let user_entry = LogEntry {
             id: 1,
             term: 1,
@@ -961,7 +974,8 @@ mod tests {
         msm.commit_cmd(&user_entry).await.unwrap();
 
         // Add session for that user
-        let session_data = crate::utils::serde::serialize(&(String::from("session:abc"), String::from("user:1")));
+        let session_data =
+            crate::utils::serde::serialize(&(String::from("session:abc"), String::from("user:1")));
         let session_entry = LogEntry {
             id: 2,
             term: 1,
@@ -979,9 +993,8 @@ mod tests {
             fn_id: 11, // COUNT
             data: vec![],
         };
-        let user_count: usize = crate::utils::serde::deserialize(
-            &msm.exec_qry(&user_query).await.unwrap()
-        ).unwrap();
+        let user_count: usize =
+            crate::utils::serde::deserialize(&msm.exec_qry(&user_query).await.unwrap()).unwrap();
 
         let session_query = LogEntry {
             id: 4,
@@ -990,9 +1003,8 @@ mod tests {
             fn_id: 11, // COUNT
             data: vec![],
         };
-        let session_count: usize = crate::utils::serde::deserialize(
-            &msm.exec_qry(&session_query).await.unwrap()
-        ).unwrap();
+        let session_count: usize =
+            crate::utils::serde::deserialize(&msm.exec_qry(&session_query).await.unwrap()).unwrap();
 
         assert_eq!(user_count, 1);
         assert_eq!(session_count, 1);
@@ -1140,13 +1152,9 @@ mod tests {
         let entry1 = query_entry.clone();
         let entry2 = query_entry.clone();
 
-        let handle1 = tokio::spawn(async move {
-            msm1.exec_qry(&entry1).await
-        });
+        let handle1 = tokio::spawn(async move { msm1.exec_qry(&entry1).await });
 
-        let handle2 = tokio::spawn(async move {
-            msm2.exec_qry(&entry2).await
-        });
+        let handle2 = tokio::spawn(async move { msm2.exec_qry(&entry2).await });
 
         // Both should complete (may error with FnNotFound but shouldn't panic)
         let _ = tokio::try_join!(handle1, handle2);

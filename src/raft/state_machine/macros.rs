@@ -253,10 +253,10 @@ macro_rules! raft_state_machine {
             use $crate::raft::client::*;
             use $crate::raft::state_machine::master::ExecError;
             use $crate::raft::state_machine::StateMachineClient;
-            use $crate::raft::client::{RaftClient, SubscriptionError, SubscriptionReceipt};
+            use $crate::raft::client::{AsRaftPlaneClient, RaftClient, RaftPlaneClient, SubscriptionError, SubscriptionReceipt};
 
             pub struct SMClient {
-                client: Arc<RaftClient>,
+                client: Arc<RaftPlaneClient>,
                 sm_id: u64
             }
             impl SMClient {
@@ -264,15 +264,18 @@ macro_rules! raft_state_machine {
                   $(#[$attr])*
                   raft_client_fn!($smt $fn_name( $( $arg : &$in_ ),* ) -> $out);
                )*
-               pub fn new(sm_id: u64, client: &Arc<RaftClient>) -> Self {
+               pub fn new<C>(sm_id: u64, client: &Arc<C>) -> Self
+               where
+                C: AsRaftPlaneClient + 'static,
+               {
                     Self {
-                        client: client.clone(),
+                    client: client.as_raft_plane_client(),
                         sm_id: sm_id
                     }
                }
             }
             impl StateMachineClient for SMClient {
-               fn new_instance (sm_id: u64, client: &Arc<RaftClient>) -> Self {
+            fn new_instance (sm_id: u64, client: &Arc<RaftPlaneClient>) -> Self {
                     Self::new(sm_id, client)
                }
             }
