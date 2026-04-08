@@ -110,19 +110,36 @@ impl MasterStateMachine {
         true
     }
 
-    pub fn register(&mut self, mut smc: SubStateMachine) -> RegisterResult {
+    pub fn register(&mut self, smc: SubStateMachine) -> RegisterResult {
         let id = smc.id();
-        if id < 2 {
+        if is_reserved_internal_sm_id(id) {
             return RegisterResult::RESERVED;
         }
         if self.subs.contains_key(&id) {
             return RegisterResult::EXISTED;
         };
-        if let Some(snapshot) = self.snapshots.remove(&id) {
-            smc.recover(snapshot);
-        }
         self.subs.insert(id, smc);
         RegisterResult::OK
+    }
+
+    pub async fn recover_registered_snapshots(&mut self) {
+        if let Some(snapshot) = self.snapshots.remove(&CONFIG_SM_ID) {
+            self.configs.recover(snapshot).await;
+        }
+
+        let recoverable_ids: Vec<u64> = self
+            .subs
+            .keys()
+            .filter(|id| self.snapshots.contains_key(id))
+            .copied()
+            .collect();
+        for sm_id in recoverable_ids {
+            if let Some(snapshot) = self.snapshots.remove(&sm_id) {
+                if let Some(smc) = self.subs.get_mut(&sm_id) {
+                    smc.recover(snapshot).await;
+                }
+            }
+        }
     }
 
     pub fn members(&self) -> &HashMap<u64, RaftMember> {
@@ -404,8 +421,8 @@ mod tests {
         assert!(matches!(result, RegisterResult::EXISTED));
     }
 
-    #[test]
-    fn test_register_with_snapshot_recovery() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_register_with_snapshot_recovery() {
         let mut msm = MasterStateMachine::new(1);
 
         // Add a snapshot for SM id 10
@@ -421,8 +438,37 @@ mod tests {
 
         msm.register(mock_sm);
 
-        // Snapshot should be removed after registration
+        // Snapshot is kept pending until registered snapshots are explicitly recovered.
+        assert_eq!(msm.snapshots.get(&10), Some(&snapshot_data));
+
+        msm.recover_registered_snapshots().await;
+
+        // Snapshot should be removed after replay.
         assert!(!msm.snapshots.contains_key(&10));
+        let recovered = msm
+            .subs
+            .get(&10)
+            .and_then(|sm| {
+                let any = sm.as_ref() as &dyn std::any::Any;
+                any.downcast_ref::<MockStateMachine>()
+            })
+            .and_then(|sm| sm.recovered_data.clone());
+        assert_eq!(recovered, Some(snapshot_data));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_recover_registered_snapshots_applies_config_snapshot() {
+        let mut msm = MasterStateMachine::new(1);
+        msm.configs.members.clear();
+
+        let mut restored = Configures::new(99);
+        let _ = restored.new_member(String::from("127.0.0.1:9100")).await;
+        msm.snapshots.insert(CONFIG_SM_ID, restored.snapshot());
+
+        msm.recover_registered_snapshots().await;
+
+        assert_eq!(msm.configs.members.len(), 1);
+        assert!(!msm.snapshots.contains_key(&CONFIG_SM_ID));
     }
 
     #[test]
@@ -868,6 +914,7 @@ mod tests {
             data: HashMap::new(),
         });
         new_msm.register(new_kv_sm);
+        new_msm.recover_registered_snapshots().await;
 
         // Verify data was recovered by querying
         let get_data = crate::utils::serde::serialize(&String::from("session:5"));

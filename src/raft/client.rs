@@ -2,7 +2,9 @@ use super::*;
 use crate::raft::state_machine::callback::client::SubscriptionService;
 use crate::raft::state_machine::callback::SubKey;
 use crate::raft::state_machine::configs::commands::{
-    subscribe as conf_subscribe, unsubscribe as conf_unsubscribe,
+    del_member_ as conf_del_member, member_address as conf_member_address,
+    new_member_ as conf_new_member, subscribe as conf_subscribe,
+    unsubscribe as conf_unsubscribe,
 };
 use crate::raft::state_machine::master::ExecError;
 use crate::raft::state_machine::StateMachineClient;
@@ -32,6 +34,17 @@ pub enum ClientError {
     ServerUnreachable,
 }
 
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClientError::LeaderIdValid => write!(f, "leader id is invalid"),
+            ClientError::ServerUnreachable => write!(f, "seed nodes are unreachable"),
+        }
+    }
+}
+
+impl std::error::Error for ClientError {}
+
 #[derive(Debug)]
 pub enum SubscriptionError {
     RemoteError,
@@ -39,8 +52,11 @@ pub enum SubscriptionError {
     CannotFindSubId,
 }
 
-struct QryMeta {
+struct PlaneClientState {
     pos: AtomicU64,
+    leader_id: AtomicU64,
+    last_log_id: AtomicU64,
+    last_log_term: AtomicU64,
 }
 
 struct Members {
@@ -48,33 +64,144 @@ struct Members {
     id_map: HashMap<u64, String>,
 }
 
+pub trait AsRaftPlaneClient: Send + Sync {
+    fn as_raft_plane_client(self: &Arc<Self>) -> Arc<RaftPlaneClient>;
+}
+
+#[derive(Clone)]
+pub struct RaftPlaneClient {
+    client: Arc<RaftClient>,
+    plane_id: PlaneId,
+}
+
+impl RaftPlaneClient {
+    pub fn plane_id(&self) -> PlaneId {
+        self.plane_id
+    }
+
+    pub async fn execute<R, M>(&self, sm_id: u64, msg: M) -> Result<R, ExecError>
+    where
+        R: 'static,
+        M: RaftMsg<R> + 'static,
+    {
+        self.client.execute_on_plane(self.plane_id, sm_id, msg).await
+    }
+
+    pub async fn subscribe<M, R, F>(
+        &self,
+        sm_id: u64,
+        msg: M,
+        f: F,
+    ) -> Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>
+    where
+        M: RaftMsg<R> + 'static,
+        R: 'static + Send,
+        F: Fn(R) -> BoxFuture<'static, ()> + 'static + Send + Sync,
+    {
+        self.client.subscribe_on_plane(self.plane_id, sm_id, msg, f).await
+    }
+
+    pub async fn unsubscribe(
+        &self,
+        receipt: SubscriptionReceipt,
+    ) -> Result<Result<(), SubscriptionError>, ExecError> {
+        self.client.unsubscribe(receipt).await
+    }
+
+    pub async fn cluster_info(&self) -> Result<ClientClusterInfo, ExecError> {
+        self.client.cluster_info_on_plane(self.plane_id).await
+    }
+
+    pub async fn have_state_machine(&self, sm_id: u64) -> Result<bool, ExecError> {
+        self.client.have_state_machine_on_plane(self.plane_id, sm_id).await
+    }
+}
+
 pub struct RaftClient {
-    qry_meta: QryMeta,
     members: RwLock<Members>,
-    leader_id: AtomicU64,
-    last_log_id: AtomicU64,
-    last_log_term: AtomicU64,
+    type1_state: Arc<PlaneClientState>,
+    plane_states: RwLock<HashMap<PlaneId, Arc<PlaneClientState>>>,
     service_id: u64,
 }
 
+impl AsRaftPlaneClient for RaftClient {
+    fn as_raft_plane_client(self: &Arc<Self>) -> Arc<RaftPlaneClient> {
+        self.plane(PlaneId::type1())
+    }
+}
+
+impl AsRaftPlaneClient for RaftPlaneClient {
+    fn as_raft_plane_client(self: &Arc<Self>) -> Arc<RaftPlaneClient> {
+        self.clone()
+    }
+}
+
 impl RaftClient {
+    fn new_plane_state() -> Arc<PlaneClientState> {
+        Arc::new(PlaneClientState {
+            pos: AtomicU64::new(rand::random::<u64>()),
+            leader_id: AtomicU64::new(0),
+            last_log_id: AtomicU64::new(0),
+            last_log_term: AtomicU64::new(0),
+        })
+    }
+
     pub async fn new(servers: &Vec<String>, service_id: u64) -> Result<Arc<Self>, ClientError> {
         let client = RaftClient {
-            qry_meta: QryMeta {
-                pos: AtomicU64::new(rand::random::<u64>()),
-            },
             members: RwLock::new(Members {
                 clients: BTreeMap::new(),
                 id_map: HashMap::new(),
             }),
-            leader_id: AtomicU64::new(0),
-            last_log_id: AtomicU64::new(0),
-            last_log_term: AtomicU64::new(0),
+            type1_state: Self::new_plane_state(),
+            plane_states: RwLock::new(HashMap::new()),
             service_id,
         };
         client.update_info(servers).await?;
         Ok(Arc::new(client))
     }
+
+    async fn plane_state(&self, plane_id: PlaneId) -> Arc<PlaneClientState> {
+        if plane_id.is_type1() {
+            return self.type1_state.clone();
+        }
+
+        {
+            let states = self.plane_states.read().await;
+            if let Some(state) = states.get(&plane_id) {
+                return state.clone();
+            }
+        }
+
+        let mut states = self.plane_states.write().await;
+        states
+            .entry(plane_id)
+            .or_insert_with(Self::new_plane_state)
+            .clone()
+    }
+
+    pub fn plane(self: &Arc<Self>, plane_id: PlaneId) -> Arc<RaftPlaneClient> {
+        Arc::new(RaftPlaneClient {
+            client: self.clone(),
+            plane_id,
+        })
+    }
+
+    pub fn type1(self: &Arc<Self>) -> Arc<RaftPlaneClient> {
+        self.plane(PlaneId::type1())
+    }
+
+    pub async fn add_root_member(&self, address: &String) -> Result<bool, ExecError> {
+        self.execute(CONFIG_SM_ID, conf_new_member::new(address)).await
+    }
+
+    pub async fn remove_root_member(&self, address: &String) -> Result<(), ExecError> {
+        self.execute(CONFIG_SM_ID, conf_del_member::new(address)).await
+    }
+
+    pub async fn root_member_addresses(&self) -> Result<Vec<String>, ExecError> {
+        self.execute(CONFIG_SM_ID, conf_member_address::new()).await
+    }
+
     pub async fn prepare_subscription(server: &Arc<rpc::Server>) -> Option<()> {
         let mut callback = CALLBACK.write().await;
         return if callback.is_none() {
@@ -86,13 +213,23 @@ impl RaftClient {
         };
     }
 
-    async fn cluster_info<'a>(&'a self, servers: &Vec<String>) -> Option<ClientClusterInfo> {
-        debug!("Getting server info for {:?}", servers);
+    async fn cluster_info<'a>(
+        &'a self,
+        plane_id: PlaneId,
+        servers: &Vec<String>,
+    ) -> Option<ClientClusterInfo> {
+        debug!(
+            "Getting server info for plane {} from {:?}",
+            plane_id.raw(),
+            servers
+        );
         let mut attempt_remains: i32 = 10;
         loop {
             debug!(
-                "Trying to get cluster info, attempt from {:?}...{}",
-                servers, attempt_remains
+                "Trying to get cluster info for plane {}, attempt from {:?}...{}",
+                plane_id.raw(),
+                servers,
+                attempt_remains
             );
             let mut futs: FuturesUnordered<_> = servers
                 .iter()
@@ -131,7 +268,7 @@ impl RaftClient {
                             }
                         };
                         debug!("Invoking server_cluster_info on {}, id {}", server_addr, id);
-                        let info_res = member_client.c_server_cluster_info().await;
+                        let info_res = member_client.c_server_cluster_info(plane_id).await;
                         debug!("Checking response from {}", server_addr);
                         return match info_res {
                             Ok(info) => {
@@ -175,13 +312,17 @@ impl RaftClient {
                 break;
             }
         }
-        warn!("Cannot find anything useful from list: {:?}", servers);
+        warn!(
+            "Cannot find anything useful for plane {} from list: {:?}",
+            plane_id.raw(),
+            servers
+        );
         return None;
     }
 
     async fn update_info(&self, servers: &Vec<String>) -> Result<(), ClientError> {
         debug!("Updating cluster info from servers: {:?}", servers);
-        let cluster_info = self.cluster_info(servers).await;
+        let cluster_info = self.cluster_info(PlaneId::type1(), servers).await;
         match cluster_info {
             Some(info) => {
                 let mut members = self.members.write().await;
@@ -224,13 +365,49 @@ impl RaftClient {
                 info!(
                     "UPDATE_INFO Setting leader to {}, was {}",
                     info.leader_id,
-                    self.leader_id.load(Relaxed)
+                    self.type1_state.leader_id.load(Relaxed)
                 );
-                self.leader_id.store(info.leader_id, ORDERING);
+                self.type1_state.leader_id.store(info.leader_id, ORDERING);
+                swap_when_greater(&self.type1_state.last_log_id, info.last_log_id);
+                swap_when_greater(&self.type1_state.last_log_term, info.last_log_term);
                 Ok(())
             }
             None => {
                 error!("Cannot update info, cannot get cluster info");
+                Err(ClientError::ServerUnreachable)
+            }
+        }
+    }
+
+    async fn update_plane_info(
+        &self,
+        plane_id: PlaneId,
+        servers: &Vec<String>,
+    ) -> Result<(), ClientError> {
+        if plane_id.is_type1() {
+            return self.update_info(servers).await;
+        }
+
+        let cluster_info = self.cluster_info(plane_id, servers).await;
+        match cluster_info {
+            Some(info) => {
+                let state = self.plane_state(plane_id).await;
+                info!(
+                    "UPDATE_INFO Setting plane {} leader to {}, was {}",
+                    plane_id.raw(),
+                    info.leader_id,
+                    state.leader_id.load(Relaxed)
+                );
+                state.leader_id.store(info.leader_id, ORDERING);
+                swap_when_greater(&state.last_log_id, info.last_log_id);
+                swap_when_greater(&state.last_log_term, info.last_log_term);
+                Ok(())
+            }
+            None => {
+                error!(
+                    "Cannot update info for plane {}, cannot get cluster info",
+                    plane_id.raw()
+                );
                 Err(ClientError::ServerUnreachable)
             }
         }
@@ -270,10 +447,25 @@ impl RaftClient {
         R: 'static,
         M: RaftMsg<R> + 'static,
     {
+        self.execute_on_plane(PlaneId::type1(), sm_id, msg).await
+    }
+
+    pub async fn execute_on_plane<R, M>(
+        &self,
+        plane_id: PlaneId,
+        sm_id: u64,
+        msg: M,
+    ) -> Result<R, ExecError>
+    where
+        R: 'static,
+        M: RaftMsg<R> + 'static,
+    {
         let (fn_id, op, req_data) = msg.encode();
         let response = match op {
-            OpType::QUERY => self.query(sm_id, fn_id, req_data).await,
-            OpType::COMMAND | OpType::SUBSCRIBE => self.command(sm_id, fn_id, req_data).await,
+            OpType::QUERY => self.query_on_plane(plane_id, sm_id, fn_id, req_data).await,
+            OpType::COMMAND | OpType::SUBSCRIBE => {
+                self.command_on_plane(plane_id, sm_id, fn_id, req_data).await
+            }
         };
         match response {
             Ok(data) => match data {
@@ -287,7 +479,7 @@ impl RaftClient {
     pub async fn can_callback() -> bool {
         CALLBACK.read().await.is_some()
     }
-    fn get_sub_key<M, R>(&self, sm_id: u64, msg: M) -> SubKey
+    fn get_sub_key<M, R>(&self, plane_id: PlaneId, sm_id: u64, msg: M) -> SubKey
     where
         M: RaftMsg<R> + 'static,
         R: 'static,
@@ -297,7 +489,7 @@ impl RaftClient {
             let (fn_id, _, pattern_data) = msg.encode();
             (fn_id, hash_bytes(pattern_data.as_slice()))
         };
-        return (raft_sid, sm_id, fn_id, pattern_id);
+        SubKey::new(raft_sid, plane_id, sm_id, fn_id, pattern_id)
     }
 
     pub async fn get_callback(&self) -> Result<Arc<SubscriptionService>, SubscriptionError> {
@@ -321,15 +513,31 @@ impl RaftClient {
         R: 'static + Send,
         F: Fn(R) -> BoxFuture<'static, ()> + 'static + Send + Sync,
     {
+        self.subscribe_on_plane(PlaneId::type1(), sm_id, msg, f).await
+    }
+
+    pub async fn subscribe_on_plane<M, R, F>(
+        &self,
+        plane_id: PlaneId,
+        sm_id: u64,
+        msg: M,
+        f: F,
+    ) -> Result<Result<SubscriptionReceipt, SubscriptionError>, ExecError>
+    where
+        M: RaftMsg<R> + 'static,
+        R: 'static + Send,
+        F: Fn(R) -> BoxFuture<'static, ()> + 'static + Send + Sync,
+    {
         let callback = match self.get_callback().await {
             Ok(c) => c,
             Err(e) => return Ok(Err(e)),
         };
-        let key = self.get_sub_key(sm_id, msg);
+        let key = self.get_sub_key(plane_id, sm_id, msg);
         let wrapper_fn =
             move |data: Vec<u8>| -> BoxFuture<'static, ()> { f(M::decode_return(&data)).boxed() };
         let cluster_subs = self
-            .execute(
+            .execute_on_plane(
+                plane_id,
                 CONFIG_SM_ID,
                 conf_subscribe::new(&key, &callback.server_address, &callback.session_id),
             )
@@ -355,7 +563,7 @@ impl RaftClient {
             Ok(callback) => {
                 let (key, sub_id) = receipt;
                 let unsub = self
-                    .execute(CONFIG_SM_ID, conf_unsubscribe::new(&sub_id))
+                    .execute_on_plane(key.plane_id, CONFIG_SM_ID, conf_unsubscribe::new(&sub_id))
                     .await;
                 match unsub {
                     Ok(_) => {
@@ -385,7 +593,14 @@ impl RaftClient {
         }
     }
 
-    async fn query(&self, sm_id: u64, fn_id: u64, data: Vec<u8>) -> Result<ExecResult, ExecError> {
+    async fn query_on_plane(
+        &self,
+        plane_id: PlaneId,
+        sm_id: u64,
+        fn_id: u64,
+        data: Vec<u8>,
+    ) -> Result<ExecResult, ExecError> {
+        let state = self.plane_state(plane_id).await;
         let mut depth = 0;
         loop {
             if depth == 0 {
@@ -393,7 +608,7 @@ impl RaftClient {
             } else {
                 warn!("Retry client query sm_id {}, fn_id {}", sm_id, fn_id);
             }
-            let pos = self.qry_meta.pos.fetch_add(1, ORDERING);
+            let pos = state.pos.fetch_add(1, ORDERING);
             let members = self.members.read().await;
             let num_members = members.clients.len();
             if num_members >= 1 {
@@ -412,7 +627,7 @@ impl RaftClient {
                     fn_id
                 );
                 let res = rpc_client
-                    .c_query(&self.gen_log_entry(sm_id, fn_id, &data))
+                    .c_query(plane_id, &self.gen_log_entry(&state, sm_id, fn_id, &data))
                     .await;
                 trace!(
                     "Query from node {} for sm_id {}, fn_id {} completed",
@@ -428,8 +643,8 @@ impl RaftClient {
                         } => {
                             debug!("Found left behind record...{}, updating client state: server has log_id={}, term={}", depth, last_log_id, last_log_term);
                             // Update client state from server to avoid retry loop
-                            swap_when_greater(&self.last_log_id, last_log_id);
-                            swap_when_greater(&self.last_log_term, last_log_term);
+                            swap_when_greater(&state.last_log_id, last_log_id);
+                            swap_when_greater(&state.last_log_term, last_log_term);
                             // Add a small delay to allow server to catch up if under stress
                             if depth > 0 {
                                 sleep(Duration::from_millis(50)).await;
@@ -447,8 +662,8 @@ impl RaftClient {
                             last_log_term,
                             last_log_id,
                         } => {
-                            swap_when_greater(&self.last_log_id, last_log_id);
-                            swap_when_greater(&self.last_log_term, last_log_term);
+                            swap_when_greater(&state.last_log_id, last_log_id);
+                            swap_when_greater(&state.last_log_term, last_log_term);
                             if depth > 0 {
                                 warn!("Retry successful...{}", depth);
                             }
@@ -476,16 +691,23 @@ impl RaftClient {
         }
     }
 
-    async fn command(
+    async fn command_on_plane(
         &self,
+        plane_id: PlaneId,
         sm_id: u64,
         fn_id: u64,
         data: Vec<u8>,
     ) -> Result<ExecResult, ExecError> {
-        const NOT_COMMITTED_RETRY_LIMIT: i32 = 64;
         const NOT_COMMITTED_RETRY_DELAY_MS: u64 = 10;
-        const UPDATE_INFO_RETRY_LIMIT: i32 = 64;
         const UPDATE_INFO_RETRY_DELAY_MS: u64 = 10;
+        let not_committed_retry_limit = std::cmp::max(
+            64,
+            ((HEARTBEAT_MS * 2) / NOT_COMMITTED_RETRY_DELAY_MS as i64) as i32,
+        );
+        let update_info_retry_limit = std::cmp::max(
+            64,
+            ((HEARTBEAT_MS * 2) / UPDATE_INFO_RETRY_DELAY_MS as i64) as i32,
+        );
 
         enum FailureAction {
             SwitchLeader,
@@ -494,6 +716,7 @@ impl RaftClient {
             NotLeader,
             ShuttingDown,
         }
+        let state = self.plane_state(plane_id).await;
         let mut leader_retry_depth = 0;
         let mut not_committed_depth = 0;
         let mut update_info_depth = 0;
@@ -511,10 +734,13 @@ impl RaftClient {
                         return Err(ExecError::TooManyRetry);
                     };
                 }
-                match self.current_leader_client().await {
+                match self.preferred_client_on_plane(&state).await {
                     Some((leader_id, client)) => {
                         let cmd_res = client
-                            .c_command(self.gen_log_entry(sm_id, fn_id, &data))
+                            .c_command(
+                                plane_id,
+                                self.gen_log_entry(&state, sm_id, fn_id, &data),
+                            )
                             .await;
                         match cmd_res {
                             Ok(ClientCmdResponse::Success {
@@ -522,8 +748,8 @@ impl RaftClient {
                                 last_log_term,
                                 last_log_id,
                             }) => {
-                                swap_when_greater(&self.last_log_id, last_log_id);
-                                swap_when_greater(&self.last_log_term, last_log_term);
+                                swap_when_greater(&state.last_log_id, last_log_id);
+                                swap_when_greater(&state.last_log_term, last_log_term);
                                 return Ok(data);
                             }
                             Ok(ClientCmdResponse::NotLeader(new_leader_id)) => {
@@ -553,11 +779,12 @@ impl RaftClient {
                                         new_leader_id
                                     );
                                     info!(
-                                        "CMD Setting leader to {}, was {}",
+                                        "CMD Setting plane {} leader to {}, was {}",
+                                        plane_id.raw(),
                                         new_leader_id,
-                                        self.leader_id.load(Relaxed)
+                                        state.leader_id.load(Relaxed)
                                     );
-                                    self.leader_id.store(new_leader_id, ORDERING);
+                                    state.leader_id.store(new_leader_id, ORDERING);
                                     FailureAction::NotLeader
                                 }
                             }
@@ -571,8 +798,8 @@ impl RaftClient {
                                     last_log_term,
                                     last_log_id
                                 );
-                                swap_when_greater(&self.last_log_id, last_log_id);
-                                swap_when_greater(&self.last_log_term, last_log_term);
+                                swap_when_greater(&state.last_log_id, last_log_id);
+                                swap_when_greater(&state.last_log_term, last_log_term);
                                 FailureAction::NotCommitted
                             }
                             Ok(ClientCmdResponse::ShuttingDown) => FailureAction::ShuttingDown,
@@ -598,7 +825,7 @@ impl RaftClient {
                 FailureAction::NotCommitted => {
                     not_committed_depth += 1;
                     update_info_depth = 0;
-                    if not_committed_depth >= NOT_COMMITTED_RETRY_LIMIT {
+                    if not_committed_depth >= not_committed_retry_limit {
                         error!(
                             "Too many retry on command due to NotCommitted responses {}",
                             not_committed_depth
@@ -608,7 +835,7 @@ impl RaftClient {
                     debug!(
                         "Retrying command after NotCommitted response {}/{}",
                         not_committed_depth,
-                        NOT_COMMITTED_RETRY_LIMIT
+                        not_committed_retry_limit
                     );
                     sleep(Duration::from_millis(NOT_COMMITTED_RETRY_DELAY_MS)).await;
                     continue;
@@ -621,7 +848,7 @@ impl RaftClient {
                         update_info_depth,
                         leader_retry_depth
                     );
-                    if update_info_depth >= UPDATE_INFO_RETRY_LIMIT {
+                    if update_info_depth >= update_info_retry_limit {
                         error!(
                             "Too many retry on command due to cluster-info refresh attempts {}",
                             update_info_depth
@@ -639,10 +866,10 @@ impl RaftClient {
                     debug!(
                         "Refreshing cluster info after transient NotLeader/leader-miss {}/{} from {:?}",
                         update_info_depth,
-                        UPDATE_INFO_RETRY_LIMIT,
+                        update_info_retry_limit,
                         servers
                     );
-                    if let Err(e) = self.update_info(&servers).await {
+                    if let Err(e) = self.update_plane_info(plane_id, &servers).await {
                         warn!("Failed to refresh cluster info during command retry: {:?}", e);
                     }
                     sleep(Duration::from_millis(UPDATE_INFO_RETRY_DELAY_MS)).await;
@@ -656,7 +883,7 @@ impl RaftClient {
                     debug!("Switch leader by probing");
                     let members = self.members.read().await;
                     let num_members = members.clients.len();
-                    let leader_id = self.leader_id.load(ORDERING);
+                    let leader_id = state.leader_id.load(ORDERING);
                     let new_leader_id = match members
                         .clients
                         .keys()
@@ -672,7 +899,7 @@ impl RaftClient {
                             return Err(ExecError::ServersUnreachable);
                         }
                     };
-                    let leadder_switch = self.leader_id.compare_exchange(
+                    let leadder_switch = state.leader_id.compare_exchange(
                         leader_id,
                         new_leader_id,
                         ORDERING,
@@ -697,21 +924,53 @@ impl RaftClient {
         }
     }
 
-    fn gen_log_entry(&self, sm_id: u64, fn_id: u64, data: &Vec<u8>) -> LogEntry {
+    fn gen_log_entry(
+        &self,
+        state: &PlaneClientState,
+        sm_id: u64,
+        fn_id: u64,
+        data: &Vec<u8>,
+    ) -> LogEntry {
         LogEntry {
-            id: self.last_log_id.load(ORDERING),
-            term: self.last_log_term.load(ORDERING),
+            id: state.last_log_id.load(ORDERING),
+            term: state.last_log_term.load(ORDERING),
             sm_id,
             fn_id,
             data: data.clone(),
         }
     }
+
     pub fn leader_id(&self) -> u64 {
-        self.leader_id.load(ORDERING)
+        self.type1_state.leader_id.load(ORDERING)
     }
+
     pub async fn leader_client(&self) -> Option<(u64, Client)> {
+        self.current_leader_client_on_plane(PlaneId::type1(), &self.type1_state)
+            .await
+    }
+
+    async fn any_known_client(&self) -> Option<Client> {
         let members = self.members.read().await;
-        let leader_id = self.leader_id();
+        members.clients.values().next().cloned()
+    }
+
+    async fn preferred_client_on_plane(
+        &self,
+        state: &PlaneClientState,
+    ) -> Option<(u64, Client)> {
+        if let Some((leader_id, client)) = self.leader_client_on_plane(state).await {
+            return Some((leader_id, client));
+        }
+
+        self.any_known_client().await.map(|client| (0, client))
+    }
+
+    async fn leader_client_on_plane(
+        &self,
+        state: &PlaneClientState,
+    ) -> Option<(u64, Client)> {
+        let members = self.members.read().await;
+        let leader_id = state.leader_id.load(ORDERING);
         if let Some(client) = members.clients.get(&leader_id) {
             Some((leader_id, client.clone()))
         } else {
@@ -719,31 +978,47 @@ impl RaftClient {
         }
     }
 
-    async fn current_leader_client(&self) -> Option<(u64, Client)> {
+    async fn current_leader_client_on_plane(
+        &self,
+        plane_id: PlaneId,
+        state: &PlaneClientState,
+    ) -> Option<(u64, Client)> {
         {
-            let leader_client = self.leader_client().await;
+            let leader_client = self.leader_client_on_plane(state).await;
             if leader_client.is_some() {
                 return leader_client;
             }
         }
-        debug!("Obtaining leader client by updating clusyer info");
+        debug!(
+            "Obtaining leader client for plane {} by updating cluster info",
+            plane_id.raw()
+        );
         {
             let servers = {
                 let members = self.members.read().await;
                 Vec::from_iter(members.id_map.values().cloned())
             };
-            if let Err(e) = self.update_info(&servers).await {
-                error!("Failed to update cluster info: {:?}", e);
+            if let Err(e) = self.update_plane_info(plane_id, &servers).await {
+                error!(
+                    "Failed to update cluster info for plane {}: {:?}",
+                    plane_id.raw(),
+                    e
+                );
                 return None;
             }
-            let leader_id = self.leader_id.load(ORDERING);
+            let leader_id = state.leader_id.load(ORDERING);
             let members = self.members.read().await;
             if let Some(client) = members.clients.get(&leader_id) {
-                debug!("Obtained leader client with id: {}", leader_id);
+                debug!(
+                    "Obtained leader client for plane {} with id: {}",
+                    plane_id.raw(),
+                    leader_id
+                );
                 Some((leader_id, client.clone()))
             } else {
                 warn!(
-                    "Cannot obtain leader client with id {}. Having {:?}",
+                    "Cannot obtain leader client for plane {} with id {}. Having {:?}",
+                    plane_id.raw(),
                     leader_id,
                     members.clients.keys().collect::<Vec<_>>()
                 );
@@ -752,8 +1027,42 @@ impl RaftClient {
         }
     }
     pub async fn current_leader_rpc_client(&self) -> Result<Arc<rpc::RPCClient>, ()> {
-        let (_, client) = self.current_leader_client().await.ok_or_else(|| ())?;
+        let (_, client) = self
+            .current_leader_client_on_plane(PlaneId::type1(), &self.type1_state)
+            .await
+            .ok_or_else(|| ())?;
         Ok(client.client.clone())
+    }
+
+    pub async fn cluster_info_on_plane(
+        &self,
+        plane_id: PlaneId,
+    ) -> Result<ClientClusterInfo, ExecError> {
+        let state = self.plane_state(plane_id).await;
+        let client = match self.leader_client_on_plane(&state).await {
+            Some((_, client)) => client,
+            None => self.any_known_client().await.ok_or(ExecError::ServersUnreachable)?,
+        };
+        client
+            .c_server_cluster_info(plane_id)
+            .await
+            .map_err(|_| ExecError::ServersUnreachable)
+    }
+
+    pub async fn have_state_machine_on_plane(
+        &self,
+        plane_id: PlaneId,
+        sm_id: u64,
+    ) -> Result<bool, ExecError> {
+        let state = self.plane_state(plane_id).await;
+        let client = match self.leader_client_on_plane(&state).await {
+            Some((_, client)) => client,
+            None => self.any_known_client().await.ok_or(ExecError::ServersUnreachable)?,
+        };
+        client
+            .c_have_state_machine(plane_id, sm_id)
+            .await
+            .map_err(|_| ExecError::ServersUnreachable)
     }
 }
 
@@ -777,19 +1086,29 @@ fn swap_when_greater(atomic: &AtomicU64, value: u64) {
 pub struct CachedStateMachine<T: StateMachineClient> {
     server_list: Vec<String>,
     raft_service_id: u64,
+    plane_id: PlaneId,
     state_machine_id: u64,
     cache: RwLock<Option<Arc<T>>>,
 }
 
 impl<T: StateMachineClient> CachedStateMachine<T> {
-    pub fn new(server_list: &Vec<String>, raft_service_id: u64, state_machine_id: u64) -> Self {
+    pub fn new(
+        server_list: &Vec<String>,
+        raft_service_id: u64,
+        plane_id: PlaneId,
+        state_machine_id: u64,
+    ) -> Self {
         debug!(
-            "Construct cached state machine for list {:?}, service id {}, state machine {}",
-            server_list, raft_service_id, state_machine_id
+            "Construct cached state machine for list {:?}, service id {}, plane {}, state machine {}",
+            server_list,
+            raft_service_id,
+            plane_id.raw(),
+            state_machine_id
         );
         Self {
             server_list: server_list.clone(),
             raft_service_id,
+            plane_id,
             state_machine_id,
             cache: RwLock::new(None),
         }
@@ -822,10 +1141,11 @@ impl<T: StateMachineClient> CachedStateMachine<T> {
                             continue;
                         }
                     };
+                    let plane_client = raft_client.plane(self.plane_id);
                     // Create a client for the state machine on the raft service
                     *place_holder = Some(Arc::new(T::new_instance(
                         self.state_machine_id,
-                        &raft_client,
+                        &plane_client,
                     )))
                 }
             }
