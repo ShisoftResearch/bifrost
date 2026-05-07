@@ -546,6 +546,11 @@ enum RequestVoteResponse {
     NotGranted,
 }
 
+enum HeartbeatReplicationResult {
+    Matched(u64),
+    TermOut { term: u64, leader_id: u64 },
+}
+
 macro_rules! get_last_log_info {
     ($s: expr, $logs: expr) => {{
         let last_log = $logs.iter().next_back();
@@ -555,19 +560,43 @@ macro_rules! get_last_log_info {
 
 async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
     while meta.commit_index > meta.last_applied {
-        meta.last_applied += 1;
-        let last_applied = meta.last_applied;
-        // TODO: Get rid of frequent locking and clone?
-        let logs = meta.logs.read().await;
-        if let Some(entry) = logs.get(&last_applied) {
-            if let Err(e) = commit_command(meta, &entry).await {
+        let next_log_id = meta.last_applied + 1;
+        let entry = {
+            // Clone the next entry so we can drop the log read lock before mutating apply state.
+            let logs = meta.logs.read().await;
+            logs.get(&next_log_id).cloned()
+        };
+        let Some(entry) = entry else {
+            warn!(
+                "Committed log entry {} is missing during apply (commit_index={}, last_applied={}); deferring replay",
+                next_log_id,
+                meta.commit_index,
+                meta.last_applied
+            );
+            break;
+        };
+
+        match commit_command(meta, &entry).await {
+            Ok(_) => {
+                meta.last_applied = next_log_id;
+            }
+            Err(ExecError::SmNotFound(sm_id)) => {
+                warn!(
+                    "Deferring log entry {} until state machine {} is registered",
+                    next_log_id,
+                    sm_id
+                );
+                break;
+            }
+            Err(e) => {
                 error!(
                     "Failed to commit command for log entry {}: {:?}",
-                    last_applied, e
+                    next_log_id, e
                 );
-                // Continue processing other entries despite this failure
+                // Preserve prior behavior for non-recoverable apply failures.
+                meta.last_applied = next_log_id;
             }
-        };
+        }
     }
 }
 
@@ -908,8 +937,10 @@ impl RaftService {
                     meta.last_snapshot_index = snapshot.last_included_index;
                     meta.last_snapshot_term = snapshot.last_included_term;
 
-                    if snapshot.last_included_index > meta.last_applied {
-                        meta.last_applied = snapshot.last_included_index;
+                    // Snapshot restore must reset the apply cursor to the snapshot index so
+                    // post-snapshot WAL entries are replayed deterministically on startup.
+                    meta.last_applied = snapshot.last_included_index;
+                    if meta.commit_index < snapshot.last_included_index {
                         meta.commit_index = snapshot.last_included_index;
                     }
 
@@ -1059,6 +1090,7 @@ impl RaftService {
                     get_last_log_info!(self, logs)
                 };
                 drop(sm);
+                ensure_direct_leader_term(meta);
                 self.become_leader_on_plane(leader_flag, meta, last_log_id)
                     .await;
                 info!(
@@ -1474,6 +1506,12 @@ fn alter_term(meta: &mut RwLockWriteGuard<RaftMeta>, term: u64) {
     }
 }
 
+fn ensure_direct_leader_term(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
+    if meta.term == 0 {
+        meta.term = 1;
+    }
+}
+
 impl RaftService {
     pub fn new(opts: Options) -> Arc<RaftService> {
         let server_address = opts.address.clone();
@@ -1577,20 +1615,18 @@ impl RaftService {
             meta.state_machine
                 .write()
                 .await
-                .recover(snapshot.snapshot.clone());
+                .recover(snapshot.snapshot.clone())
+                .await;
 
             // Update snapshot metadata
             meta.last_snapshot_index = snapshot.last_included_index;
             meta.last_snapshot_term = snapshot.last_included_term;
 
-            // Update commit and applied indices.
-            // Preserve commit_index from commit.idx if it is already higher than the
-            // snapshot index — this ensures post-snapshot WAL entries can be replayed.
-            if snapshot.last_included_index > meta.last_applied {
-                meta.last_applied = snapshot.last_included_index;
-                if meta.commit_index < snapshot.last_included_index {
-                    meta.commit_index = snapshot.last_included_index;
-                }
+            // Restore applies from the snapshot boundary every time so any
+            // committed WAL entries after the snapshot are replayed exactly once.
+            meta.last_applied = snapshot.last_included_index;
+            if meta.commit_index < snapshot.last_included_index {
+                meta.commit_index = snapshot.last_included_index;
             }
 
             // Compact logs: remove entries already covered by the snapshot
@@ -2314,42 +2350,68 @@ impl RaftService {
             }
             if let (Some(log_id), &Membership::Leader(ref leader_meta)) = (log_id, &meta.membership)
             {
-                let mut leader_meta = leader_meta.write().await;
                 let mut updated_followers = 0;
-                while let Some(heartbeat_res) = heartbeat_futs.next().await {
-                    match heartbeat_res {
-                        Ok(Ok((member_id, last_matched_id))) => {
-                            debug!(
-                                "Heartbeat response on plane {} from {} is {:?}",
-                                plane_id.raw(),
-                                member_id,
-                                last_matched_id
-                            );
-                            if last_matched_id >= log_id {
-                                updated_followers += 1;
-                                if is_majority(followers as u64, updated_followers) {
-                                    return true;
+                let mut higher_term = None;
+                {
+                    let mut leader_meta = leader_meta.write().await;
+                    while let Some(heartbeat_res) = heartbeat_futs.next().await {
+                        match heartbeat_res {
+                            Ok(Ok((member_id, heartbeat_result))) => {
+                                match heartbeat_result {
+                                    HeartbeatReplicationResult::Matched(last_matched_id) => {
+                                        debug!(
+                                            "Heartbeat response on plane {} from {} is {:?}",
+                                            plane_id.raw(),
+                                            member_id,
+                                            last_matched_id
+                                        );
+                                        if last_matched_id >= log_id {
+                                            updated_followers += 1;
+                                            if is_majority(followers as u64, updated_followers) {
+                                                return true;
+                                            }
+                                        }
+                                    }
+                                    HeartbeatReplicationResult::TermOut {
+                                        term: remote_term,
+                                        leader_id: remote_leader_id,
+                                    } => {
+                                        higher_term = Some((remote_term, remote_leader_id));
+                                        break;
+                                    }
                                 }
                             }
-                        }
-                        Ok(Err(err)) => {
-                            warn!(
-                                "Heartbeat task failed on plane {} while replicating log {}: {:?}",
-                                plane_id.raw(),
-                                log_id,
-                                err
-                            );
-                        }
-                        Err(_) => {
-                            warn!(
-                                "Heartbeat task timed out on plane {} while replicating log {}",
-                                plane_id.raw(),
-                                log_id
-                            );
+                            Ok(Err(err)) => {
+                                warn!(
+                                    "Heartbeat task failed on plane {} while replicating log {}: {:?}",
+                                    plane_id.raw(),
+                                    log_id,
+                                    err
+                                );
+                            }
+                            Err(_) => {
+                                warn!(
+                                    "Heartbeat task timed out on plane {} while replicating log {}",
+                                    plane_id.raw(),
+                                    log_id
+                                );
+                            }
                         }
                     }
+                    leader_meta.last_updated = get_time();
                 }
-                leader_meta.last_updated = get_time();
+                if let Some((remote_term, remote_leader_id)) = higher_term {
+                    warn!(
+                        "Plane {} stepping down after follower reported higher term {} (leader_id={})",
+                        plane_id.raw(),
+                        remote_term,
+                        remote_leader_id
+                    );
+                    alter_term(meta, remote_term);
+                    meta.leader_id = remote_leader_id;
+                    self.switch_membership(meta, Membership::Follower);
+                    return false;
+                }
                 debug!(
                     "Plane {} replicated log {} to {} of {} followers",
                     plane_id.raw(),
@@ -2390,7 +2452,7 @@ impl RaftService {
         follower: Arc<Mutex<FollowerStatus>>,
         rpc: Arc<AsyncServiceClient>,
         member_id: u64,
-    ) -> u64 {
+    ) -> HeartbeatReplicationResult {
         // let commit_index = meta.commit_index;
         // let term = meta.term;
         // let leader_id = meta.leader_id;
@@ -2428,7 +2490,7 @@ impl RaftService {
                     follower.next_index,
                     member_id
                 );
-                return follower.match_index;
+                return HeartbeatReplicationResult::Matched(follower.match_index);
             }
             let last_entries_id = match &entries {
                 // get last entry id
@@ -2462,7 +2524,7 @@ impl RaftService {
                     follower.next_index = last_snapshot_index + 1;
                     follower.match_index = last_snapshot_index;
                 }
-                return follower.match_index;
+                return HeartbeatReplicationResult::Matched(follower.match_index);
             }
 
             let (follower_last_log_id, follower_last_log_term) = {
@@ -2481,7 +2543,7 @@ impl RaftService {
                         Some((first_log_id, _)) => *first_log_id,
                         None => {
                             error!("Logs map is not empty on plane {} but iter().next() returned None - this should not happen", plane_id.raw());
-                            return follower.match_index;
+                            return HeartbeatReplicationResult::Matched(follower.match_index);
                         }
                     };
                     if first_log_id > follower_last_log_id {
@@ -2510,7 +2572,7 @@ impl RaftService {
                             follower.next_index = last_applied + 1;
                             follower.match_index = last_applied;
                         }
-                        return follower.match_index;
+                        return HeartbeatReplicationResult::Matched(follower.match_index);
                     }
                     let follower_last_entry = logs.get(&follower_last_log_id);
                     match follower_last_entry {
@@ -2569,7 +2631,10 @@ impl RaftService {
                             leader_id,
                             follower.next_index
                         );
-                        break;
+                        return HeartbeatReplicationResult::TermOut {
+                            term: follower_term,
+                            leader_id: actual_leader_id,
+                        };
                     }
                 },
                 Err(err) => {
@@ -2585,7 +2650,7 @@ impl RaftService {
             }
             is_retry = true;
         }
-        follower.match_index
+        HeartbeatReplicationResult::Matched(follower.match_index)
     }
 
     //check term number, return reject = false if server term is stale
@@ -2788,6 +2853,7 @@ impl RaftService {
                     let (last_log_id, _last_log_term) = get_last_log_info!(self, logs);
                     last_log_id
                 };
+                ensure_direct_leader_term(&mut meta);
                 self.become_leader_on_plane(leader_flag, &mut meta, last_log_id)
                     .await;
             }
@@ -2800,7 +2866,32 @@ impl RaftService {
             };
         }
 
-        let (new_log_id, new_log_term) = self.leader_append_log(&meta, &mut entry).await;
+        let existing_pending_entry = if entry.id > meta.commit_index {
+            let logs = meta.logs.read().await;
+            match logs.get(&entry.id) {
+                Some(existing)
+                    if existing.term == entry.term
+                        && existing.sm_id == entry.sm_id
+                        && existing.fn_id == entry.fn_id
+                        && existing.data == entry.data =>
+                {
+                    Some((existing.id, existing.term))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let (new_log_id, new_log_term) = if let Some((existing_log_id, existing_log_term)) =
+            existing_pending_entry
+        {
+            (existing_log_id, existing_log_term)
+        } else {
+            self.leader_append_log(&meta, &mut entry).await
+        };
+        entry.id = new_log_id;
+        entry.term = new_log_term;
         let data = match entry.sm_id {
             CONFIG_SM_ID => Some(
                 self.try_sync_config_to_followers_on_plane(plane_id, meta, &entry, new_log_id)
@@ -3601,7 +3692,8 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn type2_plane_client_roundtrip() {
-        let addr = String::from("127.0.0.1:2010");
+        let port = 4210 + (rand::random::<u16>() % 200);
+        let addr = format!("127.0.0.1:{}", port);
         let service = RaftService::new(Options {
             storage: Storage::default(),
             address: addr.clone(),
@@ -3645,7 +3737,8 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn loaded_type2_planes_only_reports_materialized_type2_runtimes() {
-        let addr = String::from("127.0.0.1:2011");
+        let port = 4410 + (rand::random::<u16>() % 200);
+        let addr = format!("127.0.0.1:{}", port);
         let service = RaftService::new(Options {
             storage: Storage::default(),
             address: addr.clone(),
@@ -3670,7 +3763,8 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn type2_plane_shutdown_rejects_commands() {
-        let addr = String::from("127.0.0.1:2011");
+        let port = 4610 + (rand::random::<u16>() % 200);
+        let addr = format!("127.0.0.1:{}", port);
         let service = RaftService::new(Options {
             storage: Storage::default(),
             address: addr.clone(),
@@ -4630,16 +4724,10 @@ mod test {
         async fn multi_server_command() {
             let _ = env_logger::try_init();
             // 5 servers
-            let addresses: Vec<_> = vec![
-                "127.0.0.1:2010",
-                "127.0.0.1:2011",
-                "127.0.0.1:2012",
-                "127.0.0.1:2013",
-                "127.0.0.1:2014",
-            ]
-            .into_iter()
-            .map(|addr| addr.to_string())
-            .collect();
+            let base_port = 4810 + (rand::random::<u16>() % 200);
+            let addresses: Vec<_> = (0..5)
+                .map(|offset| format!("127.0.0.1:{}", base_port + offset))
+                .collect();
             let raft_services = addresses
                 .iter()
                 .map(|addr| {
