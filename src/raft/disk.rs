@@ -197,7 +197,11 @@ impl StorageEntity {
                             logs.insert(entry.log.id, entry.log);
                             counter += 1;
                         }
-                        debug!("Recovered {} raft logs for plane {}", counter, plane_id.raw());
+                        debug!(
+                            "Recovered {} raft logs for plane {}",
+                            counter,
+                            plane_id.raw()
+                        );
                         Some(File::from_std(log_file))
                     } else {
                         None
@@ -268,7 +272,10 @@ impl StorageEntity {
                 f.sync_all().await?;
                 debug!(
                     "Appended and persisted {} logs for plane {}, was {}, appended {:?}",
-                    counter, self.plane_id.raw(), was_last_term, terms_appended
+                    counter,
+                    self.plane_id.raw(),
+                    was_last_term,
+                    terms_appended
                 );
             }
         }
@@ -325,7 +332,10 @@ impl StorageEntity {
     /// Ensure WAL file is fully synced to disk.
     pub async fn flush_wal(&mut self) -> io::Result<()> {
         if let Some(f) = &mut self.logs {
-            info!("WAL fsync for plane {}: syncing log.dat to disk", self.plane_id.raw());
+            info!(
+                "WAL fsync for plane {}: syncing log.dat to disk",
+                self.plane_id.raw()
+            );
             f.sync_all().await?;
             info!("WAL fsync for plane {}: completed", self.plane_id.raw());
         }
@@ -414,7 +424,11 @@ impl StorageEntity {
 
         // Check if snapshot file exists
         if !snapshot_path.exists() {
-            debug!("No snapshot file found for plane {} at {:?}", self.plane_id.raw(), snapshot_path);
+            debug!(
+                "No snapshot file found for plane {} at {:?}",
+                self.plane_id.raw(),
+                snapshot_path
+            );
             return Ok(None);
         }
 
@@ -423,7 +437,10 @@ impl StorageEntity {
         // Read checksum
         let mut checksum_buf = [0u8; 4];
         if file.read_exact(&mut checksum_buf).await.is_err() {
-            warn!("Failed to read snapshot checksum for plane {}, file may be corrupted", self.plane_id.raw());
+            warn!(
+                "Failed to read snapshot checksum for plane {}, file may be corrupted",
+                self.plane_id.raw()
+            );
             return Ok(None);
         }
         let expected_checksum = u32::from_le_bytes(checksum_buf);
@@ -431,7 +448,10 @@ impl StorageEntity {
         // Read length
         let mut len_buf = [0u8; 8];
         if file.read_exact(&mut len_buf).await.is_err() {
-            warn!("Failed to read snapshot length for plane {}, file may be corrupted", self.plane_id.raw());
+            warn!(
+                "Failed to read snapshot length for plane {}, file may be corrupted",
+                self.plane_id.raw()
+            );
             return Ok(None);
         }
         let len = u64::from_le_bytes(len_buf);
@@ -439,7 +459,10 @@ impl StorageEntity {
         // Read data
         let mut data_buf = vec![0u8; len as usize];
         if file.read_exact(&mut data_buf).await.is_err() {
-            warn!("Failed to read snapshot data for plane {}, file may be corrupted", self.plane_id.raw());
+            warn!(
+                "Failed to read snapshot data for plane {}, file may be corrupted",
+                self.plane_id.raw()
+            );
             return Ok(None);
         }
 
@@ -448,7 +471,9 @@ impl StorageEntity {
         if actual_checksum != expected_checksum {
             error!(
                 "Snapshot checksum mismatch on plane {}! Expected: {}, Got: {}. File is corrupted.",
-                self.plane_id.raw(), expected_checksum, actual_checksum
+                self.plane_id.raw(),
+                expected_checksum,
+                actual_checksum
             );
             return Ok(None);
         }

@@ -164,37 +164,42 @@ impl MasterStateMachine {
                     None => {
                         warn!(
                             "FN not found for cmd on plane {} sm_id={}, fn_id={} at log_id={}",
-                            self.plane_id.raw(), entry.sm_id, entry.fn_id, entry.id
+                            self.plane_id.raw(),
+                            entry.sm_id,
+                            entry.fn_id,
+                            entry.id
                         );
                         Err(ExecError::FnNotFound(entry.sm_id, entry.fn_id))
                     }
                 }
             }
-            _ => match self.subs.get_mut(&entry.sm_id) {
-                Some(sm) => {
-                    let out = sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data).await;
-                    match out {
-                        Some(data) => Ok(data),
-                        None => {
-                            warn!(
+            _ => {
+                match self.subs.get_mut(&entry.sm_id) {
+                    Some(sm) => {
+                        let out = sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data).await;
+                        match out {
+                            Some(data) => Ok(data),
+                            None => {
+                                warn!(
                                 "FN not found for cmd on plane {} sm_id={}, fn_id={} at log_id={}",
                                 self.plane_id.raw(), entry.sm_id, entry.fn_id, entry.id
                             );
-                            Err(ExecError::FnNotFound(entry.sm_id, entry.fn_id))
+                                Err(ExecError::FnNotFound(entry.sm_id, entry.fn_id))
+                            }
                         }
                     }
-                }
-                None => {
-                    warn!(
+                    None => {
+                        warn!(
                         "SM not found for cmd on plane {} sm_id={} at log_id={}, have SMs: {:?}",
                         self.plane_id.raw(),
                         entry.sm_id,
                         entry.id,
                         self.subs.keys().collect::<Vec<_>>()
                     );
-                    Err(ExecError::SmNotFound(entry.sm_id))
+                        Err(ExecError::SmNotFound(entry.sm_id))
+                    }
                 }
-            },
+            }
         }
     }
     pub async fn exec_qry(&self, entry: &LogEntry) -> ExecResult {
@@ -206,37 +211,42 @@ impl MasterStateMachine {
                     None => {
                         warn!(
                             "FN not found for qry on plane {} sm_id={}, fn_id={} at log_id={}",
-                            self.plane_id.raw(), entry.sm_id, entry.fn_id, entry.id
+                            self.plane_id.raw(),
+                            entry.sm_id,
+                            entry.fn_id,
+                            entry.id
                         );
                         Err(ExecError::FnNotFound(entry.sm_id, entry.fn_id))
                     }
                 }
             }
-            _ => match self.subs.get(&entry.sm_id) {
-                Some(sm) => {
-                    let out = sm.fn_dispatch_qry(entry.fn_id, &entry.data).await;
-                    match out {
-                        Some(data) => Ok(data),
-                        None => {
-                            warn!(
+            _ => {
+                match self.subs.get(&entry.sm_id) {
+                    Some(sm) => {
+                        let out = sm.fn_dispatch_qry(entry.fn_id, &entry.data).await;
+                        match out {
+                            Some(data) => Ok(data),
+                            None => {
+                                warn!(
                                 "FN not found for qry on plane {} sm_id={}, fn_id={} at log_id={}",
                                 self.plane_id.raw(), entry.sm_id, entry.fn_id, entry.id
                             );
-                            Err(ExecError::FnNotFound(entry.sm_id, entry.fn_id))
+                                Err(ExecError::FnNotFound(entry.sm_id, entry.fn_id))
+                            }
                         }
                     }
-                }
-                None => {
-                    warn!(
+                    None => {
+                        warn!(
                         "SM not found for qry on plane {} sm_id={} at log_id={}, have SMs: {:?}",
                         self.plane_id.raw(),
                         entry.sm_id,
                         entry.id,
                         self.subs.keys().collect::<Vec<_>>()
                     );
-                    Err(ExecError::SmNotFound(entry.sm_id))
+                        Err(ExecError::SmNotFound(entry.sm_id))
+                    }
                 }
-            },
+            }
         }
     }
     pub fn clear_subs(&mut self) {

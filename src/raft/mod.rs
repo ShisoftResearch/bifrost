@@ -848,12 +848,15 @@ impl RaftService {
         }
         info!(
             "Manual apply on plane {}: applying committed logs (commit_index={}, last_applied={})",
-            PlaneId::type1().raw(), meta.commit_index, meta.last_applied
+            PlaneId::type1().raw(),
+            meta.commit_index,
+            meta.last_applied
         );
         check_commit(&mut meta).await;
         info!(
             "Manual apply on plane {}: applied logs up to last_applied={}",
-            PlaneId::type1().raw(), meta.last_applied
+            PlaneId::type1().raw(),
+            meta.last_applied
         );
     }
 }
@@ -1536,7 +1539,10 @@ impl RaftService {
     }
 
     pub async fn start(server: &Arc<RaftService>, recover_registered: bool) -> bool {
-        info!("Waiting for raft server to be initialized on plane {}", PlaneId::type1().raw());
+        info!(
+            "Waiting for raft server to be initialized on plane {}",
+            PlaneId::type1().raw()
+        );
         {
             let mut meta = server.meta.write().await;
             if server
@@ -1568,16 +1574,26 @@ impl RaftService {
         (RaftService::start(&service, false).await, service, server)
     }
     pub async fn probe_and_join(&self, servers: &Vec<String>) -> Result<bool, ExecError> {
-        debug!("Probing and try to join servers for plane {}: {:?}", self.plane_id().raw(), servers);
+        debug!(
+            "Probing and try to join servers for plane {}: {:?}",
+            self.plane_id().raw(),
+            servers
+        );
         let is_first_node =
             !RaftClient::probe_servers(servers, &self.options.address, self.options.service_id)
                 .await;
         if is_first_node {
-            debug!("There is no live node in the server list for plane {}, will bootstrap", self.plane_id().raw());
+            debug!(
+                "There is no live node in the server list for plane {}, will bootstrap",
+                self.plane_id().raw()
+            );
             self.bootstrap().await;
             Ok(false)
         } else {
-            debug!("There are some live nodes for plane {}, will join them", self.plane_id().raw());
+            debug!(
+                "There are some live nodes for plane {}, will join them",
+                self.plane_id().raw()
+            );
             self.join(servers).await
         }
     }
@@ -1591,11 +1607,20 @@ impl RaftService {
     }
     pub async fn conservative_bootstrap(&self, servers: &Vec<String>) {
         let meta = self.meta.read().await;
-        debug!("Conservative bootstrap for plane {}, checking storage", self.plane_id().raw());
+        debug!(
+            "Conservative bootstrap for plane {}, checking storage",
+            self.plane_id().raw()
+        );
         if let Some(storage) = &meta.storage {
-            debug!("There is storage for plane {}, checking last term", self.plane_id().raw());
+            debug!(
+                "There is storage for plane {}, checking last term",
+                self.plane_id().raw()
+            );
             if storage.lock().await.last_term > 0 {
-                debug!("Plane {} has logged term, will probe and join or bootstrap", self.plane_id().raw());
+                debug!(
+                    "Plane {} has logged term, will probe and join or bootstrap",
+                    self.plane_id().raw()
+                );
                 drop(meta);
                 if let Err(e) = self.probe_and_join(servers).await {
                     error!(
@@ -1604,12 +1629,18 @@ impl RaftService {
                     );
                 }
             } else {
-                debug!("Log is empty for plane {}, bootstrap", self.plane_id().raw());
+                debug!(
+                    "Log is empty for plane {}, bootstrap",
+                    self.plane_id().raw()
+                );
                 drop(meta);
                 self.bootstrap().await;
             }
         } else {
-            debug!("No storage for plane {}, will probe and join or bootstrap", self.plane_id().raw());
+            debug!(
+                "No storage for plane {}, will probe and join or bootstrap",
+                self.plane_id().raw()
+            );
             drop(meta);
             if let Err(e) = self.probe_and_join(servers).await {
                 error!(
@@ -1620,21 +1651,44 @@ impl RaftService {
         }
     }
     pub async fn join(&self, servers: &Vec<String>) -> Result<bool, ExecError> {
-        debug!("Trying to join plane {} cluster with id {}", self.plane_id().raw(), self.id);
+        debug!(
+            "Trying to join plane {} cluster with id {}",
+            self.plane_id().raw(),
+            self.id
+        );
         let client = RaftClient::new(servers, self.options.service_id).await;
         if let Ok(client) = client {
             debug!(
                 "Executing in SM to create new member on plane {}: {}, {}",
-                self.plane_id().raw(), &self.options.address, self.id
+                self.plane_id().raw(),
+                &self.options.address,
+                self.id
             );
             let result = client.add_root_member(&self.options.address).await;
-            debug!("Getting member address for plane {}: {}", self.plane_id().raw(), self.id);
+            debug!(
+                "Getting member address for plane {}: {}",
+                self.plane_id().raw(),
+                self.id
+            );
             let members = client.root_member_addresses().await;
-            debug!("Updating local meta for plane {} by acquiring lock: {}", self.plane_id().raw(), self.id);
+            debug!(
+                "Updating local meta for plane {} by acquiring lock: {}",
+                self.plane_id().raw(),
+                self.id
+            );
             let mut meta = self.write_meta().await;
-            debug!("Local meta lock acquired for plane {}: {}", self.plane_id().raw(), self.id);
+            debug!(
+                "Local meta lock acquired for plane {}: {}",
+                self.plane_id().raw(),
+                self.id
+            );
             if let Ok(members) = members {
-                debug!("We have following members for plane {} node {}: {:?}", self.plane_id().raw(), self.id, members);
+                debug!(
+                    "We have following members for plane {} node {}: {:?}",
+                    self.plane_id().raw(),
+                    self.id,
+                    members
+                );
                 for member in members {
                     meta.state_machine
                         .write()
@@ -1644,13 +1698,31 @@ impl RaftService {
                         .await;
                 }
             }
-            debug!("Become follower because of join on plane {}: {}", self.plane_id().raw(), self.id);
+            debug!(
+                "Become follower because of join on plane {}: {}",
+                self.plane_id().raw(),
+                self.id
+            );
             self.become_follower(&mut meta, 0, client.leader_id());
-            debug!("Resetting last checked for join on plane {}: {}", self.plane_id().raw(), self.id);
+            debug!(
+                "Resetting last checked for join on plane {}: {}",
+                self.plane_id().raw(),
+                self.id
+            );
             self.reset_last_checked(&mut meta);
             match &result {
-                Ok(joined) => debug!("Completed join for plane {} node {}, result {}", self.plane_id().raw(), self.id, joined),
-                Err(e) => debug!("Join failed for plane {} node {}, error: {:?}", self.plane_id().raw(), self.id, e),
+                Ok(joined) => debug!(
+                    "Completed join for plane {} node {}, result {}",
+                    self.plane_id().raw(),
+                    self.id,
+                    joined
+                ),
+                Err(e) => debug!(
+                    "Join failed for plane {} node {}, error: {:?}",
+                    self.plane_id().raw(),
+                    self.id,
+                    e
+                ),
             }
             result
         } else {
@@ -1665,55 +1737,81 @@ impl RaftService {
             .collect();
         debug!(
             "Leaving from plane {} cluster, server id {} with {} members {:?}",
-            self.plane_id().raw(), self.id,
+            self.plane_id().raw(),
+            self.id,
             servers.len(),
             servers
         );
         if let Ok(client) = RaftClient::new(&servers, self.options.service_id).await {
             debug!(
                 "Temporary client for plane {} leaving, leader: {}. Sending removal message.",
-                self.plane_id().raw(), client.leader_id()
+                self.plane_id().raw(),
+                client.leader_id()
             );
             match client.remove_root_member(&self.options.address).await {
                 Ok(_) => info!(
                     "Successfully removed member {} from plane {} cluster",
-                    self.options.address, self.plane_id().raw()
+                    self.options.address,
+                    self.plane_id().raw()
                 ),
                 Err(e) => {
                     error!(
                         "Failed to remove member {} from plane {} cluster: {:?}",
-                        self.options.address, self.plane_id().raw(), e
+                        self.options.address,
+                        self.plane_id().raw(),
+                        e
                     );
                     return false;
                 }
             }
         } else {
-            error!("Cannot obtain temporary client for leaving plane {}", self.plane_id().raw());
+            error!(
+                "Cannot obtain temporary client for leaving plane {}",
+                self.plane_id().raw()
+            );
             return false;
         }
         let mut meta = self.write_meta().await;
         if is_leader(&meta) {
-            info!("Leader step down on plane {}: {}", self.plane_id().raw(), self.options.address);
+            info!(
+                "Leader step down on plane {}: {}",
+                self.plane_id().raw(),
+                self.options.address
+            );
             if !self.send_followers_heartbeat(&mut meta, None, true).await {
                 error!("Leader cannot step down on plane {}", self.plane_id().raw());
                 return false;
             }
-            info!("Step down heartbeat sent to followers on plane {}", self.plane_id().raw());
+            info!(
+                "Step down heartbeat sent to followers on plane {}",
+                self.plane_id().raw()
+            );
             let mut reelected = false;
             for (_id, addr) in members {
                 if addr != self.options.address {
-                    info!("Calling reelect on plane {} to {}", self.plane_id().raw(), addr);
+                    info!(
+                        "Calling reelect on plane {} to {}",
+                        self.plane_id().raw(),
+                        addr
+                    );
                     match rpc::DEFAULT_CLIENT_POOL.get(&addr).await {
                         Ok(client) => {
                             let service = AsyncServiceClient::new(&client);
                             match service.reelect(PlaneId::type1()).await {
                                 Ok(true) => {
-                                    info!("New leader has been elected on plane {}", self.plane_id().raw());
+                                    info!(
+                                        "New leader has been elected on plane {}",
+                                        self.plane_id().raw()
+                                    );
                                     reelected = true;
                                     break; // Only need one successful reelection
                                 }
                                 Ok(false) => {
-                                    warn!("Server {} cannot be elected on plane {}", addr, self.plane_id().raw());
+                                    warn!(
+                                        "Server {} cannot be elected on plane {}",
+                                        addr,
+                                        self.plane_id().raw()
+                                    );
                                 }
                                 Err(e) => {
                                     error!(
@@ -1724,13 +1822,21 @@ impl RaftService {
                             }
                         }
                         Err(e) => {
-                            error!("Cannot call reelect on plane {} to {}, error {:?}", self.plane_id().raw(), addr, e)
+                            error!(
+                                "Cannot call reelect on plane {} to {}, error {:?}",
+                                self.plane_id().raw(),
+                                addr,
+                                e
+                            )
                         }
                     }
                 }
             }
             if !reelected {
-                warn!("No new leader has been elected on plane {}", self.plane_id().raw());
+                warn!(
+                    "No new leader has been elected on plane {}",
+                    self.plane_id().raw()
+                );
             }
         }
         meta.membership = Membership::Offline;
@@ -1809,7 +1915,11 @@ impl RaftService {
     }
 
     pub async fn shutdown(&self) {
-        info!("Shutting down RaftService on plane {} at {}", self.plane_id().raw(), self.options.address);
+        info!(
+            "Shutting down RaftService on plane {} at {}",
+            self.plane_id().raw(),
+            self.options.address
+        );
 
         let plane_runtimes = {
             let planes = self.planes.read().await;
@@ -1820,7 +1930,10 @@ impl RaftService {
         }
 
         self.shutdown_managed_runtime(None).await;
-        info!("RaftService shutdown complete for plane {}", self.plane_id().raw());
+        info!(
+            "RaftService shutdown complete for plane {}",
+            self.plane_id().raw()
+        );
     }
 
     pub async fn register_state_machine(&self, state_machine: SubStateMachine) {
@@ -1880,7 +1993,11 @@ impl RaftService {
         meta: &'a mut RwLockWriteGuard<'_, RaftMeta>,
     ) {
         let server_id = self.id;
-        debug!("Plane {} server {} become candidate", plane_id.raw(), server_id);
+        debug!(
+            "Plane {} server {} become candidate",
+            plane_id.raw(),
+            server_id
+        );
         self.reset_last_checked(meta);
         leader_flag.store(false, Relaxed);
         let term = meta.term;
@@ -1965,11 +2082,17 @@ impl RaftService {
                     }
                     Ok(RequestVoteResponse::Granted) => {
                         granted += 1;
-                        debug!("Plane {} member {} received {} votes for now", plane_id.raw(), server_id, granted);
+                        debug!(
+                            "Plane {} member {} received {} votes for now",
+                            plane_id.raw(),
+                            server_id,
+                            granted
+                        );
                         if is_majority(num_members as u64, granted) {
                             debug!(
                                 "Plane {} member {} become leader after receiving majority votes",
-                                plane_id.raw(), server_id
+                                plane_id.raw(),
+                                server_id
                             );
                             self.become_leader_on_plane(leader_flag, meta, last_log_id)
                                 .await;
@@ -1980,7 +2103,13 @@ impl RaftService {
                 }
             }
         }
-        debug!("Plane {} granted votes for {}: {}/{}", plane_id.raw(), self.id, granted, num_members);
+        debug!(
+            "Plane {} granted votes for {}: {}/{}",
+            plane_id.raw(),
+            self.id,
+            granted,
+            num_members
+        );
         return;
     }
 
@@ -2012,7 +2141,12 @@ impl RaftService {
         meta: &mut RwLockWriteGuard<'_, RaftMeta>,
         last_log_id: u64,
     ) {
-        debug!("Plane {} server {} become leader, term {}", self.plane_id().raw(), self.id, meta.term);
+        debug!(
+            "Plane {} server {} become leader, term {}",
+            self.plane_id().raw(),
+            self.id,
+            meta.term
+        );
         let leader_meta = RwLock::new(LeaderMeta::new());
         {
             let mut guard = leader_meta.write().await;
@@ -2110,7 +2244,9 @@ impl RaftService {
                         Ok(Ok((member_id, last_matched_id))) => {
                             debug!(
                                 "Heartbeat response on plane {} from {} is {:?}",
-                                plane_id.raw(), member_id, last_matched_id
+                                plane_id.raw(),
+                                member_id,
+                                last_matched_id
                             );
                             if last_matched_id >= log_id {
                                 updated_followers += 1;
@@ -2186,7 +2322,11 @@ impl RaftService {
         // let meta_last_applied = meta.last_applied;
         // let master_sm = &meta.state_machine;
         // let logs = &meta.logs;
-        trace!("Sending follower heartbeat on plane {} to {}", plane_id.raw(), member_id);
+        trace!(
+            "Sending follower heartbeat on plane {} to {}",
+            plane_id.raw(),
+            member_id
+        );
         let mut follower = follower.lock().await;
         let logs = logs.read().await;
         let mut is_retry = false;
@@ -2207,7 +2347,8 @@ impl RaftService {
                 // break when retry and there is no entry
                 trace!(
                     "Stop retry on plane {} when entry is empty, {}, member id {}",
-                    plane_id.raw(), follower.next_index,
+                    plane_id.raw(),
+                    follower.next_index,
                     member_id
                 );
                 return follower.match_index;
@@ -2317,7 +2458,11 @@ impl RaftService {
             match append_result {
                 Ok((follower_term, result)) => match result {
                     AppendEntriesResult::Ok => {
-                        trace!("Log updated on plane {} to follower {}", plane_id.raw(), member_id);
+                        trace!(
+                            "Log updated on plane {} to follower {}",
+                            plane_id.raw(),
+                            member_id
+                        );
                         if let Some(last_entries_id) = last_entries_id {
                             follower.next_index = last_entries_id + 1;
                             follower.match_index = last_entries_id;
@@ -2326,7 +2471,9 @@ impl RaftService {
                     AppendEntriesResult::LogMismatch => {
                         debug!(
                             "Log mismatch on plane {} in follower {}, index {}",
-                            plane_id.raw(), member_id, follower.next_index
+                            plane_id.raw(),
+                            member_id,
+                            follower.next_index
                         );
                         if follower.next_index > 0 {
                             follower.next_index -= 1;
@@ -2640,7 +2787,9 @@ impl RaftService {
         if let Err(e) = self.logs_post_processing(meta, logs).await {
             error!(
                 "Failed to persist log entry {} to storage on plane {}: {:?}",
-                new_log_id, self.plane_id().raw(), e
+                new_log_id,
+                self.plane_id().raw(),
+                e
             );
             // Note: We still return the log ID/term even if persistence failed
             // The caller should handle this appropriately
@@ -2677,23 +2826,30 @@ impl RaftService {
                 let mut storage = storage_mutex.lock().await;
                 info!(
                     "Strict WA plane {}: flushing WAL before commit at log_id={} (term={})",
-                    plane_id.raw(), new_log_id, entry.term
+                    plane_id.raw(),
+                    new_log_id,
+                    entry.term
                 );
                 let _ = storage.flush_wal().await;
                 info!(
                     "Strict WA plane {}: WAL fsync completed before commit at log_id={}",
-                    plane_id.raw(), new_log_id
+                    plane_id.raw(),
+                    new_log_id
                 );
             }
             meta.commit_index = new_log_id;
             info!(
                 "Strict WA plane {}: applying entry at log_id={} (commit_index={})",
-                plane_id.raw(), new_log_id, meta.commit_index
+                plane_id.raw(),
+                new_log_id,
+                meta.commit_index
             );
             let result = commit_command(&mut meta, entry).await;
             info!(
                 "Strict WA plane {}: apply completed at log_id={} (result={:?})",
-                plane_id.raw(), new_log_id, result
+                plane_id.raw(),
+                new_log_id,
+                result
             );
             // Mark applied and persist commit progress atomically after apply
             meta.last_applied = new_log_id;
@@ -2706,7 +2862,10 @@ impl RaftService {
                 let _ = storage
                     .write_commit_progress(meta.commit_index, meta.last_applied)
                     .await;
-                info!("Strict WA plane {}: commit progress persisted", plane_id.raw());
+                info!(
+                    "Strict WA plane {}: commit progress persisted",
+                    plane_id.raw()
+                );
             }
 
             // Check if we should take a snapshot after committing
@@ -2784,7 +2943,9 @@ impl RaftService {
     async fn take_snapshot(&self, meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
         info!(
             "Taking snapshot on plane {} at index={}, term={}",
-            self.plane_id().raw(), meta.last_applied, meta.term
+            self.plane_id().raw(),
+            meta.last_applied,
+            meta.term
         );
 
         // Generate snapshot from state machine (Master SM decides which subs are recoverable)
@@ -2820,14 +2981,20 @@ impl RaftService {
 
                     info!(
                         "Snapshot created successfully on plane {} at index={}, term={}",
-                        self.plane_id().raw(), meta.last_snapshot_index, meta.last_snapshot_term
+                        self.plane_id().raw(),
+                        meta.last_snapshot_index,
+                        meta.last_snapshot_term
                     );
 
                     // Now compact logs (reads meta.last_snapshot_index)
                     self.compact_logs_after_snapshot(meta, storage_guard).await;
                 }
                 Err(e) => {
-                    error!("Failed to persist snapshot on plane {}: {:?}", self.plane_id().raw(), e);
+                    error!(
+                        "Failed to persist snapshot on plane {}: {:?}",
+                        self.plane_id().raw(),
+                        e
+                    );
                 }
             }
         }
@@ -2848,7 +3015,10 @@ impl RaftService {
 
             debug!(
                 "Compaction check on plane {}: {} logs, threshold: {}, snapshot_index: {}",
-                self.plane_id().raw(), before_count, compaction_threshold, snapshot_index
+                self.plane_id().raw(),
+                before_count,
+                compaction_threshold,
+                snapshot_index
             );
 
             // Only compact if we exceed the compaction threshold
@@ -2868,11 +3038,16 @@ impl RaftService {
             } else {
                 info!(
                     "Skipping log compaction on plane {}: {} logs <= threshold {}",
-                    self.plane_id().raw(), before_count, compaction_threshold
+                    self.plane_id().raw(),
+                    before_count,
+                    compaction_threshold
                 );
             }
         } else {
-            debug!("Not using disk storage on plane {}, skipping compaction", self.plane_id().raw());
+            debug!(
+                "Not using disk storage on plane {}, skipping compaction",
+                self.plane_id().raw()
+            );
         }
     }
 }
@@ -3152,13 +3327,15 @@ impl Service for RaftService {
                     let mut meta = self.meta.write().await;
                     info!(
                         "Been asked to reelect on plane {}, become candidate. Server id {}",
-                        plane_id.raw(), self.get_server_id()
+                        plane_id.raw(),
+                        self.get_server_id()
                     );
                     self.become_candidate(&mut meta).await;
                     let is_leader = self.is_leader();
                     info!(
                         "Reelect result for plane {} server {}, is leader {}",
-                        plane_id.raw(), self.get_server_id(),
+                        plane_id.raw(),
+                        self.get_server_id(),
                         is_leader
                     );
                     is_leader
