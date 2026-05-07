@@ -475,17 +475,27 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_recover_registered_snapshots_applies_config_snapshot() {
+        use crate::rpc::Server;
+
         let mut msm = MasterStateMachine::new(1);
         msm.configs.members.clear();
 
+        // new_member opens an RPC client to the address, so a real listener is required.
+        let member_addr = String::from("127.0.0.1:9100");
+        let server = Server::new(&member_addr);
+        Server::listen_and_resume(&server).await;
+
         let mut restored = Configures::new(99);
-        let _ = restored.new_member(String::from("127.0.0.1:9100")).await;
+        let added = restored.new_member(member_addr.clone()).await;
+        assert!(added, "Member should join successfully");
         msm.snapshots.insert(CONFIG_SM_ID, restored.snapshot());
 
         msm.recover_registered_snapshots().await;
 
         assert_eq!(msm.configs.members.len(), 1);
         assert!(!msm.snapshots.contains_key(&CONFIG_SM_ID));
+
+        server.shutdown().await;
     }
 
     #[test]

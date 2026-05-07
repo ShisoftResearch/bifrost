@@ -6230,6 +6230,7 @@ mod test {
                     commit_index: N as u64, last_applied: N as u64,
                     leader_id: 0, storage: None,
                     last_snapshot_index: 0, last_snapshot_term: 0,
+                    lifecycle: LifecycleState::Running,
                 };
                 let meta_lock = async_std::sync::RwLock::new(meta);
                 let meta_guard = meta_lock.write().await;
@@ -6239,6 +6240,7 @@ mod test {
                 let mut storage = disk::StorageEntity {
                     logs: Some(tokio::fs::File::create(&log_path).await.unwrap()),
                     snapshot: None, last_term: 0, base_path: temp_dir.clone(),
+                    plane_id: PlaneId::type1(),
                 };
                 storage.append_logs(&meta_guard, &logs_guard).await.unwrap();
                 // drop storage to flush/close
@@ -6327,6 +6329,7 @@ mod test {
                     commit_index: N as u64, last_applied: N as u64,
                     leader_id: 0, storage: None,
                     last_snapshot_index: 0, last_snapshot_term: 0,
+                    lifecycle: LifecycleState::Running,
                 };
                 let meta_lock = async_std::sync::RwLock::new(meta);
                 let meta_guard = meta_lock.write().await;
@@ -6335,6 +6338,7 @@ mod test {
                 let mut storage = disk::StorageEntity {
                     logs: Some(tokio::fs::File::create(&log_path).await.unwrap()),
                     snapshot: None, last_term: 0, base_path: temp_dir.clone(),
+                    plane_id: PlaneId::type1(),
                 };
                 storage.append_logs(&meta_guard, &logs_guard).await.unwrap();
             }
