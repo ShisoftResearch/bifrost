@@ -576,7 +576,7 @@ async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
             break;
         };
 
-        match commit_command(meta, &entry).await {
+        match apply_committed_entry(meta, &entry).await {
             Ok(_) => {
                 meta.last_applied = next_log_id;
             }
@@ -1486,7 +1486,7 @@ fn is_majority(members: u64, granted: u64) -> bool {
     majority
 }
 
-async fn commit_command<'a>(
+async fn apply_committed_entry<'a>(
     meta: &'a RwLockWriteGuard<'a, RaftMeta>,
     entry: &'a LogEntry,
 ) -> ExecResult {
@@ -3012,7 +3012,7 @@ impl RaftService {
                 new_log_id,
                 meta.commit_index
             );
-            let result = commit_command(&mut meta, entry).await;
+            let result = apply_committed_entry(&mut meta, entry).await;
             info!(
                 "Strict WA plane {}: apply completed at log_id={} (result={:?})",
                 plane_id.raw(),
@@ -3058,7 +3058,7 @@ impl RaftService {
         // this will force followers to commit the changes
         debug!("Sync config to followers on plane {}", plane_id.raw());
         meta.commit_index = new_log_id;
-        let data = commit_command(&meta, &entry).await;
+        let data = apply_committed_entry(&meta, &entry).await;
         if let Membership::Leader(ref leader_meta) = meta.membership {
             let mut leader_meta = leader_meta.write().await;
             let member_sm = meta.state_machine.read().await;
