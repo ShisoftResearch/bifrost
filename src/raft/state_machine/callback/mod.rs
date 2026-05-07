@@ -1,10 +1,37 @@
 use bifrost_plugins::hash_ident;
-use server::SMCallback;
+
+use crate::raft::PlaneId;
 
 pub mod client;
 pub mod server;
-//                (raft_sid, sm_id, fn_id, pattern_id)
-pub type SubKey = (u64, u64, u64, u64);
+pub use server::SMCallback;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct SubKey {
+    pub service_id: u64,
+    pub plane_id: PlaneId,
+    pub sm_id: u64,
+    pub fn_id: u64,
+    pub pattern_id: u64,
+}
+
+impl SubKey {
+    pub const fn new(
+        service_id: u64,
+        plane_id: PlaneId,
+        sm_id: u64,
+        fn_id: u64,
+        pattern_id: u64,
+    ) -> Self {
+        Self {
+            service_id,
+            plane_id,
+            sm_id,
+            fn_id,
+            pattern_id,
+        }
+    }
+}
 
 pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_RAFT_SM_CALLBACK_DEFAULT_SERVICE) as u64;
 
@@ -17,7 +44,7 @@ mod test {
     use crate::raft::client::RaftClient;
     use crate::raft::state_machine::callback::server::SMCallback;
     use crate::raft::state_machine::StateMachineCtl;
-    use crate::raft::{Options, RaftService, Storage, DEFAULT_SERVICE_ID};
+    use crate::raft::{Options, PlaneId, PlaneSpec, RaftService, Storage, DEFAULT_SERVICE_ID};
     use crate::rpc::Server;
     use crate::utils::time::async_wait_secs;
     use future::FutureExt;
@@ -105,6 +132,79 @@ mod test {
                 counter_clone.fetch_add(1, Ordering::Relaxed);
                 sumer_clone.fetch_add(res as usize, Ordering::Relaxed);
                 info!("CALLBACK TRIGGERED {}", res);
+                future::ready(()).boxed()
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        for i in 0..loops {
+            let sm_client = sm_client.clone();
+            expected_sum += i + 1;
+            tokio::spawn(async move {
+                sm_client.trigger().await.unwrap();
+            });
+        }
+
+        async_wait_secs().await;
+
+        assert_eq!(counter.load(Ordering::Relaxed), loops);
+        assert_eq!(sumer.load(Ordering::Relaxed), expected_sum);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dummy_type2_plane() {
+        let _ = env_logger::try_init();
+        let addr = String::from("127.0.0.1:2111");
+        let raft_service = RaftService::new(Options {
+            storage: Storage::default(),
+            address: addr.clone(),
+            service_id: DEFAULT_SERVICE_ID,
+        });
+        let server = Server::new(&addr);
+        server.register_service(&raft_service).await;
+        Server::listen_and_resume(&server).await;
+        assert!(RaftService::start(&raft_service, false).await);
+        raft_service.bootstrap().await;
+
+        let plane_id = PlaneId::type2(11).unwrap();
+        let plane = raft_service
+            .ensure_plane(PlaneSpec { plane_id })
+            .await
+            .expect("plane should be created");
+        let dummy_sm = Trigger {
+            count: 0,
+            callback: plane
+                .callback(10)
+                .await
+                .expect("type-2 callback should bind to plane-local subscriptions"),
+        };
+        let sm_id = dummy_sm.id();
+        plane
+            .register_state_machine(Box::new(dummy_sm))
+            .await
+            .expect("type-2 state machine should register");
+        plane
+            .recover_after_register()
+            .await
+            .expect("type-2 plane should finish registration recovery");
+
+        let raft_client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID)
+            .await
+            .unwrap();
+        let plane_client = raft_client.plane(plane_id);
+        let sm_client = Arc::new(client::SMClient::new(sm_id, &plane_client));
+        let loops = 5;
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        let sumer = Arc::new(AtomicUsize::new(0));
+        let sumer_clone = sumer.clone();
+        let mut expected_sum = 0;
+        RaftClient::prepare_subscription(&server).await;
+        sm_client
+            .on_trigged(move |res: u64| {
+                counter_clone.fetch_add(1, Ordering::Relaxed);
+                sumer_clone.fetch_add(res as usize, Ordering::Relaxed);
                 future::ready(()).boxed()
             })
             .await

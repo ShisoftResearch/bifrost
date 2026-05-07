@@ -1,6 +1,6 @@
 use super::super::OpType;
 use super::*;
-use crate::raft::{RaftMsg, RaftService};
+use crate::raft::{PlaneError, PlaneId, RaftMsg, RaftService};
 use crate::rpc;
 use async_std::sync::*;
 use bifrost_hasher::{hash_bytes, hash_str};
@@ -46,10 +46,14 @@ impl Subscriptions {
         let suber_id = hash_str(address);
         let suber_exists = self.subscribers.contains_key(&suber_id);
         let sub_id = self.next_id;
-        let (_, _, fn_id, pattern_id) = key;
         debug!(
-            "Subscription {:?} from {}, address {}, fn {}, pattern {}",
-            key, suber_id, address, fn_id, pattern_id
+            "Subscription {:?} from {}, address {}, plane {}, fn {}, pattern {}",
+            key,
+            suber_id,
+            address,
+            key.plane_id.raw(),
+            key.fn_id,
+            key.pattern_id
         );
         let require_reload_suber = if suber_exists {
             match self.subscribers.get(&suber_id) {
@@ -136,6 +140,7 @@ pub struct SMCallback {
     pub subscriptions: Arc<RwLock<Subscriptions>>,
     pub raft_service: Arc<RaftService>,
     pub internal_subs: RwLock<HashMap<u64, Vec<InternalSubscription>>>,
+    pub plane_id: PlaneId,
     pub sm_id: u64,
 }
 
@@ -151,15 +156,24 @@ pub enum NotifyError {
 
 impl SMCallback {
     pub async fn new(state_machine_id: u64, raft_service: Arc<RaftService>) -> SMCallback {
-        let meta = raft_service.meta.read().await;
-        let sm = meta.state_machine.read().await;
-        let subs = sm.configs.subscriptions.clone();
-        SMCallback {
-            subscriptions: subs,
+        Self::new_on_plane(state_machine_id, PlaneId::type1(), raft_service)
+            .await
+            .expect("type-1 callback construction should not fail")
+    }
+
+    pub async fn new_on_plane(
+        state_machine_id: u64,
+        plane_id: PlaneId,
+        raft_service: Arc<RaftService>,
+    ) -> Result<SMCallback, PlaneError> {
+        let subscriptions = raft_service.subscriptions_on_plane(plane_id).await?;
+        Ok(SMCallback {
+            subscriptions,
             raft_service: raft_service.clone(),
+            plane_id,
             sm_id: state_machine_id,
             internal_subs: RwLock::new(HashMap::new()),
-        }
+        })
     }
 
     pub async fn notify<M, R>(
@@ -171,10 +185,16 @@ impl SMCallback {
         R: serde::Serialize + Send + Sync + Clone + Any + Unpin + 'static,
         M: RaftMsg<R> + 'static,
     {
-        if !self.raft_service.is_leader() {
+        let is_leader = self
+            .raft_service
+            .is_leader_on_plane(self.plane_id)
+            .await
+            .unwrap_or(false);
+        if !is_leader {
             debug!(
-                "Will not send notification from {} because this node is not a leader",
-                self.raft_service.get_server_id()
+                "Will not send notification from {} on plane {} because this node is not a leader",
+                self.raft_service.get_server_id(),
+                self.plane_id.raw()
             );
             return Err(NotifyError::IsNotLeader);
         }
@@ -184,7 +204,7 @@ impl SMCallback {
                 let pattern_id = hash_bytes(&pattern_data.as_slice());
                 let raft_sid = self.raft_service.options.service_id;
                 let sm_id = self.sm_id;
-                let key = (raft_sid, sm_id, fn_id, pattern_id);
+                let key = SubKey::new(raft_sid, self.plane_id, sm_id, fn_id, pattern_id);
                 let internal_subs = self.internal_subs.read().await;
                 let svr_subs = self.subscriptions.read().await;
                 debug!(
@@ -239,13 +259,7 @@ impl SMCallback {
                         .collect();
                     let response: Vec<_> = sub_result
                         .into_iter()
-                        .filter_map(|r| {
-                            if let Ok(value) = r {
-                                Some(value)
-                            } else {
-                                None
-                            }
-                        })
+                        .filter_map(|r| if let Ok(value) = r { Some(value) } else { None })
                         .collect();
                     Ok((sub_ids.len(), errors, response))
                 } else {
@@ -298,5 +312,170 @@ where
         }
     } else {
         warn!("Cannot send notification, callback handler is empty");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_subscriptions_new() {
+        let subs = Subscriptions::new();
+
+        assert_eq!(subs.next_id, 0);
+        assert!(subs.subscribers.is_empty());
+        assert!(subs.suber_subs.is_empty());
+        assert!(subs.subscriptions.is_empty());
+        assert!(subs.sub_suber.is_empty());
+        assert!(subs.sub_to_key.is_empty());
+    }
+
+    #[test]
+    fn test_remove_subscription_nonexistent() {
+        let mut subs = Subscriptions::new();
+
+        // Remove non-existent subscription should not crash
+        subs.remove_subscription(999);
+
+        assert!(subs.sub_to_key.is_empty());
+        assert!(subs.subscriptions.is_empty());
+    }
+
+    #[test]
+    fn test_remove_subscription() {
+        let mut subs = Subscriptions::new();
+
+        // Manually add a subscription
+        let sub_id = 1u64;
+        let sub_key = SubKey::new(0, PlaneId::type1(), 0, 100, 200);
+
+        subs.sub_to_key.insert(sub_id, sub_key);
+        subs.subscriptions
+            .entry(sub_key)
+            .or_insert_with(HashSet::new)
+            .insert(sub_id);
+        subs.sub_suber.insert(sub_id, 42u64);
+
+        // Now remove it
+        subs.remove_subscription(sub_id);
+
+        assert!(!subs.sub_to_key.contains_key(&sub_id));
+        assert!(!subs.sub_suber.contains_key(&sub_id));
+        if let Some(subs_set) = subs.subscriptions.get(&sub_key) {
+            assert!(!subs_set.contains(&sub_id));
+        }
+    }
+
+    #[test]
+    fn test_remove_subscriber() {
+        let mut subs = Subscriptions::new();
+
+        let suber_id = 42u64;
+        let sub_id = 1u64;
+        let sub_key = SubKey::new(0, PlaneId::type1(), 0, 100, 200);
+
+        // Manually set up subscriber with subscription
+        subs.suber_subs
+            .entry(suber_id)
+            .or_insert_with(HashSet::new)
+            .insert(sub_id);
+        subs.sub_to_key.insert(sub_id, sub_key);
+        subs.subscriptions
+            .entry(sub_key)
+            .or_insert_with(HashSet::new)
+            .insert(sub_id);
+        subs.sub_suber.insert(sub_id, suber_id);
+
+        // Remove the subscriber
+        subs.remove_subscriber(suber_id);
+
+        assert!(!subs.suber_subs.contains_key(&suber_id));
+        assert!(!subs.subscribers.contains_key(&suber_id));
+        assert!(!subs.sub_to_key.contains_key(&sub_id));
+        assert!(!subs.sub_suber.contains_key(&sub_id));
+    }
+
+    #[test]
+    fn test_remove_subscriber_nonexistent() {
+        let mut subs = Subscriptions::new();
+
+        // Remove non-existent subscriber should not crash
+        subs.remove_subscriber(999);
+
+        assert!(subs.subscribers.is_empty());
+    }
+
+    #[test]
+    fn test_notify_error_debug() {
+        // Test that NotifyError can be debugged and cloned
+        let error = NotifyError::IsNotLeader;
+        let cloned = error.clone();
+
+        assert!(matches!(cloned, NotifyError::IsNotLeader));
+
+        // Test all variants
+        let _ = NotifyError::OpTypeNotSubscribe;
+        let _ = NotifyError::CannotFindSubscription;
+        let _ = NotifyError::CannotFindSubscribers;
+        let _ = NotifyError::CannotFindSubscriber;
+        let _ = NotifyError::CannotCastInternalSub;
+    }
+
+    #[test]
+    fn test_subscriptions_next_id_increment() {
+        let mut subs = Subscriptions::new();
+
+        assert_eq!(subs.next_id, 0);
+
+        // Simulate what subscribe does with next_id
+        let first_id = subs.next_id;
+        subs.next_id += 1;
+
+        let second_id = subs.next_id;
+        subs.next_id += 1;
+
+        assert_eq!(first_id, 0);
+        assert_eq!(second_id, 1);
+        assert_eq!(subs.next_id, 2);
+    }
+
+    #[test]
+    fn test_subscriptions_multiple_subs_per_subscriber() {
+        let mut subs = Subscriptions::new();
+
+        let suber_id = 42u64;
+        let sub_id1 = 1u64;
+        let sub_id2 = 2u64;
+        let sub_key1 = SubKey::new(0, PlaneId::type1(), 0, 100, 200);
+        let sub_key2 = SubKey::new(0, PlaneId::type1(), 0, 101, 201);
+
+        // Add two subscriptions for same subscriber
+        subs.suber_subs
+            .entry(suber_id)
+            .or_insert_with(HashSet::new)
+            .insert(sub_id1);
+        subs.suber_subs
+            .entry(suber_id)
+            .or_insert_with(HashSet::new)
+            .insert(sub_id2);
+
+        subs.sub_to_key.insert(sub_id1, sub_key1);
+        subs.sub_to_key.insert(sub_id2, sub_key2);
+        subs.sub_suber.insert(sub_id1, suber_id);
+        subs.sub_suber.insert(sub_id2, suber_id);
+
+        // Verify both subscriptions are tracked
+        let subscriber_subs = subs.suber_subs.get(&suber_id).unwrap();
+        assert_eq!(subscriber_subs.len(), 2);
+        assert!(subscriber_subs.contains(&sub_id1));
+        assert!(subscriber_subs.contains(&sub_id2));
+
+        // Remove the subscriber - should remove both subscriptions
+        subs.remove_subscriber(suber_id);
+
+        assert!(!subs.sub_to_key.contains_key(&sub_id1));
+        assert!(!subs.sub_to_key.contains_key(&sub_id2));
+        assert!(!subs.suber_subs.contains_key(&suber_id));
     }
 }

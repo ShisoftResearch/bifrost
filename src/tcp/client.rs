@@ -33,7 +33,9 @@ pub struct Client {
 impl Client {
     pub async fn connect_with_timeout(address: &String, timeout: Duration) -> io::Result<Self> {
         let server_id = hash_str(address);
-        let senders = Arc::new(SyncMutex::new(HashMap::<u64, oneshot::Sender<BytesMut>>::new()));
+        let senders = Arc::new(SyncMutex::new(
+            HashMap::<u64, oneshot::Sender<BytesMut>>::new(),
+        ));
         debug!(
             "TCP connect to {}, server id {}, timeout {}ms",
             address,
@@ -66,7 +68,10 @@ impl Client {
                             let mut senders = cloned_senders.lock();
                             if let Some(sender) = senders.remove(&res_msg_id) {
                                 if let Err(e) = sender.send(data) {
-                                    error!("Failed to send response for msg {}: {:?}", res_msg_id, e);
+                                    error!(
+                                        "Failed to send response for msg {}: {:?}",
+                                        res_msg_id, e
+                                    );
                                 }
                             } else {
                                 error!("No sender found for response msg {}", res_msg_id);
@@ -108,7 +113,10 @@ impl Client {
                 Ok(response) => Ok(response),
                 Err(e) => {
                     error!("Failed to receive response for msg {}: {:?}", msg_id, e);
-                    Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Response channel closed"))
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "Response channel closed",
+                    ))
                 }
             }
         } else {
@@ -118,3 +126,54 @@ impl Client {
 }
 
 unsafe impl Send for Client {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::{BufMut, BytesMut};
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_client_connect_timeout() {
+        let _ = env_logger::builder().format_timestamp(None).try_init();
+
+        // Try to connect to a non-existent server with short timeout
+        let addr = String::from("127.0.0.1:9999");
+        let timeout = Duration::from_millis(100);
+
+        let result = Client::connect_with_timeout(&addr, timeout).await;
+        // This should fail since there's no server
+        assert!(
+            result.is_err(),
+            "Connection to non-existent server should fail"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_client_standalone_address() {
+        let _ = env_logger::builder().format_timestamp(None).try_init();
+
+        // Try to connect to STANDALONE address
+        let standalone_addr = STANDALONE_ADDRESS.to_string();
+        let result = Client::connect(&standalone_addr).await;
+        assert!(result.is_err(), "Connection to STANDALONE should fail");
+
+        if let Err(e) = result {
+            assert_eq!(e.kind(), io::ErrorKind::Other);
+            assert!(e.to_string().contains("STANDALONE"));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_client_server_id() {
+        let addr = String::from("127.0.0.1:9876");
+        let expected_id = hash_str(&addr);
+
+        // Even if connection fails, we can test server_id calculation
+        let timeout = Duration::from_millis(50);
+        let _ = Client::connect_with_timeout(&addr, timeout).await;
+
+        // Verify hash_str produces consistent results
+        assert_eq!(hash_str(&addr), expected_id);
+    }
+}

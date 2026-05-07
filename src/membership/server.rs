@@ -4,7 +4,7 @@ use super::*;
 use crate::membership::client::Member as ClientMember;
 use crate::raft::state_machine::callback::server::{notify as cb_notify, SMCallback};
 use crate::raft::state_machine::StateMachineCtl;
-use crate::raft::{LogEntry, RaftMsg, RaftService, Service as raft_svr_trait};
+use crate::raft::{LogEntry, PlaneId, RaftMsg, RaftService, Service as raft_svr_trait};
 use crate::rpc::Server;
 use crate::utils::time;
 use crate::utils::time::get_time;
@@ -17,7 +17,6 @@ use lightning::map::PtrHashMap;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,7 +35,7 @@ struct HBStatus {
     online: bool,
     consecutive_failures: u8, // Count of consecutive timeout checks while supposedly online
     consecutive_successes: u8, // Count of consecutive successful checks while supposedly offline
-    last_state_change: i64, // Timestamp of last online/offline state change
+    last_state_change: i64,   // Timestamp of last online/offline state change
 }
 
 pub struct HeartbeatService {
@@ -86,13 +85,16 @@ impl HeartbeatService {
         // Encode to state machine command
         let (fn_id, _, data) = log.encode();
         self.raft_service
-            .c_command(LogEntry {
-                id: 0,
-                term: 0,
-                sm_id: DEFAULT_SERVICE_ID,
-                fn_id,
-                data,
-            })
+            .c_command(
+                PlaneId::type1(),
+                LogEntry {
+                    id: 0,
+                    term: 0,
+                    sm_id: DEFAULT_SERVICE_ID,
+                    fn_id,
+                    data,
+                },
+            )
             .await;
     }
     async fn transfer_leadership(&self) {
@@ -110,13 +112,16 @@ impl HeartbeatService {
                 online_count += 1;
             }
         }
-        info!("Leadership transferred, reset heartbeat status for {} online members", online_count);
+        info!(
+            "Leadership transferred, reset heartbeat status for {} online members",
+            online_count
+        );
     }
-    
+
     pub async fn shutdown(&self) {
         info!("Shutting down heartbeat service");
         self.closed.store(true, Ordering::Relaxed);
-        
+
         // Wait for the watcher task to complete
         match self.watcher_handle.lock() {
             Ok(mut guard) => {
@@ -125,7 +130,10 @@ impl HeartbeatService {
                 }
             }
             Err(e) => {
-                error!("Failed to acquire watcher handle lock during shutdown: {}", e);
+                error!(
+                    "Failed to acquire watcher handle lock during shutdown: {}",
+                    e
+                );
             }
         }
     }
@@ -146,13 +154,13 @@ pub struct MemberGroup {
 }
 
 /// Membership service manages member groups and heartbeat status.
-/// 
+///
 /// IMPORTANT: This service does NOT persist its state to disk. On each restart,
 /// it starts with empty state and rebuilds membership through:
 /// 1. Members sending join() commands
 /// 2. Heartbeat ping() messages updating online/offline status
 /// 3. Group membership operations (join_group, leave_group, etc.)
-/// 
+///
 /// This design ensures membership always reflects current network reality,
 /// not stale persisted state that might be outdated after crashes.
 pub struct Membership {
@@ -170,12 +178,12 @@ impl Drop for Membership {
 
 impl Membership {
     /// Creates a new Membership service with fresh, empty state.
-    /// 
+    ///
     /// The service will discover members through:
     /// - join() commands from members joining the cluster
     /// - ping() heartbeats indicating member liveness
     /// - join_group/leave_group commands for group management
-    /// 
+    ///
     /// No state is recovered from disk - all membership is learned from the network.
     pub async fn new(server: &Arc<Server>, raft_service: &Arc<RaftService>) {
         let service = Arc::new(HeartbeatService {
@@ -308,17 +316,20 @@ impl Membership {
             }
             info!("Membership heartbeat watcher stopped gracefully");
         });
-        
+
         // Store the handle for graceful shutdown
         match service.watcher_handle.lock() {
             Ok(mut guard) => {
                 *guard = Some(handle);
             }
             Err(e) => {
-                error!("Failed to acquire watcher handle lock during initialization: {}", e);
+                error!(
+                    "Failed to acquire watcher handle lock during initialization: {}",
+                    e
+                );
             }
         }
-        
+
         // Create membership service with EMPTY state.
         // It will learn all membership from the network through:
         // 1. join() commands as members join
@@ -326,10 +337,10 @@ impl Membership {
         // 3. Group operations (join_group, leave_group, etc.)
         let mut membership_service = Membership {
             heartbeat: service_clone.clone(),
-            groups: BTreeMap::new(),       // Empty groups - will be populated as groups are created
-            members: BTreeMap::new(),      // Empty members - will be populated as members join
+            groups: BTreeMap::new(), // Empty groups - will be populated as groups are created
+            members: BTreeMap::new(), // Empty members - will be populated as members join
             callback: None,
-            version: 0,                    // Version starts at 0
+            version: 0, // Version starts at 0
         };
         membership_service.init_callback(raft_service).await;
         raft_service
@@ -354,7 +365,10 @@ impl Membership {
         let client_member = match self.compose_client_member(id).await {
             Some(member) => member,
             None => {
-                error!("Failed to compose client member {} for online notification", id);
+                error!(
+                    "Failed to compose client member {} for online notification",
+                    id
+                );
                 return;
             }
         };
@@ -381,7 +395,10 @@ impl Membership {
         let client_member = match self.compose_client_member(id).await {
             Some(member) => member,
             None => {
-                error!("Failed to compose client member {} for offline notification", id);
+                error!(
+                    "Failed to compose client member {} for offline notification",
+                    id
+                );
                 return;
             }
         };
@@ -408,7 +425,10 @@ impl Membership {
         let client_member = match self.compose_client_member(id).await {
             Some(member) => member,
             None => {
-                error!("Failed to compose client member {} for left notification", id);
+                error!(
+                    "Failed to compose client member {} for left notification",
+                    id
+                );
                 return;
             }
         };
@@ -445,9 +465,13 @@ impl Membership {
         if success {
             if need_notify {
                 if let Some(client_member) = self.compose_client_member(id).await {
-                    self.notify_for_group_member_left(group_id, &client_member).await;
+                    self.notify_for_group_member_left(group_id, &client_member)
+                        .await;
                 } else {
-                    error!("Failed to compose client member {} for group {} leave notification", id, group_id);
+                    error!(
+                        "Failed to compose client member {} for group {} leave notification",
+                        id, group_id
+                    );
                 }
             }
             self.group_leader_candidate_unavailable(group_id, id).await;
@@ -520,7 +544,10 @@ impl Membership {
         }
         if leader_changed {
             if let Err(_) = self.change_leader(group_id, Some(member)).await {
-                error!("Failed to change leader for group {} to member {}", group_id, member);
+                error!(
+                    "Failed to change leader for group {} to member {}",
+                    group_id, member
+                );
             }
         }
     }
@@ -683,7 +710,10 @@ impl StateMachineCmds for Membership {
             let mut success = false;
             if !self.groups.contains_key(&group_id) {
                 if let Err(existing_id) = self.new_group(group_name.clone()).await {
-                    debug!("Group {} already exists with id {}", group_name, existing_id);
+                    debug!(
+                        "Group {} already exists with id {}",
+                        group_name, existing_id
+                    );
                 }
             } // create group if not exists
             if let Some(ref mut group) = self.groups.get_mut(&group_id) {
@@ -706,7 +736,10 @@ impl StateMachineCmds for Membership {
                         true
                     }
                     None => {
-                        error!("Failed to compose client member {} for group {} join notification", id, group_id);
+                        error!(
+                            "Failed to compose client member {} for group {} join notification",
+                            id, group_id
+                        );
                         false
                     }
                 }
