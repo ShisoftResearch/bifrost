@@ -114,9 +114,17 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
         }
     }
 
+    fn canonicalized_map(&self) -> Vec<(S, u64)> {
+        Self::canonicalize(self.map.clone())
+    }
+
+    fn canonicalize_in_place(&mut self) {
+        self.map = Self::canonicalize(std::mem::take(&mut self.map));
+    }
+
     fn canonical_relation(&self, clock_b: &VectorClock<S>) -> Relation {
-        let clock_a = Self::canonicalize(self.map.clone());
-        let clock_b = Self::canonicalize(clock_b.map.clone());
+        let clock_a = self.canonicalized_map();
+        let clock_b = clock_b.canonicalized_map();
         Self::compare_canonical(&clock_a, &clock_b)
     }
 
@@ -131,6 +139,7 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
     }
 
     pub fn inc(&mut self, server: S) {
+        self.canonicalize_in_place();
         let idx = self.map.binary_search_by_key(&server, |(k, _)| *k);
         match idx {
             Ok(idx) => {
@@ -156,46 +165,45 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
 
     pub fn merge_with(&mut self, clock_b: &VectorClock<S>) {
         // merge_with is used to update counter for other servers (also learn from it)
+        let map_a = self.canonicalized_map();
+        let map_b = clock_b.canonicalized_map();
         let mut ai = 0;
         let mut bi = 0;
-        let al = self.map.len();
-        let bl = clock_b.map.len();
-        if bl == 0 {
+        if map_b.is_empty() {
+            self.map = map_a;
             return;
         }
-        if al == 0 {
-            self.map = clock_b.map.clone();
+        if map_a.is_empty() {
+            self.map = map_b;
             return;
         }
-        let mut new_map = Vec::with_capacity(self.map.len() + clock_b.map.len());
-        while ai < al || bi < bl {
-            if ai >= al {
-                ai = al - 1;
-            }
-            if bi >= bl {
-                bi = bl - 1;
-            }
-            let (ak, an) = &self.map[ai];
-            let (bk, bn) = &clock_b.map[bi];
-            if ak == bk {
-                // Two vector have the same key, compare their values
-                if an < bn {
-                    new_map.push((*ak, *bn));
-                } else {
+        let mut new_map = Vec::with_capacity(map_a.len() + map_b.len());
+        while ai < map_a.len() || bi < map_b.len() {
+            match (map_a.get(ai), map_b.get(bi)) {
+                (Some((ak, an)), Some((bk, bn))) => match ak.cmp(bk) {
+                    Ordering::Equal => {
+                        new_map.push((*ak, (*an).max(*bn)));
+                        ai += 1;
+                        bi += 1;
+                    }
+                    Ordering::Less => {
+                        new_map.push((*ak, *an));
+                        ai += 1;
+                    }
+                    Ordering::Greater => {
+                        new_map.push((*bk, *bn));
+                        bi += 1;
+                    }
+                },
+                (Some((ak, an)), None) => {
                     new_map.push((*ak, *an));
+                    ai += 1;
                 }
-                ai += 1;
-                bi += 1;
-            } else if ak > bk {
-                // Clock b have a server that a does not have
-                new_map.push((*bk, *bn));
-                bi += 1;
-            } else if ak < bk {
-                // Clock a have a server that b does not have
-                new_map.push((*ak, *an));
-                ai += 1;
-            } else {
-                unreachable!();
+                (None, Some((bk, bn))) => {
+                    new_map.push((*bk, *bn));
+                    bi += 1;
+                }
+                (None, None) => break,
             }
         }
         self.map = new_map;
@@ -203,42 +211,45 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
 
     pub fn learn_from(&mut self, clock_b: &VectorClock<S>) {
         // learn_from only insert missing servers into the clock
+        let map_a = self.canonicalized_map();
+        let map_b = clock_b.canonicalized_map();
         let mut ai = 0;
         let mut bi = 0;
-        let al = self.map.len();
-        let bl = clock_b.map.len();
-        if bl == 0 {
+        if map_b.is_empty() {
+            self.map = map_a;
             return;
         }
-        if al == 0 {
-            self.map = clock_b.map.clone();
+        if map_a.is_empty() {
+            self.map = map_b;
             return;
         }
-        let mut new_map = Vec::with_capacity(self.map.len() + clock_b.map.len());
-        while ai < al || bi < bl {
-            if ai >= al {
-                ai = al - 1;
-            }
-            if bi >= bl {
-                bi = bl - 1;
-            }
-            let (ak, an) = &self.map[ai];
-            let (bk, bn) = &clock_b.map[bi];
-            if ak == bk {
-                // Two vector have the same key, compare their values
-                ai += 1;
-                bi += 1;
-                new_map.push((*ak, *an));
-            } else if ak > bk {
-                // Clock b have a server that a does not have
-                new_map.push((*bk, *bn));
-                bi += 1;
-            } else if ak < bk {
-                // Clock a have a server that b does not have
-                new_map.push((*ak, *an));
-                ai += 1;
-            } else {
-                unreachable!();
+        let mut new_map = Vec::with_capacity(map_a.len() + map_b.len());
+        while ai < map_a.len() || bi < map_b.len() {
+            match (map_a.get(ai), map_b.get(bi)) {
+                (Some((ak, an)), Some((bk, bn))) => match ak.cmp(bk) {
+                    Ordering::Equal => {
+                        new_map.push((*ak, *an));
+                        ai += 1;
+                        bi += 1;
+                    }
+                    Ordering::Less => {
+                        new_map.push((*ak, *an));
+                        ai += 1;
+                    }
+                    Ordering::Greater => {
+                        new_map.push((*bk, *bn));
+                        bi += 1;
+                    }
+                },
+                (Some((ak, an)), None) => {
+                    new_map.push((*ak, *an));
+                    ai += 1;
+                }
+                (None, Some((bk, bn))) => {
+                    new_map.push((*bk, *bn));
+                    bi += 1;
+                }
+                (None, None) => break,
             }
         }
         self.map = new_map;
@@ -461,6 +472,51 @@ mod test {
     }
 
     #[test]
+    fn mutation_merge_with_disjoint_keys_in_both_orientations() {
+        let mut left = StandardVectorClock::from_vec(vec![(1, 2)]);
+        let right = StandardVectorClock::from_vec(vec![(3, 4)]);
+        left.merge_with(&right);
+        assert_eq!(left, StandardVectorClock::from_vec(vec![(1, 2), (3, 4)]));
+
+        let mut left = StandardVectorClock::from_vec(vec![(3, 4)]);
+        let right = StandardVectorClock::from_vec(vec![(1, 2)]);
+        left.merge_with(&right);
+        assert_eq!(left, StandardVectorClock::from_vec(vec![(1, 2), (3, 4)]));
+    }
+
+    #[test]
+    fn mutation_merge_with_trailing_keys_in_both_orientations() {
+        let mut left = StandardVectorClock::from_vec(vec![(1, 5), (4, 2), (5, 7)]);
+        let right = StandardVectorClock::from_vec(vec![(1, 3), (2, 8)]);
+        left.merge_with(&right);
+        assert_eq!(
+            left,
+            StandardVectorClock::from_vec(vec![(1, 5), (2, 8), (4, 2), (5, 7)])
+        );
+
+        let mut left = StandardVectorClock::from_vec(vec![(1, 3), (2, 8)]);
+        let right = StandardVectorClock::from_vec(vec![(1, 5), (4, 2), (5, 7)]);
+        left.merge_with(&right);
+        assert_eq!(
+            left,
+            StandardVectorClock::from_vec(vec![(1, 5), (2, 8), (4, 2), (5, 7)])
+        );
+    }
+
+    #[test]
+    fn mutation_merge_with_trailing_multi_entry_tail() {
+        let mut left = StandardVectorClock::from_vec(vec![(1, 2), (2, 4)]);
+        let right = StandardVectorClock::from_vec(vec![(1, 6), (3, 1), (4, 9), (5, 2)]);
+
+        left.merge_with(&right);
+
+        assert_eq!(
+            left,
+            StandardVectorClock::from_vec(vec![(1, 6), (2, 4), (3, 1), (4, 9), (5, 2)])
+        );
+    }
+
+    #[test]
     fn test_merge_with_empty() {
         let mut clock_a = StandardVectorClock::from_vec(vec![(1, 2), (3, 4)]);
         let clock_b = StandardVectorClock::new();
@@ -490,6 +546,65 @@ mod test {
 
         // After learn_from, clock_a keeps its own values for existing keys
         assert_eq!(clock_a, StandardVectorClock::from_vec(vec![(1, 5)]));
+    }
+
+    #[test]
+    fn mutation_learn_from_disjoint_keys_in_both_orientations() {
+        let mut left = StandardVectorClock::from_vec(vec![(1, 2)]);
+        let right = StandardVectorClock::from_vec(vec![(3, 4)]);
+        left.learn_from(&right);
+        assert_eq!(left, StandardVectorClock::from_vec(vec![(1, 2), (3, 4)]));
+
+        let mut left = StandardVectorClock::from_vec(vec![(3, 4)]);
+        let right = StandardVectorClock::from_vec(vec![(1, 2)]);
+        left.learn_from(&right);
+        assert_eq!(left, StandardVectorClock::from_vec(vec![(1, 2), (3, 4)]));
+    }
+
+    #[test]
+    fn mutation_learn_from_trailing_keys_in_both_orientations() {
+        let mut left = StandardVectorClock::from_vec(vec![(1, 5), (4, 2), (5, 7)]);
+        let right = StandardVectorClock::from_vec(vec![(1, 3), (2, 8)]);
+        left.learn_from(&right);
+        assert_eq!(
+            left,
+            StandardVectorClock::from_vec(vec![(1, 5), (2, 8), (4, 2), (5, 7)])
+        );
+
+        let mut left = StandardVectorClock::from_vec(vec![(1, 3), (2, 8)]);
+        let right = StandardVectorClock::from_vec(vec![(1, 5), (4, 2), (5, 7)]);
+        left.learn_from(&right);
+        assert_eq!(
+            left,
+            StandardVectorClock::from_vec(vec![(1, 3), (2, 8), (4, 2), (5, 7)])
+        );
+    }
+
+    #[test]
+    fn mutation_learn_from_trailing_multi_entry_tail() {
+        let mut left = StandardVectorClock::from_vec(vec![(1, 9), (2, 4)]);
+        let right = StandardVectorClock::from_vec(vec![(1, 6), (3, 1), (4, 9), (5, 2)]);
+
+        left.learn_from(&right);
+
+        assert_eq!(
+            left,
+            StandardVectorClock::from_vec(vec![(1, 9), (2, 4), (3, 1), (4, 9), (5, 2)])
+        );
+    }
+
+    #[test]
+    fn mutation_deserialize_then_inc_canonicalizes_and_increments_max_counter() {
+        let mut clock: StandardVectorClock =
+            serde_json::from_str(r#"{"map":[[3,0],[2,1],[1,2],[2,3],[1,0]]}"#).unwrap();
+
+        clock.inc(2);
+
+        assert_eq!(clock.map, vec![(1, 2), (2, 4)]);
+        assert_eq!(
+            serde_json::to_string(&clock).unwrap(),
+            r#"{"map":[[1,2],[2,4]]}"#
+        );
     }
 
     #[test]
