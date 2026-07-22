@@ -11,7 +11,7 @@ pub enum Relation {
     Concurrent,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Eq, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq)]
 pub struct VectorClock<S: std::hash::Hash + Ord + Eq + Copy> {
     map: Vec<(S, u64)>,
 }
@@ -41,18 +41,93 @@ impl<S: std::hash::Hash + Eq + Copy + Ord> Ord for VectorClock<S> {
 
 impl<S: std::hash::Hash + Eq + Copy + Ord> PartialEq for VectorClock<S> {
     fn eq(&self, other: &VectorClock<S>) -> bool {
-        let rel = self.relation(other);
-        rel == Relation::Equal
+        self.equals(other)
     }
 }
 
 impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
+    fn canonicalize(mut map: Vec<(S, u64)>) -> Vec<(S, u64)> {
+        map.retain(|(_, counter)| *counter > 0);
+        map.sort_unstable_by_key(|(server, _)| *server);
+
+        let mut canonical: Vec<(S, u64)> = Vec::with_capacity(map.len());
+        for (server, counter) in map {
+            match canonical.last_mut() {
+                Some((last_server, last_counter)) if *last_server == server => {
+                    *last_counter = (*last_counter).max(counter);
+                }
+                _ => canonical.push((server, counter)),
+            }
+        }
+
+        canonical
+    }
+
+    fn compare_canonical(a: &[(S, u64)], b: &[(S, u64)]) -> Relation {
+        let mut ai = 0;
+        let mut bi = 0;
+        let mut a_lt_b = false;
+        let mut b_lt_a = false;
+
+        while ai < a.len() || bi < b.len() {
+            match (a.get(ai), b.get(bi)) {
+                (Some((ak, an)), Some((bk, bn))) => match ak.cmp(bk) {
+                    Ordering::Equal => {
+                        if an < bn {
+                            a_lt_b = true;
+                        } else if an > bn {
+                            b_lt_a = true;
+                        }
+                        ai += 1;
+                        bi += 1;
+                    }
+                    Ordering::Less => {
+                        b_lt_a = true;
+                        ai += 1;
+                    }
+                    Ordering::Greater => {
+                        a_lt_b = true;
+                        bi += 1;
+                    }
+                },
+                (Some(_), None) => {
+                    b_lt_a = true;
+                    ai += 1;
+                }
+                (None, Some(_)) => {
+                    a_lt_b = true;
+                    bi += 1;
+                }
+                (None, None) => break,
+            }
+
+            if a_lt_b && b_lt_a {
+                return Relation::Concurrent;
+            }
+        }
+
+        match (a_lt_b, b_lt_a) {
+            (false, false) => Relation::Equal,
+            (true, false) => Relation::Before,
+            (false, true) => Relation::After,
+            (true, true) => Relation::Concurrent,
+        }
+    }
+
+    fn canonical_relation(&self, clock_b: &VectorClock<S>) -> Relation {
+        let clock_a = Self::canonicalize(self.map.clone());
+        let clock_b = Self::canonicalize(clock_b.map.clone());
+        Self::compare_canonical(&clock_a, &clock_b)
+    }
+
     pub fn new() -> VectorClock<S> {
         VectorClock { map: vec![] }
     }
 
     pub fn from_vec(vec: Vec<(S, u64)>) -> Self {
-        Self { map: vec }
+        Self {
+            map: Self::canonicalize(vec),
+        }
     }
 
     pub fn inc(&mut self, server: S) {
@@ -68,96 +143,15 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
     }
 
     pub fn happened_before(&self, clock_b: &VectorClock<S>) -> bool {
-        let mut ai = 0;
-        let mut bi = 0;
-        let al = self.map.len();
-        let bl = clock_b.map.len();
-        if al == 0 {
-            return clock_b.map.iter().any(|(_, n)| *n > 0);
-        }
-        if bl == 0 {
-            return false;
-        }
-        let mut a_lt_b = false;
-        let mut b_lt_a = false;
-        while ai < al && bi < bl {
-            let (ak, an) = &self.map[ai];
-            let (bk, bn) = &clock_b.map[bi];
-            if ak == bk {
-                // Two vector have the same key, compare their values
-                ai += 1;
-                bi += 1;
-                if *an < *bn {
-                    a_lt_b = true;
-                } else if *an > *bn {
-                    b_lt_a = true;
-                }
-            } else if ak > bk {
-                // Clock b have a server that a does not have
-                bi += 1;
-            } else if ak < bk {
-                // Clock a have a server that b does not have
-                ai += 1;
-            } else {
-                unreachable!();
-            }
-        }
-        return a_lt_b && (!b_lt_a);
+        self.canonical_relation(clock_b) == Relation::Before
     }
 
     pub fn equals(&self, clock_b: &VectorClock<S>) -> bool {
-        let al = self.map.len();
-        let bl = clock_b.map.len();
-        if al == 0 && al == bl {
-            return true;
-        }
-        if al != bl {
-            if al == 0 {
-                return clock_b.map.iter().all(|(_, n)| *n == 0);
-            }
-            if bl == 0 {
-                return self.map.iter().all(|(_, n)| *n == 0);
-            }
-        }
-        let mut ai = 0;
-        let mut bi = 0;
-        let mut a_eq_b = false;
-        while ai < al && bi < bl {
-            let (ak, an) = &self.map[ai];
-            let (bk, bn) = &clock_b.map[bi];
-            if ak == bk {
-                // Two vector have the same key, compare their values
-                if an != bn {
-                    return false;
-                }
-                a_eq_b = true;
-                ai += 1;
-                bi += 1;
-            } else if ak > bk {
-                // Clock b have a server that a does not have
-                // b should either equal or happend after a
-                bi += 1;
-            } else if ak < bk {
-                // Clock a have a server that b does not have
-                ai += 1;
-            } else {
-                unreachable!();
-            }
-        }
-        return a_eq_b;
+        self.canonical_relation(clock_b) == Relation::Equal
     }
 
     pub fn relation(&self, clock_b: &VectorClock<S>) -> Relation {
-        if self.equals(clock_b) {
-            return Relation::Equal;
-        }
-        if self.happened_before(clock_b) {
-            return Relation::Before;
-        }
-        if clock_b.happened_before(self) {
-            return Relation::After;
-        }
-        return Relation::Concurrent;
+        self.canonical_relation(clock_b)
     }
 
     pub fn merge_with(&mut self, clock_b: &VectorClock<S>) {
@@ -251,6 +245,14 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
     }
 }
 
+impl<S: std::hash::Hash + Eq + Copy + Ord> std::hash::Hash for VectorClock<S> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let canonical = Self::canonicalize(self.map.clone());
+        canonical.len().hash(state);
+        canonical.hash(state);
+    }
+}
+
 pub struct ServerVectorClock {
     server: u64,
     clock: RwLock<StandardVectorClock>,
@@ -300,6 +302,14 @@ pub type StandardVectorClock = VectorClock<u64>;
 #[cfg(test)]
 mod test {
     use crate::vector_clock::{Relation, StandardVectorClock};
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    fn clock_hash(clock: &StandardVectorClock) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        clock.hash(&mut hasher);
+        hasher.finish()
+    }
 
     #[test]
     fn general() {
@@ -356,11 +366,59 @@ mod test {
         let _ = env_logger::try_init();
         let clock_a = StandardVectorClock::from_vec(vec![(1, 2), (2, 3), (3, 4), (4, 5), (5, 6)]);
         let clock_b = StandardVectorClock::from_vec(vec![(2, 3), (4, 5)]);
-        assert!(clock_a.equals(&clock_b));
-        assert!(clock_b.equals(&clock_a));
+        assert!(!clock_a.equals(&clock_b));
+        assert!(!clock_b.equals(&clock_a));
         assert!(!clock_a.happened_before(&clock_b));
+        assert!(clock_b.happened_before(&clock_a));
+        assert_eq!(clock_a.relation(&clock_b), Relation::After);
+        assert_eq!(clock_b.relation(&clock_a), Relation::Before);
+    }
+
+    #[test]
+    fn missing_trailing_component_is_before() {
+        let clock_a = StandardVectorClock::from_vec(vec![(1, 1)]);
+        let clock_b = StandardVectorClock::from_vec(vec![(1, 1), (2, 1)]);
+
+        assert!(!clock_a.equals(&clock_b));
+        assert!(!clock_b.equals(&clock_a));
+        assert!(clock_a.happened_before(&clock_b));
         assert!(!clock_b.happened_before(&clock_a));
-        assert_eq!(clock_a.relation(&clock_b), Relation::Equal);
+        assert_eq!(clock_a.relation(&clock_b), Relation::Before);
+        assert_eq!(clock_b.relation(&clock_a), Relation::After);
+    }
+
+    #[test]
+    fn missing_leading_and_disjoint_components_compare_over_union() {
+        let leading_a = StandardVectorClock::from_vec(vec![(2, 1)]);
+        let leading_b = StandardVectorClock::from_vec(vec![(1, 1), (2, 1)]);
+        assert_eq!(leading_a.relation(&leading_b), Relation::Before);
+        assert_eq!(leading_b.relation(&leading_a), Relation::After);
+
+        let concurrent_a = StandardVectorClock::from_vec(vec![(1, 2), (3, 1)]);
+        let concurrent_b = StandardVectorClock::from_vec(vec![(1, 1), (2, 1)]);
+        assert!(!concurrent_a.happened_before(&concurrent_b));
+        assert!(!concurrent_b.happened_before(&concurrent_a));
+        assert_eq!(concurrent_a.relation(&concurrent_b), Relation::Concurrent);
+        assert_eq!(concurrent_b.relation(&concurrent_a), Relation::Concurrent);
+    }
+
+    #[test]
+    fn from_vec_canonicalizes_unsorted_duplicates_and_zeroes() {
+        let clock = StandardVectorClock::from_vec(vec![(3, 0), (2, 1), (1, 2), (2, 3), (1, 0)]);
+
+        assert_eq!(clock.map, vec![(1, 2), (2, 3)]);
+        assert_eq!(clock, StandardVectorClock::from_vec(vec![(1, 2), (2, 3)]));
+    }
+
+    #[test]
+    fn deserialized_noncanonical_equal_clocks_hash_the_same() {
+        let canonical = StandardVectorClock::from_vec(vec![(1, 2), (2, 3)]);
+        let deserialized: StandardVectorClock =
+            serde_json::from_str(r#"{"map":[[2,1],[1,2],[2,3],[3,0],[2,0]]}"#).unwrap();
+
+        assert_eq!(deserialized.relation(&canonical), Relation::Equal);
+        assert_eq!(deserialized, canonical);
+        assert_eq!(clock_hash(&deserialized), clock_hash(&canonical));
     }
 
     #[test]
