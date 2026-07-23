@@ -63,6 +63,22 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
         canonical
     }
 
+    fn map_is_canonical(map: &[(S, u64)]) -> bool {
+        let mut prev = None;
+        for (server, counter) in map {
+            if *counter == 0 {
+                return false;
+            }
+            if let Some(prev_server) = prev {
+                if prev_server >= *server {
+                    return false;
+                }
+            }
+            prev = Some(*server);
+        }
+        true
+    }
+
     fn compare_canonical(a: &[(S, u64)], b: &[(S, u64)]) -> Relation {
         let mut ai = 0;
         let mut bi = 0;
@@ -123,9 +139,13 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
     }
 
     fn canonical_relation(&self, clock_b: &VectorClock<S>) -> Relation {
-        let clock_a = self.canonicalized_map();
-        let clock_b = clock_b.canonicalized_map();
-        Self::compare_canonical(&clock_a, &clock_b)
+        if Self::map_is_canonical(&self.map) && Self::map_is_canonical(&clock_b.map) {
+            Self::compare_canonical(&self.map, &clock_b.map)
+        } else {
+            let clock_a = self.canonicalized_map();
+            let clock_b = clock_b.canonicalized_map();
+            Self::compare_canonical(&clock_a, &clock_b)
+        }
     }
 
     pub fn new() -> VectorClock<S> {
@@ -161,6 +181,18 @@ impl<S: std::hash::Hash + Ord + Eq + Copy> VectorClock<S> {
 
     pub fn relation(&self, clock_b: &VectorClock<S>) -> Relation {
         self.canonical_relation(clock_b)
+    }
+
+    pub fn deterministic_cmp(&self, other: &Self) -> Ordering {
+        if Self::map_is_canonical(&self.map) && Self::map_is_canonical(&other.map) {
+            self.map.cmp(&other.map)
+        } else {
+            let canonical_self = self.canonicalized_map();
+            let canonical_other = other.canonicalized_map();
+            canonical_self
+                .cmp(&canonical_other)
+                .then_with(|| self.map.cmp(&other.map))
+        }
     }
 
     pub fn merge_with(&mut self, clock_b: &VectorClock<S>) {
@@ -313,6 +345,7 @@ pub type StandardVectorClock = VectorClock<u64>;
 #[cfg(test)]
 mod test {
     use crate::vector_clock::{Relation, StandardVectorClock};
+    use std::cmp::Ordering;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -320,6 +353,10 @@ mod test {
         let mut hasher = DefaultHasher::new();
         clock.hash(&mut hasher);
         hasher.finish()
+    }
+
+    fn raw_clock(entries: &[(u64, u64)]) -> StandardVectorClock {
+        serde_json::from_value(serde_json::json!({ "map": entries })).unwrap()
     }
 
     #[test]
@@ -430,6 +467,40 @@ mod test {
         assert_eq!(deserialized.relation(&canonical), Relation::Equal);
         assert_eq!(deserialized, canonical);
         assert_eq!(clock_hash(&deserialized), clock_hash(&canonical));
+    }
+
+    #[test]
+    fn deterministic_cmp_totally_orders_canonical_clocks() {
+        let left = StandardVectorClock::from_vec(vec![(1, 1)]);
+        let right = StandardVectorClock::from_vec(vec![(2, 1)]);
+        let expected = left.map.cmp(&right.map);
+
+        assert_eq!(left.relation(&right), Relation::Concurrent);
+        assert_ne!(expected, Ordering::Equal);
+        assert_eq!(left.deterministic_cmp(&right), expected);
+        assert_eq!(right.deterministic_cmp(&left), expected.reverse());
+    }
+
+    #[test]
+    fn deterministic_cmp_returns_equal_for_causally_equal_canonical_clocks() {
+        let left = StandardVectorClock::from_vec(vec![(1, 2), (2, 3)]);
+        let right = StandardVectorClock::from_vec(vec![(1, 2), (2, 3)]);
+
+        assert_eq!(left.relation(&right), Relation::Equal);
+        assert_eq!(left.deterministic_cmp(&right), Ordering::Equal);
+        assert_eq!(right.deterministic_cmp(&left), Ordering::Equal);
+    }
+
+    #[test]
+    fn deterministic_cmp_tie_breaks_semantically_equal_noncanonical_clocks_by_raw_map() {
+        let left = raw_clock(&[(2, 0), (1, 1)]);
+        let right = raw_clock(&[(1, 1), (3, 0)]);
+        let expected = left.map.cmp(&right.map);
+
+        assert_eq!(left.relation(&right), Relation::Equal);
+        assert_ne!(expected, Ordering::Equal);
+        assert_eq!(left.deterministic_cmp(&right), expected);
+        assert_eq!(right.deterministic_cmp(&left), expected.reverse());
     }
 
     #[test]
