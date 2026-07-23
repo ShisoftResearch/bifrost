@@ -55,7 +55,7 @@ pub fn adjust_caller_identifiers(input: TokenStream) -> TokenStream {
         .collect::<Vec<_>>();
 
     quote! {
-        ( #(#output),* )
+        ( #(#output,)* )
     }
     .into()
 }
@@ -124,6 +124,6 @@ pub fn deref_tuple_types(input: TokenStream) -> TokenStream {
         })
         .collect();
 
-    let tokens = quote! { (#(#transformed_types),*) };
+    let tokens = quote! { (#(#transformed_types,)*) };
     tokens.into()
 }

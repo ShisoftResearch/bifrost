@@ -421,6 +421,20 @@ mod test {
             let error_msg = response.await.unwrap().err().unwrap();
             assert_eq!(error_msg, expected_err_msg);
         }
+
+        #[tokio::test(flavor = "multi_thread")]
+        pub async fn one_arg_dispatch_decodes_wire_tuple_payload() {
+            let req_data = (String::from("Jack"),);
+            let req_data_bytes =
+                crate::bytes::BytesMut::from(crate::utils::serde::serialize(&req_data).as_slice());
+            let req_bytes =
+                crate::rpc::prepend_u64(bifrost_plugins::hash_ident!(hello) as u64, req_data_bytes);
+
+            let res_bytes = HelloServer.inner_dispatch(req_bytes).await.unwrap();
+            let greeting: String = crate::utils::serde::deserialize(&res_bytes).unwrap();
+
+            assert_eq!(greeting, String::from("Hello, Jack!"));
+        }
     }
 
     pub mod struct_service {
