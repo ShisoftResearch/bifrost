@@ -96,18 +96,22 @@ impl DiskLogEntry {
                 format!("DiskLogEntry too short: {} bytes", data.len()),
             ));
         }
-        let term          = u64::from_le_bytes(data[0..8].try_into().unwrap());
-        let commit_index  = u64::from_le_bytes(data[8..16].try_into().unwrap());
-        let last_applied  = u64::from_le_bytes(data[16..24].try_into().unwrap());
-        let log_id        = u64::from_le_bytes(data[24..32].try_into().unwrap());
-        let log_term      = u64::from_le_bytes(data[32..40].try_into().unwrap());
-        let log_sm_id     = u64::from_le_bytes(data[40..48].try_into().unwrap());
-        let log_fn_id     = u64::from_le_bytes(data[48..56].try_into().unwrap());
-        let data_len      = u64::from_le_bytes(data[56..64].try_into().unwrap()) as usize;
+        let term = u64::from_le_bytes(data[0..8].try_into().unwrap());
+        let commit_index = u64::from_le_bytes(data[8..16].try_into().unwrap());
+        let last_applied = u64::from_le_bytes(data[16..24].try_into().unwrap());
+        let log_id = u64::from_le_bytes(data[24..32].try_into().unwrap());
+        let log_term = u64::from_le_bytes(data[32..40].try_into().unwrap());
+        let log_sm_id = u64::from_le_bytes(data[40..48].try_into().unwrap());
+        let log_fn_id = u64::from_le_bytes(data[48..56].try_into().unwrap());
+        let data_len = u64::from_le_bytes(data[56..64].try_into().unwrap()) as usize;
         if data.len() < 64 + data_len {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("DiskLogEntry data truncated: expected {}, got {}", 64 + data_len, data.len()),
+                format!(
+                    "DiskLogEntry data truncated: expected {}, got {}",
+                    64 + data_len,
+                    data.len()
+                ),
             ));
         }
         let log_data = data[64..64 + data_len].to_vec();
@@ -174,7 +178,8 @@ impl StorageEntity {
                         let mut counter = 0;
                         let mut last_valid_pos: u64 = 0;
                         loop {
-                            let pos_before = log_file.seek(SeekFrom::Current(0))
+                            let pos_before = log_file
+                                .seek(SeekFrom::Current(0))
                                 .unwrap_or(last_valid_pos);
                             if log_file.read_exact(&mut len_buf).is_err() {
                                 break;
@@ -182,18 +187,27 @@ impl StorageEntity {
                             let record_len = u64::from_le_bytes(len_buf);
                             // record_len = 4 (CRC) + payload_len
                             if record_len < 4 {
-                                warn!("WAL corrupt: invalid record length {} at pos {}, truncating", record_len, pos_before);
+                                warn!(
+                                    "WAL corrupt: invalid record length {} at pos {}, truncating",
+                                    record_len, pos_before
+                                );
                                 break;
                             }
                             let payload_len = record_len - 4;
                             if log_file.read_exact(&mut crc_buf).is_err() {
-                                warn!("WAL truncated: missing CRC at pos {}, truncating", pos_before);
+                                warn!(
+                                    "WAL truncated: missing CRC at pos {}, truncating",
+                                    pos_before
+                                );
                                 break;
                             }
                             let expected_crc = u32::from_le_bytes(crc_buf);
                             let mut data_buf = vec![0u8; payload_len as usize];
                             if log_file.read_exact(&mut data_buf).is_err() {
-                                warn!("WAL truncated: missing payload at pos {}, truncating", pos_before);
+                                warn!(
+                                    "WAL truncated: missing payload at pos {}, truncating",
+                                    pos_before
+                                );
                                 break;
                             }
                             let actual_crc = crc32fast::hash(&data_buf);
@@ -212,11 +226,15 @@ impl StorageEntity {
                                     last_log_id = entry.log.id;
                                     logs.insert(entry.log.id, entry.log);
                                     counter += 1;
-                                    last_valid_pos = log_file.seek(SeekFrom::Current(0))
+                                    last_valid_pos = log_file
+                                        .seek(SeekFrom::Current(0))
                                         .unwrap_or(last_valid_pos);
                                 }
                                 Err(e) => {
-                                    warn!("WAL decode error at pos {}: {:?}, truncating", pos_before, e);
+                                    warn!(
+                                        "WAL decode error at pos {}: {:?}, truncating",
+                                        pos_before, e
+                                    );
                                     break;
                                 }
                             }
@@ -225,9 +243,16 @@ impl StorageEntity {
                         // then seek to end so appends start at the correct position
                         let current_len = log_file.seek(SeekFrom::End(0)).unwrap_or(last_valid_pos);
                         if current_len > last_valid_pos {
-                            info!("WAL has corrupt tail ({} extra bytes), truncating to {}", current_len - last_valid_pos, last_valid_pos);
+                            info!(
+                                "WAL has corrupt tail ({} extra bytes), truncating to {}",
+                                current_len - last_valid_pos,
+                                last_valid_pos
+                            );
                             if let Err(e) = log_file.set_len(last_valid_pos) {
-                                warn!("Failed to truncate WAL to {} bytes: {:?}", last_valid_pos, e);
+                                warn!(
+                                    "Failed to truncate WAL to {} bytes: {:?}",
+                                    last_valid_pos, e
+                                );
                             }
                         }
                         let _ = log_file.seek(SeekFrom::End(0));

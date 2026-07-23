@@ -593,8 +593,7 @@ async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
             Err(ExecError::SmNotFound(sm_id)) => {
                 warn!(
                     "Deferring log entry {} until state machine {} is registered",
-                    next_log_id,
-                    sm_id
+                    next_log_id, sm_id
                 );
                 break;
             }
@@ -1660,7 +1659,6 @@ impl RaftService {
         }
     }
 
-
     pub async fn start(server: &Arc<RaftService>, recover_registered: bool) -> bool {
         info!(
             "Waiting for raft server to be initialized on plane {}",
@@ -2366,31 +2364,29 @@ impl RaftService {
                     let mut leader_meta = leader_meta.write().await;
                     while let Some(heartbeat_res) = heartbeat_futs.next().await {
                         match heartbeat_res {
-                            Ok(Ok((member_id, heartbeat_result))) => {
-                                match heartbeat_result {
-                                    HeartbeatReplicationResult::Matched(last_matched_id) => {
-                                        debug!(
-                                            "Heartbeat response on plane {} from {} is {:?}",
-                                            plane_id.raw(),
-                                            member_id,
-                                            last_matched_id
-                                        );
-                                        if last_matched_id >= log_id {
-                                            updated_followers += 1;
-                                            if is_majority(followers as u64, updated_followers) {
-                                                return true;
-                                            }
+                            Ok(Ok((member_id, heartbeat_result))) => match heartbeat_result {
+                                HeartbeatReplicationResult::Matched(last_matched_id) => {
+                                    debug!(
+                                        "Heartbeat response on plane {} from {} is {:?}",
+                                        plane_id.raw(),
+                                        member_id,
+                                        last_matched_id
+                                    );
+                                    if last_matched_id >= log_id {
+                                        updated_followers += 1;
+                                        if is_majority(followers as u64, updated_followers) {
+                                            return true;
                                         }
                                     }
-                                    HeartbeatReplicationResult::TermOut {
-                                        term: remote_term,
-                                        leader_id: remote_leader_id,
-                                    } => {
-                                        higher_term = Some((remote_term, remote_leader_id));
-                                        break;
-                                    }
                                 }
-                            }
+                                HeartbeatReplicationResult::TermOut {
+                                    term: remote_term,
+                                    leader_id: remote_leader_id,
+                                } => {
+                                    higher_term = Some((remote_term, remote_leader_id));
+                                    break;
+                                }
+                            },
                             Ok(Err(err)) => {
                                 warn!(
                                     "Heartbeat task failed on plane {} while replicating log {}: {:?}",
@@ -2893,13 +2889,12 @@ impl RaftService {
             None
         };
 
-        let (new_log_id, new_log_term) = if let Some((existing_log_id, existing_log_term)) =
-            existing_pending_entry
-        {
-            (existing_log_id, existing_log_term)
-        } else {
-            self.leader_append_log(&meta, &mut entry).await
-        };
+        let (new_log_id, new_log_term) =
+            if let Some((existing_log_id, existing_log_term)) = existing_pending_entry {
+                (existing_log_id, existing_log_term)
+            } else {
+                self.leader_append_log(&meta, &mut entry).await
+            };
         entry.id = new_log_id;
         entry.term = new_log_term;
         let data = match entry.sm_id {
@@ -6203,7 +6198,8 @@ mod test {
             let _ = env_logger::try_init();
             info!("=== TEST: abrupt crash → full WAL recovery ===");
 
-            let temp_dir = std::env::temp_dir().join(format!("raft_abrupt_{}", rand::random::<u64>()));
+            let temp_dir =
+                std::env::temp_dir().join(format!("raft_abrupt_{}", rand::random::<u64>()));
             std::fs::create_dir_all(&temp_dir).unwrap();
             let data_path = temp_dir.to_str().unwrap().to_string();
             let sm_id = 15u64;
@@ -6231,12 +6227,17 @@ mod test {
                 let server = Server::new(&addr1);
                 server.register_service(&svc).await;
                 Server::listen_and_resume(&server).await;
-                svc.register_state_machine(Box::new(SM { shots: initial_shots })).await;
+                svc.register_state_machine(Box::new(SM {
+                    shots: initial_shots,
+                }))
+                .await;
                 RaftService::start(&svc, false).await;
                 svc.bootstrap().await;
                 async_wait_secs().await;
 
-                let client = RaftClient::new(&vec![addr1.clone()], DEFAULT_SERVICE_ID).await.unwrap();
+                let client = RaftClient::new(&vec![addr1.clone()], DEFAULT_SERVICE_ID)
+                    .await
+                    .unwrap();
                 let sm_client = client::SMClient::new(sm_id, &client);
                 for _ in 0..num_cmds {
                     sm_client.take_a_shot(&1).await.unwrap();
@@ -6249,10 +6250,16 @@ mod test {
 
                 // Verify WAL and commit.idx exist
                 assert!(temp_dir.join("log.dat").exists(), "WAL must exist");
-                assert!(temp_dir.join("commit.idx").exists(), "commit.idx must exist (written per-command)");
+                assert!(
+                    temp_dir.join("commit.idx").exists(),
+                    "commit.idx must exist (written per-command)"
+                );
 
                 // ABRUPT CRASH — no shutdown(), no flush_persistence()
-                drop(sm_client); drop(client); drop(svc); drop(server);
+                drop(sm_client);
+                drop(client);
+                drop(svc);
+                drop(server);
                 info!("Abrupt crash simulated (all handles dropped)");
             }
             async_wait(Duration::from_secs(2)).await;
@@ -6277,7 +6284,10 @@ mod test {
                 server2.register_service(&svc2).await;
                 Server::listen_and_resume(&server2).await;
                 // Register SM with SAME initial shots so replay produces the right result
-                svc2.register_state_machine(Box::new(SM { shots: initial_shots })).await;
+                svc2.register_state_machine(Box::new(SM {
+                    shots: initial_shots,
+                }))
+                .await;
                 RaftService::start(&svc2, false).await;
                 svc2.bootstrap().await;
 
@@ -6285,15 +6295,26 @@ mod test {
                 svc2.recover_after_register().await;
                 async_wait(Duration::from_secs(2)).await;
 
-                let client2 = RaftClient::new(&vec![addr2.clone()], DEFAULT_SERVICE_ID).await.unwrap();
+                let client2 = RaftClient::new(&vec![addr2.clone()], DEFAULT_SERVICE_ID)
+                    .await
+                    .unwrap();
                 let sm_client2 = client::SMClient::new(sm_id, &client2);
                 let recovered = sm_client2.get_shot().await.unwrap();
                 info!("Recovered state: {} (expected {})", recovered, expected);
 
-                assert_ne!(recovered, initial_shots, "Must not equal untouched initial state");
-                assert_eq!(recovered, expected, "Must recover exact pre-crash state via WAL");
+                assert_ne!(
+                    recovered, initial_shots,
+                    "Must not equal untouched initial state"
+                );
+                assert_eq!(
+                    recovered, expected,
+                    "Must recover exact pre-crash state via WAL"
+                );
 
-                drop(sm_client2); drop(client2); drop(svc2); drop(server2);
+                drop(sm_client2);
+                drop(client2);
+                drop(svc2);
+                drop(server2);
             }
             std::fs::remove_dir_all(&temp_dir).unwrap();
             info!("=== PASS: abrupt crash recovery ===");
@@ -6306,7 +6327,8 @@ mod test {
             let _ = env_logger::try_init();
             info!("=== TEST: partial WAL write → truncation on recovery ===");
 
-            let temp_dir = std::env::temp_dir().join(format!("raft_partial_{}", rand::random::<u64>()));
+            let temp_dir =
+                std::env::temp_dir().join(format!("raft_partial_{}", rand::random::<u64>()));
             std::fs::create_dir_all(&temp_dir).unwrap();
             let log_path = temp_dir.join("log.dat");
             const N: usize = 5;
@@ -6316,18 +6338,33 @@ mod test {
             {
                 let mut logs = BTreeMap::new();
                 for i in 1..=N as u64 {
-                    logs.insert(i, LogEntry { id: i, term: 1, sm_id: 15, fn_id: 1,
-                        data: vec![i as u8; DATA_LEN] });
+                    logs.insert(
+                        i,
+                        LogEntry {
+                            id: i,
+                            term: 1,
+                            sm_id: 15,
+                            fn_id: 1,
+                            data: vec![i as u8; DATA_LEN],
+                        },
+                    );
                 }
                 let meta = RaftMeta {
-                    term: 1, vote_for: None, timeout: 10000, last_checked: 0,
+                    term: 1,
+                    vote_for: None,
+                    timeout: 10000,
+                    last_checked: 0,
                     membership: Membership::Undefined,
                     logs: Arc::new(async_std::sync::RwLock::new(BTreeMap::new())),
-                    state_machine: Arc::new(async_std::sync::RwLock::new(
-                        MasterStateMachine::new(DEFAULT_SERVICE_ID))),
-                    commit_index: N as u64, last_applied: N as u64,
-                    leader_id: 0, storage: None,
-                    last_snapshot_index: 0, last_snapshot_term: 0,
+                    state_machine: Arc::new(async_std::sync::RwLock::new(MasterStateMachine::new(
+                        DEFAULT_SERVICE_ID,
+                    ))),
+                    commit_index: N as u64,
+                    last_applied: N as u64,
+                    leader_id: 0,
+                    storage: None,
+                    last_snapshot_index: 0,
+                    last_snapshot_term: 0,
                     lifecycle: LifecycleState::Running,
                 };
                 let meta_lock = async_std::sync::RwLock::new(meta);
@@ -6337,7 +6374,9 @@ mod test {
 
                 let mut storage = disk::StorageEntity {
                     logs: Some(tokio::fs::File::create(&log_path).await.unwrap()),
-                    snapshot: None, last_term: 0, base_path: temp_dir.clone(),
+                    snapshot: None,
+                    last_term: 0,
+                    base_path: temp_dir.clone(),
                     plane_id: PlaneId::type1(),
                 };
                 storage.append_logs(&meta_guard, &logs_guard).await.unwrap();
@@ -6351,13 +6390,19 @@ mod test {
             // ─── Phase 2: append 5 garbage bytes (partial length prefix) ───
             {
                 use std::io::Write as _;
-                let mut f = std::fs::OpenOptions::new().append(true).open(&log_path).unwrap();
+                let mut f = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&log_path)
+                    .unwrap();
                 f.write_all(&[0xDE, 0xAD, 0xBE, 0xEF, 0xCA]).unwrap();
                 f.sync_all().unwrap();
             }
             let size_with_garbage = std::fs::metadata(&log_path).unwrap().len();
-            assert_eq!(size_with_garbage, size_good + 5,
-                "File should be exactly 5 bytes larger after injecting garbage");
+            assert_eq!(
+                size_with_garbage,
+                size_good + 5,
+                "File should be exactly 5 bytes larger after injecting garbage"
+            );
 
             // ─── Phase 3: recover using new_with_options ───
             let mut term = 0u64;
@@ -6367,27 +6412,45 @@ mod test {
             let opts = Options {
                 storage: Storage::DISK(disk::DiskOptions {
                     path: temp_dir.to_str().unwrap().to_string(),
-                    take_snapshots: false, append_logs: true, trim_logs: false,
-                    snapshot_log_threshold: 10000, log_compaction_threshold: 20000,
+                    take_snapshots: false,
+                    append_logs: true,
+                    trim_logs: false,
+                    snapshot_log_threshold: 10000,
+                    log_compaction_threshold: 20000,
                 }),
                 address: "127.0.0.1:0".to_string(),
                 service_id: DEFAULT_SERVICE_ID,
             };
             let _storage = disk::StorageEntity::new_with_options(
-                &opts, &mut term, &mut commit_index, &mut last_applied, &mut recovered_logs
-            ).unwrap();
+                &opts,
+                &mut term,
+                &mut commit_index,
+                &mut last_applied,
+                &mut recovered_logs,
+            )
+            .unwrap();
 
             // All N good entries must be present
-            assert_eq!(recovered_logs.len(), N,
-                "Should recover exactly {} entries; got {}", N, recovered_logs.len());
+            assert_eq!(
+                recovered_logs.len(),
+                N,
+                "Should recover exactly {} entries; got {}",
+                N,
+                recovered_logs.len()
+            );
 
             // The corrupt 5-byte tail must have been truncated
             let size_after = std::fs::metadata(&log_path).unwrap().len();
-            assert_eq!(size_after, size_good,
-                "WAL file must be truncated back to {} bytes; got {}", size_good, size_after);
+            assert_eq!(
+                size_after, size_good,
+                "WAL file must be truncated back to {} bytes; got {}",
+                size_good, size_after
+            );
 
-            info!("Recovered {} entries; corrupt tail truncated ({} → {} bytes)",
-                N, size_with_garbage, size_after);
+            info!(
+                "Recovered {} entries; corrupt tail truncated ({} → {} bytes)",
+                N, size_with_garbage, size_after
+            );
             std::fs::remove_dir_all(&temp_dir).unwrap();
             info!("=== PASS: partial write truncation ===");
         }
@@ -6415,18 +6478,33 @@ mod test {
             {
                 let mut logs = BTreeMap::new();
                 for i in 1..=N as u64 {
-                    logs.insert(i, LogEntry { id: i, term: 1, sm_id: 15, fn_id: 1,
-                        data: vec![i as u8; DATA_LEN] });
+                    logs.insert(
+                        i,
+                        LogEntry {
+                            id: i,
+                            term: 1,
+                            sm_id: 15,
+                            fn_id: 1,
+                            data: vec![i as u8; DATA_LEN],
+                        },
+                    );
                 }
                 let meta = RaftMeta {
-                    term: 1, vote_for: None, timeout: 10000, last_checked: 0,
+                    term: 1,
+                    vote_for: None,
+                    timeout: 10000,
+                    last_checked: 0,
                     membership: Membership::Undefined,
                     logs: Arc::new(async_std::sync::RwLock::new(BTreeMap::new())),
-                    state_machine: Arc::new(async_std::sync::RwLock::new(
-                        MasterStateMachine::new(DEFAULT_SERVICE_ID))),
-                    commit_index: N as u64, last_applied: N as u64,
-                    leader_id: 0, storage: None,
-                    last_snapshot_index: 0, last_snapshot_term: 0,
+                    state_machine: Arc::new(async_std::sync::RwLock::new(MasterStateMachine::new(
+                        DEFAULT_SERVICE_ID,
+                    ))),
+                    commit_index: N as u64,
+                    last_applied: N as u64,
+                    leader_id: 0,
+                    storage: None,
+                    last_snapshot_index: 0,
+                    last_snapshot_term: 0,
                     lifecycle: LifecycleState::Running,
                 };
                 let meta_lock = async_std::sync::RwLock::new(meta);
@@ -6435,27 +6513,37 @@ mod test {
                 let logs_guard = logs_lock.write().await;
                 let mut storage = disk::StorageEntity {
                     logs: Some(tokio::fs::File::create(&log_path).await.unwrap()),
-                    snapshot: None, last_term: 0, base_path: temp_dir.clone(),
+                    snapshot: None,
+                    last_term: 0,
+                    base_path: temp_dir.clone(),
                     plane_id: PlaneId::type1(),
                 };
                 storage.append_logs(&meta_guard, &logs_guard).await.unwrap();
             }
 
             let size_before = std::fs::metadata(&log_path).unwrap().len();
-            assert_eq!(size_before, (N * RECORD_SIZE) as u64,
-                "WAL size mismatch: expected {} bytes for {} entries", N * RECORD_SIZE, N);
+            assert_eq!(
+                size_before,
+                (N * RECORD_SIZE) as u64,
+                "WAL size mismatch: expected {} bytes for {} entries",
+                N * RECORD_SIZE,
+                N
+            );
 
             // ─── Phase 2: flip all 4 CRC bytes of entry CORRUPT_IDX ───
             {
                 let mut file_data = std::fs::read(&log_path).unwrap();
                 // CRC starts at byte 8 (after 8-byte length prefix) within each record
                 let crc_offset = CORRUPT_IDX * RECORD_SIZE + 8;
-                file_data[crc_offset]     ^= 0xFF;
+                file_data[crc_offset] ^= 0xFF;
                 file_data[crc_offset + 1] ^= 0xFF;
                 file_data[crc_offset + 2] ^= 0xFF;
                 file_data[crc_offset + 3] ^= 0xFF;
                 std::fs::write(&log_path, &file_data).unwrap();
-                info!("Corrupted CRC of entry {} at byte offset {}", CORRUPT_IDX, crc_offset);
+                info!(
+                    "Corrupted CRC of entry {} at byte offset {}",
+                    CORRUPT_IDX, crc_offset
+                );
             }
 
             // ─── Phase 3: recover ───
@@ -6466,40 +6554,66 @@ mod test {
             let opts = Options {
                 storage: Storage::DISK(disk::DiskOptions {
                     path: temp_dir.to_str().unwrap().to_string(),
-                    take_snapshots: false, append_logs: true, trim_logs: false,
-                    snapshot_log_threshold: 10000, log_compaction_threshold: 20000,
+                    take_snapshots: false,
+                    append_logs: true,
+                    trim_logs: false,
+                    snapshot_log_threshold: 10000,
+                    log_compaction_threshold: 20000,
                 }),
                 address: "127.0.0.1:0".to_string(),
                 service_id: DEFAULT_SERVICE_ID,
             };
             let _storage = disk::StorageEntity::new_with_options(
-                &opts, &mut term, &mut commit_index, &mut last_applied, &mut recovered_logs
-            ).unwrap();
+                &opts,
+                &mut term,
+                &mut commit_index,
+                &mut last_applied,
+                &mut recovered_logs,
+            )
+            .unwrap();
 
             // Only the CORRUPT_IDX entries before the corruption survive
-            assert_eq!(recovered_logs.len(), CORRUPT_IDX,
+            assert_eq!(
+                recovered_logs.len(),
+                CORRUPT_IDX,
                 "Should recover exactly {} entries before corruption; got {}",
-                CORRUPT_IDX, recovered_logs.len());
+                CORRUPT_IDX,
+                recovered_logs.len()
+            );
 
             // Verify the recovered entries are the correct ones (ids 1..CORRUPT_IDX)
             for id in 1..=CORRUPT_IDX as u64 {
-                assert!(recovered_logs.contains_key(&id), "Entry id={} should be present", id);
+                assert!(
+                    recovered_logs.contains_key(&id),
+                    "Entry id={} should be present",
+                    id
+                );
             }
             for id in (CORRUPT_IDX + 1) as u64..=N as u64 {
-                assert!(!recovered_logs.contains_key(&id),
-                    "Entry id={} should have been dropped (after corruption)", id);
+                assert!(
+                    !recovered_logs.contains_key(&id),
+                    "Entry id={} should have been dropped (after corruption)",
+                    id
+                );
             }
 
             // File truncated at the corruption boundary
             let expected_truncated_size = (CORRUPT_IDX * RECORD_SIZE) as u64;
             let actual_size = std::fs::metadata(&log_path).unwrap().len();
-            assert_eq!(actual_size, expected_truncated_size,
+            assert_eq!(
+                actual_size, expected_truncated_size,
                 "WAL must be truncated to {} bytes at corruption; got {}",
-                expected_truncated_size, actual_size);
+                expected_truncated_size, actual_size
+            );
 
-            info!("CRC corruption test: {} good entries recovered, {} corrupt entries dropped, \
+            info!(
+                "CRC corruption test: {} good entries recovered, {} corrupt entries dropped, \
                 file truncated from {} to {} bytes",
-                CORRUPT_IDX, N - CORRUPT_IDX, size_before, actual_size);
+                CORRUPT_IDX,
+                N - CORRUPT_IDX,
+                size_before,
+                actual_size
+            );
             std::fs::remove_dir_all(&temp_dir).unwrap();
             info!("=== PASS: CRC corruption stops recovery at bad entry ===");
         }
@@ -6512,14 +6626,15 @@ mod test {
             let _ = env_logger::try_init();
             info!("=== TEST: snapshot + post-snapshot WAL crash recovery ===");
 
-            let temp_dir = std::env::temp_dir().join(format!("raft_snap_wal_{}", rand::random::<u64>()));
+            let temp_dir =
+                std::env::temp_dir().join(format!("raft_snap_wal_{}", rand::random::<u64>()));
             std::fs::create_dir_all(&temp_dir).unwrap();
             let data_path = temp_dir.to_str().unwrap().to_string();
             let sm_id = 15u64;
 
             const INITIAL: i32 = 100;
-            const CMDS_BEFORE_SNAP: i32 = 5;  // shots: 100 → 95
-            const CMDS_AFTER_SNAP: i32  = 3;  // shots: 95  → 92
+            const CMDS_BEFORE_SNAP: i32 = 5; // shots: 100 → 95
+            const CMDS_AFTER_SNAP: i32 = 3; // shots: 95  → 92
             let expected = INITIAL - CMDS_BEFORE_SNAP - CMDS_AFTER_SNAP; // 92
 
             let port1 = 4050u16 + (rand::random::<u16>() % 20);
@@ -6542,12 +6657,15 @@ mod test {
                 let server = Server::new(&addr1);
                 server.register_service(&svc).await;
                 Server::listen_and_resume(&server).await;
-                svc.register_state_machine(Box::new(SM { shots: INITIAL })).await;
+                svc.register_state_machine(Box::new(SM { shots: INITIAL }))
+                    .await;
                 RaftService::start(&svc, false).await;
                 svc.bootstrap().await;
                 async_wait_secs().await;
 
-                let client = RaftClient::new(&vec![addr1.clone()], DEFAULT_SERVICE_ID).await.unwrap();
+                let client = RaftClient::new(&vec![addr1.clone()], DEFAULT_SERVICE_ID)
+                    .await
+                    .unwrap();
                 let sm_client = client::SMClient::new(sm_id, &client);
 
                 // Execute CMDS_BEFORE_SNAP commands
@@ -6565,7 +6683,10 @@ mod test {
                     svc.take_snapshot(&mut meta).await;
                     info!("Snapshot taken at state {}", state_before_snap);
                 }
-                assert!(temp_dir.join("snapshot.dat").exists(), "snapshot.dat must exist");
+                assert!(
+                    temp_dir.join("snapshot.dat").exists(),
+                    "snapshot.dat must exist"
+                );
 
                 // Execute CMDS_AFTER_SNAP more commands (post-snapshot WAL entries)
                 for _ in 0..CMDS_AFTER_SNAP {
@@ -6577,11 +6698,20 @@ mod test {
                 info!("State before crash: {}", state_before_crash);
 
                 assert!(temp_dir.join("log.dat").exists(), "WAL must exist");
-                assert!(temp_dir.join("commit.idx").exists(), "commit.idx must exist");
+                assert!(
+                    temp_dir.join("commit.idx").exists(),
+                    "commit.idx must exist"
+                );
 
                 // Abrupt crash
-                drop(sm_client); drop(client); drop(svc); drop(server);
-                info!("Abrupt crash (post snapshot + {} WAL entries)", CMDS_AFTER_SNAP);
+                drop(sm_client);
+                drop(client);
+                drop(svc);
+                drop(server);
+                info!(
+                    "Abrupt crash (post snapshot + {} WAL entries)",
+                    CMDS_AFTER_SNAP
+                );
             }
             async_wait(Duration::from_secs(2)).await;
 
@@ -6610,31 +6740,43 @@ mod test {
                 // stores the snapshot bytes before register() applies them.
                 // start() loads snapshot → stores snapshot[15] → register() applies snapshot → SM.shots=95
                 RaftService::start(&svc2, false).await;
-                svc2.register_state_machine(Box::new(SM { shots: 999 })).await;
+                svc2.register_state_machine(Box::new(SM { shots: 999 }))
+                    .await;
                 svc2.bootstrap().await;
 
                 // Replay post-snapshot WAL entries (entries after snapshot index → shots 95→92)
                 svc2.recover_after_register().await;
                 async_wait(Duration::from_secs(2)).await;
 
-                let client2 = RaftClient::new(&vec![addr2.clone()], DEFAULT_SERVICE_ID).await.unwrap();
+                let client2 = RaftClient::new(&vec![addr2.clone()], DEFAULT_SERVICE_ID)
+                    .await
+                    .unwrap();
                 let sm_client2 = client::SMClient::new(sm_id, &client2);
                 let recovered = sm_client2.get_shot().await.unwrap();
                 info!("Recovered state: {} (expected {})", recovered, expected);
 
                 // Core assertions
-                assert_ne!(recovered, 999,
-                    "SM must NOT show initial 999 — that would be 'starting over'");
-                assert_ne!(recovered, INITIAL,
-                    "SM must NOT show {} — that would mean snapshot was ignored", INITIAL);
-                assert_eq!(recovered, expected,
-                    "SM must recover to exact pre-crash state via snapshot + WAL replay");
+                assert_ne!(
+                    recovered, 999,
+                    "SM must NOT show initial 999 — that would be 'starting over'"
+                );
+                assert_ne!(
+                    recovered, INITIAL,
+                    "SM must NOT show {} — that would mean snapshot was ignored",
+                    INITIAL
+                );
+                assert_eq!(
+                    recovered, expected,
+                    "SM must recover to exact pre-crash state via snapshot + WAL replay"
+                );
 
-                drop(sm_client2); drop(client2); drop(svc2); drop(server2);
+                drop(sm_client2);
+                drop(client2);
+                drop(svc2);
+                drop(server2);
             }
             std::fs::remove_dir_all(&temp_dir).unwrap();
             info!("=== PASS: snapshot + WAL crash recovery (not start over) ===");
         }
     }
 }
-
