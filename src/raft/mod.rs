@@ -481,6 +481,16 @@ impl PlaneHandle {
             .await
     }
 
+    pub async fn member_addresses(&self) -> Result<Vec<String>, PlaneError> {
+        self.service.plane_member_addresses(self.plane_id).await
+    }
+
+    pub async fn add_member(&self, address: String) -> Result<bool, PlaneBootstrapError> {
+        self.service
+            .add_plane_member_via_log(self.plane_id, address)
+            .await
+    }
+
     pub async fn have_state_machine(&self, sm_id: u64) -> Result<bool, PlaneError> {
         self.service
             .have_state_machine_on_plane_local(self.plane_id, sm_id)

@@ -5,7 +5,7 @@ use bifrost_hasher::hash_str;
 use futures::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::{runtime, time};
+use tokio::time;
 
 use crate::membership::DEFAULT_SERVICE_ID;
 use crate::raft::client::RaftClient;
@@ -77,6 +77,9 @@ impl MemberService {
     pub async fn leave(&self) -> Result<bool, ExecError> {
         self.close();
         self.sm_client.leave(&self.id).await
+    }
+    pub async fn join(&self, server_address: &String) -> Result<Option<u64>, ExecError> {
+        self.sm_client.join(server_address).await
     }
     pub async fn join_group(&self, group: &String) -> Result<bool, ExecError> {
         self.member_client.join_group(group).await
