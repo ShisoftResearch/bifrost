@@ -2,3 +2,6 @@ target
 Cargo.lock
 .idea/
 bifrost.iml
+
+# Local agent state
+.claude/
