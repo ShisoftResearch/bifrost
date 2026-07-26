@@ -23,6 +23,11 @@ pub struct Hlc {
     pub node: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HlcError {
+    Exhausted,
+}
+
 impl Hlc {
     /// Wall-clock milliseconds this value is anchored to.
     pub fn wall_ms(&self) -> u64 {
@@ -50,48 +55,87 @@ impl HlcSource {
         self.node
     }
 
-    fn packed_phys_ms() -> u64 {
-        let ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        ms << LOGICAL_BITS
-    }
-
-    fn advance(&self, floor: u64) -> Hlc {
-        let phys = Self::packed_phys_ms();
+    fn advance_checked(&self, floor: u64) -> Result<Hlc, HlcError> {
+        let phys = Self::packed_phys_ms_checked()?;
+        let floor_next = floor.checked_add(1).ok_or(HlcError::Exhausted)?;
         let mut current = self.ts.load(Ordering::Relaxed);
         loop {
-            // Strictly greater than everything seen: local history, the floor
-            // (a received remote value), and the physical clock anchor.
-            // Logical overflow naturally carries into the wall-ms bits.
-            let next = (current + 1).max(floor + 1).max(phys);
+            let local_next = current.checked_add(1).ok_or(HlcError::Exhausted)?;
+            let next = local_next.max(floor_next).max(phys);
             match self
                 .ts
                 .compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Relaxed)
             {
-                Ok(_) => return Hlc { ts: next, node: self.node },
+                Ok(_) => {
+                    return Ok(Hlc {
+                        ts: next,
+                        node: self.node,
+                    });
+                }
                 Err(actual) => current = actual,
             }
         }
     }
 
+    fn packed_phys_ms_checked() -> Result<u64, HlcError> {
+        let ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        if ms > (u64::MAX >> LOGICAL_BITS) {
+            return Err(HlcError::Exhausted);
+        }
+        Ok(ms << LOGICAL_BITS)
+    }
+
+    pub fn try_now(&self) -> Result<Hlc, HlcError> {
+        self.advance_checked(0)
+    }
+
+    pub fn try_observe(&self, remote: Hlc) -> Result<Hlc, HlcError> {
+        self.advance_checked(remote.ts)
+    }
+
     /// Local/send event: a fresh value strictly greater than any previously
     /// issued by this source.
     pub fn now(&self) -> Hlc {
-        self.advance(0)
+        self.try_now().expect("HLC timestamp space exhausted")
     }
 
     /// Receive event: merge a remote value; the result strictly exceeds both
     /// the remote and all prior local values.
     pub fn observe(&self, remote: Hlc) -> Hlc {
-        self.advance(remote.ts)
+        self.try_observe(remote)
+            .expect("HLC timestamp space exhausted")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_advance_refuses_local_wrap() {
+        let source = HlcSource::new(7);
+        source.ts.store(u64::MAX, Ordering::Relaxed);
+
+        assert_eq!(source.try_now(), Err(HlcError::Exhausted));
+        assert_eq!(source.ts.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
+    fn checked_observe_refuses_remote_wrap() {
+        let source = HlcSource::new(7);
+
+        assert_eq!(
+            source.try_observe(Hlc {
+                ts: u64::MAX,
+                node: 9,
+            }),
+            Err(HlcError::Exhausted)
+        );
+        assert_eq!(source.ts.load(Ordering::Relaxed), 0);
+    }
 
     #[test]
     fn hlc_orders_by_ts_then_node() {
