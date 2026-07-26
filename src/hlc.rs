@@ -80,12 +80,16 @@ impl HlcSource {
     fn packed_phys_ms_checked() -> Result<u64, HlcError> {
         let ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_millis() as u64)
+            .map(|duration| duration.as_millis())
             .unwrap_or(0);
-        if ms > (u64::MAX >> LOGICAL_BITS) {
+        Self::pack_phys_ms_checked(ms)
+    }
+
+    fn pack_phys_ms_checked(ms: u128) -> Result<u64, HlcError> {
+        if ms > (u64::MAX >> LOGICAL_BITS) as u128 {
             return Err(HlcError::Exhausted);
         }
-        Ok(ms << LOGICAL_BITS)
+        Ok((ms as u64) << LOGICAL_BITS)
     }
 
     pub fn try_now(&self) -> Result<Hlc, HlcError> {
@@ -135,6 +139,24 @@ mod tests {
             Err(HlcError::Exhausted)
         );
         assert_eq!(source.ts.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn checked_physical_packing_refuses_out_of_range_milliseconds() {
+        let max_ms = (u64::MAX >> LOGICAL_BITS) as u128;
+
+        assert_eq!(
+            HlcSource::pack_phys_ms_checked(max_ms),
+            Ok((max_ms as u64) << LOGICAL_BITS)
+        );
+        assert_eq!(
+            HlcSource::pack_phys_ms_checked(max_ms + 1),
+            Err(HlcError::Exhausted)
+        );
+        assert_eq!(
+            HlcSource::pack_phys_ms_checked(u64::MAX as u128 + 1),
+            Err(HlcError::Exhausted)
+        );
     }
 
     #[test]
