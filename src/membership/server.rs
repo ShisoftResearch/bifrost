@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time as std_time;
 use tokio::time as async_time;
 
@@ -40,7 +40,7 @@ struct HBStatus {
 
 pub struct HeartbeatService {
     status: PtrHashMap<u64, HBStatus>,
-    raft_service: Arc<RaftService>,
+    raft_service: Weak<RaftService>,
     closed: AtomicBool,
     was_leader: AtomicBool,
     watcher_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -80,11 +80,16 @@ impl Service for HeartbeatService {
     }
 }
 impl HeartbeatService {
-    async fn update_raft(&self, online: &Vec<u64>, offline: &Vec<u64>) {
+    async fn update_raft(
+        &self,
+        raft_service: &Arc<RaftService>,
+        online: &Vec<u64>,
+        offline: &Vec<u64>,
+    ) {
         let log = commands::hb_online_changed::new(online, offline);
         // Encode to state machine command
         let (fn_id, _, data) = log.encode();
-        self.raft_service
+        raft_service
             .c_command(
                 PlaneId::type1(),
                 LogEntry {
@@ -189,7 +194,7 @@ impl Membership {
         let service = Arc::new(HeartbeatService {
             status: PtrHashMap::with_capacity(32),
             closed: AtomicBool::new(false),
-            raft_service: raft_service.clone(),
+            raft_service: Arc::downgrade(raft_service),
             was_leader: AtomicBool::new(false),
             watcher_handle: std::sync::Mutex::new(None),
         });
@@ -199,8 +204,12 @@ impl Membership {
             info!("Starting membership heartbeat watcher (fresh state, learning from network)");
             while !service_for_task.closed.load(Ordering::Relaxed) {
                 let service = &service_for_task;
+                let raft_service = match service.raft_service.upgrade() {
+                    Some(raft_service) => raft_service,
+                    None => break,
+                };
                 let start_time = get_time();
-                let is_leader = service.raft_service.is_leader();
+                let is_leader = raft_service.is_leader();
                 let was_leader = service.was_leader.load(Ordering::Relaxed);
                 if !was_leader && is_leader {
                     // Transferred leader will skip checking all member timeout for once
@@ -210,7 +219,7 @@ impl Membership {
                     service.was_leader.store(is_leader, Ordering::Relaxed);
                 }
                 if is_leader {
-                    trace!("Resync Membership as leader id {}", service.raft_service.id);
+                    trace!("Resync Membership as leader id {}", raft_service.id);
                     let mut outdated_members: Vec<u64> = Vec::new();
                     let mut back_in_members: Vec<u64> = Vec::new();
                     {
@@ -221,14 +230,14 @@ impl Membership {
                             let alive = (start_time < last_updated)
                                 || ((start_time - last_updated) < MAX_TIMEOUT);
                             let time_since_last_change = start_time - status.last_state_change;
-                            
+
                             // Finding new offline servers (with grace period)
                             if status.online && !alive {
                                 status.consecutive_failures += 1;
                                 status.consecutive_successes = 0;
-                                
+
                                 // Only mark offline after multiple consecutive failures AND minimum interval
-                                if status.consecutive_failures >= OFFLINE_GRACE_CHECKS 
+                                if status.consecutive_failures >= OFFLINE_GRACE_CHECKS
                                     && time_since_last_change >= MIN_STATE_CHANGE_INTERVAL {
                                     warn!(
                                         "Marking member {} as offline after {} consecutive timeout checks ({}ms since last update)",
@@ -251,7 +260,7 @@ impl Membership {
                             else if !status.online && alive {
                                 status.consecutive_successes += 1;
                                 status.consecutive_failures = 0;
-                                
+
                                 // Only mark online after multiple consecutive successes AND minimum interval
                                 if status.consecutive_successes >= ONLINE_GRACE_CHECKS
                                     && time_since_last_change >= MIN_STATE_CHANGE_INTERVAL {
@@ -293,13 +302,18 @@ impl Membership {
                             outdated_members.len()
                         );
                         service
-                            .update_raft(&back_in_members, &outdated_members)
+                            .update_raft(
+                                &raft_service,
+                                &back_in_members,
+                                &outdated_members,
+                            )
                             .await;
                     }
                 }
                 let end_time = get_time();
                 let time_took = end_time - start_time;
                 let interval = 500; // in ms
+                drop(raft_service);
                 if time_took < interval {
                     let time_to_wait = interval - time_took;
                     trace!(
