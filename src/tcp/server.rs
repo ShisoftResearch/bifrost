@@ -19,10 +19,37 @@ pub type BoxedRPCFuture = Box<RPCFuture>;
 pub type TcpReq = BytesMut;
 pub type TcpRes = Pin<Box<dyn Future<Output = BytesMut> + Send>>;
 
+#[cfg(test)]
+lazy_static! {
+    pub(crate) static ref TCP_BEFORE_REGISTRATION_PUBLICATION: Mutex<Option<Box<dyn FnOnce() + Send>>> =
+        Mutex::new(None);
+    pub(crate) static ref TCP_AFTER_REGISTRATION_ATTEMPT: Mutex<Option<Box<dyn FnOnce() + Send>>> =
+        Mutex::new(None);
+    pub(crate) static ref TCP_SHUTDOWN_AFTER_REGISTRATION_SNAPSHOT: Mutex<Option<Box<dyn FnOnce() + Send>>> =
+        Mutex::new(None);
+}
+
+#[cfg(test)]
+fn run_test_hook(hook: &Mutex<Option<Box<dyn FnOnce() + Send>>>) {
+    let hook = hook
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 pub struct Server {
     shutdown_tx: broadcast::Sender<()>,
-    shortcut_registration: Mutex<Option<shortcut::ShortcutRegistration>>,
+    registration: Mutex<RegistrationLifecycle>,
     shutdown_requested: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct RegistrationLifecycle {
+    closing: bool,
+    registration: Option<shortcut::ShortcutRegistration>,
 }
 
 impl Server {
@@ -30,7 +57,7 @@ impl Server {
         let (shutdown_tx, _) = broadcast::channel(1);
         Server {
             shutdown_tx,
-            shortcut_registration: Mutex::new(None),
+            registration: Mutex::new(RegistrationLifecycle::default()),
             shutdown_requested: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -53,12 +80,28 @@ impl Server {
             Some(TcpListener::bind(&addr).await?)
         };
         let is_network_listener = listener.is_some();
-        let registration = shortcut::register_server(addr, &callback).await;
-        let registration_token = registration.token();
-        *self
-            .shortcut_registration
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(registration);
+        #[cfg(test)]
+        run_test_hook(&TCP_BEFORE_REGISTRATION_PUBLICATION);
+        let publication = {
+            let mut lifecycle = self
+                .registration
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if lifecycle.closing {
+                None
+            } else {
+                let registration = shortcut::register_server(addr, &callback);
+                let registration_token = registration.token();
+                let replaced = lifecycle.registration.replace(registration);
+                Some((registration_token, replaced))
+            }
+        };
+        #[cfg(test)]
+        run_test_hook(&TCP_AFTER_REGISTRATION_ATTEMPT);
+        let Some((registration_token, replaced)) = publication else {
+            return Ok(());
+        };
+        drop(replaced);
 
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let shutdown_requested = self.shutdown_requested.clone();
@@ -138,16 +181,17 @@ impl Server {
 
         if is_network_listener || shutdown_requested.load(Ordering::Acquire) {
             let registration = {
-                let mut owned_registration = self
-                    .shortcut_registration
+                let mut lifecycle = self
+                    .registration
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if owned_registration
+                if lifecycle
+                    .registration
                     .as_ref()
                     .map(|registration| registration.token().is_same(&registration_token))
                     == Some(true)
                 {
-                    owned_registration.take()
+                    lifecycle.registration.take()
                 } else {
                     None
                 }
@@ -165,14 +209,19 @@ impl Server {
     pub(crate) fn shutdown_owned(&self) -> Option<shortcut::ShortcutToken> {
         info!("Initiating TCP server shutdown");
         self.shutdown_requested.store(true, Ordering::Release);
-        let registration = self
-            .shortcut_registration
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
+        let registration = {
+            let mut lifecycle = self
+                .registration
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            lifecycle.closing = true;
+            lifecycle.registration.take()
+        };
         let token = registration
             .as_ref()
             .map(shortcut::ShortcutRegistration::token);
+        #[cfg(test)]
+        run_test_hook(&TCP_SHUTDOWN_AFTER_REGISTRATION_SNAPSHOT);
         drop(registration);
         let _ = self.shutdown_tx.send(());
         token

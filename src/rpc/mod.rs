@@ -33,6 +33,18 @@ lazy_static! {
         StdMutex::new(None);
     static ref CLIENT_POOL_BEFORE_INSERT: StdMutex<Option<Box<dyn FnOnce() + Send>>> =
         StdMutex::new(None);
+    static ref CLIENT_POOL_AFTER_RESERVATION: StdMutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    > = StdMutex::new(None);
+    static ref CLIENT_POOL_WAITER_READY: StdMutex<Option<tokio::sync::oneshot::Sender<()>>> =
+        StdMutex::new(None);
+    static ref RPC_SHUTDOWN_AFTER_CLOSING: StdMutex<Option<Box<dyn FnOnce() + Send>>> =
+        StdMutex::new(None);
+    static ref LISTENER_AFTER_COMPLETION: StdMutex<Option<Box<dyn FnOnce() + Send>>> =
+        StdMutex::new(None);
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -130,6 +142,43 @@ pub struct ClientPool {
 struct ClientConstruction {
     expected_registration: Option<tcp::shortcut::ShortcutToken>,
     completed: tokio::sync::watch::Sender<bool>,
+}
+
+struct ClientConstructionOwner<'a> {
+    pool: &'a ClientPool,
+    server_id: u64,
+    construction: Arc<ClientConstruction>,
+    armed: bool,
+}
+
+impl<'a> ClientConstructionOwner<'a> {
+    fn new(pool: &'a ClientPool, server_id: u64, construction: Arc<ClientConstruction>) -> Self {
+        Self {
+            pool,
+            server_id,
+            construction,
+            armed: true,
+        }
+    }
+
+    fn cancel(&mut self) -> bool {
+        if !self.armed {
+            return false;
+        }
+        self.armed = false;
+        self.pool
+            .cancel_construction(self.server_id, &self.construction)
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ClientConstructionOwner<'_> {
+    fn drop(&mut self) {
+        self.cancel();
+    }
 }
 
 enum ConstructionAccess {
@@ -299,6 +348,16 @@ impl Server {
             }
         };
         drop(retired);
+        #[cfg(test)]
+        {
+            let hook = LISTENER_AFTER_COMPLETION
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
     }
 
     pub async fn listen(server: &Arc<Server>) -> Result<(), Box<dyn Error>> {
@@ -310,9 +369,7 @@ impl Server {
             .tcp_server
             .listen(&server.address, request_callback(server))
             .await;
-        let retain_active = result.is_ok()
-            && server.address == tcp::STANDALONE_ADDRESS
-            && !server.shutting_down.load(Ordering::Acquire);
+        let retain_active = result.is_ok() && server.address == tcp::STANDALONE_ADDRESS;
         server.complete_listener(&run, retain_active);
         result
     }
@@ -337,9 +394,7 @@ impl Server {
         let handle = tokio::spawn(async move {
             let result = run.tcp_server.listen(&address, callback).await;
             if let Some(listener_server) = listener_server.upgrade() {
-                let retain_active = result.is_ok()
-                    && address == tcp::STANDALONE_ADDRESS
-                    && !listener_server.shutting_down.load(Ordering::Acquire);
+                let retain_active = result.is_ok() && address == tcp::STANDALONE_ADDRESS;
                 listener_server.complete_listener(&run, retain_active);
             }
 
@@ -355,6 +410,16 @@ impl Server {
     pub async fn shutdown(&self) {
         info!("Shutting down RPC server on {}", self.address);
         self.shutting_down.store(true, Ordering::Release);
+        #[cfg(test)]
+        {
+            let hook = RPC_SHUTDOWN_AFTER_CLOSING
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         let active = {
             let mut lifecycle = self
                 .listener
@@ -584,6 +649,14 @@ impl ClientPool {
                 ConstructionAccess::Ready(client) => return Ok(client),
                 ConstructionAccess::Wait(construction) => {
                     let mut completed = construction.completed.subscribe();
+                    #[cfg(test)]
+                    if let Some(ready) = CLIENT_POOL_WAITER_READY
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .take()
+                    {
+                        let _ = ready.send(());
+                    }
                     let still_active = self
                         .constructions
                         .lock()
@@ -598,20 +671,32 @@ impl ClientPool {
                 }
                 ConstructionAccess::Owner(construction) => construction,
             };
+            let mut owner = ClientConstructionOwner::new(self, server_id, construction.clone());
+            #[cfg(test)]
+            {
+                let hook = CLIENT_POOL_AFTER_RESERVATION
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                if let Some((reached, release)) = hook {
+                    let _ = reached.send(());
+                    let _ = release.await;
+                }
+            }
 
             let connect_result =
                 timeout(Duration::from_secs(5), RPCClient::new_async(&address)).await;
             let client = match connect_result {
                 Ok(Ok(client)) => client,
                 Ok(Err(error)) => {
-                    let owned = self.finish_failed_construction(server_id, &construction);
+                    let owned = owner.cancel();
                     if owned {
                         return Err(error);
                     }
                     continue;
                 }
                 Err(error) => {
-                    let owned = self.finish_failed_construction(server_id, &construction);
+                    let owned = owner.cancel();
                     if owned {
                         return Err(error.into());
                     }
@@ -663,8 +748,9 @@ impl ClientPool {
                     }
                 }
             };
+            owner.disarm();
             if completed {
-                let _ = construction.completed.send(true);
+                construction.completed.send_replace(true);
             }
             if let Some(result) = result {
                 return Ok(result);
@@ -672,11 +758,7 @@ impl ClientPool {
         }
     }
 
-    fn finish_failed_construction(
-        &self,
-        server_id: u64,
-        construction: &Arc<ClientConstruction>,
-    ) -> bool {
+    fn cancel_construction(&self, server_id: u64, construction: &Arc<ClientConstruction>) -> bool {
         let owned = {
             let mut constructions = self
                 .constructions
@@ -694,7 +776,7 @@ impl ClientPool {
             }
         };
         if owned {
-            let _ = construction.completed.send(true);
+            construction.completed.send_replace(true);
         }
         owned
     }
@@ -740,7 +822,7 @@ impl ClientPool {
             (cancelled, removed)
         };
         if let Some(cancelled) = cancelled {
-            let _ = cancelled.completed.send(true);
+            cancelled.completed.send_replace(true);
         }
         drop(removed);
     }
@@ -1055,6 +1137,139 @@ mod test {
         }
 
         #[tokio::test(flavor = "multi_thread")]
+        async fn standalone_shutdown_owns_retirement_before_returning() {
+            let addr = crate::tcp::STANDALONE_ADDRESS.to_string();
+            let server_id = hash_str(&addr);
+            let server = Server::new(&addr);
+            let (published_tx, published_rx) = std::sync::mpsc::channel();
+            let (publish_release_tx, publish_release_rx) = std::sync::mpsc::channel();
+            *LISTENER_AFTER_PUBLICATION
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move || {
+                published_tx.send(()).unwrap();
+                publish_release_rx.recv().unwrap();
+            }));
+            let (closing_tx, closing_rx) = std::sync::mpsc::channel();
+            let (closing_release_tx, closing_release_rx) = std::sync::mpsc::channel();
+            *RPC_SHUTDOWN_AFTER_CLOSING
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move || {
+                closing_tx.send(()).unwrap();
+                closing_release_rx.recv().unwrap();
+            }));
+            let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+            let (completion_release_tx, completion_release_rx) = std::sync::mpsc::channel();
+            *LISTENER_AFTER_COMPLETION
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move || {
+                completed_tx.send(()).unwrap();
+                completion_release_rx.recv().unwrap();
+            }));
+
+            let listen_server = server.clone();
+            let listen = tokio::spawn(async move {
+                Server::listen(&listen_server).await.unwrap();
+            });
+            published_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("standalone listener was not published");
+            let shutdown_server = server.clone();
+            let shutdown = tokio::spawn(async move { shutdown_server.shutdown().await });
+            closing_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("shutdown did not mark the server closing");
+
+            publish_release_tx.send(()).unwrap();
+            completed_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("standalone completion did not reach retirement");
+            closing_release_tx.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(1), shutdown)
+                .await
+                .expect("shutdown did not finish")
+                .unwrap();
+            let shortcut_retired_before_return = !crate::tcp::shortcut::is_local(server_id).await;
+
+            completion_release_tx.send(()).unwrap();
+            listen.await.unwrap();
+            assert!(
+                shortcut_retired_before_return,
+                "shutdown returned while the finishing standalone run retained its registration"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn shutdown_evicts_generation_published_after_tcp_precheck() {
+            let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = reserved.local_addr().unwrap().to_string();
+            drop(reserved);
+            let server_id = hash_str(&addr);
+            DEFAULT_CLIENT_POOL.clients.remove(&server_id);
+            let server = Server::new(&addr);
+
+            let (before_tx, before_rx) = std::sync::mpsc::channel();
+            let (before_release_tx, before_release_rx) = std::sync::mpsc::channel();
+            *crate::tcp::server::TCP_BEFORE_REGISTRATION_PUBLICATION
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move || {
+                before_tx.send(()).unwrap();
+                before_release_rx.recv().unwrap();
+            }));
+            let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+            let (shutdown_release_tx, shutdown_release_rx) = std::sync::mpsc::channel();
+            *crate::tcp::server::TCP_SHUTDOWN_AFTER_REGISTRATION_SNAPSHOT
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move || {
+                shutdown_tx.send(()).unwrap();
+                shutdown_release_rx.recv().unwrap();
+            }));
+            let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+            let (attempt_release_tx, attempt_release_rx) = std::sync::mpsc::channel();
+            *crate::tcp::server::TCP_AFTER_REGISTRATION_ATTEMPT
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move || {
+                attempt_tx.send(()).unwrap();
+                attempt_release_rx.recv().unwrap();
+            }));
+
+            let listen_server = server.clone();
+            let listen = tokio::spawn(async move {
+                Server::listen(&listen_server).await.unwrap();
+            });
+            before_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("TCP listener did not reach pre-publication barrier");
+            let shutdown_server = server.clone();
+            let shutdown = tokio::spawn(async move { shutdown_server.shutdown().await });
+            shutdown_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("TCP shutdown did not snapshot registration state");
+
+            before_release_tx.send(()).unwrap();
+            attempt_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("TCP listener did not finish its publication attempt");
+            if crate::tcp::shortcut::registration_token(server_id)
+                .await
+                .is_some()
+            {
+                let transient = DEFAULT_CLIENT_POOL.get(&addr).await.unwrap();
+                assert!(transient.client.shortcut_token().is_some());
+            }
+            attempt_release_tx.send(()).unwrap();
+            shutdown_release_tx.send(()).unwrap();
+            listen.await.unwrap();
+            shutdown.await.unwrap();
+
+            let cached_after_shutdown = DEFAULT_CLIENT_POOL.clients.get(&server_id);
+            DEFAULT_CLIENT_POOL.clients.remove(&server_id);
+            assert!(
+                cached_after_shutdown.is_none(),
+                "shutdown left a transient stopped TCP generation cached"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
         async fn shutdown_awaits_listener_and_allows_immediate_same_port_rebind() {
             let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let addr = reserved.local_addr().unwrap().to_string();
@@ -1216,6 +1431,78 @@ mod test {
             );
         }
 
+        #[tokio::test(flavor = "multi_thread")]
+        async fn aborted_pool_owner_releases_reservation_and_wakes_waiter() {
+            let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = reserved.local_addr().unwrap().to_string();
+            drop(reserved);
+            let server_id = hash_str(&addr);
+            DEFAULT_CLIENT_POOL.clients.remove(&server_id);
+
+            let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+            let accept = tokio::spawn(async move { listener.accept().await.unwrap().0 });
+            let (owner_reached_tx, owner_reached_rx) = tokio::sync::oneshot::channel();
+            let (owner_release_tx, owner_release_rx) = tokio::sync::oneshot::channel();
+            *CLIENT_POOL_AFTER_RESERVATION
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some((owner_reached_tx, owner_release_rx));
+
+            let owner_addr = addr.clone();
+            let owner =
+                tokio::spawn(async move { DEFAULT_CLIENT_POOL.get(&owner_addr).await.unwrap() });
+            owner_reached_rx
+                .await
+                .expect("construction owner did not reach reservation barrier");
+
+            let (waiter_ready_tx, waiter_ready_rx) = tokio::sync::oneshot::channel();
+            *CLIENT_POOL_WAITER_READY
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(waiter_ready_tx);
+            let waiter_addr = addr.clone();
+            let mut waiter =
+                tokio::spawn(async move { DEFAULT_CLIENT_POOL.get(&waiter_addr).await.unwrap() });
+            waiter_ready_rx
+                .await
+                .expect("second getter did not wait on owner reservation");
+
+            owner.abort();
+            match owner.await {
+                Err(error) => assert!(error.is_cancelled()),
+                Ok(_) => panic!("aborted construction owner completed"),
+            }
+            let _ = owner_release_tx.send(());
+
+            let waiter_result = tokio::time::timeout(Duration::from_secs(1), &mut waiter).await;
+            let waiter_completed = waiter_result.is_ok();
+            if waiter_completed {
+                waiter_result.unwrap().unwrap();
+            } else {
+                waiter.abort();
+                let _ = waiter.await;
+                if let Some(stranded) = DEFAULT_CLIENT_POOL
+                    .constructions
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&server_id)
+                {
+                    let _ = stranded.completed.send(true);
+                }
+            }
+
+            DEFAULT_CLIENT_POOL.clients.remove(&server_id);
+            if waiter_completed {
+                drop(accept.await.unwrap());
+            } else {
+                accept.abort();
+                let _ = accept.await;
+            }
+            assert!(
+                waiter_completed,
+                "aborted owner stranded the construction reservation"
+            );
+        }
+
         #[cfg(target_os = "linux")]
         #[tokio::test(flavor = "multi_thread")]
         async fn repeated_raft_service_lifecycle_keeps_fds_bounded() {
@@ -1269,11 +1556,10 @@ mod test {
                 "isolated repeated lifecycle fd baseline={}, peak={}, final={}",
                 baseline, peak, final_count
             );
-            assert!(
-                final_count <= baseline + 2,
+            assert_eq!(
+                final_count, baseline,
                 "file descriptors grew from {} to {}",
-                baseline,
-                final_count
+                baseline, final_count
             );
         }
 
@@ -1311,11 +1597,10 @@ mod test {
                 "external shutdown fd baseline={}, peak={}, after={}",
                 baseline, peak, after_shutdown
             );
-            assert!(
-                after_shutdown <= baseline + 2,
+            assert_eq!(
+                after_shutdown, baseline,
                 "external shutdown returned with driver FDs open: {} -> {}",
-                baseline,
-                after_shutdown
+                baseline, after_shutdown
             );
             assert_eq!(Arc::strong_count(&service), 1);
             drop(service);
@@ -1363,7 +1648,7 @@ mod test {
             loop {
                 let owner_released = weak_service.upgrade().is_none();
                 let fd_count = open_fd_count();
-                if owner_released && fd_count <= baseline + 2 {
+                if owner_released && fd_count == baseline {
                     eprintln!(
                         "self shutdown fd baseline={}, peak={}, final={}",
                         baseline, peak, fd_count
@@ -1380,6 +1665,146 @@ mod test {
                 );
                 sleep(Duration::from_millis(10)).await;
             }
+        }
+
+        #[cfg(target_os = "linux")]
+        #[tokio::test(flavor = "multi_thread")]
+        async fn cancelled_external_teardown_is_awaited_by_next_external_shutdown() {
+            const CHILD_ENV: &str = "BIFROST_CANCELLED_EXTERNAL_TEARDOWN_CHILD";
+            if std::env::var_os(CHILD_ENV).is_none() {
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .arg("--exact")
+                    .arg(
+                        "rpc::test::simple_service::cancelled_external_teardown_is_awaited_by_next_external_shutdown",
+                    )
+                    .arg("--nocapture")
+                    .env(CHILD_ENV, "1")
+                    .status()
+                    .unwrap();
+                assert!(
+                    status.success(),
+                    "isolated cancelled-external teardown child failed"
+                );
+                return;
+            }
+
+            let open_fd_count = || std::fs::read_dir("/proc/self/fd").unwrap().count();
+            let baseline = open_fd_count();
+            let service = crate::raft::RaftService::new(crate::raft::Options {
+                storage: crate::raft::Storage::MEMORY,
+                address: "cancelled-external-teardown".to_string(),
+                service_id: 7,
+            });
+            let (teardown_tx, teardown_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            *crate::raft::RAFT_TEARDOWN_BEFORE_DROP
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move || {
+                teardown_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }));
+
+            let first_target = service.clone();
+            let first = tokio::spawn(async move { first_target.shutdown().await });
+            teardown_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("first external teardown did not transfer runtime ownership");
+            first.abort();
+            assert!(first.await.unwrap_err().is_cancelled());
+
+            let second_target = service.clone();
+            let mut second = tokio::spawn(async move { second_target.shutdown().await });
+            let returned_before_teardown =
+                tokio::time::timeout(Duration::from_millis(100), &mut second)
+                    .await
+                    .is_ok();
+            release_tx.send(()).unwrap();
+            if !returned_before_teardown {
+                second.await.unwrap();
+            }
+
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            while open_fd_count() != baseline && tokio::time::Instant::now() < deadline {
+                sleep(Duration::from_millis(10)).await;
+            }
+            let final_fds = open_fd_count();
+            drop(service);
+            assert!(
+                !returned_before_teardown,
+                "second external shutdown returned before prior teardown completed"
+            );
+            assert_eq!(
+                final_fds, baseline,
+                "external teardown did not restore the exact FD baseline"
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[tokio::test(flavor = "multi_thread")]
+        async fn external_shutdown_waits_for_self_runtime_teardown() {
+            const CHILD_ENV: &str = "BIFROST_SELF_EXTERNAL_TEARDOWN_CHILD";
+            if std::env::var_os(CHILD_ENV).is_none() {
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .arg("--exact")
+                    .arg(
+                        "rpc::test::simple_service::external_shutdown_waits_for_self_runtime_teardown",
+                    )
+                    .arg("--nocapture")
+                    .env(CHILD_ENV, "1")
+                    .status()
+                    .unwrap();
+                assert!(
+                    status.success(),
+                    "isolated self/external teardown child failed"
+                );
+                return;
+            }
+
+            let open_fd_count = || std::fs::read_dir("/proc/self/fd").unwrap().count();
+            let baseline = open_fd_count();
+            let service = crate::raft::RaftService::new(crate::raft::Options {
+                storage: crate::raft::Storage::MEMORY,
+                address: "self-external-teardown".to_string(),
+                service_id: 7,
+            });
+            let (self_returned_tx, self_returned_rx) = std::sync::mpsc::channel();
+            let (self_release_tx, self_release_rx) = std::sync::mpsc::channel();
+            let self_target = service.clone();
+            let self_shutdown = service.rt.spawn(async move {
+                self_target.shutdown().await;
+                self_returned_tx.send(()).unwrap();
+                self_release_rx.recv().unwrap();
+            });
+            self_returned_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("self-runtime shutdown did not return to its caller task");
+
+            let external_target = service.clone();
+            let mut external = tokio::spawn(async move { external_target.shutdown().await });
+            let returned_before_self_task_exit =
+                tokio::time::timeout(Duration::from_millis(100), &mut external)
+                    .await
+                    .is_ok();
+            self_release_tx.send(()).unwrap();
+            let _ = self_shutdown.await;
+            if !returned_before_self_task_exit {
+                external.await.unwrap();
+            }
+
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            while open_fd_count() != baseline && tokio::time::Instant::now() < deadline {
+                sleep(Duration::from_millis(10)).await;
+            }
+            let final_fds = open_fd_count();
+            drop(service);
+            assert!(
+                !returned_before_self_task_exit,
+                "external shutdown returned before self-runtime teardown completed"
+            );
+            assert_eq!(
+                final_fds, baseline,
+                "self/external teardown did not restore the exact FD baseline"
+            );
         }
 
         #[tokio::test(flavor = "multi_thread")]

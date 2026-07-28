@@ -61,7 +61,7 @@ impl Drop for ShortcutRegistration {
     }
 }
 
-pub async fn register_server(
+pub fn register_server(
     server_address: &String,
     callback: &Arc<dyn TcpCallbackFuncShareable>,
 ) -> ShortcutRegistration {
@@ -117,8 +117,8 @@ mod tests {
         let callback: Arc<dyn TcpCallbackFuncShareable> =
             Arc::new(|_request: TcpReq| async { BytesMut::new() }.boxed());
 
-        let older = register_server(&address, &callback).await;
-        let newer = register_server(&address, &callback).await;
+        let older = register_server(&address, &callback);
+        let newer = register_server(&address, &callback);
 
         drop(older);
         assert!(is_local(hash_str(&address)).await);

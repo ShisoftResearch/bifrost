@@ -536,7 +536,8 @@ pub struct RaftService {
     pub id: u64,
     pub options: Options,
     pub rt: RaftRuntimeHandle,
-    rt_owner: StdMutex<Option<runtime::Runtime>>,
+    rt_id: runtime::Id,
+    rt_lifecycle: StdMutex<RuntimeLifecycle>,
     _is_leader: AtomicBool,
     checker_task: TokioMutex<Option<tokio::task::JoinHandle<()>>>,
     shutdown_tx: watch::Sender<LifecycleState>,
@@ -544,6 +545,39 @@ pub struct RaftService {
 
 pub struct RaftRuntimeHandle {
     handle: StdMutex<Option<runtime::Handle>>,
+}
+
+struct RuntimeLifecycle {
+    runtime: Option<runtime::Runtime>,
+    teardown: Option<Arc<RuntimeTeardown>>,
+}
+
+struct RuntimeTeardown {
+    completed: watch::Sender<bool>,
+}
+
+struct RuntimeTeardownJob {
+    runtime: Option<runtime::Runtime>,
+    teardown: Arc<RuntimeTeardown>,
+}
+
+#[cfg(test)]
+lazy_static! {
+    pub(crate) static ref RAFT_SPAWN_BARRIER: StdMutex<Option<Box<dyn FnOnce() + Send>>> =
+        StdMutex::new(None);
+    pub(crate) static ref RAFT_TEARDOWN_BEFORE_DROP: StdMutex<Option<Box<dyn FnOnce() + Send>>> =
+        StdMutex::new(None);
+}
+
+#[cfg(test)]
+fn run_raft_test_hook(hook: &StdMutex<Option<Box<dyn FnOnce() + Send>>>) {
+    let hook = hook
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if let Some(hook) = hook {
+        hook();
+    }
 }
 
 impl RaftRuntimeHandle {
@@ -558,22 +592,16 @@ impl RaftRuntimeHandle {
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
     {
+        #[cfg(test)]
+        run_raft_test_hook(&RAFT_SPAWN_BARRIER);
         let handle = self
             .handle
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        handle
             .as_ref()
-            .cloned()
-            .expect("Raft runtime is shut down");
-        handle.spawn(future)
-    }
-
-    fn id(&self) -> Option<runtime::Id> {
-        self.handle
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_ref()
-            .map(runtime::Handle::id)
+            .expect("Raft runtime is shut down")
+            .spawn(future)
     }
 
     fn close(&self) {
@@ -584,17 +612,50 @@ impl RaftRuntimeHandle {
     }
 }
 
-impl Drop for RaftService {
+impl RuntimeTeardown {
+    fn new() -> Self {
+        let (completed, _completed_rx) = watch::channel(false);
+        Self { completed }
+    }
+
+    fn complete(&self) {
+        self.completed.send_replace(true);
+    }
+
+    async fn wait(&self) {
+        let mut completed = self.completed.subscribe();
+        if *completed.borrow_and_update() {
+            return;
+        }
+        while completed.changed().await.is_ok() {
+            if *completed.borrow_and_update() {
+                return;
+            }
+        }
+    }
+}
+
+impl RuntimeTeardownJob {
+    fn run(mut self) {
+        #[cfg(test)]
+        run_raft_test_hook(&RAFT_TEARDOWN_BEFORE_DROP);
+        drop(self.runtime.take());
+        self.teardown.complete();
+    }
+}
+
+impl Drop for RuntimeTeardownJob {
     fn drop(&mut self) {
-        self.rt.close();
-        if let Some(runtime) = self
-            .rt_owner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        {
+        if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_background();
         }
+        self.teardown.complete();
+    }
+}
+
+impl Drop for RaftService {
+    fn drop(&mut self) {
+        self.begin_runtime_teardown();
     }
 }
 
@@ -1618,6 +1679,7 @@ impl RaftService {
             .build()
             .expect("Failed to build tokio runtime for Raft service");
         let runtime_handle = runtime.handle().clone();
+        let runtime_id = runtime_handle.id();
         let server_obj = RaftService {
             meta: RwLock::new(RaftMeta {
                 term,
@@ -1639,7 +1701,11 @@ impl RaftService {
             id: server_id,
             options: opts,
             rt: RaftRuntimeHandle::new(runtime_handle),
-            rt_owner: StdMutex::new(Some(runtime)),
+            rt_id: runtime_id,
+            rt_lifecycle: StdMutex::new(RuntimeLifecycle {
+                runtime: Some(runtime),
+                teardown: None,
+            }),
             _is_leader: AtomicBool::new(false),
             checker_task: TokioMutex::new(None),
             shutdown_tx,
@@ -2121,26 +2187,48 @@ impl RaftService {
     }
 
     async fn shutdown_runtime_owner(&self) {
-        let owned_runtime_id = self.rt.id();
-        let runtime = self
-            .rt_owner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        let Some(runtime) = runtime else {
-            self.rt.close();
+        let called_from_owned_runtime = runtime::Handle::try_current()
+            .map(|current| current.id() == self.rt_id)
+            .unwrap_or(false);
+        let teardown = self.begin_runtime_teardown();
+        if called_from_owned_runtime {
             return;
+        }
+        teardown.wait().await;
+    }
+
+    fn begin_runtime_teardown(&self) -> Arc<RuntimeTeardown> {
+        let (teardown, runtime) = {
+            let mut lifecycle = self
+                .rt_lifecycle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(teardown) = lifecycle.teardown.as_ref() {
+                return teardown.clone();
+            }
+
+            let teardown = Arc::new(RuntimeTeardown::new());
+            self.rt.close();
+            let runtime = lifecycle.runtime.take();
+            lifecycle.teardown = Some(teardown.clone());
+            (teardown, runtime)
         };
 
-        let called_from_owned_runtime = runtime::Handle::try_current()
-            .map(|current| Some(current.id()) == owned_runtime_id)
-            .unwrap_or(false);
-        self.rt.close();
-        if called_from_owned_runtime {
-            runtime.shutdown_background();
-        } else if let Err(error) = tokio::task::spawn_blocking(move || drop(runtime)).await {
-            error!("Failed to join Raft runtime shutdown task: {:?}", error);
+        if let Some(runtime) = runtime {
+            let job = RuntimeTeardownJob {
+                runtime: Some(runtime),
+                teardown: teardown.clone(),
+            };
+            if let Err(error) = std::thread::Builder::new()
+                .name("raft-runtime-teardown".to_string())
+                .spawn(move || job.run())
+            {
+                error!("Failed to start Raft runtime teardown thread: {:?}", error);
+            }
+        } else {
+            teardown.complete();
         }
+        teardown
     }
 
     pub async fn register_state_machine(&self, state_machine: SubStateMachine) {
@@ -3640,6 +3728,52 @@ mod test {
     use crate::utils::time::async_wait_secs;
     use futures::FutureExt;
     use std::sync::Arc;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn runtime_spawn_does_not_escape_after_close_wins() {
+        let service = RaftService::new(Options {
+            storage: Storage::MEMORY,
+            address: "spawn-close-race".to_string(),
+            service_id: 7,
+        });
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (selected_tx, selected_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *super::RAFT_SPAWN_BARRIER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move || {
+            selected_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }));
+
+        let spawn_service = service.clone();
+        let ran_in_task = ran.clone();
+        let spawn_thread = std::thread::spawn(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                spawn_service.rt.spawn(async move {
+                    ran_in_task.store(true, std::sync::atomic::Ordering::Release);
+                })
+            }))
+        });
+        selected_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("spawn did not select the runtime handle");
+
+        service.rt.close();
+        release_tx.send(()).unwrap();
+        let outcome = spawn_thread.join().unwrap();
+        let escaped = match outcome {
+            Ok(handle) => {
+                let _ = handle.await;
+                true
+            }
+            Err(_) => false,
+        };
+        let task_ran = ran.load(std::sync::atomic::Ordering::Acquire);
+        drop(service);
+        assert!(!escaped, "spawn used a raw handle after close won");
+        assert!(!task_ran, "task ran after close won");
+    }
 
     struct CounterStateMachine {
         value: u64,
