@@ -91,6 +91,98 @@ mod test {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn graceful_shutdown_releases_root_callback_state_machine_cycle() {
+        let raft_service = RaftService::new(Options {
+            storage: Storage::default(),
+            address: "root-callback-shutdown-cycle".to_string(),
+            service_id: DEFAULT_SERVICE_ID,
+        });
+        let weak_service = Arc::downgrade(&raft_service);
+        let state_machine = Trigger {
+            count: 0,
+            callback: SMCallback::new(10, raft_service.clone()).await,
+        };
+        raft_service
+            .register_state_machine(Box::new(state_machine))
+            .await;
+
+        raft_service.shutdown().await;
+        drop(raft_service);
+
+        assert!(
+            weak_service.upgrade().is_none(),
+            "registered callback state machine kept the root RaftService alive after shutdown"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn graceful_shutdown_releases_type2_callback_state_machine_cycle() {
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reserved.local_addr().unwrap().to_string();
+        drop(reserved);
+        let raft_service = RaftService::new(Options {
+            storage: Storage::default(),
+            address: address.clone(),
+            service_id: DEFAULT_SERVICE_ID,
+        });
+        let weak_service = Arc::downgrade(&raft_service);
+        let server = Server::new(&address);
+        server.register_service(&raft_service).await;
+        Server::listen_and_resume(&server).await;
+        assert!(RaftService::start(&raft_service, false).await);
+        raft_service.bootstrap().await;
+        let plane_id = PlaneId::type2(12).unwrap();
+        let plane = raft_service
+            .ensure_plane(PlaneSpec { plane_id })
+            .await
+            .expect("type-2 plane should be created");
+        let state_machine = Trigger {
+            count: 0,
+            callback: plane
+                .callback(10)
+                .await
+                .expect("type-2 callback should bind to its plane"),
+        };
+        plane
+            .register_state_machine(Box::new(state_machine))
+            .await
+            .expect("type-2 callback state machine should register");
+
+        raft_service.shutdown().await;
+        server.shutdown().await;
+        drop(plane);
+        drop(server);
+        drop(raft_service);
+
+        assert!(
+            weak_service.upgrade().is_none(),
+            "registered callback state machine kept the type-2 RaftService alive after shutdown"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn callback_returns_not_leader_after_service_owner_is_dropped() {
+        let raft_service = RaftService::new(Options {
+            storage: Storage::default(),
+            address: "callback-after-owner-drop".to_string(),
+            service_id: DEFAULT_SERVICE_ID,
+        });
+        let weak_service = Arc::downgrade(&raft_service);
+        let callback = SMCallback::new(10, raft_service.clone()).await;
+
+        drop(raft_service);
+
+        assert!(matches!(
+            callback.notify(commands::on_trigged::new(), 1).await,
+            Err(super::server::NotifyError::IsNotLeader)
+        ));
+        assert!(
+            weak_service.upgrade().is_none(),
+            "callback retained its dropped RaftService owner"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn dummy() {
         let _ = env_logger::try_init();
         info!("TESTING CALLBACK");

@@ -9,7 +9,7 @@ use serde;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 pub struct Subscriber {
     pub session_id: u64,
@@ -138,7 +138,7 @@ pub struct InternalSubscription {
 
 pub struct SMCallback {
     pub subscriptions: Arc<RwLock<Subscriptions>>,
-    pub raft_service: Arc<RaftService>,
+    pub raft_service: Weak<RaftService>,
     pub internal_subs: RwLock<HashMap<u64, Vec<InternalSubscription>>>,
     pub plane_id: PlaneId,
     pub sm_id: u64,
@@ -169,7 +169,7 @@ impl SMCallback {
         let subscriptions = raft_service.subscriptions_on_plane(plane_id).await?;
         Ok(SMCallback {
             subscriptions,
-            raft_service: raft_service.clone(),
+            raft_service: Arc::downgrade(&raft_service),
             plane_id,
             sm_id: state_machine_id,
             internal_subs: RwLock::new(HashMap::new()),
@@ -185,15 +185,25 @@ impl SMCallback {
         R: serde::Serialize + Send + Sync + Clone + Any + Unpin + 'static,
         M: RaftMsg<R> + 'static,
     {
-        let is_leader = self
-            .raft_service
+        let raft_service = match self.raft_service.upgrade() {
+            Some(raft_service) => raft_service,
+            None => {
+                debug!(
+                    "Will not send notification from state machine {} on plane {} because its Raft service has been retired",
+                    self.sm_id,
+                    self.plane_id.raw()
+                );
+                return Err(NotifyError::IsNotLeader);
+            }
+        };
+        let is_leader = raft_service
             .is_leader_on_plane(self.plane_id)
             .await
             .unwrap_or(false);
         if !is_leader {
             debug!(
                 "Will not send notification from {} on plane {} because this node is not a leader",
-                self.raft_service.get_server_id(),
+                raft_service.get_server_id(),
                 self.plane_id.raw()
             );
             return Err(NotifyError::IsNotLeader);
@@ -202,7 +212,7 @@ impl SMCallback {
         return match op_type {
             OpType::SUBSCRIBE => {
                 let pattern_id = hash_bytes(&pattern_data.as_slice());
-                let raft_sid = self.raft_service.options.service_id;
+                let raft_sid = raft_service.options.service_id;
                 let sm_id = self.sm_id;
                 let key = SubKey::new(raft_sid, self.plane_id, sm_id, fn_id, pattern_id);
                 let internal_subs = self.internal_subs.read().await;
