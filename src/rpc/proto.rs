@@ -24,13 +24,30 @@ macro_rules! dispatch_rpc_service_functions {
                 service_ptr: usize,
                 server_id: u64,
                 service_id: u64,
-            ) -> ::std::pin::Pin<Box<dyn Future<Output = ()> + Send>> {
-                async move {
-                    let mut cbs = RPC_SVRS.write().await;
-                    let service = unsafe { Arc::from_raw(service_ptr as *const $s) };
-                    cbs.insert((server_id, service_id), service);
+            ) -> $crate::rpc::ShortcutToken {
+                let token = $crate::rpc::ShortcutToken::new();
+                let service = unsafe { Arc::from_raw(service_ptr as *const $s) };
+                let service: Arc<dyn Service> = service;
+                let service = Arc::downgrade(&service);
+                RPC_SVRS
+                    .write()
+                    .insert((server_id, service_id), (token.clone(), service));
+                token
+            }
+            fn unregister_shortcut_service(
+                &self,
+                server_id: u64,
+                service_id: u64,
+                token: &$crate::rpc::ShortcutToken,
+            ) {
+                let mut services = RPC_SVRS.write();
+                if services
+                    .get(&(server_id, service_id))
+                    .map(|(registered_token, _)| registered_token.is_same(token))
+                    == Some(true)
+                {
+                    services.remove(&(server_id, service_id));
                 }
-                .boxed()
             }
             fn service_symbol(&self) -> &'static str {
                 stringify!($s)
@@ -108,8 +125,13 @@ macro_rules! service {
 
         lazy_static! {
             pub static ref RPC_SVRS:
-            async_std::sync::RwLock<::std::collections::BTreeMap<(u64, u64), Arc<dyn Service>>>
-            = async_std::sync::RwLock::new(::std::collections::BTreeMap::new());
+            ::parking_lot::RwLock<
+                ::std::collections::BTreeMap<
+                    (u64, u64),
+                    ($crate::rpc::ShortcutToken, ::std::sync::Weak<dyn Service>),
+                >,
+            >
+            = ::parking_lot::RwLock::new(::std::collections::BTreeMap::new());
         }
 
         pub trait Service : RPCService {
@@ -145,10 +167,24 @@ macro_rules! service {
 
         #[allow(dead_code)]
         pub async fn get_local(server_id: u64, service_id: u64) -> Option<Arc<dyn Service>> {
-            let svrs = RPC_SVRS.read().await;
-            match svrs.get(&(server_id, service_id)) {
-                Some(s) => Some(s.clone()),
-                _ => None
+            let key = (server_id, service_id);
+            let registration = RPC_SVRS.read().get(&key).cloned();
+            match registration {
+                Some((_, service)) if service.strong_count() > 0 => service.upgrade(),
+                Some((token, _)) => {
+                    let mut services = RPC_SVRS.write();
+                    if services
+                        .get(&key)
+                        .map(|(registered_token, service)| {
+                            registered_token.is_same(&token) && service.strong_count() == 0
+                        })
+                        .unwrap_or(false)
+                    {
+                        services.remove(&key);
+                    }
+                    None
+                }
+                None => None,
             }
         }
 

@@ -24,6 +24,7 @@ use std::io;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tokio::runtime;
 use tokio::sync::{watch, Mutex as TokioMutex};
@@ -534,11 +535,26 @@ pub struct RaftService {
     planes: RwLock<BTreeMap<PlaneId, Arc<RaftPlaneRuntime>>>,
     pub id: u64,
     pub options: Options,
-    pub rt: runtime::Runtime,
+    pub rt: runtime::Handle,
+    rt_owner: StdMutex<Option<runtime::Runtime>>,
     _is_leader: AtomicBool,
     checker_task: TokioMutex<Option<tokio::task::JoinHandle<()>>>,
     shutdown_tx: watch::Sender<LifecycleState>,
 }
+
+impl Drop for RaftService {
+    fn drop(&mut self) {
+        if let Some(runtime) = self
+            .rt_owner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            runtime.shutdown_background();
+        }
+    }
+}
+
 dispatch_rpc_service_functions!(RaftService);
 
 #[derive(Debug)]
@@ -1550,6 +1566,15 @@ impl RaftService {
         let master_sm = MasterStateMachine::new_on_plane(opts.service_id, PlaneId::type1());
 
         let (shutdown_tx, _shutdown_rx) = watch::channel(LifecycleState::Running);
+        let runtime = runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("raft-server")
+            .worker_threads(12)
+            .max_blocking_threads(num_cpus::get())
+            .event_interval(31)
+            .build()
+            .expect("Failed to build tokio runtime for Raft service");
+        let runtime_handle = runtime.handle().clone();
         let server_obj = RaftService {
             meta: RwLock::new(RaftMeta {
                 term,
@@ -1570,14 +1595,8 @@ impl RaftService {
             planes: RwLock::new(BTreeMap::new()),
             id: server_id,
             options: opts,
-            rt: runtime::Builder::new_multi_thread()
-                .enable_all()
-                .thread_name("raft-server")
-                .worker_threads(12)
-                .max_blocking_threads(num_cpus::get())
-                .event_interval(31)
-                .build()
-                .expect("Failed to build tokio runtime for Raft service"),
+            rt: runtime_handle,
+            rt_owner: StdMutex::new(Some(runtime)),
             _is_leader: AtomicBool::new(false),
             checker_task: TokioMutex::new(None),
             shutdown_tx,
@@ -2051,10 +2070,31 @@ impl RaftService {
         }
 
         self.shutdown_managed_runtime(None).await;
+        self.shutdown_runtime_owner().await;
         info!(
             "RaftService shutdown complete for plane {}",
             self.plane_id().raw()
         );
+    }
+
+    async fn shutdown_runtime_owner(&self) {
+        let runtime = self
+            .rt_owner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let Some(runtime) = runtime else {
+            return;
+        };
+
+        let called_from_owned_runtime = runtime::Handle::try_current()
+            .map(|current| current.id() == self.rt.id())
+            .unwrap_or(false);
+        if called_from_owned_runtime {
+            runtime.shutdown_background();
+        } else if let Err(error) = tokio::task::spawn_blocking(move || drop(runtime)).await {
+            error!("Failed to join Raft runtime shutdown task: {:?}", error);
+        }
     }
 
     pub async fn register_state_machine(&self, state_machine: SubStateMachine) {

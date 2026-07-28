@@ -7,13 +7,14 @@ use bifrost_hasher::hash_str;
 use bytes::{Buf, BufMut, BytesMut};
 use futures::future::BoxFuture;
 use futures::prelude::*;
-use futures::Future;
 use lightning::map::*;
 use serde::{Deserialize, Serialize};
 use std::backtrace;
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::io;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
@@ -22,6 +23,12 @@ use tokio::time::*;
 
 lazy_static! {
     pub static ref DEFAULT_CLIENT_POOL: ClientPool = ClientPool::new();
+}
+
+#[cfg(test)]
+lazy_static! {
+    static ref CLIENT_POOL_EVICT_AFTER_READ: StdMutex<Option<Box<dyn FnOnce() + Send>>> =
+        StdMutex::new(None);
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -39,6 +46,22 @@ pub enum RPCError {
     ClientCannotDecodeResponse,
 }
 
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct ShortcutToken(Arc<()>);
+
+impl ShortcutToken {
+    #[doc(hidden)]
+    pub fn new() -> Self {
+        Self(Arc::new(()))
+    }
+
+    #[doc(hidden)]
+    pub fn is_same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 pub trait RPCService: Sync + Send {
     fn dispatch(&self, data: BytesMut) -> BoxFuture<Result<BytesMut, RPCRequestError>>;
     fn register_shortcut_service(
@@ -46,7 +69,8 @@ pub trait RPCService: Sync + Send {
         service_ptr: usize,
         server_id: u64,
         service_id: u64,
-    ) -> ::std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
+    ) -> ShortcutToken;
+    fn unregister_shortcut_service(&self, server_id: u64, service_id: u64, token: &ShortcutToken);
     fn service_symbol(&self) -> &'static str;
 }
 
@@ -56,6 +80,9 @@ pub struct Server {
     pub server_id: u64,
     tcp_server: StdMutex<Option<Arc<tcp::server::Server>>>,
     shutdown_handle: StdMutex<Option<tokio::task::JoinHandle<()>>>,
+    service_shortcut_tokens: StdMutex<BTreeMap<u64, ShortcutToken>>,
+    service_lifecycle: StdMutex<()>,
+    shutting_down: AtomicBool,
 }
 
 unsafe impl Sync for Server {}
@@ -96,6 +123,42 @@ fn decode_res(res: io::Result<BytesMut>) -> Result<BytesMut, RPCError> {
     }
 }
 
+fn request_callback(
+    server: &Arc<Server>,
+) -> Arc<dyn Fn(tcp::server::TcpReq) -> tcp::server::TcpRes + Send + Sync> {
+    let server = server.clone();
+    Arc::new(move |data| {
+        let server = server.clone();
+        async move {
+            let (svr_id, data) = read_u64_head(data);
+            let service = server.services.get(&svr_id);
+            trace!("Processing request for service {}", svr_id);
+            match service {
+                Some(service) => {
+                    let svr_res = service.dispatch(data).await;
+                    encode_res(svr_res)
+                }
+                None => {
+                    let service_list = server
+                        .services
+                        .entries()
+                        .into_iter()
+                        .map(|(sid, service)| format!("{}:{}", sid, service.service_symbol()))
+                        .collect::<Vec<_>>();
+                    error!(
+                        "Service {} not found, have {:?}, backtrace: {:?}",
+                        svr_id,
+                        service_list.join(", "),
+                        backtrace::Backtrace::capture()
+                    );
+                    encode_res(Err(RPCRequestError::ServiceIdNotFound))
+                }
+            }
+        }
+        .boxed()
+    })
+}
+
 pub fn read_u64_head(mut data: BytesMut) -> (u64, BytesMut) {
     let num = data.get_u64_le();
     (num, data)
@@ -109,6 +172,9 @@ impl Server {
             server_id: hash_str(address),
             tcp_server: StdMutex::new(None),
             shutdown_handle: StdMutex::new(None),
+            service_shortcut_tokens: StdMutex::new(BTreeMap::new()),
+            service_lifecycle: StdMutex::new(()),
+            shutting_down: AtomicBool::new(false),
         })
     }
 
@@ -122,44 +188,7 @@ impl Server {
             Err(e) => error!("Failed to store tcp_server reference: {}", e),
         }
 
-        let server_clone = server.clone();
-        tcp_server
-            .listen(
-                address,
-                Arc::new(move |data| {
-                    let server = server_clone.clone();
-                    async move {
-                        let (svr_id, data) = read_u64_head(data);
-                        let service = server.services.get(&svr_id);
-                        trace!("Processing request for service {}", svr_id);
-                        match service {
-                            Some(service) => {
-                                let svr_res = service.dispatch(data).await;
-                                encode_res(svr_res)
-                            }
-                            None => {
-                                let service_list = server
-                                    .services
-                                    .entries()
-                                    .into_iter()
-                                    .map(|(sid, service)| {
-                                        format!("{}:{}", sid, service.service_symbol())
-                                    })
-                                    .collect::<Vec<_>>();
-                                error!(
-                                    "Service {} not found, have {:?}, backtrace: {:?}",
-                                    svr_id,
-                                    service_list.join(", "),
-                                    backtrace::Backtrace::capture()
-                                );
-                                encode_res(Err(RPCRequestError::ServiceIdNotFound))
-                            }
-                        }
-                    }
-                    .boxed()
-                }),
-            )
-            .await
+        tcp_server.listen(address, request_callback(server)).await
     }
 
     pub async fn listen_and_resume(server: &Arc<Server>) {
@@ -172,45 +201,9 @@ impl Server {
             Err(e) => error!("Failed to store tcp_server reference: {}", e),
         }
 
-        let server_clone = server.clone();
+        let callback = request_callback(server);
         let handle = tokio::spawn(async move {
-            let result = tcp_server
-                .listen(
-                    &address,
-                    Arc::new(move |data| {
-                        let server = server_clone.clone();
-                        async move {
-                            let (svr_id, data) = read_u64_head(data);
-                            let service = server.services.get(&svr_id);
-                            trace!("Processing request for service {}", svr_id);
-                            match service {
-                                Some(service) => {
-                                    let svr_res = service.dispatch(data).await;
-                                    encode_res(svr_res)
-                                }
-                                None => {
-                                    let service_list = server
-                                        .services
-                                        .entries()
-                                        .into_iter()
-                                        .map(|(sid, service)| {
-                                            format!("{}:{}", sid, service.service_symbol())
-                                        })
-                                        .collect::<Vec<_>>();
-                                    error!(
-                                        "Service {} not found, have {:?}, backtrace: {:?}",
-                                        svr_id,
-                                        service_list.join(", "),
-                                        backtrace::Backtrace::capture()
-                                    );
-                                    encode_res(Err(RPCRequestError::ServiceIdNotFound))
-                                }
-                            }
-                        }
-                        .boxed()
-                    }),
-                )
-                .await;
+            let result = tcp_server.listen(&address, callback).await;
 
             if let Err(e) = result {
                 error!("RPC server error: {:?}", e);
@@ -228,28 +221,55 @@ impl Server {
 
     pub async fn shutdown(&self) {
         info!("Shutting down RPC server on {}", self.address);
-        match self.tcp_server.lock() {
-            Ok(guard) => {
-                if let Some(ref tcp_server) = *guard {
-                    tcp_server.shutdown();
-                }
+        self.shutting_down.store(true, Ordering::Release);
+        let tcp_server = self
+            .tcp_server
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let tcp_registration = tcp_server
+            .as_ref()
+            .and_then(|tcp_server| tcp_server.shutdown_owned());
+        let shutdown_handle = self
+            .shutdown_handle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(shutdown_handle) = shutdown_handle {
+            if let Err(e) = shutdown_handle.await {
+                error!("RPC listener task failed during shutdown: {:?}", e);
             }
-            Err(e) => error!("Failed to acquire tcp_server lock during shutdown: {}", e),
         }
-        // Give it a moment to shut down gracefully
-        sleep(Duration::from_millis(100)).await;
+        drop(tcp_server);
+        if let Some(tcp_registration) = tcp_registration.as_ref() {
+            DEFAULT_CLIENT_POOL.evict_owned(self.server_id, tcp_registration);
+        }
+        self.release_services();
     }
 
     pub async fn register_service_with_id<T>(&self, service_id: u64, service: &Arc<T>)
     where
         T: RPCService + Sized + 'static,
     {
+        let _lifecycle = self
+            .service_lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.shutting_down.load(Ordering::Acquire) {
+            error!(
+                "Cannot register service {} on shutting down RPC server {}",
+                service_id, self.address
+            );
+            return;
+        }
         let service = service.clone();
         if !DISABLE_SHORTCUT {
             let service_ptr = Arc::into_raw(service.clone()) as usize;
-            service
-                .register_shortcut_service(service_ptr, self.server_id, service_id)
-                .await;
+            let token = service.register_shortcut_service(service_ptr, self.server_id, service_id);
+            self.service_shortcut_tokens
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(service_id, token);
         } else {
             debug!("SERVICE SHORTCUT DISABLED");
         }
@@ -269,10 +289,59 @@ impl Server {
     }
 
     pub async fn remove_service(&self, service_id: u64) {
+        let _lifecycle = self
+            .service_lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let service = self.services.get(&service_id);
+        let shortcut_token = self
+            .service_shortcut_tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&service_id);
+        if let (Some(service), Some(token)) = (service.as_ref(), shortcut_token) {
+            service.unregister_shortcut_service(self.server_id, service_id, &token);
+        }
         self.services.remove(&service_id);
     }
+
+    fn release_services(&self) {
+        let _lifecycle = self
+            .service_lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut shortcut_tokens = self
+            .service_shortcut_tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (service_id, service) in self.services.entries() {
+            if let Some(token) = shortcut_tokens.remove(&service_id) {
+                service.unregister_shortcut_service(self.server_id, service_id, &token);
+            }
+            self.services.remove(&service_id);
+        }
+        shortcut_tokens.clear();
+    }
+
     pub fn address(&self) -> &String {
         &self.address
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.shutting_down.store(true, Ordering::Release);
+        if let Some(tcp_server) = self
+            .tcp_server
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            if let Some(tcp_registration) = tcp_server.shutdown_owned() {
+                DEFAULT_CLIENT_POOL.evict_owned(self.server_id, &tcp_registration);
+            }
+        }
+        self.release_services();
     }
 }
 
@@ -340,6 +409,40 @@ impl ClientPool {
             Ok(client)
         }
     }
+
+    fn evict_owned(&self, server_id: u64, registration: &tcp::shortcut::ShortcutToken) {
+        let should_evict = self
+            .clients
+            .get(&server_id)
+            .map(|client| {
+                client
+                    .client
+                    .shortcut_token()
+                    .map(|cached_registration| cached_registration.is_same(registration))
+                    .unwrap_or(true)
+            })
+            .unwrap_or(false);
+        #[cfg(test)]
+        if let Some(hook) = CLIENT_POOL_EVICT_AFTER_READ
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            hook();
+        }
+        if should_evict {
+            if let Some(client) = self.clients.lock(&server_id) {
+                let still_owned = client
+                    .client
+                    .shortcut_token()
+                    .map(|cached_registration| cached_registration.is_same(registration))
+                    .unwrap_or(true);
+                if still_owned {
+                    client.remove();
+                }
+            }
+        }
+    }
 }
 
 pub trait ServiceClient: Send + Sync {
@@ -401,14 +504,11 @@ mod test {
         pub async fn simple_rpc() {
             let _ = env_logger::try_init();
             let addr = String::from("127.0.0.1:1300");
-            {
-                let addr = addr.clone();
-                let server = Server::new(&addr);
-                server
-                    .register_service_with_id(0, &Arc::new(HelloServer))
-                    .await;
-                Server::listen_and_resume(&server).await;
-            }
+            let server = Server::new(&addr);
+            server
+                .register_service_with_id(0, &Arc::new(HelloServer))
+                .await;
+            Server::listen_and_resume(&server).await;
             sleep(Duration::from_millis(1000)).await;
             let client = RPCClient::new_async(&addr).await.unwrap();
             let service_client = AsyncServiceClient::new_with_service_id(0, &client);
@@ -420,6 +520,7 @@ mod test {
             let response = service_client.error(expected_err_msg.clone());
             let error_msg = response.await.unwrap().err().unwrap();
             assert_eq!(error_msg, expected_err_msg);
+            server.shutdown().await;
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -434,6 +535,234 @@ mod test {
             let greeting: String = crate::utils::serde::deserialize(&res_bytes).unwrap();
 
             assert_eq!(greeting, String::from("Hello, Jack!"));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn shutdown_releases_server_service_and_shortcuts() {
+            let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = reserved.local_addr().unwrap().to_string();
+            drop(reserved);
+
+            let server = Server::new(&addr);
+            let weak_server = Arc::downgrade(&server);
+            let service = Arc::new(HelloServer);
+            let weak_service = Arc::downgrade(&service);
+
+            server.register_service_with_id(0, &service).await;
+            Server::listen_and_resume(&server).await;
+
+            assert!(crate::tcp::shortcut::is_local(server.server_id).await);
+            assert!(get_local(server.server_id, 0).await.is_some());
+            let pooled_client = DEFAULT_CLIENT_POOL.get(&addr).await.unwrap();
+            assert!(DEFAULT_CLIENT_POOL.clients.get(&server.server_id).is_some());
+
+            server.shutdown().await;
+            assert!(DEFAULT_CLIENT_POOL.clients.get(&server.server_id).is_none());
+            drop(pooled_client);
+            drop(service);
+            drop(server);
+
+            assert!(!crate::tcp::shortcut::is_local(hash_str(&addr)).await);
+            assert!(get_local(hash_str(&addr), 0).await.is_none());
+            assert!(weak_service.upgrade().is_none());
+            assert!(weak_server.upgrade().is_none());
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn stale_server_shutdown_preserves_replacement_service_shortcut() {
+            let addr = "rpc-service-generation-test".to_string();
+            let old_server = Server::new(&addr);
+            let old_service = Arc::new(HelloServer);
+            old_server.register_service_with_id(0, &old_service).await;
+
+            let new_server = Server::new(&addr);
+            let new_service = Arc::new(HelloServer);
+            let expected: Arc<dyn Service> = new_service.clone();
+            new_server.register_service_with_id(0, &new_service).await;
+
+            old_server.shutdown().await;
+
+            let registered = get_local(hash_str(&addr), 0)
+                .await
+                .expect("replacement service shortcut must remain registered");
+            assert!(Arc::ptr_eq(&registered, &expected));
+
+            new_server.shutdown().await;
+            assert!(get_local(hash_str(&addr), 0).await.is_none());
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn shutdown_awaits_listener_and_allows_immediate_same_port_rebind() {
+            let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = reserved.local_addr().unwrap().to_string();
+            drop(reserved);
+
+            let old_server = Server::new(&addr);
+            let old_service = Arc::new(HelloServer);
+            old_server.register_service_with_id(0, &old_service).await;
+            Server::listen_and_resume(&old_server).await;
+            old_server.shutdown().await;
+
+            let new_server = Server::new(&addr);
+            let new_service = Arc::new(HelloServer);
+            new_server.register_service_with_id(0, &new_service).await;
+            Server::listen_and_resume(&new_server).await;
+
+            let replacement_client = DEFAULT_CLIENT_POOL.get(&addr).await.unwrap();
+            old_server.shutdown().await;
+            assert!(crate::tcp::shortcut::is_local(hash_str(&addr)).await);
+            assert!(get_local(hash_str(&addr), 0).await.is_some());
+            let cached_client = DEFAULT_CLIENT_POOL.get(&addr).await.unwrap();
+            assert!(Arc::ptr_eq(&replacement_client, &cached_client));
+
+            new_server.shutdown().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn pool_eviction_rechecks_identity_before_removing() {
+            let addr = crate::tcp::STANDALONE_ADDRESS.to_string();
+            let server_id = hash_str(&addr);
+
+            let old_server = Server::new(&addr);
+            let old_service = Arc::new(HelloServer);
+            old_server.register_service_with_id(0, &old_service).await;
+            Server::listen_and_resume(&old_server).await;
+            let old_client = DEFAULT_CLIENT_POOL.get(&addr).await.unwrap();
+            let old_token = old_client.client.shortcut_token().unwrap().clone();
+
+            DEFAULT_CLIENT_POOL.clients.remove(&server_id);
+            let new_server = Server::new(&addr);
+            let new_service = Arc::new(HelloServer);
+            new_server.register_service_with_id(0, &new_service).await;
+            Server::listen_and_resume(&new_server).await;
+            let new_client = DEFAULT_CLIENT_POOL.get(&addr).await.unwrap();
+            let new_token = new_client.client.shortcut_token().unwrap().clone();
+            assert!(!old_token.is_same(&new_token));
+
+            let old_client_for_hook = old_client.clone();
+            *CLIENT_POOL_EVICT_AFTER_READ
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move || {
+                DEFAULT_CLIENT_POOL.clients.remove(&server_id);
+                DEFAULT_CLIENT_POOL
+                    .clients
+                    .insert(server_id, old_client_for_hook);
+            }));
+
+            DEFAULT_CLIENT_POOL.evict_owned(server_id, &new_token);
+
+            let cached = DEFAULT_CLIENT_POOL.clients.get(&server_id).unwrap();
+            assert!(Arc::ptr_eq(&cached, &old_client));
+
+            new_server.shutdown().await;
+            old_server.shutdown().await;
+        }
+
+        #[cfg(target_os = "linux")]
+        #[tokio::test(flavor = "multi_thread")]
+        async fn repeated_raft_service_lifecycle_keeps_fds_bounded() {
+            const CHILD_ENV: &str = "BIFROST_RPC_FD_LIFECYCLE_CHILD";
+            if std::env::var_os(CHILD_ENV).is_none() {
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .arg("--exact")
+                    .arg(
+                        "rpc::test::simple_service::repeated_raft_service_lifecycle_keeps_fds_bounded",
+                    )
+                    .arg("--nocapture")
+                    .env(CHILD_ENV, "1")
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "isolated lifecycle child failed");
+                return;
+            }
+
+            fn open_fd_count() -> usize {
+                std::fs::read_dir("/proc/self/fd").unwrap().count()
+            }
+
+            let baseline = open_fd_count();
+            let mut peak = baseline;
+            for iteration in 0..6 {
+                let addr = format!("fd-lifecycle-{}", iteration);
+                let server = Server::new(&addr);
+                let service = crate::raft::RaftService::new(crate::raft::Options {
+                    storage: crate::raft::Storage::MEMORY,
+                    address: addr,
+                    service_id: 7,
+                });
+                let weak_service = Arc::downgrade(&service);
+                peak = peak.max(open_fd_count());
+
+                server.register_service_with_id(7, &service).await;
+                service.shutdown().await;
+                server.shutdown().await;
+                drop(server);
+                drop(service);
+
+                assert!(
+                    weak_service.upgrade().is_none(),
+                    "RaftService remained rooted after lifecycle {}",
+                    iteration
+                );
+            }
+
+            let final_count = open_fd_count();
+            eprintln!(
+                "isolated repeated lifecycle fd baseline={}, peak={}, final={}",
+                baseline, peak, final_count
+            );
+            assert!(
+                final_count <= baseline + 2,
+                "file descriptors grew from {} to {}",
+                baseline,
+                final_count
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn shutdown_allows_raft_service_drop_inside_async_context() {
+            let addr = "async-raft-service-drop".to_string();
+            let server = Server::new(&addr);
+            let service = crate::raft::RaftService::new(crate::raft::Options {
+                storage: crate::raft::Storage::MEMORY,
+                address: addr,
+                service_id: 7,
+            });
+
+            server.register_service_with_id(7, &service).await;
+            service.shutdown().await;
+            server.shutdown().await;
+            drop(server);
+            drop(service);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn raft_runtime_drop_fallback_is_async_context_safe() {
+            let service = crate::raft::RaftService::new(crate::raft::Options {
+                storage: crate::raft::Storage::MEMORY,
+                address: "async-raft-service-drop-fallback".to_string(),
+                service_id: 7,
+            });
+            drop(service);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn raft_shutdown_called_from_owned_runtime_does_not_deadlock() {
+            let service = crate::raft::RaftService::new(crate::raft::Options {
+                storage: crate::raft::Storage::MEMORY,
+                address: "owned-runtime-shutdown".to_string(),
+                service_id: 7,
+            });
+            let shutdown_target = service.clone();
+            let shutdown = service
+                .rt
+                .spawn(async move { shutdown_target.shutdown().await });
+
+            tokio::time::timeout(Duration::from_secs(2), shutdown)
+                .await
+                .expect("owned-runtime shutdown must not deadlock")
+                .expect("owned-runtime shutdown task must complete");
+            drop(service);
         }
     }
 
@@ -474,14 +803,11 @@ mod test {
         pub async fn struct_rpc() {
             let _ = env_logger::try_init();
             let addr = String::from("127.0.0.1:1400");
-            {
-                let addr = addr.clone();
-                let server = Server::new(&addr); // 0 is service id
-                server
-                    .register_service_with_id(0, &Arc::new(HelloServer))
-                    .await;
-                Server::listen_and_resume(&server).await;
-            }
+            let server = Server::new(&addr); // 0 is service id
+            server
+                .register_service_with_id(0, &Arc::new(HelloServer))
+                .await;
+            Server::listen_and_resume(&server).await;
             sleep(Duration::from_millis(1000)).await;
             let client = RPCClient::new_async(&addr).await.unwrap();
             let service_client = AsyncServiceClient::new_with_service_id(0, &client);
@@ -494,6 +820,7 @@ mod test {
             info!("SERVER RESPONDED: {}", greeting_str);
             assert_eq!(greeting_str, String::from("Hello, Jack. It is 12 now!"));
             assert_eq!(42, res.owner);
+            server.shutdown().await;
         }
     }
 
@@ -563,26 +890,22 @@ mod test {
                 String::from("127.0.0.1:1700"),
                 String::from("127.0.0.1:1800"),
             ];
-            let mut id = 0;
-            for addr in &addrs {
-                {
-                    let addr = addr.clone();
-                    let server = Server::new(&addr); // 0 is service id
-                    server
-                        .register_service_with_id(id, &Arc::new(IdServer { id: id }))
-                        .await;
-                    Server::listen_and_resume(&server).await;
-                    id += 1;
-                }
+            let mut servers = Vec::new();
+            for (id, addr) in addrs.iter().enumerate() {
+                let server = Server::new(addr);
+                server
+                    .register_service_with_id(id as u64, &Arc::new(IdServer { id: id as u64 }))
+                    .await;
+                Server::listen_and_resume(&server).await;
+                servers.push(server);
             }
-            id = 0;
             sleep(Duration::from_millis(1000)).await;
-            for addr in &addrs {
+            for (id, addr) in addrs.iter().enumerate() {
                 let client = RPCClient::new_async(addr).await.unwrap();
-                let service_client = AsyncServiceClient::new_with_service_id(id, &client);
+                let service_client = AsyncServiceClient::new_with_service_id(id as u64, &client);
                 let id_res = service_client.query_server_id().await;
                 let id_un = id_res.unwrap();
-                assert_eq!(id_un, id);
+                assert_eq!(id_un, id as u64);
                 let user_str = format!("User {}", id);
                 let complex = service_client
                     .query_answer(Some(user_str.to_string()))
@@ -599,7 +922,9 @@ mod test {
                     .await
                     .unwrap();
                 assert_eq!(large_req.len(), 1024 * 2);
-                id += 1;
+            }
+            for server in servers {
+                server.shutdown().await;
             }
         }
     }
@@ -616,14 +941,11 @@ mod test {
         pub async fn lots_of_reqs() {
             let _ = env_logger::try_init();
             let addr = String::from("127.0.0.1:1411");
-            {
-                let addr = addr.clone();
-                let server = Server::new(&addr); // 0 is service id
-                server
-                    .register_service_with_id(0, &Arc::new(HelloServer))
-                    .await;
-                Server::listen_and_resume(&server).await;
-            }
+            let server = Server::new(&addr); // 0 is service id
+            server
+                .register_service_with_id(0, &Arc::new(HelloServer))
+                .await;
+            Server::listen_and_resume(&server).await;
             sleep(Duration::from_millis(1000)).await;
             let client = RPCClient::new_async(&addr).await.unwrap();
             let service_client = AsyncServiceClient::new_with_service_id(0, &client);
@@ -674,6 +996,7 @@ mod test {
                 })
                 .collect::<FuturesUnordered<_>>();
             while futs.next().await.is_some() {}
+            server.shutdown().await;
         }
     }
 }

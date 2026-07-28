@@ -28,6 +28,7 @@ pub struct Client {
     senders: Arc<SyncMutex<HashMap<u64, oneshot::Sender<BytesMut>>>>,
     timeout: Duration,
     pub server_id: u64,
+    shortcut_token: Option<shortcut::ShortcutToken>,
 }
 
 impl Client {
@@ -42,8 +43,13 @@ impl Client {
             server_id,
             timeout.as_millis()
         );
+        let shortcut_token = if DISABLE_SHORTCUT {
+            None
+        } else {
+            shortcut::registration_token(server_id).await
+        };
         let client = {
-            if !DISABLE_SHORTCUT && shortcut::is_local(server_id).await {
+            if shortcut_token.is_some() {
                 debug!("Local connection, using shortcut");
                 None
             } else {
@@ -89,6 +95,7 @@ impl Client {
             senders,
             timeout,
             msg_counter: AtomicU64::new(0),
+            shortcut_token,
         })
     }
     pub async fn connect(address: &String) -> io::Result<Self> {
@@ -122,6 +129,10 @@ impl Client {
         } else {
             Ok(shortcut::call(self.server_id, msg).await?)
         }
+    }
+
+    pub(crate) fn shortcut_token(&self) -> Option<&shortcut::ShortcutToken> {
+        self.shortcut_token.as_ref()
     }
 }
 
