@@ -598,35 +598,39 @@ impl RaftClient {
     }
 
     async fn live_callback() -> Option<Arc<SubscriptionService>> {
-        let observed = CALLBACK.read().await.clone()?;
-        if let Some(callback) = observed.upgrade() {
-            return Some(callback);
-        }
-        #[cfg(test)]
-        {
-            let hook = CALLBACK_AFTER_DEAD_OBSERVATION
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take();
-            if let Some(hook) = hook {
-                hook();
+        loop {
+            let observed = CALLBACK.read().await.clone()?;
+            if let Some(callback) = observed.upgrade() {
+                if SubscriptionService::is_registered(&callback) {
+                    return Some(callback);
+                }
+            }
+            #[cfg(test)]
+            {
+                let hook = CALLBACK_AFTER_DEAD_OBSERVATION
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+
+            let mut current = CALLBACK.write().await;
+            if current
+                .as_ref()
+                .map(|candidate| Weak::ptr_eq(candidate, &observed))
+                == Some(true)
+            {
+                if let Some(callback) = current.as_ref().and_then(Weak::upgrade) {
+                    if SubscriptionService::is_registered(&callback) {
+                        return Some(callback);
+                    }
+                }
+                *current = None;
+                return None;
             }
         }
-
-        let mut current = CALLBACK.write().await;
-        if current
-            .as_ref()
-            .map(|candidate| Weak::ptr_eq(candidate, &observed))
-            == Some(true)
-        {
-            *current = None;
-            return None;
-        }
-        let replacement = current.as_ref().and_then(Weak::upgrade);
-        if replacement.is_none() {
-            *current = None;
-        }
-        replacement
     }
 
     pub async fn subscribe<M, R, F>(
@@ -1316,6 +1320,54 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn dead_observation_preserves_same_callback_reregistered_concurrently() {
+        reset_callback().await;
+        let address = "concurrent-same-callback-reregistration".to_string();
+        let server = rpc::Server::new(&address);
+        assert_eq!(RaftClient::prepare_subscription(&server).await, Some(()));
+        let callback = callback_probe()
+            .get_callback()
+            .await
+            .expect("callback must initially be registered");
+        server
+            .remove_service(<SubscriptionService as rpc::RPCServiceWithId>::SERVICE_ID)
+            .await;
+
+        let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *CALLBACK_AFTER_DEAD_OBSERVATION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move || {
+            observed_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }));
+        let can_callback = tokio::spawn(async { RaftClient::can_callback().await });
+        observed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("callback reader did not observe the retired registration");
+
+        server.register_service(&callback).await;
+        release_tx.send(()).unwrap();
+        let observed_reregistered_callback = can_callback.await.unwrap();
+        let current = callback_probe()
+            .get_callback()
+            .await
+            .expect("same callback registration must remain published");
+
+        server.shutdown().await;
+        drop(server);
+        reset_callback().await;
+        assert!(
+            observed_reregistered_callback,
+            "stale cleanup hid the concurrently re-registered callback"
+        );
+        assert!(
+            Arc::ptr_eq(&callback, &current),
+            "same callback allocation was not preserved across re-registration"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn prepare_subscription_rebinds_after_prior_server_shutdown() {
         reset_callback().await;
         let address_a = "stale-subscription-callback-a".to_string();
@@ -1356,6 +1408,46 @@ mod tests {
             prepared_b,
             Some(()),
             "server B skipped callback registration because stale A remained"
+        );
+        assert_eq!(
+            callback_address, address_b,
+            "subscription callback remained bound to retired server A"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prepare_subscription_rebinds_when_retired_callback_is_still_strongly_held() {
+        reset_callback().await;
+        let address_a = "strongly-held-stale-subscription-callback-a".to_string();
+        let server_a = rpc::Server::new(&address_a);
+        assert_eq!(RaftClient::prepare_subscription(&server_a).await, Some(()));
+        let retired_a = callback_probe()
+            .get_callback()
+            .await
+            .expect("server A callback must initially be live");
+
+        server_a.shutdown().await;
+
+        let address_b = "strongly-held-stale-subscription-callback-b".to_string();
+        let server_b = rpc::Server::new(&address_b);
+        let prepared_b = RaftClient::prepare_subscription(&server_b).await;
+        let callback_address = callback_probe()
+            .get_callback()
+            .await
+            .expect("server B must replace the retired callback")
+            .server_address
+            .clone();
+
+        drop(retired_a);
+        server_b.shutdown().await;
+        drop(server_a);
+        drop(server_b);
+        reset_callback().await;
+
+        assert_eq!(
+            prepared_b,
+            Some(()),
+            "server B skipped registration because retired callback A still had a strong owner"
         );
         assert_eq!(
             callback_address, address_b,

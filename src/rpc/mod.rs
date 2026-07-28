@@ -15,8 +15,8 @@ use std::error::Error;
 use std::io;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::time::sleep;
 use tokio::time::*;
@@ -123,7 +123,8 @@ struct ListenerLifecycle {
 }
 
 pub struct Server {
-    services: PtrHashMap<u64, Arc<dyn RPCService>>,
+    services: PtrHashMap<u64, Weak<dyn RPCService>>,
+    service_owners: StdMutex<BTreeMap<u64, Arc<dyn RPCService>>>,
     pub address: String,
     pub server_id: u64,
     listener: StdMutex<ListenerLifecycle>,
@@ -240,7 +241,7 @@ fn request_callback(
             let (svr_id, data) = read_u64_head(data);
             let service = server.services.get(&svr_id);
             trace!("Processing request for service {}", svr_id);
-            match service {
+            match service.and_then(|service| service.upgrade()) {
                 Some(service) => {
                     let svr_res = service.dispatch(data).await;
                     encode_res(svr_res)
@@ -250,7 +251,11 @@ fn request_callback(
                         .services
                         .entries()
                         .into_iter()
-                        .map(|(sid, service)| format!("{}:{}", sid, service.service_symbol()))
+                        .filter_map(|(sid, service)| {
+                            service
+                                .upgrade()
+                                .map(|service| format!("{}:{}", sid, service.service_symbol()))
+                        })
                         .collect::<Vec<_>>();
                     error!(
                         "Service {} not found, have {:?}, backtrace: {:?}",
@@ -286,6 +291,7 @@ impl Server {
     pub fn new(address: &String) -> Arc<Server> {
         Arc::new(Server {
             services: PtrHashMap::with_capacity(16),
+            service_owners: StdMutex::new(BTreeMap::new()),
             address: address.clone(),
             server_id: hash_str(address),
             listener: StdMutex::new(ListenerLifecycle::default()),
@@ -494,7 +500,16 @@ impl Server {
             service.service_symbol(),
             service_id
         );
-        self.services.insert(service_id, service);
+        let service: Arc<dyn RPCService> = service;
+        let weak_service = Arc::downgrade(&service);
+        self.services.insert(service_id, weak_service);
+        let retired_service = self
+            .service_owners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(service_id, service);
+        drop(_lifecycle);
+        drop(retired_service);
     }
 
     pub async fn register_service<T>(&self, service: &Arc<T>)
@@ -505,38 +520,76 @@ impl Server {
     }
 
     pub async fn remove_service(&self, service_id: u64) {
-        let _lifecycle = self
-            .service_lifecycle
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let service = self.services.get(&service_id);
-        let shortcut_token = self
-            .service_shortcut_tokens
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&service_id);
-        if let (Some(service), Some(token)) = (service.as_ref(), shortcut_token) {
-            service.unregister_shortcut_service(self.server_id, service_id, &token);
-        }
-        self.services.remove(&service_id);
+        let retired_service = {
+            let _lifecycle = self
+                .service_lifecycle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.services.remove(&service_id);
+            let service = self
+                .service_owners
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&service_id);
+            let shortcut_token = self
+                .service_shortcut_tokens
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&service_id);
+            if let (Some(service), Some(token)) = (service.as_ref(), shortcut_token) {
+                service.unregister_shortcut_service(self.server_id, service_id, &token);
+            }
+            service
+        };
+        drop(retired_service);
     }
 
     fn release_services(&self) {
+        let retired_services = {
+            let _lifecycle = self
+                .service_lifecycle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let services = std::mem::take(
+                &mut *self
+                    .service_owners
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            );
+            let mut shortcut_tokens = self
+                .service_shortcut_tokens
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for (service_id, service) in services.iter() {
+                self.services.remove(service_id);
+                if let Some(token) = shortcut_tokens.remove(service_id) {
+                    service.unregister_shortcut_service(self.server_id, *service_id, &token);
+                }
+            }
+            shortcut_tokens.clear();
+            services
+        };
+        drop(retired_services);
+    }
+
+    pub(crate) fn owns_registered_service<T>(&self, service_id: u64, service: &Arc<T>) -> bool
+    where
+        T: RPCService + Sized + 'static,
+    {
         let _lifecycle = self
             .service_lifecycle
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut shortcut_tokens = self
-            .service_shortcut_tokens
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for (service_id, service) in self.services.entries() {
-            if let Some(token) = shortcut_tokens.remove(&service_id) {
-                service.unregister_shortcut_service(self.server_id, service_id, &token);
-            }
-            self.services.remove(&service_id);
+        if self.shutting_down.load(Ordering::Acquire) {
+            return false;
         }
-        shortcut_tokens.clear();
+        let service: Arc<dyn RPCService> = service.clone();
+        self.service_owners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&service_id)
+            .map(|registered| Arc::ptr_eq(registered, &service))
+            == Some(true)
     }
 
     pub fn address(&self) -> &String {
@@ -2014,6 +2067,71 @@ mod test {
             for server in servers {
                 server.shutdown().await;
             }
+        }
+    }
+
+    mod service_ownership {
+        use crate::bytes::BytesMut;
+        use crate::rpc::{RPCRequestError, RPCService, Server, ShortcutToken};
+        use futures::future::BoxFuture;
+        use futures::FutureExt;
+        use std::sync::Arc;
+
+        struct ServerOwningService {
+            _server: Arc<Server>,
+        }
+
+        impl RPCService for ServerOwningService {
+            fn dispatch(&self, _data: BytesMut) -> BoxFuture<Result<BytesMut, RPCRequestError>> {
+                async { Err(RPCRequestError::FunctionIdNotFound) }.boxed()
+            }
+
+            fn register_shortcut_service(
+                &self,
+                service_ptr: usize,
+                _server_id: u64,
+                _service_id: u64,
+            ) -> ShortcutToken {
+                drop(unsafe { Arc::from_raw(service_ptr as *const ServerOwningService) });
+                ShortcutToken::new()
+            }
+
+            fn unregister_shortcut_service(
+                &self,
+                _server_id: u64,
+                _service_id: u64,
+                _token: &ShortcutToken,
+            ) {
+            }
+
+            fn service_symbol(&self) -> &'static str {
+                "ServerOwningService"
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn shutdown_releases_service_that_owns_its_server() {
+            let address = "rpc-service-server-cycle".to_string();
+            let server = Server::new(&address);
+            let weak_server = Arc::downgrade(&server);
+            let service = Arc::new(ServerOwningService {
+                _server: server.clone(),
+            });
+            let weak_service = Arc::downgrade(&service);
+            server.register_service_with_id(7, &service).await;
+            drop(service);
+
+            server.shutdown().await;
+            drop(server);
+
+            assert!(
+                weak_service.upgrade().is_none(),
+                "retired lock-free service node kept the service alive"
+            );
+            assert!(
+                weak_server.upgrade().is_none(),
+                "retired service kept its owning RPC server alive"
+            );
         }
     }
 

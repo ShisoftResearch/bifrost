@@ -4,7 +4,7 @@ use async_std::sync::*;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 trait SubFunc = Fn(Vec<u8>) -> BoxFuture<'static, ()>;
 trait BoxedSubFunc = SubFunc + Send + Sync;
@@ -13,6 +13,7 @@ pub struct SubscriptionService {
     pub subs: RwLock<HashMap<SubKey, Vec<(Box<dyn BoxedSubFunc>, u64)>>>,
     pub server_address: String,
     pub session_id: u64,
+    owner: Weak<Server>,
 }
 
 impl Service for SubscriptionService {
@@ -47,8 +48,17 @@ impl SubscriptionService {
             subs: RwLock::new(HashMap::new()),
             server_address: server.address().clone(),
             session_id: get_time() as u64,
+            owner: Arc::downgrade(server),
         });
         server.register_service(&service).await;
         service
+    }
+
+    pub(crate) fn is_registered(service: &Arc<Self>) -> bool {
+        service
+            .owner
+            .upgrade()
+            .map(|server| server.owns_registered_service(DEFAULT_SERVICE_ID, service))
+            .unwrap_or(false)
     }
 }
