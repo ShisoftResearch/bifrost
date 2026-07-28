@@ -45,14 +45,19 @@ impl ShortcutRegistration {
 
 impl Drop for ShortcutRegistration {
     fn drop(&mut self) {
-        let mut callbacks = TCP_CALLBACKS.write();
-        if callbacks
-            .get(&self.server_id)
-            .map(|registration| registration.token.is_same(&self.token))
-            == Some(true)
-        {
-            callbacks.remove(&self.server_id);
-        }
+        let removed = {
+            let mut callbacks = TCP_CALLBACKS.write();
+            if callbacks
+                .get(&self.server_id)
+                .map(|registration| registration.token.is_same(&self.token))
+                == Some(true)
+            {
+                callbacks.remove(&self.server_id)
+            } else {
+                None
+            }
+        };
+        drop(removed);
     }
 }
 
@@ -62,14 +67,17 @@ pub async fn register_server(
 ) -> ShortcutRegistration {
     let server_id = hash_str(server_address);
     let token = ShortcutToken::new();
-    let mut callbacks = TCP_CALLBACKS.write();
-    callbacks.insert(
-        server_id,
-        CallbackRegistration {
-            token: token.clone(),
-            callback: callback.clone(),
-        },
-    );
+    let replaced = {
+        let mut callbacks = TCP_CALLBACKS.write();
+        callbacks.insert(
+            server_id,
+            CallbackRegistration {
+                token: token.clone(),
+                callback: callback.clone(),
+            },
+        )
+    };
+    drop(replaced);
     ShortcutRegistration { server_id, token }
 }
 

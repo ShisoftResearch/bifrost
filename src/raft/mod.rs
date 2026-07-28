@@ -535,15 +535,58 @@ pub struct RaftService {
     planes: RwLock<BTreeMap<PlaneId, Arc<RaftPlaneRuntime>>>,
     pub id: u64,
     pub options: Options,
-    pub rt: runtime::Handle,
+    pub rt: RaftRuntimeHandle,
     rt_owner: StdMutex<Option<runtime::Runtime>>,
     _is_leader: AtomicBool,
     checker_task: TokioMutex<Option<tokio::task::JoinHandle<()>>>,
     shutdown_tx: watch::Sender<LifecycleState>,
 }
 
+pub struct RaftRuntimeHandle {
+    handle: StdMutex<Option<runtime::Handle>>,
+}
+
+impl RaftRuntimeHandle {
+    fn new(handle: runtime::Handle) -> Self {
+        Self {
+            handle: StdMutex::new(Some(handle)),
+        }
+    }
+
+    pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let handle = self
+            .handle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .cloned()
+            .expect("Raft runtime is shut down");
+        handle.spawn(future)
+    }
+
+    fn id(&self) -> Option<runtime::Id> {
+        self.handle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(runtime::Handle::id)
+    }
+
+    fn close(&self) {
+        self.handle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+    }
+}
+
 impl Drop for RaftService {
     fn drop(&mut self) {
+        self.rt.close();
         if let Some(runtime) = self
             .rt_owner
             .lock()
@@ -1595,7 +1638,7 @@ impl RaftService {
             planes: RwLock::new(BTreeMap::new()),
             id: server_id,
             options: opts,
-            rt: runtime_handle,
+            rt: RaftRuntimeHandle::new(runtime_handle),
             rt_owner: StdMutex::new(Some(runtime)),
             _is_leader: AtomicBool::new(false),
             checker_task: TokioMutex::new(None),
@@ -2078,18 +2121,21 @@ impl RaftService {
     }
 
     async fn shutdown_runtime_owner(&self) {
+        let owned_runtime_id = self.rt.id();
         let runtime = self
             .rt_owner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
         let Some(runtime) = runtime else {
+            self.rt.close();
             return;
         };
 
         let called_from_owned_runtime = runtime::Handle::try_current()
-            .map(|current| current.id() == self.rt.id())
+            .map(|current| Some(current.id()) == owned_runtime_id)
             .unwrap_or(false);
+        self.rt.close();
         if called_from_owned_runtime {
             runtime.shutdown_background();
         } else if let Err(error) = tokio::task::spawn_blocking(move || drop(runtime)).await {

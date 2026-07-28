@@ -29,6 +29,10 @@ lazy_static! {
 lazy_static! {
     static ref CLIENT_POOL_EVICT_AFTER_READ: StdMutex<Option<Box<dyn FnOnce() + Send>>> =
         StdMutex::new(None);
+    static ref LISTENER_AFTER_PUBLICATION: StdMutex<Option<Box<dyn FnOnce() + Send>>> =
+        StdMutex::new(None);
+    static ref CLIENT_POOL_BEFORE_INSERT: StdMutex<Option<Box<dyn FnOnce() + Send>>> =
+        StdMutex::new(None);
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -74,12 +78,43 @@ pub trait RPCService: Sync + Send {
     fn service_symbol(&self) -> &'static str;
 }
 
+#[derive(Clone)]
+struct ListenerIdentity(Arc<()>);
+
+impl ListenerIdentity {
+    fn new() -> Self {
+        Self(Arc::new(()))
+    }
+
+    fn is_same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+#[derive(Clone)]
+struct ActiveListener {
+    identity: ListenerIdentity,
+    tcp_server: Arc<tcp::server::Server>,
+    completed: tokio::sync::watch::Receiver<bool>,
+}
+
+struct ListenerRun {
+    identity: ListenerIdentity,
+    tcp_server: Arc<tcp::server::Server>,
+    completed: tokio::sync::watch::Sender<bool>,
+}
+
+#[derive(Default)]
+struct ListenerLifecycle {
+    shutting_down: bool,
+    active: Option<ActiveListener>,
+}
+
 pub struct Server {
     services: PtrHashMap<u64, Arc<dyn RPCService>>,
     pub address: String,
     pub server_id: u64,
-    tcp_server: StdMutex<Option<Arc<tcp::server::Server>>>,
-    shutdown_handle: StdMutex<Option<tokio::task::JoinHandle<()>>>,
+    listener: StdMutex<ListenerLifecycle>,
     service_shortcut_tokens: StdMutex<BTreeMap<u64, ShortcutToken>>,
     service_lifecycle: StdMutex<()>,
     shutting_down: AtomicBool,
@@ -89,6 +124,29 @@ unsafe impl Sync for Server {}
 
 pub struct ClientPool {
     clients: PtrHashMap<u64, Arc<RPCClient>>,
+    constructions: StdMutex<BTreeMap<u64, Arc<ClientConstruction>>>,
+}
+
+struct ClientConstruction {
+    expected_registration: Option<tcp::shortcut::ShortcutToken>,
+    completed: tokio::sync::watch::Sender<bool>,
+}
+
+enum ConstructionAccess {
+    Ready(Arc<RPCClient>),
+    Owner(Arc<ClientConstruction>),
+    Wait(Arc<ClientConstruction>),
+}
+
+fn same_tcp_registration(
+    left: Option<&tcp::shortcut::ShortcutToken>,
+    right: Option<&tcp::shortcut::ShortcutToken>,
+) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.is_same(right),
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 fn encode_res(res: Result<BytesMut, RPCRequestError>) -> BytesMut {
@@ -159,6 +217,17 @@ fn request_callback(
     })
 }
 
+#[cfg(test)]
+fn run_listener_after_publication_hook() {
+    if let Some(hook) = LISTENER_AFTER_PUBLICATION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+    {
+        hook();
+    }
+}
+
 pub fn read_u64_head(mut data: BytesMut) -> (u64, BytesMut) {
     let num = data.get_u64_le();
     (num, data)
@@ -170,51 +239,115 @@ impl Server {
             services: PtrHashMap::with_capacity(16),
             address: address.clone(),
             server_id: hash_str(address),
-            tcp_server: StdMutex::new(None),
-            shutdown_handle: StdMutex::new(None),
+            listener: StdMutex::new(ListenerLifecycle::default()),
             service_shortcut_tokens: StdMutex::new(BTreeMap::new()),
             service_lifecycle: StdMutex::new(()),
             shutting_down: AtomicBool::new(false),
         })
     }
 
-    pub async fn listen(server: &Arc<Server>) -> Result<(), Box<dyn Error>> {
-        let address = &server.address;
-        let tcp_server = Arc::new(tcp::server::Server::new());
-
-        // Store tcp_server reference
-        match server.tcp_server.lock() {
-            Ok(mut guard) => *guard = Some(tcp_server.clone()),
-            Err(e) => error!("Failed to store tcp_server reference: {}", e),
+    fn begin_listener(&self) -> io::Result<ListenerRun> {
+        let mut lifecycle = self
+            .listener
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lifecycle.shutting_down || self.shutting_down.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "RPC server is shutting down",
+            ));
+        }
+        if lifecycle.active.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "RPC server already has an active listener",
+            ));
         }
 
-        tcp_server.listen(address, request_callback(server)).await
+        let identity = ListenerIdentity::new();
+        let tcp_server = Arc::new(tcp::server::Server::new());
+        let (completed, completed_rx) = tokio::sync::watch::channel(false);
+        lifecycle.active = Some(ActiveListener {
+            identity: identity.clone(),
+            tcp_server: tcp_server.clone(),
+            completed: completed_rx,
+        });
+        Ok(ListenerRun {
+            identity,
+            tcp_server,
+            completed,
+        })
+    }
+
+    fn complete_listener(&self, run: &ListenerRun, retain_active: bool) {
+        let retired = {
+            let mut lifecycle = self
+                .listener
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _ = run.completed.send(true);
+            if !retain_active
+                && lifecycle
+                    .active
+                    .as_ref()
+                    .map(|active| active.identity.is_same(&run.identity))
+                    == Some(true)
+            {
+                lifecycle.active.take()
+            } else {
+                None
+            }
+        };
+        drop(retired);
+    }
+
+    pub async fn listen(server: &Arc<Server>) -> Result<(), Box<dyn Error>> {
+        let run = server.begin_listener()?;
+        #[cfg(test)]
+        run_listener_after_publication_hook();
+
+        let result = run
+            .tcp_server
+            .listen(&server.address, request_callback(server))
+            .await;
+        let retain_active = result.is_ok()
+            && server.address == tcp::STANDALONE_ADDRESS
+            && !server.shutting_down.load(Ordering::Acquire);
+        server.complete_listener(&run, retain_active);
+        result
     }
 
     pub async fn listen_and_resume(server: &Arc<Server>) {
+        let run = match server.begin_listener() {
+            Ok(run) => run,
+            Err(error) => {
+                error!(
+                    "Cannot start RPC listener on {}: {:?}",
+                    server.address, error
+                );
+                return;
+            }
+        };
         let address = server.address.clone();
-        let tcp_server = Arc::new(tcp::server::Server::new());
-
-        // Store tcp_server in the server struct
-        match server.tcp_server.lock() {
-            Ok(mut guard) => *guard = Some(tcp_server.clone()),
-            Err(e) => error!("Failed to store tcp_server reference: {}", e),
-        }
+        #[cfg(test)]
+        run_listener_after_publication_hook();
 
         let callback = request_callback(server);
+        let listener_server = Arc::downgrade(server);
         let handle = tokio::spawn(async move {
-            let result = tcp_server.listen(&address, callback).await;
+            let result = run.tcp_server.listen(&address, callback).await;
+            if let Some(listener_server) = listener_server.upgrade() {
+                let retain_active = result.is_ok()
+                    && address == tcp::STANDALONE_ADDRESS
+                    && !listener_server.shutting_down.load(Ordering::Acquire);
+                listener_server.complete_listener(&run, retain_active);
+            }
 
             if let Err(e) = result {
                 error!("RPC server error: {:?}", e);
             }
         });
-
-        // Store handle
-        match server.shutdown_handle.lock() {
-            Ok(mut guard) => *guard = Some(handle),
-            Err(e) => error!("Failed to store shutdown handle: {}", e),
-        }
+        drop(handle);
 
         sleep(Duration::from_secs(1)).await
     }
@@ -222,25 +355,43 @@ impl Server {
     pub async fn shutdown(&self) {
         info!("Shutting down RPC server on {}", self.address);
         self.shutting_down.store(true, Ordering::Release);
-        let tcp_server = self
-            .tcp_server
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        let tcp_registration = tcp_server
+        let active = {
+            let mut lifecycle = self
+                .listener
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            lifecycle.shutting_down = true;
+            lifecycle.active.clone()
+        };
+        let tcp_registration = active
             .as_ref()
-            .and_then(|tcp_server| tcp_server.shutdown_owned());
-        let shutdown_handle = self
-            .shutdown_handle
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        if let Some(shutdown_handle) = shutdown_handle {
-            if let Err(e) = shutdown_handle.await {
-                error!("RPC listener task failed during shutdown: {:?}", e);
+            .and_then(|active| active.tcp_server.shutdown_owned());
+        if let Some(active) = active.as_ref() {
+            let mut completed = active.completed.clone();
+            while !*completed.borrow() {
+                if completed.changed().await.is_err() {
+                    break;
+                }
             }
         }
-        drop(tcp_server);
+        let retired = {
+            let mut lifecycle = self
+                .listener
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if lifecycle
+                .active
+                .as_ref()
+                .zip(active.as_ref())
+                .map(|(current, stopped)| current.identity.is_same(&stopped.identity))
+                == Some(true)
+            {
+                lifecycle.active.take()
+            } else {
+                None
+            }
+        };
+        drop(retired);
         if let Some(tcp_registration) = tcp_registration.as_ref() {
             DEFAULT_CLIENT_POOL.evict_owned(self.server_id, tcp_registration);
         }
@@ -331,13 +482,16 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.shutting_down.store(true, Ordering::Release);
-        if let Some(tcp_server) = self
-            .tcp_server
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        {
-            if let Some(tcp_registration) = tcp_server.shutdown_owned() {
+        let active = {
+            let mut lifecycle = self
+                .listener
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            lifecycle.shutting_down = true;
+            lifecycle.active.take()
+        };
+        if let Some(active) = active {
+            if let Some(tcp_registration) = active.tcp_server.shutdown_owned() {
                 DEFAULT_CLIENT_POOL.evict_owned(self.server_id, &tcp_registration);
             }
         }
@@ -383,6 +537,7 @@ impl ClientPool {
     pub fn new() -> ClientPool {
         ClientPool {
             clients: PtrHashMap::with_capacity(16),
+            constructions: StdMutex::new(BTreeMap::new()),
         }
     }
 
@@ -396,32 +551,155 @@ impl ClientPool {
     where
         F: FnOnce(u64) -> String,
     {
-        let clients = &self.clients;
-        if let Some(client) = clients.get(&server_id) {
-            Ok(client.clone())
-        } else {
-            let client = timeout(
-                Duration::from_secs(5),
-                RPCClient::new_async(&addr_fn(server_id)),
-            )
-            .await??;
-            clients.insert(server_id, client.clone());
-            Ok(client)
+        if let Some(client) = self.clients.get(&server_id) {
+            return Ok(client);
+        }
+        let address = addr_fn(server_id);
+
+        loop {
+            if let Some(client) = self.clients.get(&server_id) {
+                return Ok(client);
+            }
+            let observed_registration = tcp::shortcut::registration_token(server_id).await;
+            let access = {
+                let mut constructions = self
+                    .constructions
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Some(client) = self.clients.get(&server_id) {
+                    ConstructionAccess::Ready(client)
+                } else if let Some(construction) = constructions.get(&server_id) {
+                    ConstructionAccess::Wait(construction.clone())
+                } else {
+                    let construction = Arc::new(ClientConstruction {
+                        expected_registration: observed_registration,
+                        completed: tokio::sync::watch::channel(false).0,
+                    });
+                    constructions.insert(server_id, construction.clone());
+                    ConstructionAccess::Owner(construction)
+                }
+            };
+
+            let construction = match access {
+                ConstructionAccess::Ready(client) => return Ok(client),
+                ConstructionAccess::Wait(construction) => {
+                    let mut completed = construction.completed.subscribe();
+                    let still_active = self
+                        .constructions
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .get(&server_id)
+                        .map(|current| Arc::ptr_eq(current, &construction))
+                        .unwrap_or(false);
+                    if still_active && !*completed.borrow() {
+                        let _ = completed.changed().await;
+                    }
+                    continue;
+                }
+                ConstructionAccess::Owner(construction) => construction,
+            };
+
+            let connect_result =
+                timeout(Duration::from_secs(5), RPCClient::new_async(&address)).await;
+            let client = match connect_result {
+                Ok(Ok(client)) => client,
+                Ok(Err(error)) => {
+                    let owned = self.finish_failed_construction(server_id, &construction);
+                    if owned {
+                        return Err(error);
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    let owned = self.finish_failed_construction(server_id, &construction);
+                    if owned {
+                        return Err(error.into());
+                    }
+                    continue;
+                }
+            };
+            #[cfg(test)]
+            {
+                let hook = CLIENT_POOL_BEFORE_INSERT
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            let current_registration = tcp::shortcut::registration_token(server_id).await;
+            let (result, completed) = {
+                let mut constructions = self
+                    .constructions
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let still_owner = constructions
+                    .get(&server_id)
+                    .map(|current| Arc::ptr_eq(current, &construction))
+                    .unwrap_or(false);
+                if !still_owner {
+                    (None, false)
+                } else {
+                    let client_matches_expected = same_tcp_registration(
+                        client.client.shortcut_token(),
+                        construction.expected_registration.as_ref(),
+                    );
+                    let registration_is_current = same_tcp_registration(
+                        current_registration.as_ref(),
+                        construction.expected_registration.as_ref(),
+                    );
+                    constructions.remove(&server_id);
+                    if client_matches_expected && registration_is_current {
+                        let selected = if let Some(existing) = self.clients.get(&server_id) {
+                            existing
+                        } else {
+                            self.clients.insert(server_id, client.clone());
+                            client
+                        };
+                        (Some(selected), true)
+                    } else {
+                        (None, true)
+                    }
+                }
+            };
+            if completed {
+                let _ = construction.completed.send(true);
+            }
+            if let Some(result) = result {
+                return Ok(result);
+            }
         }
     }
 
+    fn finish_failed_construction(
+        &self,
+        server_id: u64,
+        construction: &Arc<ClientConstruction>,
+    ) -> bool {
+        let owned = {
+            let mut constructions = self
+                .constructions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if constructions
+                .get(&server_id)
+                .map(|current| Arc::ptr_eq(current, construction))
+                == Some(true)
+            {
+                constructions.remove(&server_id);
+                true
+            } else {
+                false
+            }
+        };
+        if owned {
+            let _ = construction.completed.send(true);
+        }
+        owned
+    }
+
     fn evict_owned(&self, server_id: u64, registration: &tcp::shortcut::ShortcutToken) {
-        let should_evict = self
-            .clients
-            .get(&server_id)
-            .map(|client| {
-                client
-                    .client
-                    .shortcut_token()
-                    .map(|cached_registration| cached_registration.is_same(registration))
-                    .unwrap_or(true)
-            })
-            .unwrap_or(false);
         #[cfg(test)]
         if let Some(hook) = CLIENT_POOL_EVICT_AFTER_READ
             .lock()
@@ -430,18 +708,41 @@ impl ClientPool {
         {
             hook();
         }
-        if should_evict {
-            if let Some(client) = self.clients.lock(&server_id) {
+        let (cancelled, removed) = {
+            let mut constructions = self
+                .constructions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let cancelled = if constructions
+                .get(&server_id)
+                .and_then(|construction| construction.expected_registration.as_ref())
+                .map(|expected| expected.is_same(registration))
+                == Some(true)
+            {
+                constructions.remove(&server_id)
+            } else {
+                None
+            };
+            let removed = if let Some(client) = self.clients.lock(&server_id) {
                 let still_owned = client
                     .client
                     .shortcut_token()
                     .map(|cached_registration| cached_registration.is_same(registration))
-                    .unwrap_or(true);
+                    == Some(true);
                 if still_owned {
-                    client.remove();
+                    Some(client.remove())
+                } else {
+                    None
                 }
-            }
+            } else {
+                None
+            };
+            (cancelled, removed)
+        };
+        if let Some(cancelled) = cancelled {
+            let _ = cancelled.completed.send(true);
         }
+        drop(removed);
     }
 }
 
@@ -592,6 +893,168 @@ mod test {
         }
 
         #[tokio::test(flavor = "multi_thread")]
+        async fn standalone_replacement_drops_old_callback_outside_shortcut_lock() {
+            const CHILD_ENV: &str = "BIFROST_SHORTCUT_REPLACEMENT_CHILD";
+            if std::env::var_os(CHILD_ENV).is_none() {
+                let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                    .arg("--exact")
+                    .arg(
+                        "rpc::test::simple_service::standalone_replacement_drops_old_callback_outside_shortcut_lock",
+                    )
+                    .arg("--nocapture")
+                    .env(CHILD_ENV, "1")
+                    .spawn()
+                    .unwrap();
+                let deadline = std::time::Instant::now() + Duration::from_secs(6);
+                loop {
+                    if let Some(status) = child.try_wait().unwrap() {
+                        assert!(status.success(), "isolated replacement child failed");
+                        return;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        child.kill().unwrap();
+                        let _ = child.wait();
+                        panic!("standalone replacement deadlocked");
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+
+            let addr = crate::tcp::STANDALONE_ADDRESS.to_string();
+            let old_server = Server::new(&addr);
+            let weak_old_server = Arc::downgrade(&old_server);
+            old_server
+                .register_service_with_id(0, &Arc::new(HelloServer))
+                .await;
+            Server::listen_and_resume(&old_server).await;
+            let old_registration = crate::tcp::shortcut::registration_token(hash_str(&addr))
+                .await
+                .expect("old shortcut must be registered");
+            drop(old_server);
+
+            let replacement = Server::new(&addr);
+            replacement
+                .register_service_with_id(0, &Arc::new(HelloServer))
+                .await;
+            Server::listen_and_resume(&replacement).await;
+            let replacement_registration =
+                crate::tcp::shortcut::registration_token(hash_str(&addr))
+                    .await
+                    .expect("replacement shortcut must be registered");
+
+            assert!(!old_registration.is_same(&replacement_registration));
+            assert!(
+                weak_old_server.upgrade().is_none(),
+                "replaced callback retained the old server"
+            );
+            replacement.shutdown().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn shutdown_waits_for_concurrent_direct_listener_publication() {
+            let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = reserved.local_addr().unwrap().to_string();
+            drop(reserved);
+            let server = Server::new(&addr);
+            let (published_tx, published_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            *LISTENER_AFTER_PUBLICATION
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move || {
+                published_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }));
+
+            let listen_server = server.clone();
+            let listen = tokio::spawn(async move {
+                Server::listen(&listen_server).await.unwrap();
+            });
+            published_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("direct listener was not published");
+
+            let shutdown_server = server.clone();
+            let mut shutdown = tokio::spawn(async move { shutdown_server.shutdown().await });
+            let completed_before_listener_started =
+                tokio::time::timeout(Duration::from_millis(100), &mut shutdown)
+                    .await
+                    .is_ok();
+
+            release_tx.send(()).unwrap();
+            listen.await.unwrap();
+            if !completed_before_listener_started {
+                shutdown.await.unwrap();
+            }
+            assert!(
+                !completed_before_listener_started,
+                "shutdown returned before the direct listener completed"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn shutdown_waits_for_concurrent_resumed_listener_publication() {
+            let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = reserved.local_addr().unwrap().to_string();
+            drop(reserved);
+            let server = Server::new(&addr);
+            let (published_tx, published_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            *LISTENER_AFTER_PUBLICATION
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move || {
+                published_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }));
+
+            let listen_server = server.clone();
+            let listen =
+                tokio::spawn(async move { Server::listen_and_resume(&listen_server).await });
+            published_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("resumed listener was not published");
+
+            let shutdown_server = server.clone();
+            let mut shutdown = tokio::spawn(async move { shutdown_server.shutdown().await });
+            let completed_before_listener_started =
+                tokio::time::timeout(Duration::from_millis(100), &mut shutdown)
+                    .await
+                    .is_ok();
+
+            release_tx.send(()).unwrap();
+            listen.await.unwrap();
+            if !completed_before_listener_started {
+                shutdown.await.unwrap();
+            }
+            assert!(
+                !completed_before_listener_started,
+                "shutdown returned before the resumed listener completed"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn already_shutdown_server_rejects_direct_standalone_listen() {
+            let addr = crate::tcp::STANDALONE_ADDRESS.to_string();
+            let server = Server::new(&addr);
+            server.shutdown().await;
+
+            let result = Server::listen(&server).await;
+
+            assert!(result.is_err(), "listen must reject a stopped server");
+            assert!(!crate::tcp::shortcut::is_local(hash_str(&addr)).await);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn already_shutdown_server_rejects_resumed_standalone_listen() {
+            let addr = crate::tcp::STANDALONE_ADDRESS.to_string();
+            let server = Server::new(&addr);
+            server.shutdown().await;
+
+            Server::listen_and_resume(&server).await;
+
+            assert!(!crate::tcp::shortcut::is_local(hash_str(&addr)).await);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
         async fn shutdown_awaits_listener_and_allows_immediate_same_port_rebind() {
             let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let addr = reserved.local_addr().unwrap().to_string();
@@ -658,6 +1121,101 @@ mod test {
             old_server.shutdown().await;
         }
 
+        #[tokio::test(flavor = "multi_thread")]
+        async fn late_old_pool_insertion_does_not_overwrite_competing_replacement() {
+            let addr = crate::tcp::STANDALONE_ADDRESS.to_string();
+            let server_id = hash_str(&addr);
+            DEFAULT_CLIENT_POOL.clients.remove(&server_id);
+
+            let old_server = Server::new(&addr);
+            old_server
+                .register_service_with_id(0, &Arc::new(HelloServer))
+                .await;
+            Server::listen_and_resume(&old_server).await;
+
+            let (connected_tx, connected_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            *CLIENT_POOL_BEFORE_INSERT
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move || {
+                connected_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }));
+            let old_get =
+                tokio::spawn(async move { DEFAULT_CLIENT_POOL.get(&addr).await.unwrap() });
+            connected_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("old client did not reach pre-insert barrier");
+
+            old_server.shutdown().await;
+            let replacement_addr = crate::tcp::STANDALONE_ADDRESS.to_string();
+            let replacement_server = Server::new(&replacement_addr);
+            replacement_server
+                .register_service_with_id(0, &Arc::new(HelloServer))
+                .await;
+            Server::listen_and_resume(&replacement_server).await;
+            let replacement_client = DEFAULT_CLIENT_POOL.get(&replacement_addr).await.unwrap();
+
+            release_tx.send(()).unwrap();
+            let _old_client = old_get.await.unwrap();
+            let cached = DEFAULT_CLIENT_POOL.clients.get(&server_id).unwrap();
+            let replacement_preserved = Arc::ptr_eq(&cached, &replacement_client);
+
+            replacement_server.shutdown().await;
+            DEFAULT_CLIENT_POOL.clients.remove(&server_id);
+            assert!(
+                replacement_preserved,
+                "late old construction overwrote the replacement client"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn old_local_eviction_preserves_tokenless_socket_replacement() {
+            let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = reserved.local_addr().unwrap().to_string();
+            drop(reserved);
+            let server_id = hash_str(&addr);
+            DEFAULT_CLIENT_POOL.clients.remove(&server_id);
+
+            let old_server = Server::new(&addr);
+            old_server
+                .register_service_with_id(0, &Arc::new(HelloServer))
+                .await;
+            Server::listen_and_resume(&old_server).await;
+            let old_registration = crate::tcp::shortcut::registration_token(server_id)
+                .await
+                .expect("old local registration must exist");
+            old_server.shutdown().await;
+
+            let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let accept = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let _ = release_rx.await;
+                drop(socket);
+            });
+            let replacement = RPCClient::new_async(&addr).await.unwrap();
+            assert!(replacement.client.shortcut_token().is_none());
+            DEFAULT_CLIENT_POOL
+                .clients
+                .insert(server_id, replacement.clone());
+
+            DEFAULT_CLIENT_POOL.evict_owned(server_id, &old_registration);
+
+            let cached = DEFAULT_CLIENT_POOL.clients.get(&server_id);
+            let replacement_preserved = cached
+                .as_ref()
+                .map(|cached| Arc::ptr_eq(cached, &replacement))
+                .unwrap_or(false);
+            DEFAULT_CLIENT_POOL.clients.remove(&server_id);
+            let _ = release_tx.send(());
+            accept.await.unwrap();
+            assert!(
+                replacement_preserved,
+                "old local generation evicted a tokenless socket replacement"
+            );
+        }
+
         #[cfg(target_os = "linux")]
         #[tokio::test(flavor = "multi_thread")]
         async fn repeated_raft_service_lifecycle_keeps_fds_bounded() {
@@ -717,6 +1275,111 @@ mod test {
                 baseline,
                 final_count
             );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[tokio::test(flavor = "multi_thread")]
+        async fn external_raft_shutdown_releases_driver_fds_before_returning() {
+            const CHILD_ENV: &str = "BIFROST_EXTERNAL_RAFT_FD_CHILD";
+            if std::env::var_os(CHILD_ENV).is_none() {
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .arg("--exact")
+                    .arg(
+                        "rpc::test::simple_service::external_raft_shutdown_releases_driver_fds_before_returning",
+                    )
+                    .arg("--nocapture")
+                    .env(CHILD_ENV, "1")
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "isolated external-shutdown child failed");
+                return;
+            }
+
+            let open_fd_count = || std::fs::read_dir("/proc/self/fd").unwrap().count();
+            let baseline = open_fd_count();
+            let service = crate::raft::RaftService::new(crate::raft::Options {
+                storage: crate::raft::Storage::MEMORY,
+                address: "external-raft-fd-release".to_string(),
+                service_id: 7,
+            });
+            let peak = open_fd_count();
+
+            service.shutdown().await;
+
+            let after_shutdown = open_fd_count();
+            eprintln!(
+                "external shutdown fd baseline={}, peak={}, after={}",
+                baseline, peak, after_shutdown
+            );
+            assert!(
+                after_shutdown <= baseline + 2,
+                "external shutdown returned with driver FDs open: {} -> {}",
+                baseline,
+                after_shutdown
+            );
+            assert_eq!(Arc::strong_count(&service), 1);
+            drop(service);
+        }
+
+        #[cfg(target_os = "linux")]
+        #[tokio::test(flavor = "multi_thread")]
+        async fn owned_runtime_shutdown_eventually_releases_owner_and_driver_fds() {
+            const CHILD_ENV: &str = "BIFROST_SELF_RAFT_FD_CHILD";
+            if std::env::var_os(CHILD_ENV).is_none() {
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .arg("--exact")
+                    .arg(
+                        "rpc::test::simple_service::owned_runtime_shutdown_eventually_releases_owner_and_driver_fds",
+                    )
+                    .arg("--nocapture")
+                    .env(CHILD_ENV, "1")
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "isolated self-shutdown child failed");
+                return;
+            }
+
+            let open_fd_count = || std::fs::read_dir("/proc/self/fd").unwrap().count();
+            let baseline = open_fd_count();
+            let service = crate::raft::RaftService::new(crate::raft::Options {
+                storage: crate::raft::Storage::MEMORY,
+                address: "self-raft-fd-release".to_string(),
+                service_id: 7,
+            });
+            let peak = open_fd_count();
+            let weak_service = Arc::downgrade(&service);
+            let shutdown_target = service.clone();
+            let shutdown = service
+                .rt
+                .spawn(async move { shutdown_target.shutdown().await });
+
+            tokio::time::timeout(Duration::from_secs(2), shutdown)
+                .await
+                .expect("owned-runtime shutdown caller must exit")
+                .expect("owned-runtime shutdown task must complete");
+            drop(service);
+
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let owner_released = weak_service.upgrade().is_none();
+                let fd_count = open_fd_count();
+                if owner_released && fd_count <= baseline + 2 {
+                    eprintln!(
+                        "self shutdown fd baseline={}, peak={}, final={}",
+                        baseline, peak, fd_count
+                    );
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "self shutdown did not release owner/FDs: owner={}, baseline={}, peak={}, current={}",
+                    owner_released,
+                    baseline,
+                    peak,
+                    fd_count
+                );
+                sleep(Duration::from_millis(10)).await;
+            }
         }
 
         #[tokio::test(flavor = "multi_thread")]

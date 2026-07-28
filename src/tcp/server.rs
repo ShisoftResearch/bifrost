@@ -44,11 +44,15 @@ impl Server {
         addr: &String,
         callback: Arc<dyn Fn(TcpReq) -> TcpRes + Send + Sync>,
     ) -> Result<(), Box<dyn Error>> {
+        if self.shutdown_requested.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let listener = if addr.eq(&STANDALONE_ADDRESS) {
             None
         } else {
             Some(TcpListener::bind(&addr).await?)
         };
+        let is_network_listener = listener.is_some();
         let registration = shortcut::register_server(addr, &callback).await;
         let registration_token = registration.token();
         *self
@@ -56,9 +60,9 @@ impl Server {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(registration);
 
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        let shutdown_requested = self.shutdown_requested.clone();
         if let Some(listener) = listener {
-            let mut shutdown_rx = self.shutdown_tx.subscribe();
-            let shutdown_requested = self.shutdown_requested.clone();
             let mut connections = JoinSet::new();
 
             info!("TCP server listening on {}", addr);
@@ -130,18 +134,25 @@ impl Server {
                     error!("TCP connection handler failed during shutdown: {:?}", e);
                 }
             }
+        }
 
-            let mut owned_registration = self
-                .shortcut_registration
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if owned_registration
-                .as_ref()
-                .map(|registration| registration.token().is_same(&registration_token))
-                == Some(true)
-            {
-                owned_registration.take();
-            }
+        if is_network_listener || shutdown_requested.load(Ordering::Acquire) {
+            let registration = {
+                let mut owned_registration = self
+                    .shortcut_registration
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if owned_registration
+                    .as_ref()
+                    .map(|registration| registration.token().is_same(&registration_token))
+                    == Some(true)
+                {
+                    owned_registration.take()
+                } else {
+                    None
+                }
+            };
+            drop(registration);
         }
         info!("TCP server on {} shut down gracefully", addr);
         Ok(())
