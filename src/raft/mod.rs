@@ -4953,7 +4953,7 @@ mod test {
             let addresses: Vec<_> = (0..5)
                 .map(|offset| format!("127.0.0.1:{}", base_port + offset))
                 .collect();
-            let raft_services = addresses
+            let nodes = addresses
                 .iter()
                 .map(|addr| {
                     let addr = addr.clone();
@@ -4969,12 +4969,16 @@ mod test {
                         Server::listen_and_resume(&server).await;
                         RaftService::start(&raft_service, false).await;
                         raft_service.register_state_machine(Box::new(sm)).await;
-                        raft_service
+                        (server, raft_service)
                     }
                 })
                 .collect::<FuturesUnordered<_>>()
                 .collect::<Vec<_>>()
                 .await;
+            let raft_services = nodes
+                .iter()
+                .map(|(_, raft_service)| raft_service.clone())
+                .collect::<Vec<_>>();
             raft_services[0].bootstrap().await;
             for i in 1..raft_services.len() {
                 raft_services[i].join(&addresses).await.unwrap();

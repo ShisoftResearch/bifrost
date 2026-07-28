@@ -123,7 +123,7 @@ struct ListenerLifecycle {
 }
 
 pub struct Server {
-    services: PtrHashMap<u64, Weak<dyn RPCService>>,
+    services: Arc<PtrHashMap<u64, Weak<dyn RPCService>>>,
     service_owners: StdMutex<BTreeMap<u64, Arc<dyn RPCService>>>,
     pub address: String,
     pub server_id: u64,
@@ -234,12 +234,12 @@ fn decode_res(res: io::Result<BytesMut>) -> Result<BytesMut, RPCError> {
 fn request_callback(
     server: &Arc<Server>,
 ) -> Arc<dyn Fn(tcp::server::TcpReq) -> tcp::server::TcpRes + Send + Sync> {
-    let server = server.clone();
+    let services = server.services.clone();
     Arc::new(move |data| {
-        let server = server.clone();
+        let services = services.clone();
         async move {
             let (svr_id, data) = read_u64_head(data);
-            let service = server.services.get(&svr_id);
+            let service = services.get(&svr_id);
             trace!("Processing request for service {}", svr_id);
             match service.and_then(|service| service.upgrade()) {
                 Some(service) => {
@@ -247,8 +247,7 @@ fn request_callback(
                     encode_res(svr_res)
                 }
                 None => {
-                    let service_list = server
-                        .services
+                    let service_list = services
                         .entries()
                         .into_iter()
                         .filter_map(|(sid, service)| {
@@ -290,7 +289,7 @@ pub fn read_u64_head(mut data: BytesMut) -> (u64, BytesMut) {
 impl Server {
     pub fn new(address: &String) -> Arc<Server> {
         Arc::new(Server {
-            services: PtrHashMap::with_capacity(16),
+            services: Arc::new(PtrHashMap::with_capacity(16)),
             service_owners: StdMutex::new(BTreeMap::new()),
             address: address.clone(),
             server_id: hash_str(address),
@@ -1002,6 +1001,39 @@ mod test {
             assert!(get_local(hash_str(&addr), 0).await.is_none());
             assert!(weak_service.upgrade().is_none());
             assert!(weak_server.upgrade().is_none());
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn dropping_running_server_releases_listener_cycle_and_services() {
+            let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = reserved.local_addr().unwrap().to_string();
+            drop(reserved);
+
+            let server = Server::new(&addr);
+            let weak_server = Arc::downgrade(&server);
+            let service = Arc::new(HelloServer);
+            let weak_service = Arc::downgrade(&service);
+
+            server.register_service_with_id(0, &service).await;
+            Server::listen_and_resume(&server).await;
+            drop(service);
+            drop(server);
+
+            for _ in 0..100 {
+                if weak_server.upgrade().is_none() && weak_service.upgrade().is_none() {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+
+            assert!(
+                weak_server.upgrade().is_none(),
+                "running listener retained its RPC Server after the caller dropped it"
+            );
+            assert!(
+                weak_service.upgrade().is_none(),
+                "running listener retained the RPC Server's registered services"
+            );
         }
 
         #[tokio::test(flavor = "multi_thread")]
