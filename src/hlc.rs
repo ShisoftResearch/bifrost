@@ -28,6 +28,15 @@ pub enum HlcError {
     Exhausted,
 }
 
+/// A reserved range of timestamps from `HlcSource::try_lease`. Values
+/// `start+1 ..= end` belong exclusively to the holder; the source has already
+/// advanced past `end`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HlcLeaseRange {
+    pub start: u64,
+    pub end: u64,
+}
+
 impl Hlc {
     /// Wall-clock milliseconds this value is anchored to.
     pub fn wall_ms(&self) -> u64 {
@@ -94,6 +103,30 @@ impl HlcSource {
 
     pub fn try_now(&self) -> Result<Hlc, HlcError> {
         self.advance_checked(0)
+    }
+
+    /// Reserve `span` consecutive timestamps for amortized allocation, in the
+    /// style of the Percolator timestamp oracle: the source is advanced to the
+    /// end of the range *before* any value inside it is issued, so every later
+    /// `try_now`/`try_observe` result is strictly greater than every leased
+    /// value, and an abandoned remainder only ever makes timestamps jump
+    /// forward. Leased values are `start+1 ..= end`: nonzero, unique, and
+    /// strictly increasing across successive leases from one source.
+    pub fn try_lease(&self, span: u64) -> Result<HlcLeaseRange, HlcError> {
+        debug_assert!(span > 0);
+        let phys = Self::packed_phys_ms_checked()?;
+        let mut current = self.ts.load(Ordering::Relaxed);
+        loop {
+            let start = current.max(phys);
+            let end = start.checked_add(span).ok_or(HlcError::Exhausted)?;
+            match self
+                .ts
+                .compare_exchange_weak(current, end, Ordering::AcqRel, Ordering::Relaxed)
+            {
+                Ok(_) => return Ok(HlcLeaseRange { start, end }),
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     pub fn try_observe(&self, remote: Hlc) -> Result<Hlc, HlcError> {
@@ -220,6 +253,63 @@ mod tests {
         let mut v = [c, a, b];
         v.sort();
         assert_eq!(v, [a, b, c]);
+    }
+
+    #[test]
+    fn leases_are_disjoint_and_below_later_values() {
+        let source = HlcSource::new(3);
+        let before = source.now();
+        let first = source.try_lease(64).unwrap();
+        let second = source.try_lease(64).unwrap();
+        assert!(first.start >= before.ts, "lease starts at or after history");
+        assert_eq!(first.end - first.start, 64);
+        assert!(
+            second.start >= first.end,
+            "later leases must start at or beyond earlier lease ends"
+        );
+        let after = source.now();
+        assert!(
+            after.ts > second.end,
+            "issued values must exceed every leased value"
+        );
+        let observed = source.observe(Hlc { ts: 1, node: 9 });
+        assert!(observed.ts > second.end);
+    }
+
+    #[test]
+    fn lease_values_are_nonzero_unique_and_increasing() {
+        let source = HlcSource::new(3);
+        let range = source.try_lease(1000).unwrap();
+        let mut prev = range.start;
+        for value in range.start + 1..=range.end {
+            assert!(value > 0);
+            assert!(value > prev);
+            prev = value;
+        }
+    }
+
+    #[test]
+    fn lease_refuses_exhausted_space() {
+        let source = HlcSource::new(3);
+        source.ts.store(u64::MAX - 10, Ordering::Relaxed);
+        assert_eq!(source.try_lease(64), Err(HlcError::Exhausted));
+        assert_eq!(
+            source.ts.load(Ordering::Relaxed),
+            u64::MAX - 10,
+            "a refused lease must not move the clock"
+        );
+    }
+
+    #[test]
+    fn lease_after_observe_stays_above_the_floor() {
+        let source = HlcSource::new(3);
+        let remote = Hlc {
+            ts: 5_000_000 << LOGICAL_BITS,
+            node: 8,
+        };
+        source.observe(remote);
+        let range = source.try_lease(64).unwrap();
+        assert!(range.start > remote.ts);
     }
 
     #[test]
