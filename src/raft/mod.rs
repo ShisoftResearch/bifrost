@@ -24,6 +24,7 @@ use std::io;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tokio::runtime;
 use tokio::sync::{watch, Mutex as TokioMutex};
@@ -534,11 +535,130 @@ pub struct RaftService {
     planes: RwLock<BTreeMap<PlaneId, Arc<RaftPlaneRuntime>>>,
     pub id: u64,
     pub options: Options,
-    pub rt: runtime::Runtime,
+    pub rt: RaftRuntimeHandle,
+    rt_id: runtime::Id,
+    rt_lifecycle: StdMutex<RuntimeLifecycle>,
     _is_leader: AtomicBool,
     checker_task: TokioMutex<Option<tokio::task::JoinHandle<()>>>,
     shutdown_tx: watch::Sender<LifecycleState>,
 }
+
+pub struct RaftRuntimeHandle {
+    handle: StdMutex<Option<runtime::Handle>>,
+}
+
+struct RuntimeLifecycle {
+    runtime: Option<runtime::Runtime>,
+    teardown: Option<Arc<RuntimeTeardown>>,
+}
+
+struct RuntimeTeardown {
+    completed: watch::Sender<bool>,
+}
+
+struct RuntimeTeardownJob {
+    runtime: Option<runtime::Runtime>,
+    teardown: Arc<RuntimeTeardown>,
+}
+
+#[cfg(test)]
+lazy_static! {
+    pub(crate) static ref RAFT_SPAWN_BARRIER: StdMutex<Option<Box<dyn FnOnce() + Send>>> =
+        StdMutex::new(None);
+    pub(crate) static ref RAFT_TEARDOWN_BEFORE_DROP: StdMutex<Option<Box<dyn FnOnce() + Send>>> =
+        StdMutex::new(None);
+}
+
+#[cfg(test)]
+fn run_raft_test_hook(hook: &StdMutex<Option<Box<dyn FnOnce() + Send>>>) {
+    let hook = hook
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+impl RaftRuntimeHandle {
+    fn new(handle: runtime::Handle) -> Self {
+        Self {
+            handle: StdMutex::new(Some(handle)),
+        }
+    }
+
+    pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        #[cfg(test)]
+        run_raft_test_hook(&RAFT_SPAWN_BARRIER);
+        let handle = self
+            .handle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        handle
+            .as_ref()
+            .expect("Raft runtime is shut down")
+            .spawn(future)
+    }
+
+    fn close(&self) {
+        self.handle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+    }
+}
+
+impl RuntimeTeardown {
+    fn new() -> Self {
+        let (completed, _completed_rx) = watch::channel(false);
+        Self { completed }
+    }
+
+    fn complete(&self) {
+        self.completed.send_replace(true);
+    }
+
+    async fn wait(&self) {
+        let mut completed = self.completed.subscribe();
+        if *completed.borrow_and_update() {
+            return;
+        }
+        while completed.changed().await.is_ok() {
+            if *completed.borrow_and_update() {
+                return;
+            }
+        }
+    }
+}
+
+impl RuntimeTeardownJob {
+    fn run(mut self) {
+        #[cfg(test)]
+        run_raft_test_hook(&RAFT_TEARDOWN_BEFORE_DROP);
+        drop(self.runtime.take());
+        self.teardown.complete();
+    }
+}
+
+impl Drop for RuntimeTeardownJob {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
+        self.teardown.complete();
+    }
+}
+
+impl Drop for RaftService {
+    fn drop(&mut self) {
+        self.begin_runtime_teardown();
+    }
+}
+
 dispatch_rpc_service_functions!(RaftService);
 
 #[derive(Debug)]
@@ -1550,6 +1670,16 @@ impl RaftService {
         let master_sm = MasterStateMachine::new_on_plane(opts.service_id, PlaneId::type1());
 
         let (shutdown_tx, _shutdown_rx) = watch::channel(LifecycleState::Running);
+        let runtime = runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("raft-server")
+            .worker_threads(12)
+            .max_blocking_threads(num_cpus::get())
+            .event_interval(31)
+            .build()
+            .expect("Failed to build tokio runtime for Raft service");
+        let runtime_handle = runtime.handle().clone();
+        let runtime_id = runtime_handle.id();
         let server_obj = RaftService {
             meta: RwLock::new(RaftMeta {
                 term,
@@ -1570,14 +1700,12 @@ impl RaftService {
             planes: RwLock::new(BTreeMap::new()),
             id: server_id,
             options: opts,
-            rt: runtime::Builder::new_multi_thread()
-                .enable_all()
-                .thread_name("raft-server")
-                .worker_threads(12)
-                .max_blocking_threads(num_cpus::get())
-                .event_interval(31)
-                .build()
-                .expect("Failed to build tokio runtime for Raft service"),
+            rt: RaftRuntimeHandle::new(runtime_handle),
+            rt_id: runtime_id,
+            rt_lifecycle: StdMutex::new(RuntimeLifecycle {
+                runtime: Some(runtime),
+                teardown: None,
+            }),
             _is_leader: AtomicBool::new(false),
             checker_task: TokioMutex::new(None),
             shutdown_tx,
@@ -2051,10 +2179,56 @@ impl RaftService {
         }
 
         self.shutdown_managed_runtime(None).await;
+        self.shutdown_runtime_owner().await;
         info!(
             "RaftService shutdown complete for plane {}",
             self.plane_id().raw()
         );
+    }
+
+    async fn shutdown_runtime_owner(&self) {
+        let called_from_owned_runtime = runtime::Handle::try_current()
+            .map(|current| current.id() == self.rt_id)
+            .unwrap_or(false);
+        let teardown = self.begin_runtime_teardown();
+        if called_from_owned_runtime {
+            return;
+        }
+        teardown.wait().await;
+    }
+
+    fn begin_runtime_teardown(&self) -> Arc<RuntimeTeardown> {
+        let (teardown, runtime) = {
+            let mut lifecycle = self
+                .rt_lifecycle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(teardown) = lifecycle.teardown.as_ref() {
+                return teardown.clone();
+            }
+
+            let teardown = Arc::new(RuntimeTeardown::new());
+            self.rt.close();
+            let runtime = lifecycle.runtime.take();
+            lifecycle.teardown = Some(teardown.clone());
+            (teardown, runtime)
+        };
+
+        if let Some(runtime) = runtime {
+            let job = RuntimeTeardownJob {
+                runtime: Some(runtime),
+                teardown: teardown.clone(),
+            };
+            if let Err(error) = std::thread::Builder::new()
+                .name("raft-runtime-teardown".to_string())
+                .spawn(move || job.run())
+            {
+                error!("Failed to start Raft runtime teardown thread: {:?}", error);
+            }
+        } else {
+            teardown.complete();
+        }
+        teardown
     }
 
     pub async fn register_state_machine(&self, state_machine: SubStateMachine) {
@@ -3555,6 +3729,52 @@ mod test {
     use futures::FutureExt;
     use std::sync::Arc;
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn runtime_spawn_does_not_escape_after_close_wins() {
+        let service = RaftService::new(Options {
+            storage: Storage::MEMORY,
+            address: "spawn-close-race".to_string(),
+            service_id: 7,
+        });
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (selected_tx, selected_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *super::RAFT_SPAWN_BARRIER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move || {
+            selected_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }));
+
+        let spawn_service = service.clone();
+        let ran_in_task = ran.clone();
+        let spawn_thread = std::thread::spawn(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                spawn_service.rt.spawn(async move {
+                    ran_in_task.store(true, std::sync::atomic::Ordering::Release);
+                })
+            }))
+        });
+        selected_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("spawn did not select the runtime handle");
+
+        service.rt.close();
+        release_tx.send(()).unwrap();
+        let outcome = spawn_thread.join().unwrap();
+        let escaped = match outcome {
+            Ok(handle) => {
+                let _ = handle.await;
+                true
+            }
+            Err(_) => false,
+        };
+        let task_ran = ran.load(std::sync::atomic::Ordering::Acquire);
+        drop(service);
+        assert!(!escaped, "spawn used a raw handle after close won");
+        assert!(!task_ran, "task ran after close won");
+    }
+
     struct CounterStateMachine {
         value: u64,
     }
@@ -4733,7 +4953,7 @@ mod test {
             let addresses: Vec<_> = (0..5)
                 .map(|offset| format!("127.0.0.1:{}", base_port + offset))
                 .collect();
-            let raft_services = addresses
+            let nodes = addresses
                 .iter()
                 .map(|addr| {
                     let addr = addr.clone();
@@ -4749,12 +4969,16 @@ mod test {
                         Server::listen_and_resume(&server).await;
                         RaftService::start(&raft_service, false).await;
                         raft_service.register_state_machine(Box::new(sm)).await;
-                        raft_service
+                        (server, raft_service)
                     }
                 })
                 .collect::<FuturesUnordered<_>>()
                 .collect::<Vec<_>>()
                 .await;
+            let raft_services = nodes
+                .iter()
+                .map(|(_, raft_service)| raft_service.clone())
+                .collect::<Vec<_>>();
             raft_services[0].bootstrap().await;
             for i in 1..raft_services.len() {
                 raft_services[i].join(&addresses).await.unwrap();

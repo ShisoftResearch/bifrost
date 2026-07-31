@@ -15,7 +15,7 @@ use std::cmp::max;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::iter::FromIterator;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -24,7 +24,14 @@ pub type Client = Arc<AsyncServiceClient>;
 pub type SubscriptionReceipt = (SubKey, u64);
 
 lazy_static! {
-    pub static ref CALLBACK: RwLock<Option<Arc<SubscriptionService>>> = RwLock::new(None);
+    pub static ref CALLBACK: RwLock<Option<Weak<SubscriptionService>>> = RwLock::new(None);
+    static ref CALLBACK_PREPARE: Mutex<()> = Mutex::new(());
+}
+
+#[cfg(test)]
+lazy_static! {
+    static ref CALLBACK_AFTER_DEAD_OBSERVATION: StdMutex<Option<Box<dyn FnOnce() + Send>>> =
+        StdMutex::new(None);
 }
 
 #[derive(Debug)]
@@ -210,14 +217,14 @@ impl RaftClient {
     }
 
     pub async fn prepare_subscription(server: &Arc<rpc::Server>) -> Option<()> {
-        let mut callback = CALLBACK.write().await;
-        return if callback.is_none() {
-            let sub_service = SubscriptionService::initialize(&server).await;
-            *callback = Some(sub_service.clone());
-            Some(())
-        } else {
-            None
-        };
+        let _preparing = CALLBACK_PREPARE.lock().await;
+        if Self::live_callback().await.is_some() {
+            return None;
+        }
+
+        let sub_service = SubscriptionService::initialize(&server).await;
+        *CALLBACK.write().await = Some(Arc::downgrade(&sub_service));
+        Some(())
     }
 
     async fn cluster_info<'a>(
@@ -565,7 +572,7 @@ impl RaftClient {
     }
 
     pub async fn can_callback() -> bool {
-        CALLBACK.read().await.is_some()
+        Self::live_callback().await.is_some()
     }
     fn get_sub_key<M, R>(&self, plane_id: PlaneId, sm_id: u64, msg: M) -> SubKey
     where
@@ -581,12 +588,48 @@ impl RaftClient {
     }
 
     pub async fn get_callback(&self) -> Result<Arc<SubscriptionService>, SubscriptionError> {
-        match CALLBACK.read().await.clone() {
+        match Self::live_callback().await {
             None => {
                 debug!("Subscription service not set");
                 Err(SubscriptionError::SubServiceNotSet)
             }
             Some(c) => Ok(c),
+        }
+    }
+
+    async fn live_callback() -> Option<Arc<SubscriptionService>> {
+        loop {
+            let observed = CALLBACK.read().await.clone()?;
+            if let Some(callback) = observed.upgrade() {
+                if SubscriptionService::is_registered(&callback) {
+                    return Some(callback);
+                }
+            }
+            #[cfg(test)]
+            {
+                let hook = CALLBACK_AFTER_DEAD_OBSERVATION
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+
+            let mut current = CALLBACK.write().await;
+            if current
+                .as_ref()
+                .map(|candidate| Weak::ptr_eq(candidate, &observed))
+                == Some(true)
+            {
+                if let Some(callback) = current.as_ref().and_then(Weak::upgrade) {
+                    if SubscriptionService::is_registered(&callback) {
+                        return Some(callback);
+                    }
+                }
+                *current = None;
+                return None;
+            }
         }
     }
 
@@ -1209,6 +1252,236 @@ fn swap_when_greater(atomic: &AtomicU64, value: u64) {
                 orig_num = actual;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn callback_probe() -> RaftClient {
+        RaftClient {
+            members: RwLock::new(Members {
+                clients: BTreeMap::new(),
+                id_map: HashMap::new(),
+            }),
+            type1_state: RaftClient::new_plane_state(),
+            plane_states: RwLock::new(HashMap::new()),
+            service_id: DEFAULT_SERVICE_ID,
+        }
+    }
+
+    async fn reset_callback() {
+        *CALLBACK.write().await = None;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dead_observation_rechecks_concurrent_live_replacement() {
+        reset_callback().await;
+        let address_a = "concurrent-stale-callback-a".to_string();
+        let server_a = rpc::Server::new(&address_a);
+        assert_eq!(RaftClient::prepare_subscription(&server_a).await, Some(()));
+        server_a.shutdown().await;
+        drop(server_a);
+
+        let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *CALLBACK_AFTER_DEAD_OBSERVATION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move || {
+            observed_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }));
+        let can_callback = tokio::spawn(async { RaftClient::can_callback().await });
+        observed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("callback reader did not observe the stale weak entry");
+
+        let address_b = "concurrent-stale-callback-b".to_string();
+        let server_b = rpc::Server::new(&address_b);
+        assert_eq!(RaftClient::prepare_subscription(&server_b).await, Some(()));
+        release_tx.send(()).unwrap();
+        let observed_live_replacement = can_callback.await.unwrap();
+        let callback_address = callback_probe()
+            .get_callback()
+            .await
+            .expect("server B callback must remain live")
+            .server_address
+            .clone();
+
+        server_b.shutdown().await;
+        drop(server_b);
+        reset_callback().await;
+        assert!(
+            observed_live_replacement,
+            "dead A observation hid concurrently published live callback B"
+        );
+        assert_eq!(callback_address, address_b);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dead_observation_preserves_same_callback_reregistered_concurrently() {
+        reset_callback().await;
+        let address = "concurrent-same-callback-reregistration".to_string();
+        let server = rpc::Server::new(&address);
+        assert_eq!(RaftClient::prepare_subscription(&server).await, Some(()));
+        let callback = callback_probe()
+            .get_callback()
+            .await
+            .expect("callback must initially be registered");
+        server
+            .remove_service(<SubscriptionService as rpc::RPCServiceWithId>::SERVICE_ID)
+            .await;
+
+        let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *CALLBACK_AFTER_DEAD_OBSERVATION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move || {
+            observed_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }));
+        let can_callback = tokio::spawn(async { RaftClient::can_callback().await });
+        observed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("callback reader did not observe the retired registration");
+
+        server.register_service(&callback).await;
+        release_tx.send(()).unwrap();
+        let observed_reregistered_callback = can_callback.await.unwrap();
+        let current = callback_probe()
+            .get_callback()
+            .await
+            .expect("same callback registration must remain published");
+
+        server.shutdown().await;
+        drop(server);
+        reset_callback().await;
+        assert!(
+            observed_reregistered_callback,
+            "stale cleanup hid the concurrently re-registered callback"
+        );
+        assert!(
+            Arc::ptr_eq(&callback, &current),
+            "same callback allocation was not preserved across re-registration"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prepare_subscription_rebinds_after_prior_server_shutdown() {
+        reset_callback().await;
+        let address_a = "stale-subscription-callback-a".to_string();
+        let server_a = rpc::Server::new(&address_a);
+        assert_eq!(RaftClient::prepare_subscription(&server_a).await, Some(()));
+
+        server_a.shutdown().await;
+        drop(server_a);
+        let dead_get_reported_absent = matches!(
+            callback_probe().get_callback().await,
+            Err(SubscriptionError::SubServiceNotSet)
+        );
+        let callback_remained_live = RaftClient::can_callback().await;
+
+        let address_b = "stale-subscription-callback-b".to_string();
+        let server_b = rpc::Server::new(&address_b);
+        let prepared_b = RaftClient::prepare_subscription(&server_b).await;
+        let callback_address = callback_probe()
+            .get_callback()
+            .await
+            .expect("server B must publish a live callback")
+            .server_address
+            .clone();
+
+        server_b.shutdown().await;
+        drop(server_b);
+        reset_callback().await;
+
+        assert!(
+            dead_get_reported_absent,
+            "get_callback returned retired server A's callback"
+        );
+        assert!(
+            !callback_remained_live,
+            "server A callback remained globally live after RPC shutdown"
+        );
+        assert_eq!(
+            prepared_b,
+            Some(()),
+            "server B skipped callback registration because stale A remained"
+        );
+        assert_eq!(
+            callback_address, address_b,
+            "subscription callback remained bound to retired server A"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prepare_subscription_rebinds_when_retired_callback_is_still_strongly_held() {
+        reset_callback().await;
+        let address_a = "strongly-held-stale-subscription-callback-a".to_string();
+        let server_a = rpc::Server::new(&address_a);
+        assert_eq!(RaftClient::prepare_subscription(&server_a).await, Some(()));
+        let retired_a = callback_probe()
+            .get_callback()
+            .await
+            .expect("server A callback must initially be live");
+
+        server_a.shutdown().await;
+
+        let address_b = "strongly-held-stale-subscription-callback-b".to_string();
+        let server_b = rpc::Server::new(&address_b);
+        let prepared_b = RaftClient::prepare_subscription(&server_b).await;
+        let callback_address = callback_probe()
+            .get_callback()
+            .await
+            .expect("server B must replace the retired callback")
+            .server_address
+            .clone();
+
+        drop(retired_a);
+        server_b.shutdown().await;
+        drop(server_a);
+        drop(server_b);
+        reset_callback().await;
+
+        assert_eq!(
+            prepared_b,
+            Some(()),
+            "server B skipped registration because retired callback A still had a strong owner"
+        );
+        assert_eq!(
+            callback_address, address_b,
+            "subscription callback remained bound to retired server A"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repeated_prepare_preserves_same_live_server_callback() {
+        reset_callback().await;
+        let address = "same-live-subscription-callback".to_string();
+        let server = rpc::Server::new(&address);
+        assert_eq!(RaftClient::prepare_subscription(&server).await, Some(()));
+        let probe = callback_probe();
+        let first = probe.get_callback().await.unwrap();
+        let key = SubKey::new(DEFAULT_SERVICE_ID, PlaneId::type1(), 71, 72, 73);
+        first.subs.write().await.insert(key, Vec::new());
+
+        assert_eq!(RaftClient::prepare_subscription(&server).await, None);
+        let second = probe.get_callback().await.unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "repeated prepare replaced the live callback"
+        );
+        assert!(
+            second.subs.read().await.contains_key(&key),
+            "repeated prepare discarded live subscriptions"
+        );
+
+        drop(first);
+        drop(second);
+        server.shutdown().await;
+        drop(server);
+        reset_callback().await;
     }
 }
 

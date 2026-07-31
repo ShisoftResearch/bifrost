@@ -61,6 +61,36 @@ mod test {
     use std::sync::Arc;
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn graceful_shutdown_releases_membership_raft_service_cycle() {
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = reserved.local_addr().unwrap().to_string();
+        drop(reserved);
+
+        let raft_service = RaftService::new(Options {
+            storage: Storage::default(),
+            address: addr.clone(),
+            service_id: DEFAULT_SERVICE_ID,
+        });
+        let weak_service = Arc::downgrade(&raft_service);
+        let server = Server::new(&addr);
+        server.register_service(&raft_service).await;
+        Server::listen_and_resume(&server).await;
+        assert!(RaftService::start(&raft_service, false).await);
+        raft_service.bootstrap().await;
+        Membership::new(&server, &raft_service).await;
+
+        raft_service.shutdown().await;
+        server.shutdown().await;
+        drop(server);
+        drop(raft_service);
+
+        assert!(
+            weak_service.upgrade().is_none(),
+            "registered Membership retained its RaftService after graceful shutdown"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn primary() {
         let _ = env_logger::builder().format_timestamp(None).try_init();
         let addr = String::from("127.0.0.1:2100");

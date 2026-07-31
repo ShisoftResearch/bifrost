@@ -5,9 +5,12 @@ use futures::SinkExt;
 use std::error::Error;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
+use tokio::task::JoinSet;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
@@ -16,14 +19,47 @@ pub type BoxedRPCFuture = Box<RPCFuture>;
 pub type TcpReq = BytesMut;
 pub type TcpRes = Pin<Box<dyn Future<Output = BytesMut> + Send>>;
 
+#[cfg(test)]
+lazy_static! {
+    pub(crate) static ref TCP_BEFORE_REGISTRATION_PUBLICATION: Mutex<Option<Box<dyn FnOnce() + Send>>> =
+        Mutex::new(None);
+    pub(crate) static ref TCP_AFTER_REGISTRATION_ATTEMPT: Mutex<Option<Box<dyn FnOnce() + Send>>> =
+        Mutex::new(None);
+    pub(crate) static ref TCP_SHUTDOWN_AFTER_REGISTRATION_SNAPSHOT: Mutex<Option<Box<dyn FnOnce() + Send>>> =
+        Mutex::new(None);
+}
+
+#[cfg(test)]
+fn run_test_hook(hook: &Mutex<Option<Box<dyn FnOnce() + Send>>>) {
+    let hook = hook
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 pub struct Server {
     shutdown_tx: broadcast::Sender<()>,
+    registration: Mutex<RegistrationLifecycle>,
+    shutdown_requested: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct RegistrationLifecycle {
+    closing: bool,
+    registration: Option<shortcut::ShortcutRegistration>,
 }
 
 impl Server {
     pub fn new() -> Server {
         let (shutdown_tx, _) = broadcast::channel(1);
-        Server { shutdown_tx }
+        Server {
+            shutdown_tx,
+            registration: Mutex::new(RegistrationLifecycle::default()),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     pub fn shutdown_handle(&self) -> broadcast::Sender<()> {
@@ -35,14 +71,46 @@ impl Server {
         addr: &String,
         callback: Arc<dyn Fn(TcpReq) -> TcpRes + Send + Sync>,
     ) -> Result<(), Box<dyn Error>> {
-        shortcut::register_server(addr, &callback).await;
-        if !addr.eq(&STANDALONE_ADDRESS) {
-            let listener = TcpListener::bind(&addr).await?;
-            let mut shutdown_rx = self.shutdown_tx.subscribe();
+        if self.shutdown_requested.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let listener = if addr.eq(&STANDALONE_ADDRESS) {
+            None
+        } else {
+            Some(TcpListener::bind(&addr).await?)
+        };
+        let is_network_listener = listener.is_some();
+        #[cfg(test)]
+        run_test_hook(&TCP_BEFORE_REGISTRATION_PUBLICATION);
+        let publication = {
+            let mut lifecycle = self
+                .registration
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if lifecycle.closing {
+                None
+            } else {
+                let registration = shortcut::register_server(addr, &callback);
+                let registration_token = registration.token();
+                let replaced = lifecycle.registration.replace(registration);
+                Some((registration_token, replaced))
+            }
+        };
+        #[cfg(test)]
+        run_test_hook(&TCP_AFTER_REGISTRATION_ATTEMPT);
+        let Some((registration_token, replaced)) = publication else {
+            return Ok(());
+        };
+        drop(replaced);
+
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        let shutdown_requested = self.shutdown_requested.clone();
+        if let Some(listener) = listener {
+            let mut connections = JoinSet::new();
 
             info!("TCP server listening on {}", addr);
 
-            loop {
+            while !shutdown_requested.load(Ordering::Acquire) {
                 tokio::select! {
                     accept_result = listener.accept() => {
                         match accept_result {
@@ -50,10 +118,11 @@ impl Server {
                                 debug!("Accepted connection from {}", addr);
                                 let callback = callback.clone();
                                 let mut conn_shutdown_rx = self.shutdown_tx.subscribe();
+                                let connection_shutdown_requested = shutdown_requested.clone();
 
-                                tokio::spawn(async move {
+                                connections.spawn(async move {
                                     let mut transport = Framed::new(socket, LengthDelimitedCodec::new());
-                                    loop {
+                                    while !connection_shutdown_requested.load(Ordering::Acquire) {
                                         tokio::select! {
                                             result = transport.next() => {
                                                 match result {
@@ -91,20 +160,77 @@ impl Server {
                             Err(e) => error!("error accepting socket; error = {:?}", e),
                         }
                     }
+                    connection_result = connections.join_next(), if !connections.is_empty() => {
+                        if let Some(Err(e)) = connection_result {
+                            error!("TCP connection handler failed: {:?}", e);
+                        }
+                    }
                     _ = shutdown_rx.recv() => {
                         info!("TCP server on {} received shutdown signal, stopping accept loop", addr);
                         break;
                     }
                 }
             }
+
+            while let Some(connection_result) = connections.join_next().await {
+                if let Err(e) = connection_result {
+                    error!("TCP connection handler failed during shutdown: {:?}", e);
+                }
+            }
+        }
+
+        if is_network_listener || shutdown_requested.load(Ordering::Acquire) {
+            let registration = {
+                let mut lifecycle = self
+                    .registration
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if lifecycle
+                    .registration
+                    .as_ref()
+                    .map(|registration| registration.token().is_same(&registration_token))
+                    == Some(true)
+                {
+                    lifecycle.registration.take()
+                } else {
+                    None
+                }
+            };
+            drop(registration);
         }
         info!("TCP server on {} shut down gracefully", addr);
         Ok(())
     }
 
     pub fn shutdown(&self) {
+        let _ = self.shutdown_owned();
+    }
+
+    pub(crate) fn shutdown_owned(&self) -> Option<shortcut::ShortcutToken> {
         info!("Initiating TCP server shutdown");
+        self.shutdown_requested.store(true, Ordering::Release);
+        let registration = {
+            let mut lifecycle = self
+                .registration
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            lifecycle.closing = true;
+            lifecycle.registration.take()
+        };
+        let token = registration
+            .as_ref()
+            .map(shortcut::ShortcutRegistration::token);
+        #[cfg(test)]
+        run_test_hook(&TCP_SHUTDOWN_AFTER_REGISTRATION_SNAPSHOT);
+        drop(registration);
         let _ = self.shutdown_tx.send(());
+        token
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -203,5 +329,25 @@ mod tests {
         // Shutdown after test
         server.shutdown();
         sleep(Duration::from_millis(200)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_requested_before_listen_is_not_lost() {
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = reserved.local_addr().unwrap().to_string();
+        drop(reserved);
+
+        let server = Server::new();
+        server.shutdown();
+        let callback =
+            Arc::new(|_data: TcpReq| -> TcpRes { async move { BytesMut::new() }.boxed() });
+
+        tokio::time::timeout(Duration::from_millis(250), server.listen(&addr, callback))
+            .await
+            .expect("shutdown requested before listen must stop the listener")
+            .unwrap();
+
+        assert!(!shortcut::is_local(bifrost_hasher::hash_str(&addr)).await);
+        assert!(std::net::TcpListener::bind(&addr).is_ok());
     }
 }
