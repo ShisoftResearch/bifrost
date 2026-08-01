@@ -734,6 +734,8 @@ impl RaftClient {
     ) -> Result<ExecResult, ExecError> {
         let state = self.plane_state(plane_id).await;
         let mut depth = 0;
+        let mut left_behind_seen_log = 0u64;
+        let mut left_behind_stalls = 0usize;
         loop {
             if depth == 0 {
                 trace!(
@@ -794,17 +796,30 @@ impl RaftClient {
                             // Update client state from server to avoid retry loop
                             swap_when_greater(&state.last_log_id, last_log_id);
                             swap_when_greater(&state.last_log_term, last_log_term);
-                            // Add a small delay to allow server to catch up if under stress
-                            if depth > 0 {
-                                sleep(Duration::from_millis(50)).await;
-                            }
-                            if depth >= num_members {
-                                error!("Too many retry on query for plane {}, num_members {}, due to left behind record {}", plane_id.raw(), num_members, depth);
-                                return Err(ExecError::TooManyRetry);
+                            // LeftBehind is apply lag on the serving node, not
+                            // a routing problem — member count is the wrong
+                            // retry denominator (a single-node plane got one
+                            // attempt). Gate on progress instead: keep waiting
+                            // while the server's log cursor advances between
+                            // rounds; give up only after several consecutive
+                            // rounds with no progress.
+                            const LEFT_BEHIND_STALL_DELAY_MS: u64 = 50;
+                            let stall_limit = max(num_members + 1, 8);
+                            if last_log_id > left_behind_seen_log {
+                                left_behind_seen_log = last_log_id;
+                                left_behind_stalls = 0;
                             } else {
-                                depth += 1;
-                                continue;
+                                left_behind_stalls += 1;
                             }
+                            if left_behind_stalls >= stall_limit {
+                                error!(
+                                    "Too many retry on query for plane {}, num_members {}, no apply progress after {} stalled rounds at log id {}",
+                                    plane_id.raw(), num_members, left_behind_stalls, left_behind_seen_log
+                                );
+                                return Err(ExecError::TooManyRetry);
+                            }
+                            sleep(Duration::from_millis(LEFT_BEHIND_STALL_DELAY_MS)).await;
+                            continue;
                         }
                         ClientQryResponse::Success {
                             data,
