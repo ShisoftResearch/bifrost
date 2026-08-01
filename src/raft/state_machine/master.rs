@@ -19,6 +19,7 @@ pub enum ExecError {
     TooManyRetry,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegisterResult {
     OK,
     EXISTED,
@@ -36,6 +37,11 @@ raft_state_machine! {}
 pub struct MasterStateMachine {
     subs: HashMap<u64, SubStateMachine>,
     snapshots: HashMap<u64, Vec<u8>>,
+    /// Committed entries whose target state machine was not registered yet.
+    /// Late registration replays them in commit order — without this, a
+    /// member that registers a state machine after a command committed
+    /// silently diverges from replicas that had it registered.
+    pending_entries: HashMap<u64, Vec<LogEntry>>,
     pub configs: Configures,
     plane_id: PlaneId,
 }
@@ -101,6 +107,7 @@ impl MasterStateMachine {
         let msm = MasterStateMachine {
             subs: HashMap::new(),
             snapshots: HashMap::new(),
+            pending_entries: HashMap::new(),
             configs: Configures::new(service_id),
             plane_id,
         };
@@ -129,6 +136,41 @@ impl MasterStateMachine {
         };
         self.subs.insert(id, smc);
         RegisterResult::OK
+    }
+
+    /// Registers a state machine and replays, in commit order, any entries
+    /// that committed before it was registered on this replica.
+    pub async fn register_and_replay(&mut self, smc: SubStateMachine) -> RegisterResult {
+        let id = smc.id();
+        let accept_replay = smc.accept_buffered_replay();
+        let result = self.register(smc);
+        if result == RegisterResult::OK {
+            if !accept_replay {
+                if let Some(dropped) = self.pending_entries.remove(&id) {
+                    info!(
+                        "Dropping {} buffered entries for sm {} on plane {}: state machine recovers its own state",
+                        dropped.len(),
+                        id,
+                        self.plane_id.raw()
+                    );
+                }
+                return result;
+            }
+            if let Some(pending) = self.pending_entries.remove(&id) {
+                info!(
+                    "Replaying {} buffered entries for late-registered sm {} on plane {}",
+                    pending.len(),
+                    id,
+                    self.plane_id.raw()
+                );
+                if let Some(sm) = self.subs.get_mut(&id) {
+                    for entry in pending {
+                        let _ = sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data).await;
+                    }
+                }
+            }
+        }
+        result
     }
 
     pub async fn recover_registered_snapshots(&mut self) {
@@ -190,12 +232,17 @@ impl MasterStateMachine {
                     }
                     None => {
                         warn!(
-                        "SM not found for cmd on plane {} sm_id={} at log_id={}, have SMs: {:?}",
+                        "SM not found for cmd on plane {} sm_id={} at log_id={}, buffering for late registration; have SMs: {:?}",
                         self.plane_id.raw(),
                         entry.sm_id,
                         entry.id,
                         self.subs.keys().collect::<Vec<_>>()
                     );
+                        let pending =
+                            self.pending_entries.entry(entry.sm_id).or_default();
+                        if pending.len() < 65536 {
+                            pending.push(entry.clone());
+                        }
                         Err(ExecError::SmNotFound(entry.sm_id))
                     }
                 }

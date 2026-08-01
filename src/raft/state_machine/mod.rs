@@ -19,6 +19,13 @@ pub trait StateMachineCtl: Sync + Send + Any {
     fn snapshot(&self) -> Vec<u8>;
     fn recover(&mut self, data: Vec<u8>) -> ::futures::future::BoxFuture<()>;
     fn recoverable(&self) -> bool;
+    /// Whether entries buffered while this state machine was unregistered
+    /// should be replayed into it at registration. State machines that
+    /// recover their state through their own persistence must decline when
+    /// that state already reflects the buffered commands.
+    fn accept_buffered_replay(&self) -> bool {
+        true
+    }
     fn fn_dispatch_qry<'a>(
         &'a self,
         fn_id: u64,
