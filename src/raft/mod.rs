@@ -25,6 +25,7 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Mutex as StdMutex;
+use std::sync::Weak as StdWeak;
 use std::time::Duration;
 use tokio::runtime;
 use tokio::sync::{watch, Mutex as TokioMutex};
@@ -171,6 +172,7 @@ service! {
     rpc c_server_cluster_info(plane_id: PlaneId) -> ClientClusterInfo;
     rpc c_put_offline() -> bool;
     rpc c_have_state_machine(plane_id: PlaneId, id: u64) -> bool;
+    rpc c_bootstrap_plane(plane_id: PlaneId, members: Vec<String>) -> bool;
     rpc c_ping();
 }
 
@@ -541,6 +543,7 @@ pub struct RaftService {
     _is_leader: AtomicBool,
     checker_task: TokioMutex<Option<tokio::task::JoinHandle<()>>>,
     shutdown_tx: watch::Sender<LifecycleState>,
+    self_ref: StdMutex<StdWeak<RaftService>>,
 }
 
 pub struct RaftRuntimeHandle {
@@ -1497,7 +1500,7 @@ impl RaftService {
         if let Some(runtime) = self.runtime_for_plane(plane_id).await? {
             let meta = runtime.meta.read().await;
             let mut master_sm = meta.state_machine.write().await;
-            master_sm.register(state_machine);
+            master_sm.register_and_replay(state_machine).await;
             return Ok(());
         }
 
@@ -1709,8 +1712,11 @@ impl RaftService {
             _is_leader: AtomicBool::new(false),
             checker_task: TokioMutex::new(None),
             shutdown_tx,
+            self_ref: StdMutex::new(StdWeak::new()),
         };
-        Arc::new(server_obj)
+        let arc = Arc::new(server_obj);
+        *arc.self_ref.lock().unwrap() = Arc::downgrade(&arc);
+        arc
     }
 
     /// Load snapshot from disk and recover state machine if snapshot exists
@@ -2234,7 +2240,7 @@ impl RaftService {
     pub async fn register_state_machine(&self, state_machine: SubStateMachine) {
         let meta = self.meta.read().await;
         let mut master_sm = meta.state_machine.write().await;
-        master_sm.register(state_machine);
+        master_sm.register_and_replay(state_machine).await;
     }
     fn switch_membership(&self, meta: &mut RwLockWriteGuard<RaftMeta>, membership: Membership) {
         self.reset_last_checked(meta);
@@ -3648,6 +3654,42 @@ impl Service for RaftService {
                     false
                 }
             }
+        }
+        .boxed()
+    }
+
+    fn c_bootstrap_plane(&self, plane_id: PlaneId, members: Vec<String>) -> BoxFuture<bool> {
+        async move {
+            let this = match self.self_ref.lock().unwrap().upgrade() {
+                Some(this) => this,
+                None => return false,
+            };
+            let runtime = match this.resolve_plane_runtime(plane_id, true, true).await {
+                Ok((runtime, _)) => runtime,
+                Err(error) => {
+                    warn!(
+                        "c_bootstrap_plane: cannot materialize plane {}: {:?}",
+                        plane_id.raw(),
+                        error
+                    );
+                    return false;
+                }
+            };
+            this.start_managed_runtime(runtime).await;
+            for member in members {
+                if member == this.options.address {
+                    continue;
+                }
+                if let Err(error) = this.add_plane_member_via_log(plane_id, member.clone()).await {
+                    warn!(
+                        "c_bootstrap_plane: failed to add {} to plane {}: {:?}",
+                        member,
+                        plane_id.raw(),
+                        error
+                    );
+                }
+            }
+            true
         }
         .boxed()
     }
