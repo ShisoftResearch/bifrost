@@ -714,11 +714,16 @@ async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
                 meta.last_applied = next_log_id;
             }
             Err(ExecError::SmNotFound(sm_id)) => {
-                warn!(
-                    "Deferring log entry {} until state machine {} is registered",
+                // The entry was buffered by the master state machine and will
+                // be replayed (or deliberately dropped) when the target
+                // registers. Blocking here would stall every other state
+                // machine sharing this plane's log behind one late
+                // registration.
+                debug!(
+                    "Advancing past log entry {} for unregistered state machine {} (buffered)",
                     next_log_id, sm_id
                 );
-                break;
+                meta.last_applied = next_log_id;
             }
             Err(e) => {
                 error!(

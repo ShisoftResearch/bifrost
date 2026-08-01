@@ -142,8 +142,20 @@ impl MasterStateMachine {
     /// that committed before it was registered on this replica.
     pub async fn register_and_replay(&mut self, smc: SubStateMachine) -> RegisterResult {
         let id = smc.id();
+        let accept_replay = smc.accept_buffered_replay();
         let result = self.register(smc);
         if result == RegisterResult::OK {
+            if !accept_replay {
+                if let Some(dropped) = self.pending_entries.remove(&id) {
+                    info!(
+                        "Dropping {} buffered entries for sm {} on plane {}: state machine recovers its own state",
+                        dropped.len(),
+                        id,
+                        self.plane_id.raw()
+                    );
+                }
+                return result;
+            }
             if let Some(pending) = self.pending_entries.remove(&id) {
                 info!(
                     "Replaying {} buffered entries for late-registered sm {} on plane {}",
