@@ -9,11 +9,39 @@ use serde;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::sync::{Arc, Weak};
 
 pub struct Subscriber {
     pub session_id: u64,
-    pub client: Arc<AsyncServiceClient>,
+    pub address: String,
+    // Connected on first notification, not at registration. Subscribe
+    // runs inside raft command apply: dialing the subscriber there made
+    // the command's outcome depend on transient connectivity (and on
+    // which replica applied it), so bootstrap-time subscriptions
+    // spuriously failed under load.
+    client: tokio::sync::OnceCell<Arc<AsyncServiceClient>>,
+}
+
+impl Subscriber {
+    fn new(session_id: u64, address: String) -> Self {
+        Self {
+            session_id,
+            address,
+            client: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    pub async fn client(&self) -> io::Result<Arc<AsyncServiceClient>> {
+        self.client
+            .get_or_try_init(|| async {
+                RPCClient::new_async(&self.address)
+                    .await
+                    .map(|client| AsyncServiceClient::new(&client))
+            })
+            .await
+            .cloned()
+    }
 }
 
 pub struct Subscriptions {
@@ -76,19 +104,8 @@ impl Subscriptions {
             true
         };
         if !suber_exists || require_reload_suber {
-            self.subscribers.insert(
-                suber_id,
-                Subscriber {
-                    session_id,
-                    client: {
-                        if let Ok(client) = RPCClient::new_async(address).await {
-                            AsyncServiceClient::new(&client)
-                        } else {
-                            return Err(());
-                        }
-                    },
-                },
-            );
+            self.subscribers
+                .insert(suber_id, Subscriber::new(session_id, address.clone()));
         }
         self.suber_subs
             .entry(suber_id)
@@ -152,6 +169,7 @@ pub enum NotifyError {
     CannotFindSubscribers,
     CannotFindSubscriber,
     CannotCastInternalSub,
+    CannotConnectToSubscriber,
 }
 
 impl SMCallback {
@@ -240,7 +258,18 @@ impl SMCallback {
                                         svr_subs.subscribers.get(&subscriber_id)
                                     {
                                         let data = crate::utils::serde::serialize(&*message);
-                                        let client = &subscriber.client;
+                                        let client = match subscriber.client().await {
+                                            Ok(client) => client,
+                                            Err(e) => {
+                                                debug!(
+                                                    "Cannot reach subscriber {} at {}: {:?}",
+                                                    subscriber_id, subscriber.address, e
+                                                );
+                                                return Err(
+                                                    NotifyError::CannotConnectToSubscriber,
+                                                );
+                                            }
+                                        };
                                         debug!(
                                             "Sending out callback notification to sub id {}",
                                             sub_id
