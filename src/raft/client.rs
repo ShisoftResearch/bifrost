@@ -26,12 +26,28 @@ pub type SubscriptionReceipt = (SubKey, u64);
 lazy_static! {
     pub static ref CALLBACK: RwLock<Option<Weak<SubscriptionService>>> = RwLock::new(None);
     static ref CALLBACK_PREPARE: Mutex<()> = Mutex::new(());
+    /// Every rpc server that ever prepared a subscription callback. When
+    /// the active callback's owner dies, the slot revives onto the first
+    /// still-live server here instead of erroring until the next
+    /// conshash/membership bootstrap happens to run.
+    static ref CALLBACK_SERVERS: RwLock<Vec<Weak<rpc::Server>>> = RwLock::new(Vec::new());
 }
 
 #[cfg(test)]
 lazy_static! {
     static ref CALLBACK_AFTER_DEAD_OBSERVATION: StdMutex<Option<Box<dyn FnOnce() + Send>>> =
         StdMutex::new(None);
+}
+
+/// Coordination for tests touching the process-global callback slot:
+/// destructive lifecycle tests take `write` (exclusive), tests that
+/// merely rely on a stable live callback take `read`.
+#[cfg(test)]
+pub(crate) mod callback_test_support {
+    lazy_static::lazy_static! {
+        pub static ref CALLBACK_TEST_GUARD: tokio::sync::RwLock<()> =
+            tokio::sync::RwLock::new(());
+    }
 }
 
 #[derive(Debug)]
@@ -218,6 +234,16 @@ impl RaftClient {
 
     pub async fn prepare_subscription(server: &Arc<rpc::Server>) -> Option<()> {
         let _preparing = CALLBACK_PREPARE.lock().await;
+        {
+            let mut servers = CALLBACK_SERVERS.write().await;
+            servers.retain(|candidate| candidate.upgrade().is_some());
+            if !servers
+                .iter()
+                .any(|candidate| candidate.as_ptr() == Arc::as_ptr(server))
+            {
+                servers.push(Arc::downgrade(server));
+            }
+        }
         if Self::live_callback().await.is_some() {
             return None;
         }
@@ -225,6 +251,23 @@ impl RaftClient {
         let sub_service = SubscriptionService::initialize(&server).await;
         *CALLBACK.write().await = Some(Arc::downgrade(&sub_service));
         Some(())
+    }
+
+    /// Revives the process callback onto any still-live prepared server.
+    /// Returns the new service, or None if no prepared server survives.
+    async fn revive_callback() -> Option<Arc<SubscriptionService>> {
+        let _preparing = CALLBACK_PREPARE.lock().await;
+        if let Some(existing) = Self::live_callback().await {
+            return Some(existing);
+        }
+        let survivor = {
+            let mut servers = CALLBACK_SERVERS.write().await;
+            servers.retain(|candidate| candidate.upgrade().is_some());
+            servers.first().and_then(Weak::upgrade)
+        }?;
+        let sub_service = SubscriptionService::initialize(&survivor).await;
+        *CALLBACK.write().await = Some(Arc::downgrade(&sub_service));
+        Some(sub_service)
     }
 
     async fn cluster_info<'a>(
@@ -588,12 +631,17 @@ impl RaftClient {
     }
 
     pub async fn get_callback(&self) -> Result<Arc<SubscriptionService>, SubscriptionError> {
-        match Self::live_callback().await {
+        if let Some(c) = Self::live_callback().await {
+            return Ok(c);
+        }
+        // The previous owner died; try to revive onto another prepared
+        // live server before failing the caller's subscribe.
+        match Self::revive_callback().await {
+            Some(c) => Ok(c),
             None => {
                 debug!("Subscription service not set");
                 Err(SubscriptionError::SubServiceNotSet)
             }
-            Some(c) => Ok(c),
         }
     }
 
@@ -1286,13 +1334,24 @@ mod tests {
         }
     }
 
+    /// Serializes tests that manipulate the process-global callback
+    /// slot; running them concurrently races on shared global state.
+    async fn lock_callback_tests() -> tokio::sync::RwLockWriteGuard<'static, ()> {
+        let guard = super::callback_test_support::CALLBACK_TEST_GUARD
+            .write()
+            .await;
+        reset_callback().await;
+        guard
+    }
+
     async fn reset_callback() {
         *CALLBACK.write().await = None;
+        CALLBACK_SERVERS.write().await.clear();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn dead_observation_rechecks_concurrent_live_replacement() {
-        reset_callback().await;
+        let _callback_guard = lock_callback_tests().await;
         let address_a = "concurrent-stale-callback-a".to_string();
         let server_a = rpc::Server::new(&address_a);
         assert_eq!(RaftClient::prepare_subscription(&server_a).await, Some(()));
@@ -1336,7 +1395,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn dead_observation_preserves_same_callback_reregistered_concurrently() {
-        reset_callback().await;
+        let _callback_guard = lock_callback_tests().await;
         let address = "concurrent-same-callback-reregistration".to_string();
         let server = rpc::Server::new(&address);
         assert_eq!(RaftClient::prepare_subscription(&server).await, Some(()));
@@ -1384,7 +1443,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn prepare_subscription_rebinds_after_prior_server_shutdown() {
-        reset_callback().await;
+        let _callback_guard = lock_callback_tests().await;
         let address_a = "stale-subscription-callback-a".to_string();
         let server_a = rpc::Server::new(&address_a);
         assert_eq!(RaftClient::prepare_subscription(&server_a).await, Some(()));
@@ -1432,7 +1491,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn prepare_subscription_rebinds_when_retired_callback_is_still_strongly_held() {
-        reset_callback().await;
+        let _callback_guard = lock_callback_tests().await;
         let address_a = "strongly-held-stale-subscription-callback-a".to_string();
         let server_a = rpc::Server::new(&address_a);
         assert_eq!(RaftClient::prepare_subscription(&server_a).await, Some(()));
@@ -1472,7 +1531,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn repeated_prepare_preserves_same_live_server_callback() {
-        reset_callback().await;
+        let _callback_guard = lock_callback_tests().await;
         let address = "same-live-subscription-callback".to_string();
         let server = rpc::Server::new(&address);
         assert_eq!(RaftClient::prepare_subscription(&server).await, Some(()));

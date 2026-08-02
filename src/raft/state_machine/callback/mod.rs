@@ -92,6 +92,9 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn graceful_shutdown_releases_root_callback_state_machine_cycle() {
+        let _callback_guard = crate::raft::client::callback_test_support::CALLBACK_TEST_GUARD
+            .write()
+            .await;
         let raft_service = RaftService::new(Options {
             storage: Storage::default(),
             address: "root-callback-shutdown-cycle".to_string(),
@@ -117,6 +120,9 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn graceful_shutdown_releases_type2_callback_state_machine_cycle() {
+        let _callback_guard = crate::raft::client::callback_test_support::CALLBACK_TEST_GUARD
+            .write()
+            .await;
         let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = reserved.local_addr().unwrap().to_string();
         drop(reserved);
@@ -162,6 +168,9 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn callback_returns_not_leader_after_service_owner_is_dropped() {
+        let _callback_guard = crate::raft::client::callback_test_support::CALLBACK_TEST_GUARD
+            .write()
+            .await;
         let raft_service = RaftService::new(Options {
             storage: Storage::default(),
             address: "callback-after-owner-drop".to_string(),
@@ -184,6 +193,9 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn dummy() {
+        let _callback_guard = crate::raft::client::callback_test_support::CALLBACK_TEST_GUARD
+            .write()
+            .await;
         let _ = env_logger::try_init();
         info!("TESTING CALLBACK");
         let addr = String::from("127.0.0.1:2110");
@@ -246,6 +258,9 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn dummy_type2_plane() {
+        let _callback_guard = crate::raft::client::callback_test_support::CALLBACK_TEST_GUARD
+            .write()
+            .await;
         let _ = env_logger::try_init();
         let addr = String::from("127.0.0.1:2111");
         let raft_service = RaftService::new(Options {
