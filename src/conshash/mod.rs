@@ -12,6 +12,7 @@ use crate::utils::serde::serialize;
 use bifrost_hasher::{hash_bytes, hash_str};
 use parking_lot::*;
 
+pub mod slots;
 pub mod weights;
 
 #[derive(Debug)]
