@@ -77,6 +77,7 @@ pub struct Slots {
 raft_state_machine! {
     def cmd set_slot_owner(group: u64, slot: u32, owner: u64);
     def cmd adopt_slots(group: u64, assignments: Vec<(u32, u64)>) -> usize;
+    def cmd reassign_slots(group: u64, assignments: Vec<(u32, u64)>, from: u64) -> usize;
     def cmd begin_slot_migration(group: u64, slot: u32, from: u64, to: u64) -> Result<(), String>;
     def cmd complete_slot_migration(group: u64, slot: u32) -> Result<u64, String>;
     def cmd abort_slot_migration(group: u64, slot: u32) -> Result<u64, String>;
@@ -114,6 +115,41 @@ impl StateMachineCmds for Slots {
             });
         }
         future::ready(adopted).boxed()
+    }
+
+    /// Hand a batch of slots from one member to others in a single command.
+    ///
+    /// For slots with **nothing in them**. Draining a member means moving every
+    /// slot it owns, which in a small cluster is the whole 32768-slot space, and
+    /// the great majority of those hold no data at all. Walking them through the
+    /// full migration sequence costs six round trips each to move nothing --
+    /// measured at ~200k operations for one drain, which is correct and unusable.
+    ///
+    /// Safe as a bulk operation precisely because it is narrow. It moves a slot
+    /// only if that slot is `Stable` on `from`, so it cannot steal a slot from a
+    /// third member and cannot disturb one that is mid-migration -- the two ways
+    /// a bulk placement edit could otherwise strand data. Anything it declines is
+    /// simply not counted, and the caller sees the shortfall.
+    ///
+    /// It moves no data and must only be used where there is none to move.
+    fn reassign_slots(
+        &mut self,
+        group: u64,
+        assignments: Vec<(u32, u64)>,
+        from: u64,
+    ) -> BoxFuture<usize> {
+        let slots = self.groups.entry(group).or_insert_with(HashMap::new);
+        let mut reassigned = 0usize;
+        for (slot, owner) in assignments {
+            match slots.get(&slot) {
+                Some(SlotState::Stable { owner: current }) if *current == from => {
+                    slots.insert(slot, SlotState::Stable { owner });
+                    reassigned += 1;
+                }
+                _ => {}
+            }
+        }
+        future::ready(reassigned).boxed()
     }
 
     fn begin_slot_migration(
@@ -390,6 +426,57 @@ mod tests {
             block_on(sm.slot_state(G, 5)),
             Some(SlotState::Migrating { from: A, to: B })
         );
+    }
+
+    #[test]
+    fn bulk_reassignment_only_moves_slots_the_named_member_holds() {
+        // The narrowness is the safety argument: a bulk placement edit that could
+        // touch a third member's slot, or one mid-migration, could strand data
+        // with no migration sequence to protect it.
+        let mut sm = new_sm();
+        block_on(sm.adopt_slots(G, vec![(1, A), (2, A), (3, B), (4, A)]));
+        block_on(sm.begin_slot_migration(G, 4, A, C)).expect("begin");
+
+        let moved = block_on(sm.reassign_slots(
+            G,
+            vec![(1, B), (2, B), (3, C), (4, C), (9, C)],
+            A,
+        ));
+        assert_eq!(moved, 2, "only the two stable slots owned by A may move");
+
+        assert_eq!(
+            block_on(sm.slot_state(G, 1)),
+            Some(SlotState::Stable { owner: B })
+        );
+        assert_eq!(
+            block_on(sm.slot_state(G, 2)),
+            Some(SlotState::Stable { owner: B })
+        );
+        assert_eq!(
+            block_on(sm.slot_state(G, 3)),
+            Some(SlotState::Stable { owner: B }),
+            "a slot owned by somebody else must not be stolen"
+        );
+        assert_eq!(
+            block_on(sm.slot_state(G, 4)),
+            Some(SlotState::Migrating { from: A, to: C }),
+            "a migrating slot must not be redirected out from under its transfer"
+        );
+        assert_eq!(
+            block_on(sm.slot_state(G, 9)),
+            None,
+            "an unplaced slot is not claimed by a reassignment"
+        );
+    }
+
+    #[test]
+    fn bulk_reassignment_empties_a_member() {
+        let mut sm = new_sm();
+        block_on(sm.adopt_slots(G, (0..64u32).map(|slot| (slot, A)).collect()));
+        let assignments: Vec<(u32, u64)> = (0..64u32).map(|slot| (slot, B)).collect();
+        assert_eq!(block_on(sm.reassign_slots(G, assignments, A)), 64);
+        assert!(block_on(sm.slots_owned_by(G, A)).is_empty());
+        assert_eq!(block_on(sm.slots_owned_by(G, B)).len(), 64);
     }
 
     #[test]
