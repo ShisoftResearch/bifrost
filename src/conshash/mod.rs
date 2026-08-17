@@ -12,6 +12,7 @@ use crate::utils::serde::serialize;
 use bifrost_hasher::{hash_bytes, hash_str};
 use parking_lot::*;
 
+pub mod slots;
 pub mod weights;
 
 #[derive(Debug)]
@@ -42,6 +43,19 @@ struct LookupTables {
 
 pub struct ConsistentHashing {
     tables: RwLock<LookupTables>,
+    /// Stored slot ownership that overrides the computed answer, indexed by slot.
+    ///
+    /// `None` means this group has no slot table and placement is purely derived,
+    /// which is the behaviour every caller had before this existed. A zero entry
+    /// means that one slot is unplaced and falls back to the ring, which is a
+    /// different statement from "the table says nobody owns anything".
+    ///
+    /// It lives here, next to the derived table, for one reason: a system that
+    /// stores data needs placement to have exactly **one** answer. Keeping the
+    /// override in each caller instead means every code path that asks "who owns
+    /// this?" is a separate chance to ask the wrong oracle — and a write and a
+    /// read that disagree do not fail loudly, they silently lose the data.
+    slot_overrides: RwLock<Option<Vec<u64>>>,
     membership: Arc<MembershipClient>,
     weight_sm_client: WeightSMClient,
     group_name: String,
@@ -63,6 +77,7 @@ impl ConsistentHashing {
                 nodes: Vec::new(),
                 addrs: HashMap::new(),
             }),
+            slot_overrides: RwLock::new(None),
             membership: membership_client.clone(),
             weight_sm_client: WeightSMClient::new(id, &raft_client),
             group_name: group.to_string(),
@@ -197,6 +212,52 @@ impl ConsistentHashing {
         // trace!("Hash {} have been point to {:?}", hash, result);
         result.cloned()
     }
+    /// Who owns a slot: the stored table if there is one, the ring otherwise.
+    ///
+    /// This is the call every consumer that stores or locates *data* should
+    /// make, rather than `get_server_id`. The distinction is not stylistic:
+    /// `get_server_id` answers "which member does this hash land on", which is
+    /// the right question for stateless routing and the wrong one for a stored
+    /// cell, because the answer changes the moment membership does.
+    ///
+    /// Deliberately falls back rather than failing, so a group that never seeded
+    /// a table behaves exactly as it did before slot ownership existed.
+    pub fn get_server_id_for_slot(&self, slot: u64) -> Option<u64> {
+        if let Some(owners) = self.slot_overrides.read().as_ref() {
+            // A zero entry is an unplaced slot, not a server id: fall through to
+            // the ring rather than routing to a member that cannot exist.
+            match owners.get(slot as usize).copied() {
+                Some(owner) if owner != 0 => return Some(owner),
+                _ => {}
+            }
+        }
+        self.get_server_id(slot)
+    }
+
+    /// Install (or clear) the stored slot table.
+    pub fn set_slot_overrides(&self, owners: Option<Vec<u64>>) {
+        *self.slot_overrides.write() = owners;
+    }
+
+    /// Record one slot's owner without re-reading the whole table.
+    ///
+    /// For a caller that has just committed a placement change and therefore
+    /// already knows the answer authoritatively. With no table installed this
+    /// creates one holding just this slot, which is honest: every other slot
+    /// stays 0, reads as unplaced, and falls back to the ring as before.
+    pub fn note_slot_owner(&self, slot: u64, owner: u64, slot_count: usize) {
+        let mut overrides = self.slot_overrides.write();
+        let owners = overrides.get_or_insert_with(|| vec![0u64; slot_count]);
+        if let Some(entry) = owners.get_mut(slot as usize) {
+            *entry = owner;
+        }
+    }
+
+    /// Whether a stored table is installed at all.
+    pub fn has_slot_overrides(&self) -> bool {
+        self.slot_overrides.read().is_some()
+    }
+
     pub fn jump_hash(&self, slot_count: usize, hash: u64) -> usize {
         let mut b: i64 = -1;
         let mut j: i64 = 0;
@@ -417,6 +478,15 @@ mod test {
     #[tokio::test(flavor = "multi_thread")]
     async fn primary() {
         let _ = env_logger::try_init();
+        // Installs its own callback into the process-global slot and then
+        // depends on it staying there, so this is a destructive callback test in
+        // the sense `CALLBACK_TEST_GUARD` documents: the lifecycle tests take
+        // `write` and call `reset_callback`, which would otherwise pull this
+        // test's subscription out from under it mid-run. That is what the
+        // intermittent "Too many retry on command for plane 0" failures were.
+        let _callback_guard = crate::raft::client::callback_test_support::CALLBACK_TEST_GUARD
+            .write()
+            .await;
 
         info!("Creating raft service");
         let addr = String::from("127.0.0.1:2200");

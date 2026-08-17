@@ -164,6 +164,11 @@ mod tests {
     async fn test_client_standalone_address() {
         let _ = env_logger::builder().format_timestamp(None).try_init();
 
+        // Connecting to STANDALONE only fails while nothing has a standalone
+        // shortcut registered; a concurrent standalone server would make this
+        // connect succeed through the shortcut instead.
+        let _serial = crate::tcp::STANDALONE_TEST_LOCK.lock().await;
+
         // Try to connect to STANDALONE address
         let standalone_addr = STANDALONE_ADDRESS.to_string();
         let result = Client::connect(&standalone_addr).await;
