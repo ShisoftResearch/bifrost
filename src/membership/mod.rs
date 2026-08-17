@@ -92,6 +92,15 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn primary() {
+        // Installs its own callback into the process-global slot and then
+        // depends on it staying there, so this is a destructive callback test in
+        // the sense `CALLBACK_TEST_GUARD` documents: the lifecycle tests take
+        // `write` and call `reset_callback`, which would otherwise pull this
+        // test's subscription out from under it mid-run. That is what the
+        // intermittent "Too many retry on command for plane 0" failures were.
+        let _callback_guard = crate::raft::client::callback_test_support::CALLBACK_TEST_GUARD
+            .write()
+            .await;
         let _ = env_logger::builder().format_timestamp(None).try_init();
         let addr = String::from("127.0.0.1:2100");
         let raft_service = RaftService::new(Options {

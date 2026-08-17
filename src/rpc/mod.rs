@@ -27,11 +27,18 @@ lazy_static! {
 
 #[cfg(test)]
 lazy_static! {
-    static ref CLIENT_POOL_EVICT_AFTER_READ: StdMutex<Option<Box<dyn FnOnce() + Send>>> =
+    /// One-shot hooks scoped to the server identity they were installed for.
+    ///
+    /// The scoping is load-bearing, not decoration. These fire on paths that
+    /// nearly every RPC test walks, and an unscoped `take()` hands the hook to
+    /// whichever test reaches the site first — which is how a hook installed by
+    /// one test came to be run by another, on the other side of a channel whose
+    /// sender had already been dropped.
+    static ref CLIENT_POOL_EVICT_AFTER_READ: StdMutex<Option<(u64, Box<dyn FnOnce() + Send>)>> =
         StdMutex::new(None);
     static ref LISTENER_AFTER_PUBLICATION: StdMutex<Option<Box<dyn FnOnce() + Send>>> =
         StdMutex::new(None);
-    static ref CLIENT_POOL_BEFORE_INSERT: StdMutex<Option<Box<dyn FnOnce() + Send>>> =
+    static ref CLIENT_POOL_BEFORE_INSERT: StdMutex<Option<(u64, Box<dyn FnOnce() + Send>)>> =
         StdMutex::new(None);
     static ref CLIENT_POOL_AFTER_RESERVATION: StdMutex<
         Option<(
@@ -45,6 +52,22 @@ lazy_static! {
         StdMutex::new(None);
     static ref LISTENER_AFTER_COMPLETION: StdMutex<Option<Box<dyn FnOnce() + Send>>> =
         StdMutex::new(None);
+}
+
+/// Claim a one-shot hook only if it was installed for this server.
+///
+/// Leaving a non-matching hook in place is the whole point: it belongs to a test
+/// that is still waiting for it, and running it here would strand that test.
+#[cfg(test)]
+fn take_hook_for(
+    slot: &StdMutex<Option<(u64, Box<dyn FnOnce() + Send>)>>,
+    server_id: u64,
+) -> Option<Box<dyn FnOnce() + Send>> {
+    let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match slot.as_ref() {
+        Some((target, _)) if *target == server_id => slot.take().map(|(_, hook)| hook),
+        _ => None,
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -757,10 +780,7 @@ impl ClientPool {
             };
             #[cfg(test)]
             {
-                let hook = CLIENT_POOL_BEFORE_INSERT
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .take();
+                let hook = take_hook_for(&CLIENT_POOL_BEFORE_INSERT, server_id);
                 if let Some(hook) = hook {
                     hook();
                 }
@@ -835,11 +855,7 @@ impl ClientPool {
 
     fn evict_owned(&self, server_id: u64, registration: &tcp::shortcut::ShortcutToken) {
         #[cfg(test)]
-        if let Some(hook) = CLIENT_POOL_EVICT_AFTER_READ
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        {
+        if let Some(hook) = take_hook_for(&CLIENT_POOL_EVICT_AFTER_READ, server_id) {
             hook();
         }
         let (cancelled, removed) = {
@@ -1061,6 +1077,7 @@ mod test {
 
         #[tokio::test(flavor = "multi_thread")]
         async fn standalone_replacement_drops_old_callback_outside_shortcut_lock() {
+            let _serial = crate::tcp::STANDALONE_TEST_LOCK.lock().await;
             const CHILD_ENV: &str = "BIFROST_SHORTCUT_REPLACEMENT_CHILD";
             if std::env::var_os(CHILD_ENV).is_none() {
                 let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1200,6 +1217,7 @@ mod test {
 
         #[tokio::test(flavor = "multi_thread")]
         async fn already_shutdown_server_rejects_direct_standalone_listen() {
+            let _serial = crate::tcp::STANDALONE_TEST_LOCK.lock().await;
             let addr = crate::tcp::STANDALONE_ADDRESS.to_string();
             let server = Server::new(&addr);
             server.shutdown().await;
@@ -1212,6 +1230,7 @@ mod test {
 
         #[tokio::test(flavor = "multi_thread")]
         async fn already_shutdown_server_rejects_resumed_standalone_listen() {
+            let _serial = crate::tcp::STANDALONE_TEST_LOCK.lock().await;
             let addr = crate::tcp::STANDALONE_ADDRESS.to_string();
             let server = Server::new(&addr);
             server.shutdown().await;
@@ -1223,6 +1242,7 @@ mod test {
 
         #[tokio::test(flavor = "multi_thread")]
         async fn standalone_shutdown_owns_retirement_before_returning() {
+            let _serial = crate::tcp::STANDALONE_TEST_LOCK.lock().await;
             let addr = crate::tcp::STANDALONE_ADDRESS.to_string();
             let server_id = hash_str(&addr);
             let server = Server::new(&addr);
@@ -1383,6 +1403,7 @@ mod test {
 
         #[tokio::test(flavor = "multi_thread")]
         async fn pool_eviction_rechecks_identity_before_removing() {
+            let _serial = crate::tcp::STANDALONE_TEST_LOCK.lock().await;
             let addr = crate::tcp::STANDALONE_ADDRESS.to_string();
             let server_id = hash_str(&addr);
 
@@ -1405,12 +1426,15 @@ mod test {
             let old_client_for_hook = old_client.clone();
             *CLIENT_POOL_EVICT_AFTER_READ
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move || {
-                DEFAULT_CLIENT_POOL.clients.remove(&server_id);
-                DEFAULT_CLIENT_POOL
-                    .clients
-                    .insert(server_id, old_client_for_hook);
-            }));
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((
+                server_id,
+                Box::new(move || {
+                    DEFAULT_CLIENT_POOL.clients.remove(&server_id);
+                    DEFAULT_CLIENT_POOL
+                        .clients
+                        .insert(server_id, old_client_for_hook);
+                }),
+            ));
 
             DEFAULT_CLIENT_POOL.evict_owned(server_id, &new_token);
 
@@ -1423,6 +1447,7 @@ mod test {
 
         #[tokio::test(flavor = "multi_thread")]
         async fn late_old_pool_insertion_does_not_overwrite_competing_replacement() {
+            let _serial = crate::tcp::STANDALONE_TEST_LOCK.lock().await;
             let addr = crate::tcp::STANDALONE_ADDRESS.to_string();
             let server_id = hash_str(&addr);
             DEFAULT_CLIENT_POOL.clients.remove(&server_id);
@@ -1437,10 +1462,13 @@ mod test {
             let (release_tx, release_rx) = std::sync::mpsc::channel();
             *CLIENT_POOL_BEFORE_INSERT
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move || {
-                connected_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-            }));
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((
+                server_id,
+                Box::new(move || {
+                    connected_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                }),
+            ));
             let old_get =
                 tokio::spawn(async move { DEFAULT_CLIENT_POOL.get(&addr).await.unwrap() });
             connected_rx
