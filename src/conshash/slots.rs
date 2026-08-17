@@ -79,6 +79,8 @@ raft_state_machine! {
     def cmd adopt_slots(group: u64, assignments: Vec<(u32, u64)>) -> usize;
     def cmd reassign_slots(group: u64, assignments: Vec<(u32, u64)>, from: u64) -> usize;
     def cmd begin_slot_migration(group: u64, slot: u32, from: u64, to: u64) -> Result<(), String>;
+    def cmd begin_slot_migrations(group: u64, moves: Vec<(u32, u64, u64)>) -> Vec<(u32, String)>;
+    def cmd complete_slot_migrations(group: u64, slots: Vec<u32>) -> Vec<(u32, u64)>;
     def cmd complete_slot_migration(group: u64, slot: u32) -> Result<u64, String>;
     def cmd abort_slot_migration(group: u64, slot: u32) -> Result<u64, String>;
     def qry slot_state(group: u64, slot: u32) -> Option<SlotState>;
@@ -190,6 +192,82 @@ impl StateMachineCmds for Slots {
             None => Err(format!("slot {slot} has no owner to migrate from")),
         };
         future::ready(result).boxed()
+    }
+
+    /// Begin many migrations in one command; report only the refusals.
+    ///
+    /// Same guards as `begin_slot_migration`, applied per entry -- this is a
+    /// batching of that command, not a weaker version of it.
+    ///
+    /// Batching matters more than it looks. A migration costs two commands and a
+    /// query per slot, and the raft leader serialises log appends however many
+    /// callers there are, so per-slot commands put a consensus round trip in the
+    /// critical path of every slot: measured ~88 ms of fixed cost per slot even
+    /// with 32-way concurrency on the caller side, dominating a reshard of a
+    /// 1 GB store. Concurrency cannot fix a serialised path; fewer commands can.
+    fn begin_slot_migrations(
+        &mut self,
+        group: u64,
+        moves: Vec<(u32, u64, u64)>,
+    ) -> BoxFuture<Vec<(u32, String)>> {
+        let slots = self.groups.entry(group).or_insert_with(HashMap::new);
+        let mut refused = Vec::new();
+        for (slot, from, to) in moves {
+            let outcome = match slots.get(&slot) {
+                Some(SlotState::Stable { owner }) if *owner == from => {
+                    if from == to {
+                        Err(format!("slot {slot} migration from {from} to itself"))
+                    } else {
+                        slots.insert(slot, SlotState::Migrating { from, to });
+                        Ok(())
+                    }
+                }
+                Some(SlotState::Stable { owner }) => Err(format!(
+                    "slot {slot} is owned by {owner}, not by the claimed donor {from}"
+                )),
+                Some(SlotState::Migrating {
+                    from: active_from,
+                    to: active_to,
+                }) => {
+                    if *active_from == from && *active_to == to {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "slot {slot} is already migrating {active_from} -> {active_to}"
+                        ))
+                    }
+                }
+                None => Err(format!("slot {slot} has no owner to migrate from")),
+            };
+            if let Err(reason) = outcome {
+                refused.push((slot, reason));
+            }
+        }
+        future::ready(refused).boxed()
+    }
+
+    /// Commit many migrations in one command; report each slot's new owner.
+    ///
+    /// A slot absent from the result did not commit, and the caller must treat it
+    /// as still the donor's. Because this is a *command*, its return value is
+    /// produced by its own apply and is authoritative — so a bulk caller does not
+    /// need to query the table afterwards to learn what happened, which also
+    /// sidesteps a query being served by a member that has not applied this yet.
+    fn complete_slot_migrations(
+        &mut self,
+        group: u64,
+        slots: Vec<u32>,
+    ) -> BoxFuture<Vec<(u32, u64)>> {
+        let table = self.groups.entry(group).or_insert_with(HashMap::new);
+        let mut committed = Vec::new();
+        for slot in slots {
+            if let Some(SlotState::Migrating { to, .. }) = table.get(&slot) {
+                let owner = *to;
+                table.insert(slot, SlotState::Stable { owner });
+                committed.push((slot, owner));
+            }
+        }
+        future::ready(committed).boxed()
     }
 
     /// A migration's commit point. Returns the new owner.
@@ -425,6 +503,48 @@ mod tests {
         assert_eq!(
             block_on(sm.slot_state(G, 5)),
             Some(SlotState::Migrating { from: A, to: B })
+        );
+    }
+
+    #[test]
+    fn bulk_begin_and_complete_match_the_single_slot_guards() {
+        // The batched commands must be a batching of the single-slot ones, not a
+        // weaker version: same refusals, same commit point.
+        let mut sm = new_sm();
+        block_on(sm.adopt_slots(G, vec![(1, A), (2, A), (3, B)]));
+
+        let refused = block_on(sm.begin_slot_migrations(
+            G,
+            vec![
+                (1, A, B), // fine
+                (2, A, A), // to itself
+                (3, A, B), // A does not own it
+                (9, A, B), // unplaced
+            ],
+        ));
+        let refused_slots: Vec<u32> = refused.iter().map(|(slot, _)| *slot).collect();
+        assert_eq!(refused_slots, vec![2, 3, 9]);
+        assert_eq!(
+            block_on(sm.slot_state(G, 1)),
+            Some(SlotState::Migrating { from: A, to: B })
+        );
+        assert_eq!(
+            block_on(sm.slot_state(G, 3)),
+            Some(SlotState::Stable { owner: B }),
+            "a refused entry must not disturb the slot"
+        );
+
+        // Only the slot that actually began commits, and the command reports it.
+        let committed = block_on(sm.complete_slot_migrations(G, vec![1, 2, 3, 9]));
+        assert_eq!(committed, vec![(1, B)]);
+        assert_eq!(
+            block_on(sm.slot_state(G, 1)),
+            Some(SlotState::Stable { owner: B })
+        );
+        assert_eq!(
+            block_on(sm.slot_state(G, 2)),
+            Some(SlotState::Stable { owner: A }),
+            "a slot that never began must not be committed by a bulk complete"
         );
     }
 
