@@ -254,8 +254,27 @@ impl ConsistentHashing {
     }
 
     /// Whether a stored table is installed at all.
+    ///
+    /// Callers that *refuse* work on the strength of the table have to check
+    /// this first. With no table, placement is derived and members can
+    /// legitimately disagree while the ring forms; refusing then converts a
+    /// placement question into an availability failure.
     pub fn has_slot_overrides(&self) -> bool {
         self.slot_overrides.read().is_some()
+    }
+
+    /// The stored owner of a slot, without the ring fallback.
+    ///
+    /// `None` means either no table or no entry for that slot — in both cases
+    /// the answer would have come from the ring, so a caller deciding whether it
+    /// is *authoritatively* not the owner must treat it as "cannot tell" rather
+    /// than as "somebody else".
+    pub fn slot_override(&self, slot: u64) -> Option<u64> {
+        self.slot_overrides
+            .read()
+            .as_ref()
+            .and_then(|owners| owners.get(slot as usize).copied())
+            .filter(|owner| *owner != 0)
     }
 
     pub fn jump_hash(&self, slot_count: usize, hash: u64) -> usize {
