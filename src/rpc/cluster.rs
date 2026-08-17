@@ -68,7 +68,7 @@ where
     C: ServiceClientWithId,
 {
     DEFAULT_CLIENT_POOL
-        .get_by_id(server_id, move |sid| conshash.to_server_name(sid))
+        .get_by_id(server_id, move |sid| conshash.try_server_name(sid))
         .await
         .map_err(|e| RPCError::IOError(e))
         .map(|c| client_by_rpc_client(&c))

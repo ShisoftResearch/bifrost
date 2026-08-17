@@ -684,17 +684,29 @@ impl ClientPool {
     pub async fn get(&self, addr: &String) -> io::Result<Arc<RPCClient>> {
         let addr_clone = addr.clone();
         let server_id = hash_str(addr);
-        self.get_by_id(server_id, move |_| addr_clone).await
+        self.get_by_id(server_id, move |_| Some(addr_clone)).await
     }
 
+    /// Get or create a client for a member, resolving its address lazily.
+    ///
+    /// The resolver returns `Option` because an unresolvable member is a routine
+    /// outcome rather than a bug -- a stored placement table can name a member that
+    /// has left, and an operator can ask to reach one that was never there. It used
+    /// to return `String`, which left callers no way to say "I do not know that
+    /// one" except to panic.
     pub async fn get_by_id<F>(&self, server_id: u64, addr_fn: F) -> io::Result<Arc<RPCClient>>
     where
-        F: FnOnce(u64) -> String,
+        F: FnOnce(u64) -> Option<String>,
     {
         if let Some(client) = self.clients.get(&server_id) {
             return Ok(client);
         }
-        let address = addr_fn(server_id);
+        let address = addr_fn(server_id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no address known for server id {server_id}"),
+            )
+        })?;
 
         loop {
             if let Some(client) = self.clients.get(&server_id) {
@@ -2244,7 +2256,7 @@ mod test {
                     let addr = (&addr).clone();
                     tokio::spawn(async move {
                         let client = DEFAULT_CLIENT_POOL
-                            .get_by_id(server_id, move |_| addr)
+                            .get_by_id(server_id, move |_| Some(addr))
                             .await
                             .unwrap();
                         let service_client = AsyncServiceClient::new_with_service_id(0, &client);
