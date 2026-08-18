@@ -41,6 +41,103 @@ struct LookupTables {
     addrs: HashMap<u64, String>,
 }
 
+#[derive(Default)]
+struct SlotOverrides {
+    owners: Option<Vec<u64>>,
+    /// Raft log index that established each cached owner.
+    versions: Vec<u64>,
+    /// Greatest complete snapshot this cache has observed. It also versions
+    /// slots that are absent from `owners`.
+    snapshot_index: u64,
+}
+
+impl SlotOverrides {
+    fn install(&mut self, incoming: Option<Vec<u64>>, applied_index: u64) -> bool {
+        if applied_index < self.snapshot_index {
+            return false;
+        }
+        self.snapshot_index = applied_index;
+
+        match incoming {
+            Some(incoming) => {
+                let target_len = self
+                    .owners
+                    .as_ref()
+                    .map_or(incoming.len(), |owners| owners.len().max(incoming.len()));
+                let owners = self.owners.get_or_insert_with(|| vec![0; target_len]);
+                owners.resize(target_len, 0);
+                self.versions.resize(target_len, 0);
+
+                for slot in 0..target_len {
+                    if self.versions[slot] <= applied_index {
+                        owners[slot] = incoming.get(slot).copied().unwrap_or(0);
+                        self.versions[slot] = applied_index;
+                    }
+                }
+            }
+            None => {
+                if let Some(owners) = self.owners.as_mut() {
+                    self.versions.resize(owners.len(), 0);
+                    for (owner, version) in owners.iter_mut().zip(self.versions.iter_mut()) {
+                        if *version <= applied_index {
+                            *owner = 0;
+                            *version = applied_index;
+                        }
+                    }
+                    if owners.iter().all(|owner| *owner == 0) {
+                        self.owners = None;
+                        self.versions.clear();
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    fn note_owner(&mut self, slot: u64, owner: u64, slot_count: usize, applied_index: u64) -> bool {
+        if applied_index < self.snapshot_index {
+            return false;
+        }
+        let slot = slot as usize;
+        let required_len = slot_count.max(slot.saturating_add(1));
+        let owners = self.owners.get_or_insert_with(|| vec![0; required_len]);
+        owners.resize(required_len, 0);
+        self.versions.resize(required_len, self.snapshot_index);
+        if applied_index < self.versions[slot] {
+            return false;
+        }
+        owners[slot] = owner;
+        self.versions[slot] = applied_index;
+        true
+    }
+
+    fn has_table(&self) -> bool {
+        self.owners.is_some()
+    }
+
+    fn owner(&self, slot: u64) -> Option<u64> {
+        self.owners
+            .as_ref()
+            .and_then(|owners| owners.get(slot as usize).copied())
+            .filter(|owner| *owner != 0)
+    }
+
+    fn owner_with_index(&self, slot: u64) -> Option<(u64, u64)> {
+        let slot = slot as usize;
+        let owner = self
+            .owners
+            .as_ref()
+            .and_then(|owners| owners.get(slot).copied())
+            .filter(|owner| *owner != 0)?;
+        let index = self
+            .versions
+            .get(slot)
+            .copied()
+            .unwrap_or(self.snapshot_index);
+        Some((owner, index))
+    }
+}
+
 pub struct ConsistentHashing {
     tables: RwLock<LookupTables>,
     /// Stored slot ownership that overrides the computed answer, indexed by slot.
@@ -55,7 +152,7 @@ pub struct ConsistentHashing {
     /// override in each caller instead means every code path that asks "who owns
     /// this?" is a separate chance to ask the wrong oracle — and a write and a
     /// read that disagree do not fail loudly, they silently lose the data.
-    slot_overrides: RwLock<Option<Vec<u64>>>,
+    slot_overrides: RwLock<SlotOverrides>,
     membership: Arc<MembershipClient>,
     weight_sm_client: WeightSMClient,
     group_name: String,
@@ -77,7 +174,7 @@ impl ConsistentHashing {
                 nodes: Vec::new(),
                 addrs: HashMap::new(),
             }),
-            slot_overrides: RwLock::new(None),
+            slot_overrides: RwLock::new(SlotOverrides::default()),
             membership: membership_client.clone(),
             weight_sm_client: WeightSMClient::new(id, &raft_client),
             group_name: group.to_string(),
@@ -237,20 +334,17 @@ impl ConsistentHashing {
     /// Deliberately falls back rather than failing, so a group that never seeded
     /// a table behaves exactly as it did before slot ownership existed.
     pub fn get_server_id_for_slot(&self, slot: u64) -> Option<u64> {
-        if let Some(owners) = self.slot_overrides.read().as_ref() {
-            // A zero entry is an unplaced slot, not a server id: fall through to
-            // the ring rather than routing to a member that cannot exist.
-            match owners.get(slot as usize).copied() {
-                Some(owner) if owner != 0 => return Some(owner),
-                _ => {}
-            }
+        if let Some(owner) = self.slot_overrides.read().owner(slot) {
+            return Some(owner);
         }
         self.get_server_id(slot)
     }
 
-    /// Install (or clear) the stored slot table.
-    pub fn set_slot_overrides(&self, owners: Option<Vec<u64>>) {
-        *self.slot_overrides.write() = owners;
+    /// Install (or clear) a complete stored slot table at its applied Raft log
+    /// index. A lagging snapshot is ignored, and a newer push for one slot is
+    /// preserved even while the snapshot advances the rest of the table.
+    pub fn set_slot_overrides(&self, owners: Option<Vec<u64>>, applied_index: u64) -> bool {
+        self.slot_overrides.write().install(owners, applied_index)
     }
 
     /// Record one slot's owner without re-reading the whole table.
@@ -259,12 +353,16 @@ impl ConsistentHashing {
     /// already knows the answer authoritatively. With no table installed this
     /// creates one holding just this slot, which is honest: every other slot
     /// stays 0, reads as unplaced, and falls back to the ring as before.
-    pub fn note_slot_owner(&self, slot: u64, owner: u64, slot_count: usize) {
-        let mut overrides = self.slot_overrides.write();
-        let owners = overrides.get_or_insert_with(|| vec![0u64; slot_count]);
-        if let Some(entry) = owners.get_mut(slot as usize) {
-            *entry = owner;
-        }
+    pub fn note_slot_owner(
+        &self,
+        slot: u64,
+        owner: u64,
+        slot_count: usize,
+        applied_index: u64,
+    ) -> bool {
+        self.slot_overrides
+            .write()
+            .note_owner(slot, owner, slot_count, applied_index)
     }
 
     /// Whether a stored table is installed at all.
@@ -274,7 +372,7 @@ impl ConsistentHashing {
     /// legitimately disagree while the ring forms; refusing then converts a
     /// placement question into an availability failure.
     pub fn has_slot_overrides(&self) -> bool {
-        self.slot_overrides.read().is_some()
+        self.slot_overrides.read().has_table()
     }
 
     /// The stored owner of a slot, without the ring fallback.
@@ -284,11 +382,12 @@ impl ConsistentHashing {
     /// is *authoritatively* not the owner must treat it as "cannot tell" rather
     /// than as "somebody else".
     pub fn slot_override(&self, slot: u64) -> Option<u64> {
-        self.slot_overrides
-            .read()
-            .as_ref()
-            .and_then(|owners| owners.get(slot as usize).copied())
-            .filter(|owner| *owner != 0)
+        self.slot_overrides.read().owner(slot)
+    }
+
+    /// The stored owner and the Raft log index that established it.
+    pub fn slot_override_with_index(&self, slot: u64) -> Option<(u64, u64)> {
+        self.slot_overrides.read().owner_with_index(slot)
     }
 
     pub fn jump_hash(&self, slot_count: usize, hash: u64) -> usize {
@@ -496,7 +595,7 @@ async fn server_changed(ch: Arc<ConsistentHashing>, member: Member, action: Acti
 #[cfg(test)]
 mod test {
     use crate::conshash::weights::Weights;
-    use crate::conshash::ConsistentHashing;
+    use crate::conshash::{ConsistentHashing, SlotOverrides};
     use crate::membership::client::ObserverClient;
     use crate::membership::member::MemberService;
     use crate::membership::server::Membership;
@@ -507,6 +606,48 @@ mod test {
     use std::collections::HashMap;
     use std::sync::atomic::*;
     use std::sync::Arc;
+
+    #[test]
+    fn older_slot_snapshot_is_refused() {
+        let mut slots = SlotOverrides::default();
+        assert!(slots.install(Some(vec![10, 20]), 12));
+        assert!(!slots.install(Some(vec![1, 2]), 11));
+        assert_eq!(slots.owner_with_index(0), Some((10, 12)));
+        assert_eq!(slots.owner_with_index(1), Some((20, 12)));
+    }
+
+    #[test]
+    fn snapshot_preserves_a_newer_owner_push() {
+        let mut slots = SlotOverrides::default();
+        assert!(slots.install(Some(vec![10, 20]), 10));
+        assert!(slots.note_owner(0, 99, 2, 12));
+
+        assert!(slots.install(Some(vec![11, 21]), 11));
+
+        assert_eq!(slots.owner_with_index(0), Some((99, 12)));
+    }
+
+    #[test]
+    fn snapshot_still_updates_slots_without_a_newer_push() {
+        let mut slots = SlotOverrides::default();
+        assert!(slots.install(Some(vec![10, 20]), 10));
+        assert!(slots.note_owner(0, 99, 2, 12));
+
+        assert!(slots.install(Some(vec![11, 21]), 11));
+
+        assert_eq!(slots.owner_with_index(1), Some((21, 11)));
+    }
+
+    #[test]
+    fn older_owner_push_is_refused() {
+        let mut slots = SlotOverrides::default();
+        assert!(slots.install(Some(vec![10, 20]), 10));
+        assert!(slots.note_owner(0, 99, 2, 12));
+
+        assert!(!slots.note_owner(0, 11, 2, 11));
+
+        assert_eq!(slots.owner_with_index(0), Some((99, 12)));
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn primary() {

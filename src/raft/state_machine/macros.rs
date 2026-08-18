@@ -260,6 +260,15 @@ macro_rules! raft_state_machine {
                 sm_id: u64
             }
             impl SMClient {
+               pub async fn execute_command_with_index<R, M>(&self, msg: M) -> Result<(R, u64), ExecError>
+               where
+                   R: 'static,
+                   M: $crate::raft::RaftMsg<R> + 'static,
+               {
+                   self.client
+                       .execute_command_with_index(self.sm_id, msg)
+                       .await
+               }
                $(
                   $(#[$attr])*
                   raft_client_fn!($smt $fn_name( $( $arg : &$in_ ),* ) -> $out);

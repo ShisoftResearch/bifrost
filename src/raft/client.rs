@@ -111,6 +111,23 @@ impl RaftPlaneClient {
             .await
     }
 
+    /// Execute a state-machine command and return the log index at which its
+    /// result was applied. Queries are intentionally rejected because they do
+    /// not establish an ordered Raft-log position.
+    pub async fn execute_command_with_index<R, M>(
+        &self,
+        sm_id: u64,
+        msg: M,
+    ) -> Result<(R, u64), ExecError>
+    where
+        R: 'static,
+        M: RaftMsg<R> + 'static,
+    {
+        self.client
+            .execute_command_with_index_on_plane(self.plane_id, sm_id, msg)
+            .await
+    }
+
     pub async fn subscribe<M, R, F>(
         &self,
         sm_id: u64,
@@ -600,10 +617,10 @@ impl RaftClient {
         let (fn_id, op, req_data) = msg.encode();
         let response = match op {
             OpType::QUERY => self.query_on_plane(plane_id, sm_id, fn_id, req_data).await,
-            OpType::COMMAND | OpType::SUBSCRIBE => {
-                self.command_on_plane(plane_id, sm_id, fn_id, req_data)
-                    .await
-            }
+            OpType::COMMAND | OpType::SUBSCRIBE => self
+                .command_on_plane(plane_id, sm_id, fn_id, req_data)
+                .await
+                .map(|(data, _)| data),
         };
         match response {
             Ok(data) => match data {
@@ -611,6 +628,29 @@ impl RaftClient {
                 Err(e) => Err(e),
             },
             Err(e) => Err(e),
+        }
+    }
+
+    pub async fn execute_command_with_index_on_plane<R, M>(
+        &self,
+        plane_id: PlaneId,
+        sm_id: u64,
+        msg: M,
+    ) -> Result<(R, u64), ExecError>
+    where
+        R: 'static,
+        M: RaftMsg<R> + 'static,
+    {
+        let (fn_id, op, req_data) = msg.encode();
+        if !matches!(op, OpType::COMMAND) {
+            return Err(ExecError::Unknown);
+        }
+        let (data, applied_index) = self
+            .command_on_plane(plane_id, sm_id, fn_id, req_data)
+            .await?;
+        match data {
+            Ok(data) => Ok((M::decode_return(&data), applied_index)),
+            Err(error) => Err(error),
         }
     }
 
@@ -911,7 +951,7 @@ impl RaftClient {
         sm_id: u64,
         fn_id: u64,
         data: Vec<u8>,
-    ) -> Result<ExecResult, ExecError> {
+    ) -> Result<(ExecResult, u64), ExecError> {
         const NOT_COMMITTED_RETRY_DELAY_MS: u64 = 10;
         const UPDATE_INFO_RETRY_DELAY_MS: u64 = 10;
         let not_committed_retry_limit = std::cmp::max(
@@ -961,7 +1001,7 @@ impl RaftClient {
                             }) => {
                                 swap_when_greater(&state.last_log_id, last_log_id);
                                 swap_when_greater(&state.last_log_term, last_log_term);
-                                return Ok(data);
+                                return Ok((data, last_log_id));
                             }
                             Ok(ClientCmdResponse::NotLeader(new_leader_id)) => {
                                 if new_leader_id == 0 || new_leader_id == leader_id {

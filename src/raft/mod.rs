@@ -3997,8 +3997,21 @@ mod test {
         let plane_client = client.plane(plane_id);
         let sm_client = SMClient::new(77, &plane_client);
 
-        assert_eq!(sm_client.add(&5).await.unwrap(), 5);
-        assert_eq!(sm_client.get().await.unwrap(), 5);
+        let (value, first_index) = sm_client
+            .execute_command_with_index(add::new(&5))
+            .await
+            .unwrap();
+        assert_eq!(value, 5);
+        let (value, second_index) = sm_client
+            .execute_command_with_index(add::new(&7))
+            .await
+            .unwrap();
+        assert_eq!(value, 12);
+        assert!(
+            second_index > first_index,
+            "later commands must report later applied log indices"
+        );
+        assert_eq!(sm_client.get().await.unwrap(), 12);
         assert!(plane.have_state_machine(77).await.unwrap());
         assert!(plane_client.have_state_machine(77).await.unwrap());
         assert_eq!(

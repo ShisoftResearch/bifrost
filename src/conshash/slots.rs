@@ -83,10 +83,40 @@ raft_state_machine! {
     def cmd complete_slot_migrations(group: u64, slots: Vec<u32>) -> Vec<(u32, u64)>;
     def cmd complete_slot_migration(group: u64, slot: u32) -> Result<u64, String>;
     def cmd abort_slot_migration(group: u64, slot: u32) -> Result<u64, String>;
+    def cmd all_slots_consistent(group: u64) -> Option<HashMap<u32, SlotState>>;
     def qry slot_state(group: u64, slot: u32) -> Option<SlotState>;
     def qry all_slots(group: u64) -> Option<HashMap<u32, SlotState>>;
     def qry slots_owned_by(group: u64, server: u64) -> Vec<u32>;
     def qry placed_slot_count(group: u64) -> usize;
+}
+
+impl client::SMClient {
+    pub async fn all_slots_consistent_with_index(
+        &self,
+        group: &u64,
+    ) -> Result<(Option<HashMap<u32, SlotState>>, u64), crate::raft::state_machine::master::ExecError>
+    {
+        self.execute_command_with_index(commands::all_slots_consistent::new(group))
+            .await
+    }
+
+    pub async fn complete_slot_migration_with_index(
+        &self,
+        group: &u64,
+        slot: &u32,
+    ) -> Result<(Result<u64, String>, u64), crate::raft::state_machine::master::ExecError> {
+        self.execute_command_with_index(commands::complete_slot_migration::new(group, slot))
+            .await
+    }
+
+    pub async fn complete_slot_migrations_with_index(
+        &self,
+        group: &u64,
+        slots: &Vec<u32>,
+    ) -> Result<(Vec<(u32, u64)>, u64), crate::raft::state_machine::master::ExecError> {
+        self.execute_command_with_index(commands::complete_slot_migrations::new(group, slots))
+            .await
+    }
 }
 
 impl StateMachineCmds for Slots {
@@ -305,8 +335,17 @@ impl StateMachineCmds for Slots {
         future::ready(result).boxed()
     }
 
+    fn all_slots_consistent(&mut self, group: u64) -> BoxFuture<Option<HashMap<u32, SlotState>>> {
+        future::ready(self.groups.get(&group).cloned()).boxed()
+    }
+
     fn slot_state(&self, group: u64, slot: u32) -> BoxFuture<Option<SlotState>> {
-        future::ready(self.groups.get(&group).and_then(|slots| slots.get(&slot).copied())).boxed()
+        future::ready(
+            self.groups
+                .get(&group)
+                .and_then(|slots| slots.get(&slot).copied()),
+        )
+        .boxed()
     }
 
     fn all_slots(&self, group: u64) -> BoxFuture<Option<HashMap<u32, SlotState>>> {
@@ -332,7 +371,13 @@ impl StateMachineCmds for Slots {
     }
 
     fn placed_slot_count(&self, group: u64) -> BoxFuture<usize> {
-        future::ready(self.groups.get(&group).map(|slots| slots.len()).unwrap_or(0)).boxed()
+        future::ready(
+            self.groups
+                .get(&group)
+                .map(|slots| slots.len())
+                .unwrap_or(0),
+        )
+        .boxed()
     }
 }
 
@@ -432,6 +477,24 @@ mod tests {
             block_on(sm.slot_state(G, 3)),
             Some(SlotState::Stable { owner: C })
         );
+    }
+
+    #[test]
+    fn consistent_snapshot_returns_stable_and_migrating_states_without_mutation() {
+        let mut sm = new_sm();
+        block_on(sm.set_slot_owner(G, 1, A));
+        block_on(sm.set_slot_owner(G, 2, B));
+        block_on(sm.begin_slot_migration(G, 2, B, C)).expect("migration should begin");
+        let before = sm.groups.clone();
+
+        let snapshot = block_on(sm.all_slots_consistent(G)).expect("group should be placed");
+
+        assert_eq!(snapshot.get(&1), Some(&SlotState::Stable { owner: A }));
+        assert_eq!(
+            snapshot.get(&2),
+            Some(&SlotState::Migrating { from: B, to: C })
+        );
+        assert_eq!(sm.groups, before, "consistent read must not mutate slots");
     }
 
     #[test]
