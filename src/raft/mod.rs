@@ -2208,6 +2208,18 @@ impl RaftService {
         teardown.wait().await;
     }
 
+    /// Start tearing the Raft runtime down without awaiting anything.
+    ///
+    /// `Drop` already does this, but only once the LAST `Arc<RaftService>` goes
+    /// -- and a running service is referenced by its own plane tasks, so a host
+    /// that drops its handle without awaiting `shutdown` leaves the runtime and
+    /// its threads alive indefinitely. This lets an owner that knows the service
+    /// is unreachable say so from a `Drop`. Idempotent: a teardown already in
+    /// progress is returned as-is.
+    pub fn begin_teardown(&self) {
+        let _ = self.begin_runtime_teardown();
+    }
+
     fn begin_runtime_teardown(&self) -> Arc<RuntimeTeardown> {
         let (teardown, runtime) = {
             let mut lifecycle = self
