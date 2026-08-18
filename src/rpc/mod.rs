@@ -542,6 +542,24 @@ impl Server {
     }
 
     pub async fn remove_service(&self, service_id: u64) {
+        self.remove_service_now(service_id)
+    }
+
+    /// `remove_service` without the `async`, so a `Drop` can call it.
+    ///
+    /// A server holds a **strong** `Arc` to every service it hosts, so a host
+    /// that goes away without awaiting `shutdown` strands the whole object
+    /// graph behind its services -- measured in Nebuchadnezzar as ~26 threads
+    /// and one entire memory store retained per server. Nothing in the removal
+    /// actually awaits, so the only thing standing between a `Drop` and letting
+    /// go was the signature.
+    ///
+    /// Removing one service by id, rather than releasing them all, is the point:
+    /// a process hosting several servers shares process-global machinery between
+    /// them -- notably the Raft subscription callback, which lives on whichever
+    /// server prepared it first -- and taking that down on behalf of one server
+    /// breaks every other server still running.
+    pub fn remove_service_now(&self, service_id: u64) {
         let retired_service = {
             let _lifecycle = self
                 .service_lifecycle
