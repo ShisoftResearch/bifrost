@@ -184,13 +184,27 @@ impl ConsistentHashing {
             },
         }
     }
+    /// The address of a member, or `None` if this ring has never seen it.
+    ///
+    /// Prefer this over [`Self::to_server_name`]. An unknown server id is a
+    /// *routine* input, not a bug: a stored placement table can name a member that
+    /// has since left the ring, an operator can ask to drain onto a member that is
+    /// not there, and a stale watcher can hand over an id from a previous
+    /// membership. All of those want an error the caller can handle.
+    pub fn try_server_name(&self, server_id: u64) -> Option<String> {
+        self.tables.read().addrs.get(&server_id).cloned()
+    }
+
+    /// **Panics** on an unknown server id. Prefer [`Self::try_server_name`].
+    ///
+    /// Kept for callers that have already established the member exists. It was
+    /// once the only option, and being the only option meant a placement table
+    /// naming a departed member took the whole process down instead of failing one
+    /// request -- which is exactly what a stored placement table makes possible.
     pub fn to_server_name(&self, server_id: u64) -> String {
-        let lookup_table = self.tables.read();
-        trace!("Lookup table has {:?}", lookup_table.addrs);
-        if let Some(name) = lookup_table.addrs.get(&server_id) {
-            name.to_owned()
-        } else {
-            panic!("Cannot find server name for server id {}", server_id);
+        match self.try_server_name(server_id) {
+            Some(name) => name,
+            None => panic!("Cannot find server name for server id {}", server_id),
         }
     }
     pub fn to_server_name_option(&self, server_id: Option<u64>) -> Option<String> {

@@ -77,7 +77,10 @@ pub struct Slots {
 raft_state_machine! {
     def cmd set_slot_owner(group: u64, slot: u32, owner: u64);
     def cmd adopt_slots(group: u64, assignments: Vec<(u32, u64)>) -> usize;
+    def cmd reassign_slots(group: u64, assignments: Vec<(u32, u64)>, from: u64) -> usize;
     def cmd begin_slot_migration(group: u64, slot: u32, from: u64, to: u64) -> Result<(), String>;
+    def cmd begin_slot_migrations(group: u64, moves: Vec<(u32, u64, u64)>) -> Vec<(u32, String)>;
+    def cmd complete_slot_migrations(group: u64, slots: Vec<u32>) -> Vec<(u32, u64)>;
     def cmd complete_slot_migration(group: u64, slot: u32) -> Result<u64, String>;
     def cmd abort_slot_migration(group: u64, slot: u32) -> Result<u64, String>;
     def qry slot_state(group: u64, slot: u32) -> Option<SlotState>;
@@ -114,6 +117,41 @@ impl StateMachineCmds for Slots {
             });
         }
         future::ready(adopted).boxed()
+    }
+
+    /// Hand a batch of slots from one member to others in a single command.
+    ///
+    /// For slots with **nothing in them**. Draining a member means moving every
+    /// slot it owns, which in a small cluster is the whole 32768-slot space, and
+    /// the great majority of those hold no data at all. Walking them through the
+    /// full migration sequence costs six round trips each to move nothing --
+    /// measured at ~200k operations for one drain, which is correct and unusable.
+    ///
+    /// Safe as a bulk operation precisely because it is narrow. It moves a slot
+    /// only if that slot is `Stable` on `from`, so it cannot steal a slot from a
+    /// third member and cannot disturb one that is mid-migration -- the two ways
+    /// a bulk placement edit could otherwise strand data. Anything it declines is
+    /// simply not counted, and the caller sees the shortfall.
+    ///
+    /// It moves no data and must only be used where there is none to move.
+    fn reassign_slots(
+        &mut self,
+        group: u64,
+        assignments: Vec<(u32, u64)>,
+        from: u64,
+    ) -> BoxFuture<usize> {
+        let slots = self.groups.entry(group).or_insert_with(HashMap::new);
+        let mut reassigned = 0usize;
+        for (slot, owner) in assignments {
+            match slots.get(&slot) {
+                Some(SlotState::Stable { owner: current }) if *current == from => {
+                    slots.insert(slot, SlotState::Stable { owner });
+                    reassigned += 1;
+                }
+                _ => {}
+            }
+        }
+        future::ready(reassigned).boxed()
     }
 
     fn begin_slot_migration(
@@ -154,6 +192,82 @@ impl StateMachineCmds for Slots {
             None => Err(format!("slot {slot} has no owner to migrate from")),
         };
         future::ready(result).boxed()
+    }
+
+    /// Begin many migrations in one command; report only the refusals.
+    ///
+    /// Same guards as `begin_slot_migration`, applied per entry -- this is a
+    /// batching of that command, not a weaker version of it.
+    ///
+    /// Batching matters more than it looks. A migration costs two commands and a
+    /// query per slot, and the raft leader serialises log appends however many
+    /// callers there are, so per-slot commands put a consensus round trip in the
+    /// critical path of every slot: measured ~88 ms of fixed cost per slot even
+    /// with 32-way concurrency on the caller side, dominating a reshard of a
+    /// 1 GB store. Concurrency cannot fix a serialised path; fewer commands can.
+    fn begin_slot_migrations(
+        &mut self,
+        group: u64,
+        moves: Vec<(u32, u64, u64)>,
+    ) -> BoxFuture<Vec<(u32, String)>> {
+        let slots = self.groups.entry(group).or_insert_with(HashMap::new);
+        let mut refused = Vec::new();
+        for (slot, from, to) in moves {
+            let outcome = match slots.get(&slot) {
+                Some(SlotState::Stable { owner }) if *owner == from => {
+                    if from == to {
+                        Err(format!("slot {slot} migration from {from} to itself"))
+                    } else {
+                        slots.insert(slot, SlotState::Migrating { from, to });
+                        Ok(())
+                    }
+                }
+                Some(SlotState::Stable { owner }) => Err(format!(
+                    "slot {slot} is owned by {owner}, not by the claimed donor {from}"
+                )),
+                Some(SlotState::Migrating {
+                    from: active_from,
+                    to: active_to,
+                }) => {
+                    if *active_from == from && *active_to == to {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "slot {slot} is already migrating {active_from} -> {active_to}"
+                        ))
+                    }
+                }
+                None => Err(format!("slot {slot} has no owner to migrate from")),
+            };
+            if let Err(reason) = outcome {
+                refused.push((slot, reason));
+            }
+        }
+        future::ready(refused).boxed()
+    }
+
+    /// Commit many migrations in one command; report each slot's new owner.
+    ///
+    /// A slot absent from the result did not commit, and the caller must treat it
+    /// as still the donor's. Because this is a *command*, its return value is
+    /// produced by its own apply and is authoritative — so a bulk caller does not
+    /// need to query the table afterwards to learn what happened, which also
+    /// sidesteps a query being served by a member that has not applied this yet.
+    fn complete_slot_migrations(
+        &mut self,
+        group: u64,
+        slots: Vec<u32>,
+    ) -> BoxFuture<Vec<(u32, u64)>> {
+        let table = self.groups.entry(group).or_insert_with(HashMap::new);
+        let mut committed = Vec::new();
+        for slot in slots {
+            if let Some(SlotState::Migrating { to, .. }) = table.get(&slot) {
+                let owner = *to;
+                table.insert(slot, SlotState::Stable { owner });
+                committed.push((slot, owner));
+            }
+        }
+        future::ready(committed).boxed()
     }
 
     /// A migration's commit point. Returns the new owner.
@@ -390,6 +504,99 @@ mod tests {
             block_on(sm.slot_state(G, 5)),
             Some(SlotState::Migrating { from: A, to: B })
         );
+    }
+
+    #[test]
+    fn bulk_begin_and_complete_match_the_single_slot_guards() {
+        // The batched commands must be a batching of the single-slot ones, not a
+        // weaker version: same refusals, same commit point.
+        let mut sm = new_sm();
+        block_on(sm.adopt_slots(G, vec![(1, A), (2, A), (3, B)]));
+
+        let refused = block_on(sm.begin_slot_migrations(
+            G,
+            vec![
+                (1, A, B), // fine
+                (2, A, A), // to itself
+                (3, A, B), // A does not own it
+                (9, A, B), // unplaced
+            ],
+        ));
+        let refused_slots: Vec<u32> = refused.iter().map(|(slot, _)| *slot).collect();
+        assert_eq!(refused_slots, vec![2, 3, 9]);
+        assert_eq!(
+            block_on(sm.slot_state(G, 1)),
+            Some(SlotState::Migrating { from: A, to: B })
+        );
+        assert_eq!(
+            block_on(sm.slot_state(G, 3)),
+            Some(SlotState::Stable { owner: B }),
+            "a refused entry must not disturb the slot"
+        );
+
+        // Only the slot that actually began commits, and the command reports it.
+        let committed = block_on(sm.complete_slot_migrations(G, vec![1, 2, 3, 9]));
+        assert_eq!(committed, vec![(1, B)]);
+        assert_eq!(
+            block_on(sm.slot_state(G, 1)),
+            Some(SlotState::Stable { owner: B })
+        );
+        assert_eq!(
+            block_on(sm.slot_state(G, 2)),
+            Some(SlotState::Stable { owner: A }),
+            "a slot that never began must not be committed by a bulk complete"
+        );
+    }
+
+    #[test]
+    fn bulk_reassignment_only_moves_slots_the_named_member_holds() {
+        // The narrowness is the safety argument: a bulk placement edit that could
+        // touch a third member's slot, or one mid-migration, could strand data
+        // with no migration sequence to protect it.
+        let mut sm = new_sm();
+        block_on(sm.adopt_slots(G, vec![(1, A), (2, A), (3, B), (4, A)]));
+        block_on(sm.begin_slot_migration(G, 4, A, C)).expect("begin");
+
+        let moved = block_on(sm.reassign_slots(
+            G,
+            vec![(1, B), (2, B), (3, C), (4, C), (9, C)],
+            A,
+        ));
+        assert_eq!(moved, 2, "only the two stable slots owned by A may move");
+
+        assert_eq!(
+            block_on(sm.slot_state(G, 1)),
+            Some(SlotState::Stable { owner: B })
+        );
+        assert_eq!(
+            block_on(sm.slot_state(G, 2)),
+            Some(SlotState::Stable { owner: B })
+        );
+        assert_eq!(
+            block_on(sm.slot_state(G, 3)),
+            Some(SlotState::Stable { owner: B }),
+            "a slot owned by somebody else must not be stolen"
+        );
+        assert_eq!(
+            block_on(sm.slot_state(G, 4)),
+            Some(SlotState::Migrating { from: A, to: C }),
+            "a migrating slot must not be redirected out from under its transfer"
+        );
+        assert_eq!(
+            block_on(sm.slot_state(G, 9)),
+            None,
+            "an unplaced slot is not claimed by a reassignment"
+        );
+    }
+
+    #[test]
+    fn bulk_reassignment_empties_a_member() {
+        let mut sm = new_sm();
+        block_on(sm.adopt_slots(G, (0..64u32).map(|slot| (slot, A)).collect()));
+        let assignments: Vec<(u32, u64)> = (0..64u32).map(|slot| (slot, B)).collect();
+        assert_eq!(block_on(sm.reassign_slots(G, assignments, A)), 64);
+        assert!(block_on(sm.slots_owned_by(G, A)).is_empty());
+        assert_eq!(block_on(sm.slots_owned_by(G, B)).len(), 64);
     }
 
     #[test]
