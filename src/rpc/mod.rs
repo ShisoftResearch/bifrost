@@ -495,6 +495,13 @@ impl Server {
     where
         T: RPCService + Sized + 'static,
     {
+        self.register_service_inner(service_id, service, true).await
+    }
+
+    async fn register_service_inner<T>(&self, service_id: u64, service: &Arc<T>, owned: bool)
+    where
+        T: RPCService + Sized + 'static,
+    {
         let _lifecycle = self
             .service_lifecycle
             .lock()
@@ -525,13 +532,47 @@ impl Server {
         let service: Arc<dyn RPCService> = service;
         let weak_service = Arc::downgrade(&service);
         self.services.insert(service_id, weak_service);
-        let retired_service = self
-            .service_owners
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(service_id, service);
+        let retired_service = if owned {
+            self.service_owners
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(service_id, service)
+        } else {
+            // Weak registration: the caller keeps it alive. Drop any strong
+            // reference a previous owned registration under this id left behind,
+            // or the cycle survives the switch.
+            let previous = self
+                .service_owners
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&service_id);
+            drop(service);
+            previous
+        };
         drop(_lifecycle);
         drop(retired_service);
+    }
+
+    /// Register a service the server does NOT keep alive.
+    ///
+    /// The server holds only the `Weak` it dispatches through; keeping the
+    /// caller's service alive is the caller's job. That is the point: a service
+    /// may legitimately own the server that hosts it, and when the server also
+    /// owns the service the pair can never be dropped. `shutdown` breaks that
+    /// cycle -- see `shutdown_releases_service_that_owns_its_server` -- but a
+    /// host that is merely DROPPED cannot await `shutdown`, so its whole object
+    /// graph is stranded. Nebuchadnezzar measured that as ~26 threads and an
+    /// entire memory store per server.
+    ///
+    /// Registering weakly removes the cycle instead of unwinding it afterwards.
+    /// The caller must hold its `Arc` somewhere that is not reachable FROM the
+    /// service, or the service is dropped immediately and every dispatch to it
+    /// fails to upgrade.
+    pub async fn register_service_weak_with_id<T>(&self, service_id: u64, service: &Arc<T>)
+    where
+        T: RPCService + Sized + 'static,
+    {
+        self.register_service_inner(service_id, service, false).await
     }
 
     pub async fn register_service<T>(&self, service: &Arc<T>)
@@ -2197,6 +2238,46 @@ mod test {
             fn service_symbol(&self) -> &'static str {
                 "ServerOwningService"
             }
+        }
+
+        /// A weakly registered service must not keep its server alive, even
+        /// when the service owns the server.
+        ///
+        /// The owned registration below needs `shutdown` to break that cycle. A
+        /// host that is merely DROPPED cannot await `shutdown`, so its whole
+        /// graph is stranded -- measured in Nebuchadnezzar as ~26 threads and an
+        /// entire memory store per server. Registering weakly means the cycle
+        /// never forms, so no unwinding is required.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_weakly_registered_service_never_forms_a_cycle() {
+            let address = "rpc-weak-service-no-cycle".to_string();
+            let server = Server::new(&address);
+            let weak_server = Arc::downgrade(&server);
+            let service = Arc::new(ServerOwningService {
+                _server: server.clone(),
+            });
+            let weak_service = Arc::downgrade(&service);
+
+            server.register_service_weak_with_id(9, &service).await;
+
+            // The caller still holds it, so it is dispatchable.
+            assert!(
+                weak_service.upgrade().is_some(),
+                "a weakly registered service stays alive while its owner holds it"
+            );
+
+            // No shutdown, just drops -- which is the whole point.
+            drop(service);
+            drop(server);
+
+            assert!(
+                weak_service.upgrade().is_none(),
+                "the server kept a weakly registered service alive"
+            );
+            assert!(
+                weak_server.upgrade().is_none(),
+                "a weakly registered service still stranded its owning server"
+            );
         }
 
         #[tokio::test(flavor = "multi_thread")]
