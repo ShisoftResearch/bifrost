@@ -69,8 +69,36 @@ impl SlotState {
 /// pre-filled with some default member would hide.
 type GroupSlots = HashMap<u32, SlotState>;
 
+/// Operator- and balancer-facing controls over one group's migrations.
+///
+/// Both live in the state machine rather than in whoever runs the balancer,
+/// for the same reason the table itself does: enforcement at the SM means an
+/// automatic balancer and an operator's concurrent manual reshard **jointly**
+/// cannot exceed the budget, and the kill switch survives a restart because it
+/// rides in the raft snapshot -- a freeze that lives in a CLI flag is off
+/// again the moment the process bounces.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupControl {
+    /// Maximum slots allowed in `Migrating` at once. 0 means no cap, which is
+    /// the default -- existing operator flows see no behaviour change until a
+    /// cap is explicitly set.
+    pub migration_budget: u32,
+    /// While set, nothing may START a migration; in-flight ones may finish or
+    /// abort, because freezing a cluster should drain its work, not strand it.
+    pub frozen: bool,
+}
+
+/// One group's control state plus what it currently governs, in one answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationControlView {
+    pub budget: u32,
+    pub frozen: bool,
+    pub in_flight: u32,
+}
+
 pub struct Slots {
     pub groups: HashMap<u64, GroupSlots>,
+    pub controls: HashMap<u64, GroupControl>,
     pub id: u64,
 }
 
@@ -84,6 +112,9 @@ raft_state_machine! {
     def cmd complete_slot_migration(group: u64, slot: u32) -> Result<u64, String>;
     def cmd abort_slot_migration(group: u64, slot: u32) -> Result<u64, String>;
     def cmd all_slots_consistent(group: u64) -> Option<HashMap<u32, SlotState>>;
+    def cmd set_migration_budget(group: u64, budget: u32);
+    def cmd set_migration_freeze(group: u64, frozen: bool);
+    def qry migration_control(group: u64) -> MigrationControlView;
     def qry slot_state(group: u64, slot: u32) -> Option<SlotState>;
     def qry all_slots(group: u64) -> Option<HashMap<u32, SlotState>>;
     def qry slots_owned_by(group: u64, server: u64) -> Vec<u32>;
@@ -117,6 +148,37 @@ impl client::SMClient {
         self.execute_command_with_index(commands::complete_slot_migrations::new(group, slots))
             .await
     }
+}
+
+/// Slots currently mid-migration in one group. Counted from the table rather
+/// than tracked in a counter on purpose: several commands can end a migration
+/// (`complete`, `abort`, and any future overwrite), and a counter that each of
+/// them must remember to decrement drifts the first time one forgets. The scan
+/// is a few tens of microseconds against the ~88 ms consensus round trip every
+/// command already pays.
+fn in_flight_migrations(slots: &GroupSlots) -> u32 {
+    slots.values().filter(|state| state.is_migrating()).count() as u32
+}
+
+/// Whether one more migration may START, given a group's controls and what is
+/// already moving. Counted from the table at each admission, which is also
+/// what makes a batch honest: every entry it admits lands in the table before
+/// the next entry is judged, so a batch is capped exactly as a stream of
+/// single commands would be.
+fn admit_new_migration(control: &GroupControl, slots: &GroupSlots) -> Result<(), String> {
+    if control.frozen {
+        return Err("migrations are frozen for this group (kill switch set)".to_string());
+    }
+    if control.migration_budget > 0 {
+        let moving = in_flight_migrations(slots);
+        if moving >= control.migration_budget {
+            return Err(format!(
+                "migration budget exhausted: {} already in flight against a cap of {}",
+                moving, control.migration_budget
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl StateMachineCmds for Slots {
@@ -191,11 +253,19 @@ impl StateMachineCmds for Slots {
         from: u64,
         to: u64,
     ) -> BoxFuture<Result<(), String>> {
+        let control = self.controls.get(&group).copied().unwrap_or_default();
         let slots = self.groups.entry(group).or_insert_with(HashMap::new);
         let result = match slots.get(&slot) {
             Some(SlotState::Stable { owner }) if *owner == from => {
                 if from == to {
                     Err(format!("slot {slot} migration from {from} to itself"))
+                } else if let Err(refusal) = admit_new_migration(&control, slots) {
+                    // Only a Stable -> Migrating transition consults the
+                    // controls: the idempotent-retry branch below stays
+                    // admitted under freeze and budget alike, because it
+                    // starts nothing -- refusing it would strand a transfer
+                    // that already began.
+                    Err(format!("slot {slot} refused: {refusal}"))
                 } else {
                     slots.insert(slot, SlotState::Migrating { from, to });
                     Ok(())
@@ -240,6 +310,7 @@ impl StateMachineCmds for Slots {
         group: u64,
         moves: Vec<(u32, u64, u64)>,
     ) -> BoxFuture<Vec<(u32, String)>> {
+        let control = self.controls.get(&group).copied().unwrap_or_default();
         let slots = self.groups.entry(group).or_insert_with(HashMap::new);
         let mut refused = Vec::new();
         for (slot, from, to) in moves {
@@ -247,6 +318,8 @@ impl StateMachineCmds for Slots {
                 Some(SlotState::Stable { owner }) if *owner == from => {
                     if from == to {
                         Err(format!("slot {slot} migration from {from} to itself"))
+                    } else if let Err(refusal) = admit_new_migration(&control, slots) {
+                        Err(format!("slot {slot} refused: {refusal}"))
                     } else {
                         slots.insert(slot, SlotState::Migrating { from, to });
                         Ok(())
@@ -335,8 +408,33 @@ impl StateMachineCmds for Slots {
         future::ready(result).boxed()
     }
 
+    fn set_migration_budget(&mut self, group: u64, budget: u32) -> BoxFuture<()> {
+        self.controls.entry(group).or_default().migration_budget = budget;
+        future::ready(()).boxed()
+    }
+
+    fn set_migration_freeze(&mut self, group: u64, frozen: bool) -> BoxFuture<()> {
+        self.controls.entry(group).or_default().frozen = frozen;
+        future::ready(()).boxed()
+    }
+
     fn all_slots_consistent(&mut self, group: u64) -> BoxFuture<Option<HashMap<u32, SlotState>>> {
         future::ready(self.groups.get(&group).cloned()).boxed()
+    }
+
+    fn migration_control(&self, group: u64) -> BoxFuture<MigrationControlView> {
+        let control = self.controls.get(&group).copied().unwrap_or_default();
+        let in_flight = self
+            .groups
+            .get(&group)
+            .map(|slots| in_flight_migrations(slots))
+            .unwrap_or(0);
+        future::ready(MigrationControlView {
+            budget: control.migration_budget,
+            frozen: control.frozen,
+            in_flight,
+        })
+        .boxed()
     }
 
     fn slot_state(&self, group: u64, slot: u32) -> BoxFuture<Option<SlotState>> {
@@ -387,11 +485,27 @@ impl StateMachineCtl for Slots {
         self.id
     }
     fn snapshot(&self) -> Vec<u8> {
-        crate::utils::serde::serialize(&self.groups)
+        crate::utils::serde::serialize(&(self.groups.clone(), self.controls.clone()))
     }
     fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
+        // Current format first, then the pre-control format (a bare groups
+        // map). The fallback is not optional politeness: a persisted snapshot
+        // from before the controls existed that failed to decode would leave
+        // this member's table EMPTY, which claims nothing is placed anywhere
+        // -- the exact placement wipe the loud error below exists to prevent.
+        type WithControls = (HashMap<u64, GroupSlots>, HashMap<u64, GroupControl>);
+        if let Some((groups, controls)) =
+            crate::utils::serde::deserialize::<WithControls>(data.as_slice())
+        {
+            self.groups = groups;
+            self.controls = controls;
+            return future::ready(()).boxed();
+        }
         match crate::utils::serde::deserialize::<HashMap<u64, GroupSlots>>(data.as_slice()) {
-            Some(groups) => self.groups = groups,
+            Some(groups) => {
+                self.groups = groups;
+                self.controls = HashMap::new();
+            }
             None => {
                 // Deliberately loud and deliberately NOT silently emptied the
                 // way a weights table can be: an empty placement table claims
@@ -419,6 +533,7 @@ impl Slots {
         raft_service
             .register_state_machine(Box::new(Slots {
                 groups: HashMap::new(),
+                controls: HashMap::new(),
                 id,
             }))
             .await
@@ -442,6 +557,7 @@ mod tests {
     fn new_sm() -> Slots {
         Slots {
             groups: HashMap::new(),
+            controls: HashMap::new(),
             id: 1,
         }
     }
@@ -705,6 +821,145 @@ mod tests {
             block_on(sm.slot_state(G, 1)),
             Some(SlotState::Stable { owner: A }),
             "a table that cannot be read must not be replaced by an empty one"
+        );
+    }
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+    use futures::executor::block_on;
+
+    const G: u64 = 7;
+    const A: u64 = 100;
+    const B: u64 = 200;
+    const C: u64 = 300;
+
+    fn placed_sm(slots: u32) -> Slots {
+        let mut sm = Slots {
+            groups: HashMap::new(),
+            controls: HashMap::new(),
+            id: 1,
+        };
+        for slot in 0..slots {
+            block_on(sm.set_slot_owner(G, slot, A));
+        }
+        sm
+    }
+
+    #[test]
+    fn the_budget_caps_what_may_move_at_once() {
+        let mut sm = placed_sm(4);
+        block_on(sm.set_migration_budget(G, 2));
+
+        block_on(sm.begin_slot_migration(G, 0, A, B)).expect("first within budget");
+        block_on(sm.begin_slot_migration(G, 1, A, B)).expect("second within budget");
+        let refused = block_on(sm.begin_slot_migration(G, 2, A, B))
+            .expect_err("third must exceed the budget");
+        assert!(refused.contains("budget exhausted"), "{refused}");
+
+        // The idempotent retry of an in-flight migration starts nothing, so
+        // the budget must not refuse it -- a caller retrying a lost response
+        // would otherwise be wedged by its own earlier success.
+        block_on(sm.begin_slot_migration(G, 1, A, B))
+            .expect("retrying an in-flight migration is not a new one");
+
+        // Finishing one frees its budget slot.
+        block_on(sm.complete_slot_migration(G, 0)).expect("commit");
+        block_on(sm.begin_slot_migration(G, 2, A, B)).expect("room again after a commit");
+
+        assert_eq!(
+            block_on(sm.migration_control(G)),
+            MigrationControlView {
+                budget: 2,
+                frozen: false,
+                in_flight: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn a_batch_cannot_slip_past_the_budget_by_being_one_command() {
+        let mut sm = placed_sm(5);
+        block_on(sm.set_migration_budget(G, 3));
+        block_on(sm.begin_slot_migration(G, 0, A, B)).expect("one in flight already");
+
+        let refused = block_on(sm.begin_slot_migrations(
+            G,
+            vec![(1, A, B), (2, A, B), (3, A, B), (4, A, B)],
+        ));
+        // 1 in flight + a cap of 3 leaves room for exactly 2 of the 4.
+        assert_eq!(refused.len(), 2, "refusals: {refused:?}");
+        assert!(refused.iter().all(|(_, reason)| reason.contains("budget exhausted")));
+        assert_eq!(block_on(sm.migration_control(G)).in_flight, 3);
+    }
+
+    #[test]
+    fn the_kill_switch_stops_new_migrations_and_drains_old_ones() {
+        let mut sm = placed_sm(3);
+        block_on(sm.begin_slot_migration(G, 0, A, B)).expect("in flight before the freeze");
+        block_on(sm.set_migration_freeze(G, true));
+
+        let refused =
+            block_on(sm.begin_slot_migration(G, 1, A, B)).expect_err("frozen must refuse");
+        assert!(refused.contains("frozen"), "{refused}");
+        let batch = block_on(sm.begin_slot_migrations(G, vec![(1, A, B), (2, A, C)]));
+        assert_eq!(batch.len(), 2, "a freeze refuses the whole batch");
+
+        // Draining is allowed: retries of in-flight work, commits, and aborts
+        // all still function, because a freeze should empty the cluster of
+        // moving slots, not strand them mid-transfer.
+        block_on(sm.begin_slot_migration(G, 0, A, B)).expect("retry survives the freeze");
+        block_on(sm.complete_slot_migration(G, 0)).expect("commit survives the freeze");
+
+        block_on(sm.set_migration_freeze(G, false));
+        block_on(sm.begin_slot_migration(G, 1, A, B)).expect("unfrozen works again");
+    }
+
+    #[test]
+    fn controls_survive_the_snapshot_and_default_for_old_snapshots() {
+        let mut sm = placed_sm(2);
+        block_on(sm.set_migration_budget(G, 5));
+        block_on(sm.set_migration_freeze(G, true));
+        block_on(sm.begin_slot_migration(G, 0, A, B))
+            .expect_err("frozen before the snapshot, so this must refuse");
+
+        let snapshot = sm.snapshot();
+        let mut restored = Slots {
+            groups: HashMap::new(),
+            controls: HashMap::new(),
+            id: 1,
+        };
+        block_on(restored.recover(snapshot));
+        assert_eq!(
+            block_on(restored.migration_control(G)),
+            MigrationControlView {
+                budget: 5,
+                frozen: true,
+                in_flight: 0,
+            },
+            "the kill switch must survive a restart -- that is why it lives in the SM"
+        );
+        assert_eq!(restored.groups, sm.groups, "the table itself must round-trip");
+
+        // A snapshot from before the controls existed is a bare groups map.
+        // It must recover the TABLE -- losing it claims nothing is placed
+        // anywhere -- with default controls.
+        let old_format = crate::utils::serde::serialize(&sm.groups);
+        let mut upgraded = Slots {
+            groups: HashMap::new(),
+            controls: HashMap::new(),
+            id: 1,
+        };
+        block_on(upgraded.recover(old_format));
+        assert_eq!(upgraded.groups, sm.groups, "pre-control snapshot must keep the table");
+        assert_eq!(
+            block_on(upgraded.migration_control(G)),
+            MigrationControlView {
+                budget: 0,
+                frozen: false,
+                in_flight: 0,
+            }
         );
     }
 }
