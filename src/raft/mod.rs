@@ -1,6 +1,6 @@
 use self::state_machine::callback::server::Subscriptions;
 use self::state_machine::callback::SMCallback;
-use self::state_machine::configs::commands::new_member_;
+use self::state_machine::configs::commands::{member_address, new_member_};
 use self::state_machine::configs::{RaftMember, CONFIG_SM_ID};
 use self::state_machine::master::{ExecError, ExecResult, MasterStateMachine, SubStateMachine};
 use self::state_machine::OpType;
@@ -143,6 +143,15 @@ pub struct ClientClusterInfo {
     last_log_id: u64,
     last_log_term: u64,
     leader_id: u64,
+}
+
+impl ClientClusterInfo {
+    pub fn leader_id(&self) -> u64 {
+        self.leader_id
+    }
+    pub fn member_addresses(&self) -> Vec<String> {
+        self.members.iter().map(|(_, addr)| addr.clone()).collect()
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -494,6 +503,13 @@ impl PlaneHandle {
             .await
     }
 
+    /// Join this member into an EXISTING plane cluster through that cluster's
+    /// own leader. See [`RaftService::join_plane`] for why `add_member` cannot
+    /// do this.
+    pub async fn join_cluster(&self, seed_nodes: &Vec<String>) -> Result<bool, ExecError> {
+        self.service.join_plane(self.plane_id, seed_nodes).await
+    }
+
     pub async fn have_state_machine(&self, sm_id: u64) -> Result<bool, PlaneError> {
         self.service
             .have_state_machine_on_plane_local(self.plane_id, sm_id)
@@ -838,7 +854,26 @@ impl RaftService {
                             let timeout_time = meta.last_checked + meta.timeout;
                             let time_remains = timeout_time - current_time;
                             if meta.vote_for.is_none() && time_remains < 0 {
-                                CheckerAction::BecomeCandidate
+                                // An UNSEEDED plane runtime -- alone, no term,
+                                // no log -- must never elect itself. It has no
+                                // peers to campaign to, so the election it
+                                // would win is a bootstrap in disguise: this
+                                // is exactly how a member materializing a
+                                // plane it was ABOUT to join became the
+                                // isolated second leader of a split plane.
+                                // Seeding is explicit: the bootstrap
+                                // promotion, recovery from disk, or a join
+                                // importing the real member list. All three
+                                // leave a term, a log, or peers behind.
+                                let unseeded = !plane_id.is_type1()
+                                    && meta.term == 0
+                                    && meta.state_machine.read().await.members().len() <= 1
+                                    && meta.logs.read().await.is_empty();
+                                if unseeded {
+                                    CheckerAction::None
+                                } else {
+                                    CheckerAction::BecomeCandidate
+                                }
                             } else {
                                 CheckerAction::None
                             }
@@ -1216,8 +1251,9 @@ impl RaftService {
 
             if should_promote {
                 info!(
-                    "Single-node plane {} detected during initialization (term={}, logs={}, members={}). Becoming leader immediately.",
+                    "Single-node plane {} detected during initialization on {} (term={}, logs={}, members={}). Becoming leader immediately.",
                     plane_id.raw(),
+                    self.options.address,
                     meta.term,
                     has_logs,
                     num_members
@@ -1385,6 +1421,167 @@ impl RaftService {
             ClientCmdResponse::NotCommitted { .. } => Err(ExecError::NotCommitted.into()),
             ClientCmdResponse::ShuttingDown => Err(ExecError::ShuttingDown.into()),
         }
+    }
+
+    /// Join this member into an EXISTING plane's cluster, the counterpart of
+    /// type1's [`RaftService::join`].
+    ///
+    /// `PlaneHandle::add_member` cannot do this: it executes the membership
+    /// command on the LOCAL service, and `ensure_plane` promotes any fresh
+    /// single-member runtime straight to leader -- so a joiner that used
+    /// `add_member` was adding itself to its own isolated copy of the plane.
+    /// The real leader never learned of it, nothing ever replicated, and the
+    /// two self-consistent leaders only agreed by the luck of query routing.
+    /// Worse than the visible flakes, the split is a loaded gun: the isolated
+    /// joiner usually holds a HIGHER term over a SHORTER log, which is
+    /// exactly the shape raft's vote rules prefer -- an eventual merge could
+    /// elect it and truncate the real plane's history.
+    ///
+    /// The join therefore: materializes the local runtime WITHOUT the fresh
+    /// bootstrap promotion, asks the existing cluster to admit this address
+    /// (routed to its leader like any command), imports the resulting member
+    /// list, and only then starts the runtime -- as a follower that already
+    /// knows its leader, so there is no window in which it can elect itself.
+    pub async fn join_plane(
+        self: &Arc<Self>,
+        plane_id: PlaneId,
+        seed_nodes: &Vec<String>,
+    ) -> Result<bool, ExecError> {
+        debug!(
+            "Joining plane {} via {:?} as {}",
+            plane_id.raw(),
+            seed_nodes,
+            self.options.address
+        );
+        let (runtime, _) = self
+            .resolve_plane_runtime(plane_id, true, /* bootstrap_if_fresh = */ false)
+            .await
+            .map_err(|_| ExecError::Unknown)?;
+        let Some(runtime) = runtime else {
+            // type1 has its own join; this is for real planes only.
+            return Err(ExecError::Unknown);
+        };
+
+        let client = RaftClient::new(seed_nodes, self.options.service_id)
+            .await
+            .map_err(|_| ExecError::CannotConstructClient)?;
+        let plane_client = client.plane(plane_id);
+        let admitted = plane_client
+            .execute(CONFIG_SM_ID, new_member_::new(&self.options.address))
+            .await?;
+        let members = plane_client
+            .execute(CONFIG_SM_ID, member_address::new())
+            .await?;
+        let info = plane_client.cluster_info().await?;
+
+        {
+            let mut meta = runtime.meta.write().await;
+            {
+                let mut sm = meta.state_machine.write().await;
+                for member in members {
+                    sm.configs.new_member(member).await;
+                }
+            }
+            self.become_follower_on_plane(&runtime.is_leader, &mut meta, 0, info.leader_id());
+            self.reset_last_checked(&mut meta);
+        }
+        self.start_managed_runtime(Some(runtime)).await;
+        info!(
+            "Joined plane {} as {} (leader {})",
+            plane_id.raw(),
+            self.options.address,
+            info.leader_id()
+        );
+        Ok(admitted)
+    }
+
+    /// Materialize a plane runtime ONLY if it already exists in memory or has
+    /// persisted state to recover -- never bootstrapping a fresh one. This is
+    /// what startup recovery paths need: on a restart the plane comes back
+    /// with its state, and on a fresh member nothing happens, leaving the
+    /// bootstrap-or-join decision to whoever makes it explicitly. `None`
+    /// means "nothing to recover", which is a normal answer, not an error.
+    pub async fn recover_plane(
+        self: &Arc<Self>,
+        spec: PlaneSpec,
+    ) -> Result<Option<PlaneHandle>, PlaneError> {
+        match self
+            .resolve_plane_runtime(spec.plane_id, false, false)
+            .await
+        {
+            Ok((Some(runtime), _)) => {
+                self.start_managed_runtime(Some(runtime)).await;
+                Ok(Some(PlaneHandle {
+                    service: self.clone(),
+                    plane_id: spec.plane_id,
+                }))
+            }
+            // type1 needs no per-plane runtime; hand back its handle.
+            Ok((None, _)) => Ok(Some(PlaneHandle {
+                service: self.clone(),
+                plane_id: spec.plane_id,
+            })),
+            Err(PlaneError::PlaneNotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Materialize a plane runtime without the fresh-bootstrap promotion: a
+    /// brand-new runtime comes up as an unseeded follower that cannot elect
+    /// itself, waiting to be joined into an existing cluster or explicitly
+    /// bootstrapped. For registering state machines ahead of a join.
+    pub async fn ensure_plane_passive(
+        self: &Arc<Self>,
+        spec: PlaneSpec,
+    ) -> Result<PlaneHandle, PlaneError> {
+        if let (Some(runtime), _) = self
+            .resolve_plane_runtime(spec.plane_id, true, false)
+            .await?
+        {
+            self.start_managed_runtime(Some(runtime)).await;
+        }
+        Ok(PlaneHandle {
+            service: self.clone(),
+            plane_id: spec.plane_id,
+        })
+    }
+
+    /// Promote a plane runtime that is still unseeded -- the creator's half of
+    /// the bootstrap-or-join decision, for a runtime that was materialized
+    /// passively (to register state machines early) and now turns out to be
+    /// the one that must found the cluster.
+    pub async fn bootstrap_plane_if_unseeded(
+        self: &Arc<Self>,
+        plane_id: PlaneId,
+    ) -> Result<(), PlaneError> {
+        let (runtime, _) = self.resolve_plane_runtime(plane_id, true, true).await?;
+        let Some(runtime) = runtime else {
+            return Ok(());
+        };
+        let mut meta = runtime.meta.write().await;
+        let already_seeded = {
+            let sm = meta.state_machine.read().await;
+            !matches!(meta.membership, Membership::Follower | Membership::Undefined)
+                || meta.term > 0
+                || sm.members().len() > 1
+                || !meta.logs.read().await.is_empty()
+        };
+        if already_seeded {
+            return Ok(());
+        }
+        let (last_log_id, _) = {
+            let logs = meta.logs.read().await;
+            get_last_log_info!(self, logs)
+        };
+        ensure_direct_leader_term(&mut meta);
+        self.become_leader_on_plane(&runtime.is_leader, &mut meta, last_log_id)
+            .await;
+        info!(
+            "Bootstrapped previously-passive plane {} on {}",
+            plane_id.raw(),
+            self.options.address
+        );
+        Ok(())
     }
 
     pub async fn ensure_plane(
