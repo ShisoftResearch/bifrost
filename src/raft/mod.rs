@@ -3125,17 +3125,37 @@ impl RaftService {
         entry: &'a LogEntry,
     ) -> ClientQryResponse {
         let logs = meta.logs.read().await;
-        let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
-        if entry.term > last_log_term || entry.id > last_log_id {
+        let (_last_log_id, last_log_term) = get_last_log_info!(self, logs);
+        // Gate on what this member has APPLIED, not on what its log has
+        // merely received. The query below executes against the state
+        // machine, and the state machine reflects applied entries only -- so
+        // a member whose log had caught up to the client's cursor but whose
+        // apply loop had not yet run could pass the old gate and serve state
+        // from BEFORE the very command the client just saw committed.
+        //
+        // Measured as a permanently missing schema on a joining member: its
+        // own raft node had the log, answered its first `get_all` from an
+        // unapplied state machine, and no event ever replayed the difference
+        // -- bimodal, in 0 ms or never (3 of 10 joins). The same shape was
+        // recorded earlier as "a qry right after your cmd can return the
+        // pre-command state" and worked around consumer-side by pushing
+        // instead of pulling; this closes it where it lives.
+        //
+        // The reported cursor is the applied position too, for both answers:
+        // it is what the client actually observed on Success, and it is what
+        // the client's stall detection should measure on LeftBehind -- that
+        // code already says "keep waiting while the server makes apply
+        // progress", which only works if apply progress is what we report.
+        if entry.term > last_log_term || entry.id > meta.last_applied {
             ClientQryResponse::LeftBehind {
                 last_log_term,
-                last_log_id,
+                last_log_id: meta.last_applied,
             }
         } else {
             let qry_res = meta.state_machine.read().await.exec_qry(entry).await;
             ClientQryResponse::Success {
                 data: qry_res,
-                last_log_id,
+                last_log_id: meta.last_applied,
                 last_log_term,
             }
         }
@@ -3261,6 +3281,17 @@ impl RaftService {
         debug!("Sync config to followers on plane {}", plane_id.raw());
         meta.commit_index = new_log_id;
         let data = apply_committed_entry(&meta, &entry).await;
+        // The apply just happened, so say so. This path -- every subscription
+        // and membership command -- advanced `commit_index` and applied the
+        // entry but left `last_applied` behind, which had two consequences:
+        // `check_commit` considered everything since the last data command
+        // unapplied and would re-apply it, and any reader of `last_applied`
+        // (the client-query freshness gate) concluded this member was
+        // permanently behind. On a plane whose traffic is mostly config
+        // commands the counter simply never moved: queries stalled forever at
+        // "no apply progress at log id 0" the moment the gate started telling
+        // the truth.
+        meta.last_applied = new_log_id;
         if let Membership::Leader(ref leader_meta) = meta.membership {
             let mut leader_meta = leader_meta.write().await;
             let member_sm = meta.state_machine.read().await;
