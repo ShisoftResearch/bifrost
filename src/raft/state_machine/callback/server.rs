@@ -247,13 +247,25 @@ impl SMCallback {
                     trace!("Cannot found internal subs {}", pattern_id);
                 }
                 if let Some(sub_ids) = svr_subs.subscriptions.get(&key) {
-                    let sub_result_futs: FuturesUnordered<_> = sub_ids
+                    // ONE notification per SUBSCRIBER, not per sub_id. The
+                    // notify RPC carries only the key, and the receiving
+                    // client fires every closure it holds under that key --
+                    // so sending per sub_id multiplies every event by the
+                    // number of same-key registrations the subscriber holds.
+                    // Measured: one join event fired the join-fill watcher 7
+                    // times, and the 7 concurrent fills raced each other's
+                    // slot handovers into aborted transfers.
+                    let subscriber_ids: HashSet<u64> = sub_ids
                         .iter()
-                        .map(|sub_id| {
+                        .filter_map(|sub_id| svr_subs.sub_suber.get(sub_id).copied())
+                        .collect();
+                    let sub_result_futs: FuturesUnordered<_> = subscriber_ids
+                        .into_iter()
+                        .map(|subscriber_id| {
                             let message = Pin::new(&message);
                             async move {
                                 let svr_subs = self.subscriptions.read().await;
-                                if let Some(subscriber_id) = svr_subs.sub_suber.get(&sub_id) {
+                                {
                                     if let Some(subscriber) =
                                         svr_subs.subscribers.get(&subscriber_id)
                                     {
@@ -271,21 +283,20 @@ impl SMCallback {
                                             }
                                         };
                                         debug!(
-                                            "Sending out callback notification to sub id {}",
-                                            sub_id
+                                            "Sending out callback notification to subscriber {}",
+                                            subscriber_id
                                         );
                                         let client_result = client.notify(key, &data).await;
                                         Ok(client_result)
                                     } else {
                                         Err(NotifyError::CannotFindSubscriber)
                                     }
-                                } else {
-                                    Err(NotifyError::CannotFindSubscribers)
                                 }
                             }
                         })
                         .collect();
                     let sub_result: Vec<_> = sub_result_futs.collect().await;
+                    let sub_result_count = sub_result.len();
                     let errors: Vec<NotifyError> = sub_result
                         .iter()
                         .filter_map(|r| {
@@ -300,7 +311,7 @@ impl SMCallback {
                         .into_iter()
                         .filter_map(|r| if let Ok(value) = r { Some(value) } else { None })
                         .collect();
-                    Ok((sub_ids.len(), errors, response))
+                    Ok((sub_result_count, errors, response))
                 } else {
                     Err(NotifyError::CannotFindSubscription)
                 }
