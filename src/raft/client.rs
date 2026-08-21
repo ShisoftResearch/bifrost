@@ -1044,13 +1044,24 @@ impl RaftClient {
                                 last_log_id,
                             }) => {
                                 debug!(
-                                    "CLIENT plane_id={}: NOT COMMITTED at leader {}, refreshing client log cursor to term {}, id {}",
+                                    "CLIENT plane_id={}: NOT COMMITTED at leader {} (its log is at term {}, id {})",
                                     plane_id.raw(), leader_id,
                                     last_log_term,
                                     last_log_id
                                 );
-                                swap_when_greater(&state.last_log_id, last_log_id);
-                                swap_when_greater(&state.last_log_term, last_log_term);
+                                // The reported id names an entry the leader
+                                // APPENDED but could not replicate -- state the
+                                // client has NOT observed. The cursor is the
+                                // query gate's floor ("serve me at least
+                                // this"), so hoisting it here demands state no
+                                // member can apply until that entry commits.
+                                // Measured: on a cluster that lost quorum, one
+                                // refused command left every later query
+                                // answering LeftBehind until the client
+                                // errored out -- a wedged client on a merely
+                                // degraded cluster. Only observed state moves
+                                // the cursor: Success responses and query
+                                // answers.
                                 FailureAction::NotCommitted
                             }
                             Ok(ClientCmdResponse::ShuttingDown) => FailureAction::ShuttingDown,
