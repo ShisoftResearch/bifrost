@@ -1462,6 +1462,41 @@ impl RaftService {
             return Err(ExecError::Unknown);
         };
 
+        // Joining is for OUTSIDERS. A member that is already in the cluster --
+        // above all the plane's CURRENT LEADER -- must treat this as the no-op
+        // it is. The first version did not, and a leader that "joined" its own
+        // plane through a follower demoted itself to a follower of itself:
+        // `leader_id == self` with the leader flag down answers NotLeader(0)
+        // to every command, and its checker never campaigns again because
+        // `vote_for` stays latched from the election it already won. One such
+        // call froze a plane permanently -- measured as Morpheus's database
+        // creation hanging on "Too many retry ... suggested=0" forever.
+        {
+            let meta = runtime.meta.read().await;
+            if matches!(meta.membership, Membership::Leader(_)) {
+                debug!(
+                    "join_plane {}: already the leader; nothing to join",
+                    plane_id.raw()
+                );
+                return Ok(true);
+            }
+            let already_member = meta
+                .state_machine
+                .read()
+                .await
+                .configs
+                .members
+                .values()
+                .any(|member| member.address == self.options.address);
+            if already_member && meta.leader_id != 0 {
+                debug!(
+                    "join_plane {}: already a member with a known leader; nothing to join",
+                    plane_id.raw()
+                );
+                return Ok(true);
+            }
+        }
+
         let client = RaftClient::new(seed_nodes, self.options.service_id)
             .await
             .map_err(|_| ExecError::CannotConstructClient)?;
@@ -1581,6 +1616,88 @@ impl RaftService {
             plane_id.raw(),
             self.options.address
         );
+        Ok(())
+    }
+
+    /// Re-drive the local half of a join: import the plane's member list and
+    /// leader from the cluster, and follow that leader if this node is not
+    /// itself the leader. Idempotent and command-free -- safe to call any
+    /// number of times, which is what makes it the recovery step for a join
+    /// whose admit landed but whose import was cut short (a query retry, a
+    /// crash, a race): the member is in the cluster's config from the admit
+    /// onward, and this catches the local runtime up to that fact.
+    /// What the plane's cluster looks like from its SEEDED members, asked
+    /// DIRECTLY -- one RPC per seed, skipping this node and skipping unseeded
+    /// answers. This is the only honest way to ask "does this plane exist out
+    /// there, and am I in it": any path through a RaftClient re-expands its
+    /// member list and round-robins, which can serve the asker its own view
+    /// back -- the trap that produced phantom planes, no-op membership syncs
+    /// and creators waiting for themselves, in three different disguises.
+    pub async fn probe_plane_members(
+        &self,
+        plane_id: PlaneId,
+        seed_nodes: &Vec<String>,
+    ) -> Option<ClientClusterInfo> {
+        for seed in seed_nodes {
+            if seed == &self.options.address {
+                continue;
+            }
+            let Ok(rpc_client) = crate::rpc::DEFAULT_CLIENT_POOL.get(seed).await else {
+                continue;
+            };
+            let remote =
+                AsyncServiceClient::new_with_service_id(self.options.service_id, &rpc_client);
+            if let Ok(info) = remote.c_server_cluster_info(plane_id).await {
+                if !info.members.is_empty() {
+                    return Some(info);
+                }
+            }
+        }
+        None
+    }
+
+    pub async fn sync_plane_membership(
+        self: &Arc<Self>,
+        plane_id: PlaneId,
+        seed_nodes: &Vec<String>,
+    ) -> Result<(), ExecError> {
+        let (runtime, _) = self
+            .resolve_plane_runtime(plane_id, true, false)
+            .await
+            .map_err(|_| ExecError::Unknown)?;
+        let Some(runtime) = runtime else {
+            return Err(ExecError::Unknown);
+        };
+        {
+            let meta = runtime.meta.read().await;
+            if matches!(meta.membership, Membership::Leader(_)) {
+                return Ok(());
+            }
+        }
+        // See `probe_plane_members` for why seeds are asked directly.
+        let Some(info) = self.probe_plane_members(plane_id, seed_nodes).await else {
+            return Err(ExecError::ServersUnreachable);
+        };
+        let members = info.member_addresses();
+        {
+            let mut meta = runtime.meta.write().await;
+            {
+                let mut sm = meta.state_machine.write().await;
+                for member in members {
+                    sm.configs.new_member(member).await;
+                }
+            }
+            if info.leader_id() != 0 && info.leader_id() != self.id {
+                self.become_follower_on_plane(
+                    &runtime.is_leader,
+                    &mut meta,
+                    0,
+                    info.leader_id(),
+                );
+                self.reset_last_checked(&mut meta);
+            }
+        }
+        self.start_managed_runtime(Some(runtime)).await;
         Ok(())
     }
 
@@ -1733,15 +1850,33 @@ impl RaftService {
             let meta = runtime.meta.read().await;
             let logs = meta.logs.read().await;
             let sm = meta.state_machine.read().await;
-            let members = sm
-                .members()
-                .iter()
-                .map(|(id, member)| (*id, member.address.clone()))
-                .collect::<Vec<_>>();
             let last_log = logs.iter().next_back();
             let (last_log_id, last_log_term) = match last_log {
                 Some((last_log_id, last_log_item)) => (*last_log_id, last_log_item.term),
                 None => (0, 0),
+            };
+
+            // An UNSEEDED runtime knows nothing worth repeating. Its config
+            // holds only itself -- `initialize_runtime_meta` self-seeds so a
+            // bootstrap has a member to start from -- and its leader is
+            // nobody. Reporting that as cluster information is how a passive
+            // runtime awaiting a join poisoned every round-robin consumer:
+            // "the cluster is just me, no leader" answered as truth made
+            // peers conclude the plane existed with the wrong membership,
+            // made membership syncs no-ops against the asker's own view, and
+            // made creators join phantom planes. Empty members says "I know
+            // nothing" -- which every caller already treats as "ask someone
+            // else".
+            let unseeded = !matches!(meta.membership, Membership::Leader(_))
+                && meta.term == 0
+                && last_log_id == 0;
+            let members = if unseeded {
+                Vec::new()
+            } else {
+                sm.members()
+                    .iter()
+                    .map(|(id, member)| (*id, member.address.clone()))
+                    .collect::<Vec<_>>()
             };
 
             return Ok(ClientClusterInfo {
