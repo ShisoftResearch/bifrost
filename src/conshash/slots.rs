@@ -82,6 +82,16 @@ pub struct GroupControl {
     /// Maximum slots allowed in `Migrating` at once. 0 means no cap, which is
     /// the default -- existing operator flows see no behaviour change until a
     /// cap is explicitly set.
+    ///
+    /// Uncapped is the DELIBERATE default, not a missing decision. The bulk
+    /// movers (reshard, drain, join fill) begin every slot of a batch in ONE
+    /// raft command precisely so consensus costs two round trips per batch
+    /// instead of two per slot -- measured as the difference between
+    /// 9.2 MB/s and 2.8 GB/s on a member drain. Any nonzero default would
+    /// refuse those bulk begins outright while the transfers themselves are
+    /// already paced client-side by `concurrent_slots`. Set a budget only as
+    /// an operator brake on a cluster whose transfer load must be shed NOW;
+    /// pacing belongs to the movers.
     pub migration_budget: u32,
     /// While set, nothing may START a migration; in-flight ones may finish or
     /// abort, because freezing a cluster should drain its work, not strand it.
