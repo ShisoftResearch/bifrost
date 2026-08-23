@@ -710,12 +710,35 @@ macro_rules! get_last_log_info {
 async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
     while meta.commit_index > meta.last_applied {
         let next_log_id = meta.last_applied + 1;
-        let entry = {
+        let (entry, last_log_id) = {
             // Clone the next entry so we can drop the log read lock before mutating apply state.
             let logs = meta.logs.read().await;
-            logs.get(&next_log_id).cloned()
+            (
+                logs.get(&next_log_id).cloned(),
+                logs.keys().next_back().copied(),
+            )
         };
         let Some(entry) = entry else {
+            // An absent entry with LATER entries present is a hole that can
+            // never be filled: the disk WAL only skips entries whose state
+            // machine is not recoverable (`is_recoverable` in append_logs),
+            // a torn tail truncates the suffix -- never the middle -- and
+            // live replication installs windows contiguously. Waiting here
+            // wedged every state machine on the plane behind log id 1 after
+            // a kill-restart (single node: nothing will ever re-send it),
+            // which lost the ranged index's tree placements wholesale. Skip
+            // it, loudly; the state machine that owned it never recovers
+            // its state by design.
+            if last_log_id.map_or(false, |last| last > next_log_id) {
+                warn!(
+                    "Committed log entry {} is absent while later entries are durable (last={}, commit_index={}): an unrecoverable state machine's slot; skipping it",
+                    next_log_id,
+                    last_log_id.unwrap(),
+                    meta.commit_index
+                );
+                meta.last_applied = next_log_id;
+                continue;
+            }
             warn!(
                 "Committed log entry {} is missing during apply (commit_index={}, last_applied={}); deferring replay",
                 next_log_id,
@@ -1036,6 +1059,12 @@ impl RaftService {
             self._is_leader.store(false, Relaxed);
             let _ = self.shutdown_tx.send(LifecycleState::Stopped);
         }
+    }
+
+    /// The apply cursor, exposed so recovery tests can tell a completed
+    /// replay from one wedged behind a hole in the durable log.
+    pub async fn last_applied_index(&self) -> u64 {
+        self.meta.read().await.last_applied
     }
 
     /// Public helper for applications to trigger commit replay after registering
