@@ -336,6 +336,28 @@ impl ConsistentHashing {
     /// a table behaves exactly as it did before slot ownership existed.
     pub fn get_server_id_for_slot(&self, slot: u64) -> Option<u64> {
         if let Some(owner) = self.slot_overrides.read().owner(slot) {
+            // A stored table can name a member this ring has no address for.
+            // Reopen a store under a new identity -- a re-addressed or
+            // reprovisioned node -- and EVERY slot is owned by a server id
+            // that will never come back, so every read and write to it fails
+            // permanently and nothing rewrites the table to heal it.
+            //
+            // With exactly one member there is no ambiguity about where the
+            // data can be, so hand back the member that is actually here.
+            // With more than one, the stored owner stands even though it
+            // cannot be reached: serving a slot from a member that does not
+            // own it splits that slot between two homes, which is worse than
+            // an error, and healing that case is the fill/reconcile
+            // machinery's job rather than a routing guess.
+            if self.try_server_name(owner).is_none() && self.server_count() == 1 {
+                if let Some(only) = self.rand_server_id() {
+                    warn!(
+                        "slot {} is owned by server {}, which this ring has no address for;                          routing to the only member {} instead",
+                        slot, owner, only
+                    );
+                    return Some(only);
+                }
+            }
             return Some(owner);
         }
         self.get_server_id(slot)
