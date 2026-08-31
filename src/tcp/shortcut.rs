@@ -82,6 +82,19 @@ pub fn register_server(
 }
 
 pub async fn call(server_id: u64, data: TcpReq) -> Result<BytesMut> {
+    // The shortcut path can be a fully-ready future chain: no socket, no
+    // channel, no timer -- nothing that consumes tokio's cooperative budget.
+    // A task calling it in a loop therefore never yields; its poll() simply
+    // never returns. One such task does not just monopolize a worker: if the
+    // runtime's parked workers are all waiting on the condvar while the
+    // resource driver seat is empty, no schedule event ever wakes one to
+    // take the driver over, and EVERY timer and I/O event on that runtime is
+    // dead from then on -- sleeps park forever, timeouts never fire, and the
+    // process wedges silently (2026-08-31: a seek retry loop froze a whole
+    // 8-worker runtime for 420s; only the spinning task kept running).
+    // Consuming budget here makes the storm yield every ~128 calls, which
+    // costs one flag check when budget remains.
+    tokio::task::coop::consume_budget().await;
     let callback = TCP_CALLBACKS
         .read()
         .get(&server_id)
