@@ -15,6 +15,65 @@ use tokio::io::*;
 
 // const MAX_LOG_CAPACITY: usize = 10;
 
+/// Test-only fault injection for the persistence paths: a test arms a point
+/// for one storage directory, and the I/O at that point fails with an
+/// `io::Error` exactly as a failing disk would. Release and non-test builds
+/// compile every check to `Ok(())`.
+#[cfg(test)]
+pub(crate) mod failpoints {
+    use std::io;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Fail {
+        /// Writing a WAL record.
+        WalAppend,
+        /// fsync of `log.dat`.
+        WalSync,
+        /// Writing `commit.idx`.
+        CommitProgress,
+        /// Writing the hard state: before the temp file is written.
+        HardStateWrite,
+        /// Writing the hard state: temp file written, not renamed.
+        HardStateRename,
+        /// Writing the hard state: renamed, directory not yet fsynced.
+        HardStateDirSync,
+    }
+
+    static ARMED: Mutex<Vec<(PathBuf, Fail)>> = Mutex::new(Vec::new());
+
+    pub fn arm(dir: &Path, point: Fail) {
+        ARMED.lock().unwrap().push((dir.to_path_buf(), point));
+    }
+
+    pub fn disarm(dir: &Path, point: Fail) {
+        ARMED
+            .lock()
+            .unwrap()
+            .retain(|(armed_dir, armed)| !(armed_dir == dir && *armed == point));
+    }
+
+    pub fn check(dir: &Path, point: Fail) -> io::Result<()> {
+        let armed = ARMED
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(armed_dir, armed)| armed_dir == dir && *armed == point);
+        if armed {
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("injected {:?} failure in {}", point, dir.display()),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+use failpoints::{check as failpoint, Fail};
+
 #[derive(Clone)]
 pub struct DiskOptions {
     pub path: String,
@@ -388,6 +447,8 @@ impl StorageEntity {
                 // Write: [8 bytes record_len = 4+payload_len][4 bytes CRC32][N bytes payload]
                 let record_len = 4u64 + entry_data.len() as u64;
                 let written = async {
+                    #[cfg(test)]
+                    failpoint(&self.base_path, Fail::WalAppend)?;
                     f.write_all(&record_len.to_le_bytes()).await?;
                     f.write_all(&checksum.to_le_bytes()).await?;
                     f.write_all(entry_data.as_slice()).await
@@ -408,6 +469,8 @@ impl StorageEntity {
                 counter += 1;
             }
             if counter > 0 {
+                #[cfg(test)]
+                failpoint(&self.base_path, Fail::WalSync)?;
                 f.sync_all().await?;
                 debug!(
                     "Appended and persisted {} logs for plane {}, was {}, appended {:?}",
@@ -520,6 +583,8 @@ impl StorageEntity {
                 "WAL fsync for plane {}: syncing log.dat to disk",
                 self.plane_id.raw()
             );
+            #[cfg(test)]
+            failpoint(&self.base_path, Fail::WalSync)?;
             f.sync_all().await?;
             info!("WAL fsync for plane {}: completed", self.plane_id.raw());
         }
@@ -534,6 +599,8 @@ impl StorageEntity {
     ) -> io::Result<()> {
         let commit_path = self.base_path.join("commit.idx");
         let temp_path = self.base_path.join("commit.idx.tmp");
+        #[cfg(test)]
+        failpoint(&self.base_path, Fail::CommitProgress)?;
         let mut f = File::create(&temp_path).await?;
         f.write_all(&commit_index.to_le_bytes()).await?;
         f.write_all(&last_applied.to_le_bytes()).await?;

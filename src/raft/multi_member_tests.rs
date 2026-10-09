@@ -20,17 +20,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Snapshot threshold that is never reached: snapshots happen on request only.
-const NEVER: u64 = u64::MAX / 4;
+pub(super) const NEVER: u64 = u64::MAX / 4;
 
-struct Member {
-    svc: Arc<RaftService>,
-    server: Arc<Server>,
-    addr: String,
-    dir: PathBuf,
+pub(super) struct Member {
+    pub(super) svc: Arc<RaftService>,
+    pub(super) server: Arc<Server>,
+    pub(super) addr: String,
+    pub(super) dir: PathBuf,
 }
 
 impl Member {
-    async fn launch(dir: &Path, addr: &str, compaction_threshold: u64) -> Member {
+    pub(super) async fn launch(dir: &Path, addr: &str, compaction_threshold: u64) -> Member {
         let mut opts = disk_options(dir, NEVER, compaction_threshold);
         opts.address = addr.to_string();
         let svc = RaftService::new(opts);
@@ -51,13 +51,13 @@ impl Member {
 
     /// Stop the member. `shutdown` persists the WAL and the commit cursor the
     /// member already has, nothing more.
-    async fn stop(self) -> (PathBuf, String) {
+    pub(super) async fn stop(self) -> (PathBuf, String) {
         self.svc.shutdown().await;
         self.server.shutdown().await;
         (self.dir, self.addr)
     }
 
-    async fn value(&self) -> u64 {
+    pub(super) async fn value(&self) -> u64 {
         let (fn_id, _, data) = get::new().encode();
         let entry = LogEntry {
             id: 0,
@@ -73,7 +73,7 @@ impl Member {
     }
 
     /// Command on this member, which must be the leader. Returns (value, log id).
-    async fn add(&self, value: u64) -> (u64, u64) {
+    pub(super) async fn add(&self, value: u64) -> (u64, u64) {
         match Service::c_command(self.svc.as_ref(), PlaneId::type1(), add_entry(0, 0, value))
             .await
         {
@@ -86,18 +86,23 @@ impl Member {
         }
     }
 
-    async fn position(&self) -> (u64, u64) {
+    /// Command on this member, whatever the answer.
+    pub(super) async fn command(&self, value: u64) -> ClientCmdResponse {
+        Service::c_command(self.svc.as_ref(), PlaneId::type1(), add_entry(0, 0, value)).await
+    }
+
+    pub(super) async fn position(&self) -> (u64, u64) {
         let meta = self.svc.read_meta().await;
         let logs = meta.logs.read().await;
         last_log_position(&meta, &logs)
     }
 
-    async fn is_leader(&self) -> bool {
+    pub(super) async fn is_leader(&self) -> bool {
         matches!(self.svc.read_meta().await.membership, Membership::Leader(_))
     }
 
     /// Entries this member holds above its snapshot, as (id, term, data).
-    async fn log(&self) -> Vec<(u64, u64, Vec<u8>)> {
+    pub(super) async fn log(&self) -> Vec<(u64, u64, Vec<u8>)> {
         let meta = self.svc.read_meta().await;
         let logs = meta.logs.read().await;
         logs.values()
@@ -107,7 +112,7 @@ impl Member {
     }
 }
 
-fn add_entry(id: u64, term: u64, value: u64) -> LogEntry {
+pub(super) fn add_entry(id: u64, term: u64, value: u64) -> LogEntry {
     let (fn_id, _, data) = add::new(&value).encode();
     LogEntry {
         id,
@@ -118,14 +123,14 @@ fn add_entry(id: u64, term: u64, value: u64) -> LogEntry {
     }
 }
 
-fn addresses(n: usize) -> Vec<String> {
+pub(super) fn addresses(n: usize) -> Vec<String> {
     let base = 20_000 + (rand::random::<u16>() % 30_000);
     (0..n)
         .map(|i| format!("127.0.0.1:{}", base + i as u16))
         .collect()
 }
 
-async fn cluster(tag: &str, n: usize, compaction_threshold: u64) -> Vec<Member> {
+pub(super) async fn cluster(tag: &str, n: usize, compaction_threshold: u64) -> Vec<Member> {
     let addrs = addresses(n);
     let mut members = Vec::with_capacity(n);
     let first = Member::launch(
@@ -156,7 +161,7 @@ async fn cluster(tag: &str, n: usize, compaction_threshold: u64) -> Vec<Member> 
 
 /// Poll until every member's ledger reads `expected` (or time out); returns
 /// the last values read so the caller's assertion names them.
-async fn wait_for_values(members: &[&Member], expected: u64) -> Vec<u64> {
+pub(super) async fn wait_for_values(members: &[&Member], expected: u64) -> Vec<u64> {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let mut values = Vec::with_capacity(members.len());

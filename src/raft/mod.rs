@@ -4364,6 +4364,8 @@ mod compaction_tests;
 #[cfg(test)]
 mod multi_member_tests;
 #[cfg(test)]
+mod persistence_tests;
+#[cfg(test)]
 mod raft_perf;
 
 #[cfg(test)]
