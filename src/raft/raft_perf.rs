@@ -202,3 +202,64 @@ async fn perf_restart() {
     drop(svc);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Append + commit throughput on a three-member plane: every command crosses
+/// the follower append path (consistency check, conflict scan, WAL append)
+/// on two followers before it commits.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn perf_cmd_throughput_three_members() {
+    let n = env_u64("RAFT_PERF_CMDS", 2000);
+    let dirs: Vec<PathBuf> = (0..3).map(|i| perf_dir(&format!("cmd3_{}", i))).collect();
+    let base = 20000 + (rand::random::<u16>() % 20000);
+    let addrs: Vec<String> = (0..3)
+        .map(|i| format!("127.0.0.1:{}", base + i as u16))
+        .collect();
+    let mut nodes = Vec::new();
+    for (i, (dir, addr)) in dirs.iter().zip(addrs.iter()).enumerate() {
+        let svc = RaftService::new(Options {
+            storage: Storage::DISK(disk::DiskOptions {
+                path: dir.to_str().unwrap().to_string(),
+                take_snapshots: true,
+                append_logs: true,
+                trim_logs: true,
+                snapshot_log_threshold: u64::MAX / 2,
+                log_compaction_threshold: u64::MAX / 2,
+            }),
+            address: addr.clone(),
+            service_id: DEFAULT_SERVICE_ID,
+        });
+        let server = Server::new(addr);
+        server.register_service(&svc).await;
+        Server::listen_and_resume(&server).await;
+        assert!(RaftService::start(&svc, false).await);
+        svc.register_state_machine(Box::new(PerfLedger { value: 0 }))
+            .await;
+        if i == 0 {
+            svc.bootstrap().await;
+        } else {
+            svc.join(&vec![addrs[0].clone()]).await.unwrap();
+        }
+        svc.recover_after_register().await;
+        nodes.push((svc, server));
+    }
+    async_wait_secs().await;
+    let client = RaftClient::new(&addrs, DEFAULT_SERVICE_ID).await.unwrap();
+    run_commands(&client, 100).await; // warm-up
+    let started = Instant::now();
+    run_commands(&client, n).await;
+    let secs = started.elapsed().as_secs_f64();
+    println!(
+        "PERF cmds3_per_sec={:.2} cmds={} secs={:.4}",
+        n as f64 / secs,
+        n,
+        secs
+    );
+    for (svc, server) in nodes {
+        svc.shutdown().await;
+        server.shutdown().await;
+    }
+    for dir in dirs {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
