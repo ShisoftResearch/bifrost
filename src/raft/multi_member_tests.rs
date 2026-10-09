@@ -234,7 +234,11 @@ async fn diverged_follower(tag: &str) -> (Vec<Member>, u64, u64) {
         let meta = members[2].svc.write_meta().await;
         for _ in 0..2 {
             let mut entry = add_entry(0, 0, 1);
-            members[2].svc.leader_append_log(&meta, &mut entry).await;
+            members[2]
+                .svc
+                .leader_append_log(&meta, &mut entry)
+                .await
+                .expect("append to the leader's log");
         }
     }
     members[2].add(1).await;
@@ -637,7 +641,11 @@ async fn the_leader_applies_an_earlier_uncommitted_entry_in_order() {
         // replicated to a majority, not applied.
         let meta = members[0].svc.write_meta().await;
         let mut entry = add_entry(0, 0, 10);
-        members[0].svc.leader_append_log(&meta, &mut entry).await;
+        members[0]
+            .svc
+            .leader_append_log(&meta, &mut entry)
+            .await
+            .expect("append to the leader's log");
     }
     let (value, _) = members[0].add(1).await;
     assert_eq!(value, 12, "the leader skipped the earlier committed entry");

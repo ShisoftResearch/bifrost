@@ -124,6 +124,12 @@ pub enum ClientCmdResponse {
         last_log_id: u64,
     },
     ShuttingDown,
+    /// The leader could not make the command (or its commit) durable: it is
+    /// not committed and not applied. Whether it still commits later -- its
+    /// entry may already be in followers' logs -- is unknown; it is never
+    /// acknowledged. A client that predates this variant fails to decode it
+    /// and treats the answer as a transport error.
+    StorageFailure(String),
 }
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ClientQryResponse {
@@ -163,11 +169,22 @@ impl ClientClusterInfo {
     }
 }
 
+/// InstallSnapshot's answer when the member could not persist the snapshot
+/// (or a term it adopted) and installed nothing. The answer is otherwise the
+/// member's term, which never reaches this value; a leader that predates it
+/// ignores the answer, finds the member still behind and sends it again.
+pub const INSTALL_SNAPSHOT_NOT_PERSISTED: u64 = u64::MAX;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum AppendEntriesResult {
     Ok,
     TermOut(u64),
     LogMismatch,
+    /// The follower could not make the entries (or a term it adopted)
+    /// durable, so it does not acknowledge them. A leader that predates this
+    /// variant fails to decode it and treats the answer as a transport error
+    /// -- it retries at the next heartbeat either way.
+    NotPersisted,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -254,6 +271,9 @@ pub struct RaftMeta {
     last_snapshot_index: u64,
     last_snapshot_term: u64,
     lifecycle: LifecycleState,
+    /// Consecutive persistence failures while leading; see
+    /// `PERSIST_FAILURES_BEFORE_STEP_DOWN`.
+    persist_failures: u32,
 }
 
 #[derive(Clone)]
@@ -291,6 +311,8 @@ pub enum PlaneError {
     PlaneNotFound(PlaneId),
     StorageInit(io::Error),
     InitializationFailed(PlaneId),
+    /// A flush or write the caller asked for did not reach the disk.
+    Persistence(io::Error),
 }
 
 impl Display for PlaneError {
@@ -303,6 +325,7 @@ impl Display for PlaneError {
             PlaneError::InitializationFailed(plane_id) => {
                 write!(f, "failed to initialize plane {}", plane_id.raw())
             }
+            PlaneError::Persistence(err) => write!(f, "plane storage write failed: {err}"),
         }
     }
 }
@@ -458,6 +481,7 @@ impl RaftPlaneRuntime {
                 last_snapshot_index: 0,
                 last_snapshot_term: 0,
                 lifecycle: LifecycleState::Running,
+                persist_failures: 0,
             }),
             is_leader: AtomicBool::new(false),
             checker_task: TokioMutex::new(None),
@@ -702,6 +726,18 @@ enum RequestVoteResponse {
     Granted,
     TermOut(u64, u64),
     NotGranted,
+}
+
+/// Consecutive persistence failures after which a leader steps down.
+const PERSIST_FAILURES_BEFORE_STEP_DOWN: u32 = 3;
+
+/// How a leader's attempt to commit an appended entry ended.
+enum SyncOutcome {
+    Committed(ExecResult),
+    /// Not replicated to a majority; the entry stays in the log.
+    NotCommitted,
+    /// Replicated, but the commit could not be made durable here.
+    StorageFailure(String),
 }
 
 enum HeartbeatReplicationResult {
@@ -1067,7 +1103,15 @@ impl RaftService {
             let _ = handle.await;
         }
 
-        let _ = self.flush_persistence_on_plane(plane_id).await;
+        if let Err(e) = self.flush_persistence_on_plane(plane_id).await {
+            // Shutting down regardless; everything acknowledged was already
+            // durable when it was acknowledged, so only replay hints are lost.
+            error!(
+                "Plane {}: final flush at shutdown failed: {}",
+                plane_id.raw(),
+                e
+            );
+        }
 
         {
             let mut meta = if let Some(runtime) = runtime.as_ref() {
@@ -1140,7 +1184,7 @@ impl RaftService {
     async fn load_snapshot_into_meta(
         plane_id: PlaneId,
         meta: &mut RwLockWriteGuard<'_, RaftMeta>,
-    ) -> bool {
+    ) -> Result<bool, PlaneError> {
         let storage = meta.storage.clone();
 
         if let Some(storage) = storage {
@@ -1196,19 +1240,21 @@ impl RaftService {
                         "Snapshot recovery completed successfully for plane {}",
                         plane_id.raw()
                     );
-                    true
+                    Ok(true)
                 }
                 Ok(None) => {
                     debug!("No snapshot found on disk for plane {}", plane_id.raw());
-                    false
+                    Ok(false)
                 }
                 Err(e) => {
-                    warn!(
-                        "Failed to load snapshot from disk for plane {}: {:?}. Starting without snapshot recovery.",
+                    // Starting without it would drop state the log no longer
+                    // holds; refuse instead.
+                    error!(
+                        "Cannot read the snapshot of plane {}: {}; refusing to start the plane",
                         plane_id.raw(),
                         e
                     );
-                    false
+                    Err(PlaneError::StorageInit(e))
                 }
             }
         } else {
@@ -1216,7 +1262,7 @@ impl RaftService {
                 "No storage configured, skipping snapshot recovery for plane {}",
                 plane_id.raw()
             );
-            false
+            Ok(false)
         }
     }
 
@@ -1264,7 +1310,7 @@ impl RaftService {
         leader_flag.store(false, Relaxed);
         meta.last_checked = get_time() + (CHECKER_MS * 10);
 
-        let recovered_from_disk = Self::load_snapshot_into_meta(plane_id, meta).await;
+        let recovered_from_disk = Self::load_snapshot_into_meta(plane_id, meta).await?;
         Self::recover_config_state_from_logs(plane_id, meta).await;
         let server_address = self.options.address.clone();
 
@@ -1478,6 +1524,9 @@ impl RaftService {
             }),
             ClientCmdResponse::NotCommitted { .. } => Err(ExecError::NotCommitted.into()),
             ClientCmdResponse::ShuttingDown => Err(ExecError::ShuttingDown.into()),
+            ClientCmdResponse::StorageFailure(reason) => {
+                Err(ExecError::StorageFailure(reason).into())
+            }
         }
     }
 
@@ -1976,16 +2025,16 @@ impl RaftService {
             };
             if let Some(storage_mutex) = storage_opt {
                 let mut storage = storage_mutex.lock().await;
-                let _ = storage.flush_wal().await;
-                let _ = storage
+                storage.flush_wal().await.map_err(PlaneError::Persistence)?;
+                storage
                     .write_commit_progress(commit_index, last_applied)
-                    .await;
+                    .await
+                    .map_err(PlaneError::Persistence)?;
             }
             return Ok(());
         }
 
-        self.flush_persistence().await;
-        Ok(())
+        self.flush_persistence().await.map_err(PlaneError::Persistence)
     }
 
     pub async fn shutdown_plane(&self, plane_id: PlaneId) -> Result<(), PlaneError> {
@@ -2103,6 +2152,7 @@ impl RaftService {
                 last_snapshot_index: 0,
                 last_snapshot_term: 0,
                 lifecycle: LifecycleState::Running,
+                persist_failures: 0,
             }),
             planes: RwLock::new(BTreeMap::new()),
             id: server_id,
@@ -2121,89 +2171,6 @@ impl RaftService {
         let arc = Arc::new(server_obj);
         *arc.self_ref.lock().unwrap() = Arc::downgrade(&arc);
         arc
-    }
-
-    /// Load snapshot from disk and recover state machine if snapshot exists
-    async fn load_snapshot_on_startup(&self) -> bool {
-        // IMPORTANT: read the snapshot from disk while holding only a read lock, then
-        // drop the read lock before acquiring the write lock.  If we tried to acquire
-        // meta.write() while still inside the `if let … = meta.read().await.storage {`
-        // block the borrow of `storage` would keep the read guard alive and we would
-        // deadlock waiting for our own read guard to be released.
-        let maybe_snapshot = {
-            let meta = self.meta.read().await;
-            match meta.storage {
-                Some(ref storage) => {
-                    let storage = storage.lock().await;
-                    match storage.read_snapshot().await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            warn!("Failed to load snapshot from disk: {:?}. Starting without snapshot recovery.", e);
-                            None
-                        }
-                    }
-                }
-                None => {
-                    debug!("No storage configured, skipping snapshot recovery");
-                    None
-                }
-            }
-        }; // ← read guard dropped here before the write lock below
-
-        if let Some(snapshot) = maybe_snapshot {
-            info!(
-                "Found snapshot on disk: index={}, term={}. Recovering state machine...",
-                snapshot.last_included_index, snapshot.last_included_term
-            );
-
-            let mut meta = self.meta.write().await; // safe: read guard already released
-
-            // Recover state machine (stores sub-SM snapshots; applied when they register)
-            meta.state_machine
-                .write()
-                .await
-                .recover(snapshot.snapshot.clone())
-                .await;
-
-            // Update snapshot metadata
-            meta.last_snapshot_index = snapshot.last_included_index;
-            meta.last_snapshot_term = snapshot.last_included_term;
-            // Like the WAL's entries, the snapshot's term bounds the restored
-            // term from below.
-            meta.term = max(meta.term, snapshot.last_included_term);
-
-            // Restore applies from the snapshot boundary every time so any
-            // committed WAL entries after the snapshot are replayed exactly once.
-            meta.last_applied = snapshot.last_included_index;
-            if meta.commit_index < snapshot.last_included_index {
-                meta.commit_index = snapshot.last_included_index;
-            }
-
-            if let Some(ref storage) = meta.storage {
-                storage
-                    .lock()
-                    .await
-                    .forget_records_through(snapshot.last_included_index);
-            }
-            // Compact logs: remove entries already covered by the snapshot
-            {
-                let mut logs = meta.logs.write().await;
-                let before_count = logs.len();
-                logs.retain(|&id, _| id > snapshot.last_included_index);
-                let after_count = logs.len();
-                info!(
-                    "Compacted logs on startup: removed {} logs, {} remaining",
-                    before_count - after_count,
-                    after_count
-                );
-            }
-
-            info!("Snapshot recovery completed successfully");
-            true
-        } else {
-            debug!("No snapshot found on disk, starting fresh");
-            false
-        }
     }
 
     pub async fn start(server: &Arc<RaftService>, recover_registered: bool) -> bool {
@@ -2567,22 +2534,24 @@ impl RaftService {
     }
 
     /// Force a write-back and fsync of WAL and persist current commit progress.
-    pub async fn flush_persistence(&self) {
+    /// An error means the caller must not rely on either being durable.
+    pub async fn flush_persistence(&self) -> io::Result<()> {
         let (storage_opt, commit_index, last_applied) = {
             let meta = self.meta.read().await;
             (meta.storage.clone(), meta.commit_index, meta.last_applied)
         };
         if let Some(storage_mutex) = storage_opt {
             let mut storage = storage_mutex.lock().await;
-            let _ = storage.flush_wal().await;
-            let _ = storage
+            storage.flush_wal().await?;
+            storage
                 .write_commit_progress(commit_index, last_applied)
-                .await;
+                .await?;
             info!(
                 "Flushed WAL and wrote commit progress: commit_index={}, last_applied={}",
                 commit_index, last_applied
             );
         }
+        Ok(())
     }
 
     pub async fn shutdown(&self) {
@@ -3148,12 +3117,31 @@ impl RaftService {
                 };
                 let (index, snapshot_term) =
                     (snapshot.last_included_index, snapshot.last_included_term);
-                if let Ok(_) = rpc
+                match rpc
                     .install_snapshot(plane_id, term, leader_id, index, snapshot_term, snapshot.snapshot)
                     .await
                 {
-                    follower.next_index = index + 1;
-                    follower.match_index = index;
+                    Ok(INSTALL_SNAPSHOT_NOT_PERSISTED) => {
+                        // It installed nothing; send it again next round.
+                        warn!(
+                            "Follower {} on plane {} could not persist the snapshot at {}",
+                            member_id,
+                            plane_id.raw(),
+                            index
+                        );
+                    }
+                    Ok(follower_term) if follower_term > term => {
+                        // Refused as from a stale term: this leader is deposed.
+                        return HeartbeatReplicationResult::TermOut {
+                            term: follower_term,
+                            leader_id: 0,
+                        };
+                    }
+                    Ok(_) => {
+                        follower.next_index = index + 1;
+                        follower.match_index = index;
+                    }
+                    Err(_) => {}
                 }
                 return HeartbeatReplicationResult::Matched(follower.match_index);
             }
@@ -3257,6 +3245,17 @@ impl RaftService {
                             debug!("Log mismatching index is zero on plane {}", plane_id.raw());
                         }
                     }
+                    AppendEntriesResult::NotPersisted => {
+                        // The follower holds nothing it can vouch for from
+                        // this round; like a failed RPC, retry next heartbeat.
+                        warn!(
+                            "Follower {} on plane {} could not persist entries from next_index {}",
+                            member_id,
+                            plane_id.raw(),
+                            follower.next_index
+                        );
+                        break;
+                    }
                     AppendEntriesResult::TermOut(actual_leader_id) => {
                         debug!(
                             "Follower {} rejected append on plane {} because follower_term={} leader_term={} actual_leader_id={} while leader {} was replicating from next_index {}",
@@ -3353,7 +3352,9 @@ impl RaftService {
                         // The entry at prev conflicts with the leader's: it
                         // and everything after it go, in memory and on disk.
                         let _ = logs.split_off(&prev_log_id);
-                        self.discard_durable_suffix(&meta, prev_log_id).await;
+                        if self.discard_durable_suffix(&meta, prev_log_id).await.is_err() {
+                            return (meta.term, AppendEntriesResult::NotPersisted);
+                        }
                         return (meta.term, AppendEntriesResult::LogMismatch);
                     }
                     Some(_) => {}
@@ -3393,11 +3394,24 @@ impl RaftService {
                     if let Some(from) = discard_from {
                         // Before the replacements are appended, so they land
                         // where the discarded records were.
-                        self.discard_durable_suffix(&meta, from).await;
+                        if self.discard_durable_suffix(&meta, from).await.is_err() {
+                            return (meta.term, AppendEntriesResult::NotPersisted);
+                        }
                     }
                 }
+                // Acknowledging an entry promises it survives a crash: a
+                // failed write (or fsync) is answered as such, and the commit
+                // index does not move. The entries stay in memory; the
+                // leader's retry finds them and writes them again.
                 if let Err(e) = self.logs_post_processing(&meta, logs).await {
-                    error!("Failed to persist logs during append_entries: {:?}", e);
+                    error!(
+                        "Plane {}: cannot persist the entries from leader {} (prev {}): {}; not acknowledging",
+                        self.plane_id().raw(),
+                        leader_id,
+                        prev_log_id,
+                        e
+                    );
+                    return (meta.term, AppendEntriesResult::NotPersisted);
                 }
             }
             let new_commit = min(leader_commit, last_new_entry);
@@ -3484,46 +3498,51 @@ impl RaftService {
 
         // Durable before it takes effect: a member that answers and then
         // crashes must come back with the snapshot, not with the state it
-        // replaced. A failed write installs nothing; the leader finds the
-        // member still behind and sends the snapshot again.
+        // replaced. A failed write installs nothing and answers
+        // INSTALL_SNAPSHOT_NOT_PERSISTED; the leader sends the snapshot again.
         let snapshot_entity = SnapshotEntity {
             last_included_index,
             last_included_term,
             snapshot: data,
         };
+        // Raft section 7: if this member holds the snapshot's last included
+        // entry, the entries after it are valid and stay; otherwise its whole
+        // log is superseded -- on disk first, then in memory, or a replay
+        // would bring an unverified suffix back above the snapshot.
+        let keep_suffix = meta
+            .logs
+            .read()
+            .await
+            .get(&last_included_index)
+            .map_or(false, |entry| entry.term == last_included_term);
         if let Some(ref storage) = meta.storage {
             let mut storage = storage.lock().await;
-            if let Err(e) = storage.write_snapshot(&snapshot_entity).await {
+            let persisted = async {
+                storage.write_snapshot(&snapshot_entity).await?;
+                if !keep_suffix {
+                    storage.truncate_from(last_included_index + 1).await?;
+                }
+                Ok::<(), io::Error>(())
+            }
+            .await;
+            if let Err(e) = persisted {
                 error!(
                     "Failed to persist the installed snapshot on plane {} at index {}: {:?}; not installing it",
                     self.plane_id().raw(),
                     last_included_index,
                     e
                 );
-                return meta.term;
+                return INSTALL_SNAPSHOT_NOT_PERSISTED;
             }
             storage.forget_records_through(last_included_index);
         }
-
-        // Raft section 7: if this member holds the snapshot's last included
-        // entry, the entries after it are valid and stay; otherwise its whole
-        // log is superseded -- in memory and on disk, or a replay would bring
-        // an unverified suffix back above the snapshot.
-        let keep_suffix = {
+        {
             let mut logs = meta.logs.write().await;
-            let keep = logs
-                .get(&last_included_index)
-                .map_or(false, |entry| entry.term == last_included_term);
-            if keep {
+            if keep_suffix {
                 logs.retain(|&id, _| id > last_included_index);
             } else {
                 logs.clear();
             }
-            keep
-        };
-        if !keep_suffix {
-            self.discard_durable_suffix(&meta, last_included_index + 1)
-                .await;
         }
 
         {
@@ -3596,36 +3615,45 @@ impl RaftService {
             None
         };
 
-        let (new_log_id, new_log_term) =
-            if let Some((existing_log_id, existing_log_term)) = existing_pending_entry {
-                (existing_log_id, existing_log_term)
-            } else {
-                self.leader_append_log(&meta, &mut entry).await
-            };
+        let appended = if let Some(existing) = existing_pending_entry {
+            Ok(existing)
+        } else {
+            self.leader_append_log(&meta, &mut entry).await
+        };
+        let (new_log_id, new_log_term) = match appended {
+            Ok(position) => position,
+            Err(e) => {
+                let reason =
+                    self.note_persist_failure(leader_flag, &mut meta, "appending a command", &e);
+                return ClientCmdResponse::StorageFailure(reason);
+            }
+        };
         entry.id = new_log_id;
         entry.term = new_log_term;
-        let data = match entry.sm_id {
-            CONFIG_SM_ID => Some(
+        let outcome = match entry.sm_id {
+            CONFIG_SM_ID => SyncOutcome::Committed(
                 self.try_sync_config_to_followers_on_plane(plane_id, meta, &entry, new_log_id)
                     .await,
             ),
             _ => {
-                self.try_sync_log_to_followers_on_plane(plane_id, meta, &entry, new_log_id)
-                    .await
+                self.try_sync_log_to_followers_on_plane(
+                    plane_id, leader_flag, meta, &entry, new_log_id,
+                )
+                .await
             }
         };
 
-        if let Some(data) = data {
-            ClientCmdResponse::Success {
+        match outcome {
+            SyncOutcome::Committed(data) => ClientCmdResponse::Success {
                 data,
                 last_log_id: new_log_id,
                 last_log_term: new_log_term,
-            }
-        } else {
-            ClientCmdResponse::NotCommitted {
+            },
+            SyncOutcome::NotCommitted => ClientCmdResponse::NotCommitted {
                 last_log_id: new_log_id,
                 last_log_term: new_log_term,
-            }
+            },
+            SyncOutcome::StorageFailure(reason) => ClientCmdResponse::StorageFailure(reason),
         }
     }
 
@@ -3672,11 +3700,15 @@ impl RaftService {
         }
     }
 
+    /// Append `entry` to the leader's log and make it durable. On failure the
+    /// entry is taken back out under the same lock -- nothing can have read
+    /// or shipped it -- and the WAL batch was already rolled back, so the log
+    /// in memory and on disk agree and the id is handed out again next time.
     async fn leader_append_log<'a>(
         &'a self,
         meta: &'a RwLockWriteGuard<'a, RaftMeta>,
         entry: &mut LogEntry,
-    ) -> (u64, u64) {
+    ) -> io::Result<(u64, u64)> {
         let mut logs = meta.logs.write().await;
         let (last_log_id, _last_log_term) = get_last_log_info!(meta, logs);
         // Never hand out an id at or below the commit cursor: a committed
@@ -3688,17 +3720,20 @@ impl RaftService {
         entry.id = new_log_id;
         logs.insert(entry.id, entry.clone());
         // Strict write-ahead: persist to WAL before any application can observe/commit
-        if let Err(e) = self.logs_post_processing(meta, logs).await {
-            error!(
-                "Failed to persist log entry {} to storage on plane {}: {:?}",
-                new_log_id,
-                self.plane_id().raw(),
-                e
-            );
-            // Note: We still return the log ID/term even if persistence failed
-            // The caller should handle this appropriately
+        if let Some(storage_mutex) = &meta.storage {
+            let mut storage = storage_mutex.lock().await;
+            if let Err(e) = storage.append_logs(meta, &logs).await {
+                logs.remove(&new_log_id);
+                error!(
+                    "Failed to persist log entry {} to storage on plane {}: {:?}; refusing the command",
+                    new_log_id,
+                    self.plane_id().raw(),
+                    e
+                );
+                return Err(e);
+            }
         }
-        (new_log_id, new_log_term)
+        Ok((new_log_id, new_log_term))
     }
 
     async fn logs_post_processing<'a>(
@@ -3723,7 +3758,7 @@ impl RaftService {
         &'a self,
         meta: &'a RwLockWriteGuard<'a, RaftMeta>,
         from_id: u64,
-    ) {
+    ) -> io::Result<()> {
         if let Some(storage) = &meta.storage {
             if let Err(e) = storage.lock().await.truncate_from(from_id).await {
                 error!(
@@ -3732,80 +3767,101 @@ impl RaftService {
                     self.plane_id().raw(),
                     e
                 );
+                return Err(e);
             }
         }
+        Ok(())
     }
 
     async fn try_sync_log_to_followers_on_plane<'a>(
         &'a self,
         plane_id: PlaneId,
+        leader_flag: &'a AtomicBool,
         mut meta: RwLockWriteGuard<'a, RaftMeta>,
         entry: &LogEntry,
         new_log_id: u64,
-    ) -> Option<ExecResult> {
+    ) -> SyncOutcome {
         debug!("Sync logs to followers on plane {}", plane_id.raw());
-        if self
+        if !self
             .send_followers_heartbeat_on_plane(plane_id, &mut meta, Some(new_log_id), true)
             .await
         {
-            // Strict write-ahead: ensure persistence reflects this index before applying
-            if let Some(storage_mutex) = &meta.storage {
-                let mut storage = storage_mutex.lock().await;
-                info!(
-                    "Strict WA plane {}: flushing WAL before commit at log_id={} (term={})",
-                    plane_id.raw(),
-                    new_log_id,
-                    entry.term
-                );
-                let _ = storage.flush_wal().await;
-                info!(
-                    "Strict WA plane {}: WAL fsync completed before commit at log_id={}",
-                    plane_id.raw(),
-                    new_log_id
-                );
-            }
-            apply_committed_prefix(&mut meta, new_log_id).await;
-            meta.commit_index = new_log_id;
-            info!(
-                "Strict WA plane {}: applying entry at log_id={} (commit_index={})",
-                plane_id.raw(),
-                new_log_id,
-                meta.commit_index
-            );
-            let result = apply_committed_entry(&mut meta, entry).await;
-            info!(
-                "Strict WA plane {}: apply completed at log_id={} (result={:?})",
-                plane_id.raw(),
-                new_log_id,
-                result
-            );
-            // Mark applied and persist commit progress atomically after apply
-            meta.last_applied = new_log_id;
-            if let Some(storage_mutex) = &meta.storage {
-                let mut storage = storage_mutex.lock().await;
-                info!(
-                    "Strict WA plane {}: writing commit progress (commit_index={}, last_applied={})",
-                    plane_id.raw(), meta.commit_index, meta.last_applied
-                );
-                let _ = storage
-                    .write_commit_progress(meta.commit_index, meta.last_applied)
-                    .await;
-                info!(
-                    "Strict WA plane {}: commit progress persisted",
-                    plane_id.raw()
-                );
-            }
-
-            // Check if we should take a snapshot after committing
-            let num_logs = meta.logs.read().await.len();
-            if self.should_take_snapshot(&meta, num_logs) {
-                self.take_snapshot(&mut meta).await;
-            }
-
-            Some(result)
-        } else {
-            None
+            return SyncOutcome::NotCommitted;
         }
+        // Strict write-ahead: the entry, and then the commit index -- the
+        // bound of replay after a restart -- are durable before anything is
+        // applied or answered. A failure leaves the commit index where it was
+        // and applies nothing.
+        if let Some(storage_mutex) = &meta.storage {
+            let mut storage = storage_mutex.lock().await;
+            let persisted = async {
+                storage.flush_wal().await?;
+                storage
+                    .write_commit_progress(new_log_id, meta.last_applied)
+                    .await
+            }
+            .await;
+            if let Err(e) = persisted {
+                drop(storage);
+                let reason = self.note_persist_failure(
+                    leader_flag,
+                    &mut meta,
+                    &format!("committing log id {}", new_log_id),
+                    &e,
+                );
+                return SyncOutcome::StorageFailure(reason);
+            }
+            debug!(
+                "Strict WA plane {}: commit index {} persisted before applying",
+                plane_id.raw(),
+                new_log_id
+            );
+        }
+        meta.persist_failures = 0;
+        apply_committed_prefix(&mut meta, new_log_id).await;
+        meta.commit_index = new_log_id;
+        let result = apply_committed_entry(&mut meta, entry).await;
+        meta.last_applied = new_log_id;
+
+        // Check if we should take a snapshot after committing
+        let num_logs = meta.logs.read().await.len();
+        if self.should_take_snapshot(&meta, num_logs) {
+            self.take_snapshot(&mut meta).await;
+        }
+
+        SyncOutcome::Committed(result)
+    }
+
+    /// A persistence failure while leading: say what failed, and after
+    /// `PERSIST_FAILURES_BEFORE_STEP_DOWN` in a row stop leading, so a member
+    /// whose disk works can take over (one whose disk does not cannot even
+    /// persist its candidacy). Returns the reason for the client.
+    fn note_persist_failure(
+        &self,
+        leader_flag: &AtomicBool,
+        meta: &mut RwLockWriteGuard<RaftMeta>,
+        what: &str,
+        e: &io::Error,
+    ) -> String {
+        meta.persist_failures += 1;
+        let reason = format!(
+            "plane {}: {} failed to persist: {} ({} in a row)",
+            self.plane_id().raw(),
+            what,
+            e,
+            meta.persist_failures
+        );
+        error!("{}", reason);
+        if is_leader(meta) && meta.persist_failures >= PERSIST_FAILURES_BEFORE_STEP_DOWN {
+            error!(
+                "Plane {}: stepping down after {} consecutive persistence failures",
+                self.plane_id().raw(),
+                meta.persist_failures
+            );
+            let term = meta.term;
+            self.become_follower_on_plane(leader_flag, meta, term, 0);
+        }
+        reason
     }
 
     async fn try_sync_config_to_followers_on_plane<'a>(
@@ -5809,6 +5865,7 @@ mod test {
                 base_path: temp_dir.clone(),
                 plane_id: PlaneId::type1(),
                 wal_index: Default::default(),
+                poisoned: None,
             };
 
             storage.write_snapshot(&snapshot_entity).await.unwrap();
@@ -5861,13 +5918,14 @@ mod test {
                 base_path: temp_dir.clone(),
                 plane_id: PlaneId::type1(),
                 wal_index: Default::default(),
+                poisoned: None,
             };
 
             // Write snapshot to disk
             storage.write_snapshot(&snapshot).await.unwrap();
             info!("Snapshot written to disk for recovery test");
 
-            // Verify load_snapshot_on_startup would work
+            // Verify load_snapshot_into_meta would work
             let loaded = storage.read_snapshot().await.unwrap();
             assert!(loaded.is_some(), "Should load snapshot from disk");
 
@@ -5907,6 +5965,7 @@ mod test {
                 base_path: temp_dir.clone(),
                 plane_id: PlaneId::type1(),
                 wal_index: Default::default(),
+                poisoned: None,
             };
 
             // Write snapshot
@@ -5954,6 +6013,7 @@ mod test {
                 base_path: temp_dir.clone(),
                 plane_id: PlaneId::type1(),
                 wal_index: Default::default(),
+                poisoned: None,
             };
 
             // Write valid snapshot
@@ -5968,12 +6028,11 @@ mod test {
             }
 
             // Try to read corrupted snapshot
+            // A damaged snapshot is an error, never "no snapshot": starting
+            // without it would drop state the log no longer holds.
             let result = storage.read_snapshot().await;
-            assert!(result.is_ok(), "Should not error on corruption");
-            assert!(
-                result.unwrap().is_none(),
-                "Should return None for corrupted snapshot"
-            );
+            let err = result.expect_err("a corrupted snapshot must be reported");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 
             info!("Corruption detection working correctly");
 
@@ -6516,6 +6575,7 @@ mod test {
                 base_path: temp_dir.clone(),
                 plane_id: PlaneId::type1(),
                 wal_index: Default::default(),
+                poisoned: None,
             };
 
             // Create test logs in memory
@@ -6550,6 +6610,7 @@ mod test {
                 last_snapshot_index: 0,
                 last_snapshot_term: 0,
                 lifecycle: LifecycleState::Running,
+                persist_failures: 0,
             };
             let meta_lock = async_std::sync::RwLock::new(meta);
             let meta_guard = meta_lock.write().await;
@@ -7030,7 +7091,10 @@ mod test {
                 }
 
                 // Persist current commit progress as an extra safety barrier
-                service.flush_persistence().await;
+                service
+                    .flush_persistence()
+                    .await
+                    .expect("flush the WAL and commit progress");
 
                 async_wait(Duration::from_secs(1)).await;
 
@@ -7297,6 +7361,7 @@ mod test {
                     last_snapshot_index: 0,
                     last_snapshot_term: 0,
                     lifecycle: LifecycleState::Running,
+                    persist_failures: 0,
                 };
                 let meta_lock = async_std::sync::RwLock::new(meta);
                 let meta_guard = meta_lock.write().await;
@@ -7310,6 +7375,7 @@ mod test {
                     base_path: temp_dir.clone(),
                     plane_id: PlaneId::type1(),
                     wal_index: Default::default(),
+                    poisoned: None,
                 };
                 storage.append_logs(&meta_guard, &logs_guard).await.unwrap();
                 // drop storage to flush/close
@@ -7438,6 +7504,7 @@ mod test {
                     last_snapshot_index: 0,
                     last_snapshot_term: 0,
                     lifecycle: LifecycleState::Running,
+                    persist_failures: 0,
                 };
                 let meta_lock = async_std::sync::RwLock::new(meta);
                 let meta_guard = meta_lock.write().await;
@@ -7450,6 +7517,7 @@ mod test {
                     base_path: temp_dir.clone(),
                     plane_id: PlaneId::type1(),
                     wal_index: Default::default(),
+                    poisoned: None,
                 };
                 storage.append_logs(&meta_guard, &logs_guard).await.unwrap();
             }
@@ -7669,7 +7737,7 @@ mod test {
                 let server2 = Server::new(&addr2);
                 server2.register_service(&svc2).await;
                 Server::listen_and_resume(&server2).await;
-                // IMPORTANT: register SM AFTER start() so that load_snapshot_on_startup()
+                // IMPORTANT: register SM AFTER start() so that load_snapshot_into_meta()
                 // stores the snapshot bytes before register() applies them.
                 // start() loads snapshot → stores snapshot[15] → register() applies snapshot → SM.shots=95
                 RaftService::start(&svc2, false).await;

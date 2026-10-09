@@ -112,6 +112,10 @@ pub struct StorageEntity {
     pub base_path: PathBuf,
     pub plane_id: PlaneId,
     pub wal_index: WalIndex,
+    /// Set when a failed WAL write could not be undone: the file's state is
+    /// unknown, so every later WAL operation refuses until a restart replays
+    /// what is really on disk.
+    pub poisoned: Option<String>,
 }
 
 /// Where each record of `log.dat` starts, so a discarded log suffix can be cut
@@ -368,11 +372,19 @@ impl StorageEntity {
                                 current_len - last_valid_pos,
                                 last_valid_pos
                             );
+                            // Appends must start right after the last valid
+                            // record: written after a torn tail, they would sit
+                            // beyond bytes the next replay stops at.
                             if let Err(e) = log_file.set_len(last_valid_pos) {
-                                warn!(
-                                    "Failed to truncate WAL to {} bytes: {:?}",
-                                    last_valid_pos, e
-                                );
+                                return Err(io::Error::new(
+                                    e.kind(),
+                                    format!(
+                                        "cannot cut the torn WAL tail of plane {} at {} bytes: {}",
+                                        plane_id.raw(),
+                                        last_valid_pos,
+                                        e
+                                    ),
+                                ));
                             }
                         }
                         let _ = log_file.seek(SeekFrom::End(0));
@@ -395,14 +407,17 @@ impl StorageEntity {
                     base_path: base_path.to_path_buf(),
                     plane_id,
                     wal_index,
+                    poisoned: None,
                 };
                 storage.last_term = last_log_id;
 
                 // If commit progress side file exists, load it to ensure accurate indices
                 // Force full replay by resetting last_applied to 0 on startup
                 *last_applied = 0;
-                if let Ok(Some((ci, _la))) =
-                    futures::executor::block_on(storage.read_commit_progress())
+                // A damaged commit.idx is an error, not a 0: replay stops at
+                // the commit index, and 0 would hide acknowledged commits.
+                if let Some((ci, _la)) =
+                    futures::executor::block_on(storage.read_commit_progress())?
                 {
                     *commit_index = ci;
                     debug!(
@@ -411,7 +426,7 @@ impl StorageEntity {
                         ci
                     );
                 } else {
-                    // If no commit progress found, default to 0 to avoid partial state
+                    // No commit progress yet: nothing was committed here.
                     *commit_index = 0;
                 }
 
@@ -422,6 +437,59 @@ impl StorageEntity {
     }
 
     pub async fn append_logs<'a>(
+        &mut self,
+        meta: &'a RwLockWriteGuard<'a, RaftMeta>,
+        logs: &'a RwLockWriteGuard<'a, LogsMap>,
+    ) -> io::Result<()> {
+        self.refuse_if_poisoned()?;
+        let batch_start = (self.last_term, self.wal_index.len, self.wal_index.records.len());
+        let written = self.write_batch(meta, logs).await;
+        if let Err(e) = written {
+            // Nothing of a failed batch may stay: a record written but not
+            // fsynced can surface after a crash (and after a failed fsync
+            // Linux may already have dropped the dirty pages, so a later
+            // fsync would not save it either). Cut the file back to where the
+            // batch began, so the WAL holds exactly what was acknowledged.
+            self.rollback_batch(batch_start).await;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    async fn rollback_batch(&mut self, (cursor, len, records): (u64, u64, usize)) {
+        self.last_term = cursor;
+        self.wal_index.records.truncate(records);
+        self.wal_index.len = len;
+        let Some(f) = &mut self.logs else {
+            return;
+        };
+        let cut = async {
+            f.set_len(len).await?;
+            f.seek(SeekFrom::Start(len)).await?;
+            f.sync_all().await
+        }
+        .await;
+        if let Err(e) = cut {
+            let reason = format!(
+                "a failed WAL batch could not be cut back to {} bytes: {}",
+                len, e
+            );
+            error!("Plane {}: {}; refusing WAL writes until restart", self.plane_id.raw(), reason);
+            self.poisoned = Some(reason);
+        }
+    }
+
+    fn refuse_if_poisoned(&self) -> io::Result<()> {
+        match &self.poisoned {
+            Some(reason) => Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("WAL of plane {} is unusable: {}", self.plane_id.raw(), reason),
+            )),
+            None => Ok(()),
+        }
+    }
+
+    async fn write_batch<'a>(
         &mut self,
         meta: &'a RwLockWriteGuard<'a, RaftMeta>,
         logs: &'a RwLockWriteGuard<'a, LogsMap>,
@@ -456,14 +524,7 @@ impl StorageEntity {
                     f.write_all(entry_data.as_slice()).await
                 }
                 .await;
-                if let Err(e) = written {
-                    // A partial record may be on disk; the next one starts
-                    // wherever the file now ends.
-                    if let Ok(metadata) = f.metadata().await {
-                        self.wal_index.len = metadata.len();
-                    }
-                    return Err(e);
-                }
+                written?;
                 self.wal_index.records.push_back((*term, self.wal_index.len));
                 self.wal_index.len += 8 + record_len;
                 self.last_term = *term;
@@ -492,6 +553,7 @@ impl StorageEntity {
     /// `from_id`, so the replacement entries are written even when the cut
     /// itself fails -- replay then lets them supersede the stale records.
     pub async fn truncate_from(&mut self, from_id: u64) -> io::Result<()> {
+        self.refuse_if_poisoned()?;
         self.last_term = self.last_term.min(from_id.saturating_sub(1));
         let kept = self
             .wal_index
@@ -510,9 +572,20 @@ impl StorageEntity {
         f.set_len(offset).await?;
         self.wal_index.len = offset;
         // `set_len` leaves the cursor past the new end; writing there would
-        // leave a zero-filled gap that replay reads as a torn tail.
-        f.seek(SeekFrom::Start(offset)).await?;
-        f.sync_all().await?;
+        // leave a zero-filled gap that replay reads as a torn tail. With the
+        // file already cut, a failure here leaves its position unknown.
+        let settled = async {
+            f.seek(SeekFrom::Start(offset)).await?;
+            f.sync_all().await
+        }
+        .await;
+        if let Err(e) = settled {
+            self.poisoned = Some(format!(
+                "the WAL was cut to {} bytes but not settled: {}",
+                offset, e
+            ));
+            return Err(e);
+        }
         info!(
             "Cut {} WAL records from log id {} on plane {} (file now {} bytes)",
             cut,
@@ -580,6 +653,7 @@ impl StorageEntity {
 
     /// Ensure WAL file is fully synced to disk.
     pub async fn flush_wal(&mut self) -> io::Result<()> {
+        self.refuse_if_poisoned()?;
         if let Some(f) = &mut self.logs {
             info!(
                 "WAL fsync for plane {}: syncing log.dat to disk",
@@ -618,11 +692,19 @@ impl StorageEntity {
         if !commit_path.exists() {
             return Ok(None);
         }
-        let mut f = File::open(&commit_path).await?;
-        let mut buf = [0u8; 16];
-        if f.read_exact(&mut buf).await.is_err() {
-            return Ok(None);
-        }
+        // Written by rename, so it is whole or absent; anything else is
+        // damage, and guessing 0 would hide acknowledged commits from replay.
+        let bytes = std::fs::read(&commit_path)?;
+        let buf: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "commit.idx of plane {} holds {} bytes, expected 16",
+                    self.plane_id.raw(),
+                    bytes.len()
+                ),
+            )
+        })?;
         let commit_index = u64::from_le_bytes(buf[0..8].try_into().unwrap());
         let last_applied = u64::from_le_bytes(buf[8..16].try_into().unwrap());
         Ok(Some((commit_index, last_applied)))
@@ -695,54 +777,43 @@ impl StorageEntity {
             return Ok(None);
         }
 
-        let mut file = File::open(&snapshot_path).await?;
-
-        // Read checksum
-        let mut checksum_buf = [0u8; 4];
-        if file.read_exact(&mut checksum_buf).await.is_err() {
-            warn!(
-                "Failed to read snapshot checksum for plane {}, file may be corrupted",
-                plane_id.raw()
-            );
+        let bytes = tokio::fs::read(&snapshot_path).await?;
+        // Storage creates an empty snapshot.dat up front; empty is "none yet".
+        if bytes.is_empty() {
             return Ok(None);
         }
-        let expected_checksum = u32::from_le_bytes(checksum_buf);
-
-        // Read length
-        let mut len_buf = [0u8; 8];
-        if file.read_exact(&mut len_buf).await.is_err() {
-            warn!(
-                "Failed to read snapshot length for plane {}, file may be corrupted",
-                plane_id.raw()
-            );
-            return Ok(None);
+        // Anything else was written whole and renamed into place, so a short
+        // or mismatched file is damage. Starting without it would silently
+        // drop state the log no longer holds (an installed snapshot), so it
+        // is an error.
+        let corrupt = |what: String| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("snapshot of plane {} is corrupt: {}", plane_id.raw(), what),
+            )
+        };
+        if bytes.len() < 12 {
+            return Err(corrupt(format!("{} bytes, shorter than its header", bytes.len())));
         }
-        let len = u64::from_le_bytes(len_buf);
-
-        // Read data
-        let mut data_buf = vec![0u8; len as usize];
-        if file.read_exact(&mut data_buf).await.is_err() {
-            warn!(
-                "Failed to read snapshot data for plane {}, file may be corrupted",
-                plane_id.raw()
-            );
-            return Ok(None);
+        let expected_checksum = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let len = u64::from_le_bytes(bytes[4..12].try_into().unwrap()) as usize;
+        let data_buf = &bytes[12..];
+        if data_buf.len() != len {
+            return Err(corrupt(format!(
+                "header says {} bytes of data, file holds {}",
+                len,
+                data_buf.len()
+            )));
         }
-
-        // Verify checksum
-        let actual_checksum = crc32fast::hash(&data_buf);
+        let actual_checksum = crc32fast::hash(data_buf);
         if actual_checksum != expected_checksum {
-            error!(
-                "Snapshot checksum mismatch on plane {}! Expected: {}, Got: {}. File is corrupted.",
-                plane_id.raw(),
-                expected_checksum,
-                actual_checksum
-            );
-            return Ok(None);
+            return Err(corrupt(format!(
+                "checksum {:#010x}, expected {:#010x}",
+                actual_checksum, expected_checksum
+            )));
         }
-
-        // Deserialize
-        let snapshot = crate::utils::serde::deserialize::<SnapshotEntity>(&data_buf).unwrap();
+        let snapshot = crate::utils::serde::deserialize::<SnapshotEntity>(data_buf)
+            .ok_or_else(|| corrupt("its contents do not decode".to_string()))?;
 
         info!(
             "Snapshot loaded from disk for plane {}: index={}, term={}, size={} bytes",

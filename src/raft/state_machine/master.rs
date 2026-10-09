@@ -32,6 +32,11 @@ pub enum ExecError {
         stalled_rounds: u64,
         elapsed: std::time::Duration,
     },
+    /// The leader could not make the command or its commit durable: it was
+    /// not committed or applied, and it is not retried here (the outcome
+    /// is unknown -- its entry may still commit -- and the failure is the
+    /// storage's, which a retry does not fix).
+    StorageFailure(String),
     /// Same fields as `ApplyStalled`, for the case that cannot heal by
     /// waiting: a single-member plane whose own log ends BEHIND the client's
     /// cursor, i.e. the log position went backwards (a store whose log ids

@@ -1096,6 +1096,17 @@ impl RaftClient {
                                 FailureAction::NotCommitted
                             }
                             Ok(ClientCmdResponse::ShuttingDown) => FailureAction::ShuttingDown,
+                            Ok(ClientCmdResponse::StorageFailure(reason)) => {
+                                // Not committed, outcome unknown: retrying would
+                                // append a second copy, so the caller decides.
+                                warn!(
+                                    "Command on plane {} refused by leader {}: storage failure: {}",
+                                    plane_id.raw(),
+                                    leader_id,
+                                    reason
+                                );
+                                return Err(ExecError::StorageFailure(reason));
+                            }
                             Err(e) => {
                                 warn!(
                                     "RAFTDBG_V3 client plane_id={} transport_or_rpc_error leader_id={} depth={} error={:?}",

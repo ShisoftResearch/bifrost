@@ -85,7 +85,10 @@ async fn replay_skips_holes_below_durable_entries() {
         sleep(Duration::from_millis(300)).await;
         // Persist commit progress; a kill preserves commit.idx from the last
         // flush, and replay is driven by it.
-        raft_service.flush_persistence().await;
+        raft_service
+            .flush_persistence()
+            .await
+            .expect("flush the WAL and commit progress");
     }
     // Give the tokio runtime a beat to drop file handles.
     sleep(Duration::from_millis(300)).await;
