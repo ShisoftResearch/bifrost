@@ -241,7 +241,21 @@ impl StorageEntity {
                             }
                             match DiskLogEntry::decode(&data_buf) {
                                 Ok(entry) => {
-                                    *term = entry.term;
+                                    // The record header's `term` is the log ID
+                                    // (append_logs writes the map key there),
+                                    // not a term. Restoring the term from it
+                                    // usually lands far ABOVE the plane's term:
+                                    // the member's first answer then deposes the
+                                    // leader (an election per restart), but it
+                                    // also keeps the member out of any term it
+                                    // may have voted in, as neither the term nor
+                                    // the vote is persisted. Alone, though, it
+                                    // can sit BELOW the entries' own terms (more
+                                    // elections than entries), and the next
+                                    // leader term would rank older entries above
+                                    // newer ones (section 5.4.1). So the term
+                                    // never drops below the log's.
+                                    *term = (*term).max(entry.term).max(entry.log.term);
                                     // Do not trust commit/last_applied embedded in WAL for SM reconstruction
                                     // We'll derive commit_index from commit.idx and force replay from last_applied=0
                                     let id = entry.log.id;

@@ -1159,6 +1159,9 @@ impl RaftService {
 
                     meta.last_snapshot_index = snapshot.last_included_index;
                     meta.last_snapshot_term = snapshot.last_included_term;
+                    // Like the WAL's entries, the snapshot's term bounds the
+                    // restored term from below.
+                    meta.term = max(meta.term, snapshot.last_included_term);
 
                     // Snapshot restore must reset the apply cursor to the snapshot index so
                     // post-snapshot WAL entries are replayed deterministically on startup.
@@ -2161,6 +2164,9 @@ impl RaftService {
             // Update snapshot metadata
             meta.last_snapshot_index = snapshot.last_included_index;
             meta.last_snapshot_term = snapshot.last_included_term;
+            // Like the WAL's entries, the snapshot's term bounds the restored
+            // term from below.
+            meta.term = max(meta.term, snapshot.last_included_term);
 
             // Restore applies from the snapshot boundary every time so any
             // committed WAL entries after the snapshot are replayed exactly once.
