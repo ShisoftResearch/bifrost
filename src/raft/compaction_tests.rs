@@ -21,10 +21,10 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-const LEDGER_SM_ID: u64 = 4242;
+pub(super) const LEDGER_SM_ID: u64 = 4242;
 
-struct Ledger {
-    value: u64,
+pub(super) struct Ledger {
+    pub(super) value: u64,
 }
 
 raft_state_machine! {
@@ -66,14 +66,14 @@ struct Node {
     server: Arc<Server>,
 }
 
-fn scratch_dir(tag: &str) -> PathBuf {
+pub(super) fn scratch_dir(tag: &str) -> PathBuf {
     let dir =
         std::env::temp_dir().join(format!("raft_compaction_{}_{}", tag, rand::random::<u64>()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
 
-fn disk_options(path: &Path, snapshot_threshold: u64, compaction_threshold: u64) -> Options {
+pub(super) fn disk_options(path: &Path, snapshot_threshold: u64, compaction_threshold: u64) -> Options {
     Options {
         storage: Storage::DISK(disk::DiskOptions {
             path: path.to_str().unwrap().to_string(),
@@ -127,7 +127,7 @@ async fn get_value(client: &Arc<RaftClient>) -> Result<u64, ExecError> {
 
 /// Take a snapshot at the current apply position and compact down to an
 /// empty log map; returns the snapshot index.
-async fn snapshot_and_compact(svc: &Arc<RaftService>) -> u64 {
+pub(super) async fn snapshot_and_compact(svc: &Arc<RaftService>) -> u64 {
     let mut meta = svc.write_meta().await;
     svc.take_snapshot(&mut meta).await;
     let snapshot_index = meta.last_snapshot_index;
@@ -141,7 +141,7 @@ async fn snapshot_and_compact(svc: &Arc<RaftService>) -> u64 {
 }
 
 /// Ids of the entries persisted in `log.dat`, in file order.
-fn wal_entries(path: &Path) -> Vec<DiskLogEntry> {
+pub(super) fn wal_entries(path: &Path) -> Vec<DiskLogEntry> {
     let mut bytes = Vec::new();
     std::fs::File::open(path.join("log.dat"))
         .unwrap()
