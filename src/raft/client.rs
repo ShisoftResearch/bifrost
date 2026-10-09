@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::iter::FromIterator;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
 const ORDERING: Ordering = Ordering::Relaxed;
@@ -824,6 +824,7 @@ impl RaftClient {
         let mut depth = 0;
         let mut left_behind_seen_log = 0u64;
         let mut left_behind_stalls = 0usize;
+        let query_started = Instant::now();
         loop {
             if depth == 0 {
                 trace!(
@@ -864,9 +865,9 @@ impl RaftClient {
                     sm_id,
                     fn_id
                 );
-                let res = rpc_client
-                    .c_query(plane_id, &self.gen_log_entry(&state, sm_id, fn_id, &data))
-                    .await;
+                let query_entry = self.gen_log_entry(&state, sm_id, fn_id, &data);
+                let client_cursor = query_entry.id;
+                let res = rpc_client.c_query(plane_id, &query_entry).await;
                 trace!(
                     "Query for plane {} from node {} for sm_id {}, fn_id {} completed",
                     plane_id.raw(),
@@ -879,6 +880,7 @@ impl RaftClient {
                         ClientQryResponse::LeftBehind {
                             last_log_term,
                             last_log_id,
+                            last_log_index,
                         } => {
                             debug!("Found left behind record on plane {}...{}, updating client state: server has log_id={}, term={}", plane_id.raw(), depth, last_log_id, last_log_term);
                             // Update client state from server to avoid retry loop
@@ -901,10 +903,37 @@ impl RaftClient {
                             }
                             if left_behind_stalls >= stall_limit {
                                 error!(
-                                    "Too many retry on query for plane {}, num_members {}, no apply progress after {} stalled rounds at log id {}",
-                                    plane_id.raw(), num_members, left_behind_stalls, left_behind_seen_log
+                                    "Query stalled on plane {} sm {}: client cursor {}, server applied {}, server last log {}, {} members, {} stalled rounds in {:?}",
+                                    plane_id.raw(), sm_id, client_cursor, last_log_id, last_log_index,
+                                    num_members, left_behind_stalls, query_started.elapsed()
                                 );
-                                return Err(ExecError::TooManyRetry);
+                                let plane = plane_id.raw();
+                                let stalled_rounds = left_behind_stalls as u64;
+                                let elapsed = query_started.elapsed();
+                                // One member whose whole log ends below the
+                                // cursor cannot catch up by waiting: the
+                                // position went backwards.
+                                return Err(if num_members == 1 && last_log_index < client_cursor {
+                                    ExecError::LogIndexRegressed {
+                                        plane,
+                                        sm_id,
+                                        client_cursor,
+                                        server_applied: last_log_id,
+                                        server_last_log: last_log_index,
+                                        stalled_rounds,
+                                        elapsed,
+                                    }
+                                } else {
+                                    ExecError::ApplyStalled {
+                                        plane,
+                                        sm_id,
+                                        client_cursor,
+                                        server_applied: last_log_id,
+                                        server_last_log: last_log_index,
+                                        stalled_rounds,
+                                        elapsed,
+                                    }
+                                });
                             }
                             sleep(Duration::from_millis(LEFT_BEHIND_STALL_DELAY_MS)).await;
                             continue;
@@ -1228,6 +1257,13 @@ impl RaftClient {
 
     pub fn leader_id(&self) -> u64 {
         self.type1_state.leader_id.load(ORDERING)
+    }
+
+    /// Test hook: pretend this client has observed `cursor` on the plane.
+    #[cfg(test)]
+    pub(crate) async fn force_cursor_for_test(&self, plane_id: PlaneId, cursor: u64) {
+        let state = self.plane_state(plane_id).await;
+        swap_when_greater(&state.last_log_id, cursor);
     }
 
     pub async fn leader_client(&self) -> Option<(u64, Client)> {

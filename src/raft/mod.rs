@@ -134,7 +134,12 @@ pub enum ClientQryResponse {
     },
     LeftBehind {
         last_log_term: u64,
+        /// The serving member's APPLIED position.
         last_log_id: u64,
+        /// The serving member's last log position (entry or snapshot
+        /// boundary), so the client can tell apply lag (`last_log_id` below
+        /// this) from a cursor that is ahead of the member's whole log.
+        last_log_index: u64,
     },
 }
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -700,10 +705,26 @@ enum HeartbeatReplicationResult {
     TermOut { term: u64, leader_id: u64 },
 }
 
+/// The last log position (id, term) this member can vouch for.
+///
+/// Standard raft: the later of the last retained entry and the snapshot's last
+/// included (index, term). Compaction deletes every entry at or below the
+/// snapshot index -- and a snapshot is taken right after an apply, so the map
+/// is commonly EMPTY afterwards. Deriving the position from the map alone
+/// then reports (0, 0): the next leader append hands out log id 1 again, a
+/// client cursor sitting at the old position waits forever for a log that
+/// never comes back, and the renumbered entries sit below the WAL's append
+/// cursor and are never persisted.
+fn last_log_position(meta: &RaftMeta, logs: &LogsMap) -> (u64, u64) {
+    match logs.iter().next_back() {
+        Some((id, entry)) if *id >= meta.last_snapshot_index => (*id, entry.term),
+        _ => (meta.last_snapshot_index, meta.last_snapshot_term),
+    }
+}
+
 macro_rules! get_last_log_info {
-    ($s: expr, $logs: expr) => {{
-        let last_log = $logs.iter().next_back();
-        $s.get_log_info_(last_log)
+    ($meta: expr, $logs: expr) => {{
+        last_log_position(&*$meta, &*$logs)
     }};
 }
 
@@ -1289,7 +1310,7 @@ impl RaftService {
                 );
                 let (last_log_id, _) = {
                     let logs = meta.logs.read().await;
-                    get_last_log_info!(self, logs)
+                    get_last_log_info!(meta, logs)
                 };
                 drop(sm);
                 ensure_direct_leader_term(meta);
@@ -1635,7 +1656,7 @@ impl RaftService {
         }
         let (last_log_id, _) = {
             let logs = meta.logs.read().await;
-            get_last_log_info!(self, logs)
+            get_last_log_info!(meta, logs)
         };
         ensure_direct_leader_term(&mut meta);
         self.become_leader_on_plane(&runtime.is_leader, &mut meta, last_log_id)
@@ -1879,11 +1900,7 @@ impl RaftService {
             let meta = runtime.meta.read().await;
             let logs = meta.logs.read().await;
             let sm = meta.state_machine.read().await;
-            let last_log = logs.iter().next_back();
-            let (last_log_id, last_log_term) = match last_log {
-                Some((last_log_id, last_log_item)) => (*last_log_id, last_log_item.term),
-                None => (0, 0),
-            };
+            let (last_log_id, last_log_term) = get_last_log_info!(meta, logs);
 
             // An UNSEEDED runtime knows nothing worth repeating. Its config
             // holds only itself -- `initialize_runtime_meta` self-seeds so a
@@ -2222,7 +2239,7 @@ impl RaftService {
         let mut meta = self.write_meta().await;
         let (last_log_id, _) = {
             let logs = meta.logs.read().await;
-            get_last_log_info!(self, logs)
+            get_last_log_info!(meta, logs)
         };
         self.become_leader(&mut meta, last_log_id).await;
     }
@@ -2474,7 +2491,7 @@ impl RaftService {
         for (id, member) in sm_members.iter() {
             members.push((*id, member.address.clone()))
         }
-        let (last_log_id, last_log_term) = get_last_log_info!(self, logs);
+        let (last_log_id, last_log_term) = get_last_log_info!(meta, logs);
         ClientClusterInfo {
             members,
             last_log_id,
@@ -2493,6 +2510,9 @@ impl RaftService {
         let logs = meta.logs.read().await;
         logs.len()
     }
+    /// Id of the last retained log entry. `None` when the map is empty, which
+    /// is normal right after compaction; use `last_log_position` semantics
+    /// (`cluster_info().last_log_id`) for the id the next entry follows.
     pub async fn last_log_id(&self) -> Option<u64> {
         let meta = self.meta.read().await;
         let logs = meta.logs.read().await;
@@ -2624,12 +2644,6 @@ impl RaftService {
         self.reset_last_checked(meta);
         meta.membership = membership;
     }
-    fn get_log_info_(&self, log: Option<(&u64, &LogEntry)>) -> (u64, u64) {
-        match log {
-            Some((last_log_id, last_log_item)) => (*last_log_id, last_log_item.term),
-            None => (0, 0),
-        }
-    }
     fn insert_leader_follower_meta(
         &self,
         leader_meta: &mut RwLockWriteGuard<LeaderMeta>,
@@ -2686,7 +2700,7 @@ impl RaftService {
         let term = meta.term;
         let (last_log_id, last_log_term) = {
             let logs = meta.logs.read().await;
-            get_last_log_info!(self, logs)
+            get_last_log_info!(meta, logs)
         };
         let (mut members_vote_response_stream, num_members) = {
             let members: Vec<_> = {
@@ -3099,7 +3113,13 @@ impl RaftService {
                 } else {
                     follower.next_index - 1
                 };
-                if follower_last_log_id == 0 || logs.is_empty() {
+                if follower_last_log_id == 0 {
+                    (0, 0) // 0 represents there is no logs in the leader
+                } else if last_snapshot_index > 0 && follower_last_log_id == last_snapshot_index {
+                    // The follower sits exactly on the snapshot boundary; the
+                    // entry itself is compacted, the snapshot names its term.
+                    (last_snapshot_index, last_snapshot_term)
+                } else if logs.is_empty() {
                     (0, 0) // 0 represents there is no logs in the leader
                 } else {
                     // detect cleaned logs (shouldn't happen now with snapshot check above)
@@ -3262,7 +3282,16 @@ impl RaftService {
                 debug!("SWITCH FROM CANDIDATE BACK TO FOLLOWER {}", self.id);
                 self.become_follower_on_plane(leader_flag, &mut meta, term, leader_id);
             }
-            if prev_log_id > 0 {
+            // Positions covered by the snapshot are compacted away: the boundary
+            // itself is verified against the snapshot's term, and anything
+            // below it is a committed prefix that cannot conflict.
+            let snapshot_index = meta.last_snapshot_index;
+            let prev_covered_by_snapshot = prev_log_id > 0 && prev_log_id <= snapshot_index;
+            if prev_covered_by_snapshot {
+                if prev_log_id == snapshot_index && prev_log_term != meta.last_snapshot_term {
+                    return (meta.term, AppendEntriesResult::LogMismatch);
+                }
+            } else if prev_log_id > 0 {
                 check_commit(&mut meta).await;
                 let mut logs = meta.logs.write().await;
                 let contains_prev_log = logs.contains_key(&prev_log_id);
@@ -3297,17 +3326,19 @@ impl RaftService {
                 if let Some(ref entries) = entries {
                     for entry in entries {
                         let entry_id = entry.id;
+                        if entry_id <= snapshot_index {
+                            // Covered by the snapshot: already applied, and
+                            // re-inserting would resurrect a compacted entry.
+                            continue;
+                        }
                         logs.entry(entry_id).or_insert(entry.clone());
                         last_new_entry = max(last_new_entry, entry_id);
                     }
-                } else if !logs.is_empty() {
-                    last_new_entry = match logs.values().last() {
-                        Some(entry) => entry.id,
-                        None => {
-                            error!("Logs map is not empty but values().last() returned None - this should not happen");
-                            std::u64::MAX
-                        }
-                    };
+                } else if !logs.is_empty() || meta.last_snapshot_index > 0 {
+                    // Heartbeat: the commit index may advance only as far as
+                    // what this member holds, which after compaction is the
+                    // snapshot boundary even when the map is empty.
+                    last_new_entry = get_last_log_info!(meta, logs).0;
                 }
                 if let Err(e) = self.logs_post_processing(&meta, logs).await {
                     error!("Failed to persist logs during append_entries: {:?}", e);
@@ -3342,8 +3373,12 @@ impl RaftService {
             let candidate_valid = conf_sm.member_existed(candidate_id);
             let can_vote = vote_for.map_or(true, |voted_for| voted_for == candidate_id);
             if can_vote && candidate_valid {
-                let (last_id, last_term) = get_last_log_info!(self, logs);
-                if last_log_id >= last_id && last_log_term >= last_term {
+                let (last_id, last_term) = get_last_log_info!(meta, logs);
+                // Raft section 5.4.1: the later last TERM wins, ties go to the
+                // longer log.
+                if last_log_term > last_term
+                    || (last_log_term == last_term && last_log_id >= last_id)
+                {
                     vote_granted = true;
                 }
             }
@@ -3414,7 +3449,7 @@ impl RaftService {
             if member_count == 1 && meta.leader_id == self.id {
                 let last_log_id = {
                     let logs = meta.logs.read().await;
-                    let (last_log_id, _last_log_term) = get_last_log_info!(self, logs);
+                    let (last_log_id, _last_log_term) = get_last_log_info!(meta, logs);
                     last_log_id
                 };
                 ensure_direct_leader_term(&mut meta);
@@ -3486,7 +3521,7 @@ impl RaftService {
         entry: &'a LogEntry,
     ) -> ClientQryResponse {
         let logs = meta.logs.read().await;
-        let (_last_log_id, last_log_term) = get_last_log_info!(self, logs);
+        let (last_log_index, last_log_term) = get_last_log_info!(meta, logs);
         // Gate on what this member has APPLIED, not on what its log has
         // merely received. The query below executes against the state
         // machine, and the state machine reflects applied entries only -- so
@@ -3511,6 +3546,7 @@ impl RaftService {
             ClientQryResponse::LeftBehind {
                 last_log_term,
                 last_log_id: meta.last_applied,
+                last_log_index,
             }
         } else {
             let qry_res = meta.state_machine.read().await.exec_qry(entry).await;
@@ -3528,8 +3564,11 @@ impl RaftService {
         entry: &mut LogEntry,
     ) -> (u64, u64) {
         let mut logs = meta.logs.write().await;
-        let (last_log_id, _last_log_term) = get_last_log_info!(self, logs);
-        let new_log_id = last_log_id + 1;
+        let (last_log_id, _last_log_term) = get_last_log_info!(meta, logs);
+        // Never hand out an id at or below the commit cursor: a committed
+        // position is observed state, reissuing it makes every client cursor
+        // that saw it wait for a log that is not coming.
+        let new_log_id = last_log_id.max(meta.commit_index).max(meta.last_applied) + 1;
         let new_log_term = meta.term;
         entry.term = new_log_term;
         entry.id = new_log_id;
@@ -3711,9 +3750,26 @@ impl RaftService {
         );
 
         // Generate snapshot from state machine (Master SM decides which subs are recoverable)
+        //
+        // The command that triggered this snapshot is already applied and
+        // durable. A state machine whose `snapshot()` panics (a serialisation
+        // failure) must not turn that into a lost acknowledgement: the client
+        // would see a failed command that took effect and retry it, applying
+        // it twice. Skip the snapshot instead; it is retried at the next
+        // threshold check.
         let snapshot_data = {
             let sm = meta.state_machine.read().await;
-            sm.snapshot()
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sm.snapshot())) {
+                Ok(data) => data,
+                Err(_) => {
+                    error!(
+                        "Snapshot generation panicked on plane {} at index={}; keeping the log",
+                        self.plane_id().raw(),
+                        meta.last_applied
+                    );
+                    return;
+                }
+            }
         };
 
         // Get the term of the log at last_applied index
@@ -4017,6 +4073,7 @@ impl Service for RaftService {
                     ClientQryResponse::LeftBehind {
                         last_log_term: 0,
                         last_log_id: 0,
+                        last_log_index: 0,
                     }
                 }
             }
@@ -4161,6 +4218,11 @@ impl RaftStateMachine {
         }
     }
 }
+
+#[cfg(test)]
+mod compaction_tests;
+#[cfg(test)]
+mod raft_perf;
 
 #[cfg(test)]
 mod test {

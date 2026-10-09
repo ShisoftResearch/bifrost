@@ -16,7 +16,34 @@ pub enum ExecError {
     NotCommitted,
     ShuttingDown,
     Unknown,
+    /// Generic retry exhaustion with no more specific diagnosis.
     TooManyRetry,
+    /// A query kept answering "left behind" while the serving member made no
+    /// apply progress: the client demands position `client_cursor`, the
+    /// member has applied only `server_applied` and holds a log up to
+    /// `server_last_log`.
+    ApplyStalled {
+        plane: u64,
+        sm_id: u64,
+        client_cursor: u64,
+        server_applied: u64,
+        server_last_log: u64,
+        stalled_rounds: u64,
+        elapsed: std::time::Duration,
+    },
+    /// Same fields as `ApplyStalled`, for the case that cannot heal by
+    /// waiting: a single-member plane whose own log ends BEHIND the client's
+    /// cursor, i.e. the log position went backwards (a store whose log ids
+    /// were reissued after compaction by an older release).
+    LogIndexRegressed {
+        plane: u64,
+        sm_id: u64,
+        client_cursor: u64,
+        server_applied: u64,
+        server_last_log: u64,
+        stalled_rounds: u64,
+        elapsed: std::time::Duration,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -738,6 +765,24 @@ mod tests {
         let _ = ExecError::ShuttingDown;
         let _ = ExecError::Unknown;
         let _ = ExecError::TooManyRetry;
+        let _ = ExecError::ApplyStalled {
+            plane: 0,
+            sm_id: 1,
+            client_cursor: 2,
+            server_applied: 1,
+            server_last_log: 1,
+            stalled_rounds: 8,
+            elapsed: std::time::Duration::from_millis(400),
+        };
+        let _ = ExecError::LogIndexRegressed {
+            plane: 0,
+            sm_id: 1,
+            client_cursor: 2,
+            server_applied: 1,
+            server_last_log: 1,
+            stalled_rounds: 8,
+            elapsed: std::time::Duration::from_millis(400),
+        };
     }
 
     #[test]
