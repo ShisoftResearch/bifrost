@@ -2001,6 +2001,19 @@ fn is_majority(members: u64, granted: u64) -> bool {
     majority
 }
 
+/// Committing `log_id` commits every entry before it (Log Matching). Apply the
+/// earlier ones first, in log order, before the caller applies `log_id`
+/// itself: an entry answered NotCommitted stays in the leader's log and
+/// commits with the next one -- every follower applies it then, so the leader
+/// must too, or its state machine silently diverges from theirs and from its
+/// own replay.
+async fn apply_committed_prefix(meta: &mut RwLockWriteGuard<'_, RaftMeta>, log_id: u64) {
+    if meta.last_applied + 1 < log_id {
+        meta.commit_index = max(meta.commit_index, log_id - 1);
+        check_commit(meta).await;
+    }
+}
+
 async fn apply_committed_entry<'a>(
     meta: &'a RwLockWriteGuard<'a, RaftMeta>,
     entry: &'a LogEntry,
@@ -3627,6 +3640,7 @@ impl RaftService {
                     new_log_id
                 );
             }
+            apply_committed_prefix(&mut meta, new_log_id).await;
             meta.commit_index = new_log_id;
             info!(
                 "Strict WA plane {}: applying entry at log_id={} (commit_index={})",
@@ -3679,6 +3693,7 @@ impl RaftService {
     ) -> ExecResult {
         // this will force followers to commit the changes
         debug!("Sync config to followers on plane {}", plane_id.raw());
+        apply_committed_prefix(&mut meta, new_log_id).await;
         meta.commit_index = new_log_id;
         let data = apply_committed_entry(&meta, &entry).await;
         // The apply just happened, so say so. This path -- every subscription
