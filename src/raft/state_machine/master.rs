@@ -27,8 +27,7 @@ pub enum ExecError {
         sm_id: u64,
         client_cursor: u64,
         server_applied: u64,
-        /// `None` when the member predates reporting it.
-        server_last_log: Option<u64>,
+        server_last_log: u64,
         stalled_rounds: u64,
         elapsed: std::time::Duration,
     },
@@ -37,20 +36,6 @@ pub enum ExecError {
     /// is unknown -- its entry may still commit -- and the failure is the
     /// storage's, which a retry does not fix).
     StorageFailure(String),
-    /// Same fields as `ApplyStalled`, for the case that cannot heal by
-    /// waiting: a single-member plane whose own log ends BEHIND the client's
-    /// cursor, i.e. the log position went backwards (a store whose log ids
-    /// were reissued after compaction by an older release).
-    LogIndexRegressed {
-        plane: u64,
-        sm_id: u64,
-        client_cursor: u64,
-        server_applied: u64,
-        /// `None` when the member predates reporting it.
-        server_last_log: Option<u64>,
-        stalled_rounds: u64,
-        elapsed: std::time::Duration,
-    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -777,16 +762,7 @@ mod tests {
             sm_id: 1,
             client_cursor: 2,
             server_applied: 1,
-            server_last_log: Some(1),
-            stalled_rounds: 8,
-            elapsed: std::time::Duration::from_millis(400),
-        };
-        let _ = ExecError::LogIndexRegressed {
-            plane: 0,
-            sm_id: 1,
-            client_cursor: 2,
-            server_applied: 1,
-            server_last_log: Some(1),
+            server_last_log: 1,
             stalled_rounds: 8,
             elapsed: std::time::Duration::from_millis(400),
         };

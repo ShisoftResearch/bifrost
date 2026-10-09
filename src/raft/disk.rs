@@ -130,26 +130,53 @@ impl HardState {
         buf
     }
 
-    fn decode(bytes: &[u8]) -> std::result::Result<Self, String> {
+    fn decode(bytes: &[u8]) -> std::result::Result<Self, HardStateProblem> {
+        // The version is the magic's last byte; another version is not read.
+        if bytes.len() >= 4 && bytes[0..3] == HARD_STATE_MAGIC[0..3] && bytes[3] != HARD_STATE_MAGIC[3] {
+            return Err(HardStateProblem::Version(bytes[3]));
+        }
+        let damaged = |what: String| Err(HardStateProblem::Damaged(what));
         if bytes.len() != HARD_STATE_LEN {
-            return Err(format!("{} bytes, expected {}", bytes.len(), HARD_STATE_LEN));
+            return damaged(format!("{} bytes, expected {}", bytes.len(), HARD_STATE_LEN));
         }
         if bytes[0..4] != HARD_STATE_MAGIC {
-            return Err("bad magic".to_string());
+            return damaged("bad magic".to_string());
         }
         let crc = u32::from_le_bytes(bytes[21..25].try_into().unwrap());
         if crc != crc32fast::hash(&bytes[0..21]) {
-            return Err("checksum mismatch".to_string());
+            return damaged("checksum mismatch".to_string());
         }
         let term = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
         let voted_for = match bytes[12] {
             0 => None,
             1 => Some(u64::from_le_bytes(bytes[13..21].try_into().unwrap())),
-            flag => return Err(format!("bad vote flag {}", flag)),
+            flag => return damaged(format!("bad vote flag {}", flag)),
         };
         Ok(HardState { term, voted_for })
     }
 }
+
+/// Startup error: the store has a log, snapshot or commit index but no hard
+/// state, so its term and vote are unknown. (There is no derivation for
+/// stores written before the hard state existed; they are reimported.)
+#[derive(Debug)]
+pub struct MissingHardState {
+    pub plane_id: PlaneId,
+    pub path: PathBuf,
+}
+
+impl std::fmt::Display for MissingHardState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "plane {} has raft history but no hard state at {}: its term and vote are unknown",
+            self.plane_id.raw(),
+            self.path.display()
+        )
+    }
+}
+
+impl std::error::Error for MissingHardState {}
 
 /// The persisted hard state under `base_path`, `None` if there is none yet.
 pub fn read_hard_state(base_path: &Path) -> io::Result<Option<HardState>> {
@@ -159,13 +186,47 @@ pub fn read_hard_state(base_path: &Path) -> io::Result<Option<HardState>> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    HardState::decode(&bytes).map(Some).map_err(|what| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{} is corrupt: {}", path.display(), what),
-        )
+    HardState::decode(&bytes).map(Some).map_err(|problem| {
+        io::Error::new(io::ErrorKind::InvalidData, BadHardState { path, problem })
     })
 }
+
+/// What is wrong with a hard-state file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HardStateProblem {
+    /// Written in another format version (the magic's last byte).
+    Version(u8),
+    /// Not a whole, intact record of this version.
+    Damaged(String),
+}
+
+/// Startup error: the hard-state file exists but cannot be read as this
+/// version's record. Never reset: guessing the term or forgetting the vote is
+/// how a member votes twice.
+#[derive(Debug)]
+pub struct BadHardState {
+    pub path: PathBuf,
+    pub problem: HardStateProblem,
+}
+
+impl std::fmt::Display for BadHardState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.problem {
+            HardStateProblem::Version(found) => write!(
+                f,
+                "{} is hard-state version {:?}, this build reads version {:?}",
+                self.path.display(),
+                *found as char,
+                HARD_STATE_MAGIC[3] as char
+            ),
+            HardStateProblem::Damaged(what) => {
+                write!(f, "{} is damaged: {}", self.path.display(), what)
+            }
+        }
+    }
+}
+
+impl std::error::Error for BadHardState {}
 
 /// Durably replace the hard state under `base_path`. Returns only once the
 /// new state is what a restart reads.
@@ -348,13 +409,11 @@ impl StorageEntity {
                     .truncate(false);
                 let mut last_log_id = 0;
                 let mut wal_index = WalIndex::default();
-                // Floors for the term, from the log: the highest entry term
-                // (a member never holds an entry from a term beyond its own),
-                // and -- for stores without a hard-state file only -- the
-                // last log id, which the record header carries where a term
-                // was meant and which earlier releases restored the term from.
+                // The highest entry term: a member never holds an entry from a
+                // term beyond its own, so the persisted term is checked
+                // against it.
                 let mut entry_term_floor = 0u64;
-                let mut id_floor = 0u64;
+                let mut wal_records = 0u64;
                 let mut storage = Self {
                     logs: if options.append_logs {
                         let mut log_file = open_opts.open(log_path.as_path())?;
@@ -405,7 +464,7 @@ impl StorageEntity {
                             }
                             match DiskLogEntry::decode(&data_buf) {
                                 Ok(entry) => {
-                                    id_floor = id_floor.max(entry.term);
+                                    wal_records += 1;
                                     entry_term_floor = entry_term_floor.max(entry.log.term);
                                     // Do not trust commit/last_applied embedded in WAL for SM reconstruction
                                     // We'll derive commit_index from commit.idx and force replay from last_applied=0
@@ -518,23 +577,25 @@ impl StorageEntity {
                         raised
                     }
                     None => {
-                        let derived = HardState {
-                            term: id_floor.max(entry_term_floor),
-                            voted_for: None,
-                        };
-                        if derived.term > 0 {
-                            warn!(
-                                "Plane {}: no {} (a store written before the term and vote were persisted); \
-                                 deriving term {} from the WAL (last log id {}, highest entry term {}) and writing it now",
-                                plane_id.raw(),
-                                HARD_STATE_FILE,
-                                derived.term,
-                                id_floor,
-                                entry_term_floor
-                            );
+                        // A brand-new store starts at term 0 with no vote. A
+                        // store with any history but no hard state cannot say
+                        // which term it is in or whom it voted for, and
+                        // guessing is how a member votes twice: refuse it.
+                        let has_history = wal_records > 0
+                            || std::fs::metadata(&snapshot_path).map_or(false, |m| m.len() > 0)
+                            || base_path.join("commit.idx").exists();
+                        if has_history {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                MissingHardState {
+                                    plane_id,
+                                    path: base_path.join(HARD_STATE_FILE),
+                                },
+                            ));
                         }
-                        write_hard_state(base_path, &derived)?;
-                        derived
+                        let fresh = HardState::default();
+                        write_hard_state(base_path, &fresh)?;
+                        fresh
                     }
                 };
                 *term = hard_state.term;

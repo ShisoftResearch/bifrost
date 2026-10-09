@@ -213,11 +213,12 @@ appends in its term.
 
 On a restart the persisted term is authoritative; "the term is at least every
 log entry's term and the snapshot's term" is checked, and violations are
-logged and raised. A store written before the hard state existed has no
-`hardstate.dat`: its term is derived from the WAL as before (last log id /
-entry terms), written at startup, and the log says so. A damaged file is an
-error at startup -- guessing the term or forgetting the vote is how a member
-votes twice.
+logged and raised. A brand-new store creates `hardstate.dat` at term 0; a
+store with a log, snapshot or commit index but no hard state refuses to start
+(`MissingHardState`) -- there is no derivation for stores written before the
+hard state existed, they are reimported. A damaged file is an error at
+startup too: guessing the term or forgetting the vote is how a member votes
+twice.
 
 ### Snapshot File Format
 

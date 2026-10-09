@@ -316,8 +316,9 @@ fn a_failed_hard_state_write_leaves_the_old_or_the_new_state() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A damaged hard-state file stops the member from starting: guessing a term
-/// or forgetting a vote is how a member votes twice.
+/// A damaged hard-state file, or one of another format version, stops the
+/// member from starting with a typed error: guessing a term or forgetting a
+/// vote is how a member votes twice, and there is no reader for old versions.
 #[test]
 fn a_damaged_hard_state_refuses_to_start() {
     let dir = super::compaction_tests::scratch_dir("hard_state_damaged");
@@ -326,13 +327,26 @@ fn a_damaged_hard_state_refuses_to_start() {
     let mut bytes = std::fs::read(&path).unwrap();
     bytes[6] ^= 0xff;
     std::fs::write(&path, &bytes).unwrap();
-    let opts = super::compaction_tests::disk_options(&dir, NEVER, NEVER);
-    let (mut term, mut commit, mut applied) = (0, 0, 0);
-    let mut logs = LogsMap::new();
-    match StorageEntity::new_with_options(&opts, &mut term, &mut commit, &mut applied, &mut logs) {
-        Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
-        Ok(_) => panic!("a damaged hard state was accepted"),
-    }
+    let problem = |dir: &std::path::Path| {
+        let opts = super::compaction_tests::disk_options(dir, NEVER, NEVER);
+        let (mut term, mut commit, mut applied) = (0, 0, 0);
+        let mut logs = LogsMap::new();
+        match StorageEntity::new_with_options(&opts, &mut term, &mut commit, &mut applied, &mut logs) {
+            Err(e) => e
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<disk::BadHardState>())
+                .map(|bad| bad.problem.clone())
+                .expect("a typed BadHardState"),
+            Ok(_) => panic!("an unreadable hard state was accepted"),
+        }
+    };
+    assert!(matches!(problem(&dir), disk::HardStateProblem::Damaged(_)));
+    // Another format version is refused as such, not read or reset.
+    let mut other_version = std::fs::read(&path).unwrap();
+    other_version[6] ^= 0xff; // restore the byte damaged above
+    other_version[3] = b'2';
+    std::fs::write(&path, &other_version).unwrap();
+    assert_eq!(problem(&dir), disk::HardStateProblem::Version(b'2'));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -448,40 +462,54 @@ async fn a_term_is_answered_in_only_once_durable() {
     }
 }
 
-/// A store from before the hard state was persisted: the term is derived the
-/// old way (the log's floor), written once with a log line, and from then on
-/// read back as is.
+/// A store with history but no hard state cannot know its term or vote: it
+/// refuses to start with a typed error (no derivation -- such stores are
+/// reimported). A brand-new store creates the file at term 0.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_store_without_hard_state_is_upgraded_once() {
+async fn a_store_with_history_but_no_hard_state_refuses_to_start() {
     let _ = env_logger::try_init();
-    let mut members = cluster("upgrade", 1, NEVER).await;
-    let mut node = members.remove(0);
+    let mut members = cluster("no_hard_state", 1, NEVER).await;
+    let node = members.remove(0);
     for _ in 0..4 {
         node.add(1).await;
     }
-    let (last_id, _) = node.position().await;
-    let dir = node.dir.clone();
-    let (dir_again, addr) = node.stop().await;
-    assert_eq!(dir, dir_again);
+    let (dir, _addr) = node.stop().await;
     std::fs::remove_file(dir.join("hardstate.dat")).expect("the store had a hard state");
 
-    node = Member::launch(&dir, &addr, NEVER).await;
-    let upgraded = disk::read_hard_state(&dir)
-        .unwrap()
-        .expect("the upgrade writes the hard state");
+    let opts = super::compaction_tests::disk_options(&dir, NEVER, NEVER);
+    let (mut term, mut commit, mut applied) = (0, 0, 0);
+    let mut logs = LogsMap::new();
+    let err = match StorageEntity::new_with_options(&opts, &mut term, &mut commit, &mut applied, &mut logs) {
+        Err(e) => e,
+        Ok(_) => panic!("a store with a log but no hard state started"),
+    };
     assert!(
-        upgraded.term >= last_id,
-        "the derived term {} is below the old floor (last log id {})",
-        upgraded.term,
-        last_id
+        err.get_ref()
+            .and_then(|inner| inner.downcast_ref::<disk::MissingHardState>())
+            .is_some(),
+        "expected MissingHardState, got {:?}",
+        err
     );
-    assert_eq!(upgraded.voted_for, None);
-    assert_eq!(node.value().await, 4);
-    // Later restarts read it back instead of deriving it again.
-    let term = node.svc.read_meta().await.term;
-    node = restart(node, NEVER).await;
-    assert_eq!(node.svc.read_meta().await.term, term);
-    let (value, _) = node.add(1).await;
-    assert_eq!(value, 5);
-    node.stop().await;
+    assert!(
+        !dir.join("hardstate.dat").exists(),
+        "the refusal must not invent a hard state"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_new_store_creates_its_hard_state() {
+    let dir = super::compaction_tests::scratch_dir("fresh_hard_state");
+    let opts = super::compaction_tests::disk_options(&dir, NEVER, NEVER);
+    let (mut term, mut commit, mut applied) = (0, 0, 0);
+    let mut logs = LogsMap::new();
+    let storage =
+        StorageEntity::new_with_options(&opts, &mut term, &mut commit, &mut applied, &mut logs)
+            .expect("a new store starts")
+            .expect("disk storage");
+    assert_eq!(term, 0);
+    assert_eq!(storage.hard_state, HardState::default());
+    assert_eq!(disk::read_hard_state(&dir).unwrap(), Some(HardState::default()));
+    drop(storage);
+    let _ = std::fs::remove_dir_all(&dir);
 }

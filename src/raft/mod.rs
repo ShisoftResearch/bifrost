@@ -127,8 +127,7 @@ pub enum ClientCmdResponse {
     /// The leader could not make the command (or its commit) durable: it is
     /// not committed and not applied. Whether it still commits later -- its
     /// entry may already be in followers' logs -- is unknown; it is never
-    /// acknowledged. A client that predates this variant fails to decode it
-    /// and treats the answer as a transport error.
+    /// acknowledged.
     StorageFailure(String),
 }
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -145,11 +144,7 @@ pub enum ClientQryResponse {
         /// The serving member's last log position (entry or snapshot
         /// boundary), so the client can tell apply lag (`last_log_id` below
         /// this) from a cursor that is ahead of the member's whole log.
-        /// Absent (`None`) from a member that predates the field: the codec
-        /// is self-describing, so old and new members still understand each
-        /// other in both directions.
-        #[serde(default)]
-        last_log_index: Option<u64>,
+        last_log_index: u64,
     },
 }
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -169,11 +164,20 @@ impl ClientClusterInfo {
     }
 }
 
-/// InstallSnapshot's answer when the member could not persist the snapshot
-/// (or a term it adopted) and installed nothing. The answer is otherwise the
-/// member's term, which never reaches this value; a leader that predates it
-/// ignores the answer, finds the member still behind and sends it again.
-pub const INSTALL_SNAPSHOT_NOT_PERSISTED: u64 = u64::MAX;
+/// InstallSnapshot's answer.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallSnapshotResult {
+    /// The member holds the snapshot's state: installed now, or already
+    /// applied past it.
+    Installed,
+    /// The sender's term is stale; the member is at this term.
+    TermOut(u64),
+    /// The snapshot, the log cut or the adopted term could not be persisted;
+    /// nothing was installed.
+    NotPersisted,
+    /// The member does not serve this plane (unknown or shutting down).
+    Rejected,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum AppendEntriesResult {
@@ -181,9 +185,8 @@ pub enum AppendEntriesResult {
     TermOut(u64),
     LogMismatch,
     /// The follower could not make the entries (or a term it adopted)
-    /// durable, so it does not acknowledge them. A leader that predates this
-    /// variant fails to decode it and treats the answer as a transport error
-    /// -- it retries at the next heartbeat either way.
+    /// durable, so it does not acknowledge them; the leader retries at the
+    /// next heartbeat.
     NotPersisted,
 }
 
@@ -200,7 +203,7 @@ type LogsMap = BTreeMap<u64, LogEntry>;
 service! {
     rpc append_entries(plane_id: PlaneId, term: u64, leader_id: u64, prev_log_id: u64, prev_log_term: u64, entries: &Option<LogEntries>, leader_commit: u64) -> (u64, AppendEntriesResult);
     rpc request_vote(plane_id: PlaneId, term: u64, candidate_id: u64, last_log_id: u64, last_log_term: u64) -> ((u64, u64), bool); // term, voteGranted
-    rpc install_snapshot(plane_id: PlaneId, term: u64, leader_id: u64, last_included_index: u64, last_included_term: u64, data: Vec<u8>) -> u64;
+    rpc install_snapshot(plane_id: PlaneId, term: u64, leader_id: u64, last_included_index: u64, last_included_term: u64, data: Vec<u8>) -> InstallSnapshotResult;
     rpc reelect(plane_id: PlaneId) -> bool;
     rpc c_command(plane_id: PlaneId, entry: LogEntry) -> ClientCmdResponse;
     rpc c_query(plane_id: PlaneId, entry: &LogEntry) -> ClientQryResponse;
@@ -3202,25 +3205,26 @@ impl RaftService {
                     .install_snapshot(plane_id, term, leader_id, index, snapshot_term, snapshot.snapshot)
                     .await
                 {
-                    Ok(INSTALL_SNAPSHOT_NOT_PERSISTED) => {
-                        // It installed nothing; send it again next round.
-                        warn!(
-                            "Follower {} on plane {} could not persist the snapshot at {}",
-                            member_id,
-                            plane_id.raw(),
-                            index
-                        );
+                    Ok(InstallSnapshotResult::Installed) => {
+                        follower.next_index = index + 1;
+                        follower.match_index = index;
                     }
-                    Ok(follower_term) if follower_term > term => {
+                    Ok(InstallSnapshotResult::TermOut(follower_term)) => {
                         // Refused as from a stale term: this leader is deposed.
                         return HeartbeatReplicationResult::TermOut {
                             term: follower_term,
                             leader_id: 0,
                         };
                     }
-                    Ok(_) => {
-                        follower.next_index = index + 1;
-                        follower.match_index = index;
+                    Ok(refusal) => {
+                        // It installed nothing; send it again next round.
+                        warn!(
+                            "Follower {} on plane {} did not install the snapshot at {}: {:?}",
+                            member_id,
+                            plane_id.raw(),
+                            index,
+                            refusal
+                        );
                     }
                     Err(_) => {}
                 }
@@ -3264,7 +3268,7 @@ impl RaftService {
                             .get(&last_applied)
                             .map(|e| e.term)
                             .unwrap_or(last_snapshot_term);
-                        if let Ok(_) = rpc
+                        if let Ok(InstallSnapshotResult::Installed) = rpc
                             .install_snapshot(
                                 plane_id,
                                 term,
@@ -3589,7 +3593,7 @@ impl RaftService {
         last_included_index: u64,
         last_included_term: u64,
         data: Vec<u8>,
-    ) -> u64 {
+    ) -> InstallSnapshotResult {
         if !self.check_term_on_plane(leader_flag, &mut meta, term, leader_id) {
             // A deposed leader's image; the reply's term tells it so.
             warn!(
@@ -3599,7 +3603,7 @@ impl RaftService {
                 term,
                 meta.term
             );
-            return meta.term;
+            return InstallSnapshotResult::TermOut(meta.term);
         }
         if let Err(e) = persist_hard_state(&meta).await {
             error!(
@@ -3609,7 +3613,7 @@ impl RaftService {
                 leader_id,
                 e
             );
-            return INSTALL_SNAPSHOT_NOT_PERSISTED;
+            return InstallSnapshotResult::NotPersisted;
         }
         meta.leader_id = leader_id;
         self.reset_last_checked(&mut meta);
@@ -3624,13 +3628,13 @@ impl RaftService {
                 last_included_index,
                 meta.last_applied
             );
-            return meta.term;
+            return InstallSnapshotResult::Installed;
         }
 
         // Durable before it takes effect: a member that answers and then
         // crashes must come back with the snapshot, not with the state it
         // replaced. A failed write installs nothing and answers
-        // INSTALL_SNAPSHOT_NOT_PERSISTED; the leader sends the snapshot again.
+        // NotPersisted; the leader sends the snapshot again.
         let snapshot_entity = SnapshotEntity {
             last_included_index,
             last_included_term,
@@ -3663,7 +3667,7 @@ impl RaftService {
                     last_included_index,
                     e
                 );
-                return INSTALL_SNAPSHOT_NOT_PERSISTED;
+                return InstallSnapshotResult::NotPersisted;
             }
             storage.forget_records_through(last_included_index);
         }
@@ -3692,7 +3696,7 @@ impl RaftService {
         check_commit(&mut meta).await;
 
         self.reset_last_checked(&mut meta);
-        meta.term
+        InstallSnapshotResult::Installed
     }
 
     async fn handle_client_command_on_meta<'a>(
@@ -3819,7 +3823,7 @@ impl RaftService {
             ClientQryResponse::LeftBehind {
                 last_log_term,
                 last_log_id: meta.last_applied,
-                last_log_index: Some(last_log_index),
+                last_log_index,
             }
         } else {
             let qry_res = meta.state_machine.read().await.exec_qry(entry).await;
@@ -4317,7 +4321,7 @@ impl Service for RaftService {
         last_included_index: u64,
         last_included_term: u64,
         data: Vec<u8>,
-    ) -> BoxFuture<u64> {
+    ) -> BoxFuture<InstallSnapshotResult> {
         async move {
             match self.resolve_plane_runtime(plane_id, true, false).await {
                 Ok((Some(runtime), _)) => {
@@ -4352,7 +4356,7 @@ impl Service for RaftService {
                         plane_id.raw(),
                         err
                     );
-                    0
+                    InstallSnapshotResult::Rejected
                 }
             }
         }
@@ -4413,7 +4417,7 @@ impl Service for RaftService {
                     ClientQryResponse::LeftBehind {
                         last_log_term: 0,
                         last_log_id: 0,
-                        last_log_index: None,
+                        last_log_index: 0,
                     }
                 }
             }
@@ -7474,6 +7478,14 @@ mod test {
             let temp_dir =
                 std::env::temp_dir().join(format!("raft_partial_{}", rand::random::<u64>()));
             std::fs::create_dir_all(&temp_dir).unwrap();
+            disk::write_hard_state(
+                &temp_dir,
+                &disk::HardState {
+                    term: 1,
+                    voted_for: None,
+                },
+            )
+            .unwrap();
             let log_path = temp_dir.join("log.dat");
             const N: usize = 5;
             const DATA_LEN: usize = 8; // bytes per entry's data field
@@ -7613,6 +7625,14 @@ mod test {
 
             let temp_dir = std::env::temp_dir().join(format!("raft_crc_{}", rand::random::<u64>()));
             std::fs::create_dir_all(&temp_dir).unwrap();
+            disk::write_hard_state(
+                &temp_dir,
+                &disk::HardState {
+                    term: 1,
+                    voted_for: None,
+                },
+            )
+            .unwrap();
             let log_path = temp_dir.join("log.dat");
 
             const N: usize = 6;

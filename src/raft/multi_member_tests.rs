@@ -639,13 +639,12 @@ async fn the_leader_applies_an_earlier_uncommitted_entry_in_order() {
     }
 }
 
-/// The WAL record header carries the log ID where a term was meant, and
-/// startup restored the raft term from it. A member whose last entry's term is
-/// above its last id then restarts at a LOWER term than its own log: the next
-/// entries carry a term below an earlier entry's, which breaks the up-to-date
-/// comparison of Raft section 5.4.1 (later term wins) -- a candidate holding
-/// only the older, higher-termed entry outranks voters holding the newer
-/// committed one, and can overwrite it.
+/// The persisted term is checked against the log on restart: a member never
+/// holds an entry from a term beyond its own, so a hard state below the log's
+/// entry terms is raised (with an error log) rather than trusted. Running
+/// below the log, the next leader term would rank older entries above newer
+/// ones (section 5.4.1), and a candidate holding only the older entry could
+/// overwrite a newer committed one.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_restart_never_lowers_the_term_below_the_log() {
     let _ = env_logger::try_init();
@@ -672,6 +671,16 @@ async fn a_restart_never_lowers_the_term_below_the_log() {
         let mut commit = std::fs::File::create(dir.join("commit.idx")).unwrap();
         commit.write_all(&3u64.to_le_bytes()).unwrap();
         commit.write_all(&3u64.to_le_bytes()).unwrap();
+        // A hard state below the log's terms -- what an inconsistent store
+        // would hold.
+        super::disk::write_hard_state(
+            &dir,
+            &super::disk::HardState {
+                term: 3,
+                voted_for: None,
+            },
+        )
+        .unwrap();
     }
     let addr = addresses(1).remove(0);
     let node = Member::launch(&dir, &addr, NEVER).await;
