@@ -171,13 +171,6 @@ You can adjust these constants based on your needs:
 3. **Chaos testing**: Randomly kill/restart nodes to test recovery paths
 4. **Long-running stability**: Monitor for log growth and state flapping
 
-## Backward Compatibility
-
-All changes are backward compatible:
-- Wire protocol unchanged
-- State machine behavior unchanged (only timing/resilience improved)
-- Existing clusters will benefit immediately upon upgrade
-
 ## Performance Impact
 
 - **Minimal CPU overhead**: Simple counter increments
