@@ -426,6 +426,8 @@ impl StorageEntity {
         meta: &'a RwLockWriteGuard<'a, RaftMeta>,
         logs: &'a RwLockWriteGuard<'a, LogsMap>,
     ) -> io::Result<()> {
+        #[cfg(test)]
+        let base_path = self.base_path.clone();
         if let Some(f) = &mut self.logs {
             let was_last_term = self.last_term;
             let mut counter = 0;
@@ -448,7 +450,7 @@ impl StorageEntity {
                 let record_len = 4u64 + entry_data.len() as u64;
                 let written = async {
                     #[cfg(test)]
-                    failpoint(&self.base_path, Fail::WalAppend)?;
+                    failpoint(&base_path, Fail::WalAppend)?;
                     f.write_all(&record_len.to_le_bytes()).await?;
                     f.write_all(&checksum.to_le_bytes()).await?;
                     f.write_all(entry_data.as_slice()).await
@@ -470,7 +472,7 @@ impl StorageEntity {
             }
             if counter > 0 {
                 #[cfg(test)]
-                failpoint(&self.base_path, Fail::WalSync)?;
+                failpoint(&base_path, Fail::WalSync)?;
                 f.sync_all().await?;
                 debug!(
                     "Appended and persisted {} logs for plane {}, was {}, appended {:?}",
