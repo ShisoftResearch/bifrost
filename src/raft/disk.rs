@@ -588,13 +588,23 @@ impl StorageEntity {
 
     /// Read and validate snapshot from disk
     pub async fn read_snapshot(&self) -> io::Result<Option<SnapshotEntity>> {
-        let snapshot_path = self.base_path.join("snapshot.dat");
+        Self::read_snapshot_at(&self.base_path, self.plane_id).await
+    }
+
+    /// Read the snapshot persisted under `base_path` without the storage
+    /// lock. `write_snapshot` replaces the file by rename, so a concurrent
+    /// read sees one complete snapshot or the other, never a mix.
+    pub async fn read_snapshot_at(
+        base_path: &Path,
+        plane_id: PlaneId,
+    ) -> io::Result<Option<SnapshotEntity>> {
+        let snapshot_path = base_path.join("snapshot.dat");
 
         // Check if snapshot file exists
         if !snapshot_path.exists() {
             debug!(
                 "No snapshot file found for plane {} at {:?}",
-                self.plane_id.raw(),
+                plane_id.raw(),
                 snapshot_path
             );
             return Ok(None);
@@ -607,7 +617,7 @@ impl StorageEntity {
         if file.read_exact(&mut checksum_buf).await.is_err() {
             warn!(
                 "Failed to read snapshot checksum for plane {}, file may be corrupted",
-                self.plane_id.raw()
+                plane_id.raw()
             );
             return Ok(None);
         }
@@ -618,7 +628,7 @@ impl StorageEntity {
         if file.read_exact(&mut len_buf).await.is_err() {
             warn!(
                 "Failed to read snapshot length for plane {}, file may be corrupted",
-                self.plane_id.raw()
+                plane_id.raw()
             );
             return Ok(None);
         }
@@ -629,7 +639,7 @@ impl StorageEntity {
         if file.read_exact(&mut data_buf).await.is_err() {
             warn!(
                 "Failed to read snapshot data for plane {}, file may be corrupted",
-                self.plane_id.raw()
+                plane_id.raw()
             );
             return Ok(None);
         }
@@ -639,7 +649,7 @@ impl StorageEntity {
         if actual_checksum != expected_checksum {
             error!(
                 "Snapshot checksum mismatch on plane {}! Expected: {}, Got: {}. File is corrupted.",
-                self.plane_id.raw(),
+                plane_id.raw(),
                 expected_checksum,
                 actual_checksum
             );
@@ -651,7 +661,7 @@ impl StorageEntity {
 
         info!(
             "Snapshot loaded from disk for plane {}: index={}, term={}, size={} bytes",
-            self.plane_id.raw(),
+            plane_id.raw(),
             snapshot.last_included_index,
             snapshot.last_included_term,
             data_buf.len()

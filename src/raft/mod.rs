@@ -21,7 +21,7 @@ use std::collections::Bound::{Included, Unbounded};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Mutex as StdMutex;
@@ -2899,6 +2899,14 @@ impl RaftService {
             let leader_id = meta.leader_id;
             debug_assert_eq!(self.id, leader_id);
             let mut heartbeat_futs = FuturesUnordered::new();
+            // A follower behind the snapshot gets the PERSISTED snapshot: its
+            // image, index and term were written together.
+            let snapshot_dir = match meta.storage {
+                Some(ref storage) if meta.last_snapshot_index > 0 => {
+                    Some(storage.lock().await.base_path.clone())
+                }
+                _ => None,
+            };
             // Send out heartbeats
             {
                 let leader_meta = leader_meta.read().await;
@@ -2929,6 +2937,7 @@ impl RaftService {
                         meta.last_applied,
                         meta.last_snapshot_index,
                         meta.last_snapshot_term,
+                        snapshot_dir.clone(),
                         meta.state_machine.clone(),
                         meta.logs.clone(),
                         follower.clone(),
@@ -3045,6 +3054,7 @@ impl RaftService {
         last_applied: u64,
         last_snapshot_index: u64,
         last_snapshot_term: u64,
+        snapshot_dir: Option<PathBuf>,
         master_sm: Arc<RwLock<MasterStateMachine>>,
         logs: Arc<RwLock<LogsMap>>,
         follower: Arc<Mutex<FollowerStatus>>,
@@ -3105,22 +3115,35 @@ impl RaftService {
                     "Follower {} on plane {} needs compacted logs (next_index: {} <= snapshot_index: {}), sending snapshot",
                     member_id, plane_id.raw(), follower.next_index, last_snapshot_index
                 );
-                let master_sm = master_sm.read().await;
-                let snapshot = master_sm.snapshot();
-                // Use the correct last_included_term from snapshot metadata (Issue 2)
+                // The image must be the one taken AT that index. The live
+                // state machine is ahead of it (it has applied entries since)
+                // -- shipped under the snapshot's index, the follower would
+                // apply those entries a second time when they arrive.
+                let persisted = match snapshot_dir.as_deref() {
+                    Some(dir) => disk::StorageEntity::read_snapshot_at(dir, plane_id).await,
+                    None => Ok(None),
+                };
+                let snapshot = match persisted {
+                    Ok(Some(snapshot)) => snapshot,
+                    other => {
+                        error!(
+                            "Follower {} on plane {} needs the snapshot at {}, which cannot be read: {:?}",
+                            member_id,
+                            plane_id.raw(),
+                            last_snapshot_index,
+                            other.map(|s| s.map(|s| s.last_included_index))
+                        );
+                        return HeartbeatReplicationResult::Matched(follower.match_index);
+                    }
+                };
+                let (index, snapshot_term) =
+                    (snapshot.last_included_index, snapshot.last_included_term);
                 if let Ok(_) = rpc
-                    .install_snapshot(
-                        plane_id,
-                        term,
-                        leader_id,
-                        last_snapshot_index,
-                        last_snapshot_term,
-                        snapshot,
-                    )
+                    .install_snapshot(plane_id, term, leader_id, index, snapshot_term, snapshot.snapshot)
                     .await
                 {
-                    follower.next_index = last_snapshot_index + 1;
-                    follower.match_index = last_snapshot_index;
+                    follower.next_index = index + 1;
+                    follower.match_index = index;
                 }
                 return HeartbeatReplicationResult::Matched(follower.match_index);
             }
@@ -3423,33 +3446,90 @@ impl RaftService {
         last_included_term: u64,
         data: Vec<u8>,
     ) -> u64 {
-        let term_ok = self.check_term_on_plane(leader_flag, &mut meta, term, leader_id);
-        if term_ok {
-            check_commit(&mut meta).await;
+        if !self.check_term_on_plane(leader_flag, &mut meta, term, leader_id) {
+            // A deposed leader's image; the reply's term tells it so.
+            warn!(
+                "Refusing InstallSnapshot on plane {} from leader {} at stale term {} (current term {})",
+                self.plane_id().raw(),
+                leader_id,
+                term,
+                meta.term
+            );
+            return meta.term;
         }
-
-        meta.state_machine.write().await.recover(data.clone()).await;
-        meta.last_snapshot_index = last_included_index;
-        meta.last_snapshot_term = last_included_term;
-        meta.commit_index = last_included_index;
-        meta.last_applied = last_included_index;
-
-        {
-            let mut logs = meta.logs.write().await;
-            logs.retain(|&id, _| id > last_included_index);
-        }
-
-        if let Some(ref storage) = meta.storage {
-            let snapshot_entity = SnapshotEntity {
+        self.reset_last_checked(&mut meta);
+        check_commit(&mut meta).await;
+        if last_included_index <= meta.last_applied {
+            // Retransmitted or overtaken: everything it covers is applied here
+            // already. Installing it would roll the state machine back (Raft
+            // section 7: a snapshot of a prefix of the log changes nothing).
+            debug!(
+                "Ignoring InstallSnapshot on plane {} at index {}: already applied up to {}",
+                self.plane_id().raw(),
                 last_included_index,
-                last_included_term,
-                snapshot: data,
-            };
+                meta.last_applied
+            );
+            return meta.term;
+        }
+
+        // Durable before it takes effect: a member that answers and then
+        // crashes must come back with the snapshot, not with the state it
+        // replaced. A failed write installs nothing; the leader finds the
+        // member still behind and sends the snapshot again.
+        let snapshot_entity = SnapshotEntity {
+            last_included_index,
+            last_included_term,
+            snapshot: data,
+        };
+        if let Some(ref storage) = meta.storage {
             let mut storage = storage.lock().await;
             if let Err(e) = storage.write_snapshot(&snapshot_entity).await {
-                error!("Failed to persist snapshot to disk: {:?}", e);
+                error!(
+                    "Failed to persist the installed snapshot on plane {} at index {}: {:?}; not installing it",
+                    self.plane_id().raw(),
+                    last_included_index,
+                    e
+                );
+                return meta.term;
             }
+            storage.forget_records_through(last_included_index);
         }
+
+        // Raft section 7: if this member holds the snapshot's last included
+        // entry, the entries after it are valid and stay; otherwise its whole
+        // log is superseded -- in memory and on disk, or a replay would bring
+        // an unverified suffix back above the snapshot.
+        let keep_suffix = {
+            let mut logs = meta.logs.write().await;
+            let keep = logs
+                .get(&last_included_index)
+                .map_or(false, |entry| entry.term == last_included_term);
+            if keep {
+                logs.retain(|&id, _| id > last_included_index);
+            } else {
+                logs.clear();
+            }
+            keep
+        };
+        if !keep_suffix {
+            self.discard_durable_suffix(&meta, last_included_index + 1)
+                .await;
+        }
+
+        {
+            let mut master_sm = meta.state_machine.write().await;
+            master_sm.recover(snapshot_entity.snapshot).await;
+            // `recover` only stages the images; registered state machines
+            // (and the member list) take theirs now, later registrations at
+            // registration.
+            master_sm.recover_registered_snapshots().await;
+        }
+        meta.last_snapshot_index = last_included_index;
+        meta.last_snapshot_term = last_included_term;
+        meta.last_applied = last_included_index;
+        meta.commit_index = max(meta.commit_index, last_included_index);
+        // A kept suffix may already be committed.
+        check_commit(&mut meta).await;
 
         self.reset_last_checked(&mut meta);
         meta.term
