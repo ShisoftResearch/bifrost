@@ -485,3 +485,20 @@ Put these items in backticks.
 
 "Mostly" applies: if a strict rule makes the text less clear, write the clear text.
 If the user asks for a different style, use the style of the user.
+
+## 10.3 Build Caches and Disk Space
+
+Build caches can be built again. Thus you can delete them without permission from the user.
+On the dev box, the cargo target dirs are under `/mnt/optane/cargo-target`.
+
+If the build disk has less than 50 GB free, or a build fails with `ENOSPC` (no space left on device):
+
+1. Find the stale target dirs. A target dir is stale if no running build or test uses it.
+2. Delete the stale target dirs first.
+3. If the disk is still too full, run `cargo clean` on the largest target dirs.
+4. Do not ask the user before you do this. Write what you deleted and the free space after it in your report.
+
+CAUTION: Delete build caches only. Do not delete data dirs, WAL, backup or raft stores, scratch results, logs,
+or any other file that a build cannot make again.
+
+CAUTION: Do not delete a target dir that a running build or test of another worker uses.
