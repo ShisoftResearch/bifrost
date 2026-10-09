@@ -43,10 +43,12 @@ pub struct StorageEntity {
     pub logs: Option<File>,
     pub snapshot: Option<File>,
     /// Despite the name: the id of the last log entry appended to `log.dat`.
-    /// `append_logs` writes only the entries above it, which is sound because
-    /// log ids are strictly increasing -- including across snapshot and
-    /// compaction, where the next id continues from the snapshot's last
-    /// included index (`last_log_position`) instead of restarting at 1.
+    /// `append_logs` writes only the entries above it. That is sound because
+    /// a leader's ids only grow -- including across snapshot and compaction,
+    /// where the next id continues from the snapshot's last included index
+    /// (`last_log_position`) instead of restarting at 1 -- and because a
+    /// follower that discards a conflicting suffix moves it back below that
+    /// suffix (`truncate_from`), so the replacing entries are written.
     pub last_term: u64,
     pub base_path: PathBuf,
     pub plane_id: PlaneId,

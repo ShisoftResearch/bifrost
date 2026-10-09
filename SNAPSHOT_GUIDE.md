@@ -114,25 +114,33 @@ load_snapshot_on_startup();
 
 **What happens**:
 1. Leader detects: `follower.next_index <= leader.last_snapshot_index`
-2. Leader generates snapshot from state machines
-3. Leader sends via `install_snapshot` RPC
-4. Follower receives snapshot
-5. Follower recovers state machine
-6. Follower persists snapshot to disk
-7. Follower compacts old logs
-8. Follower continues with normal log replication
+2. Leader reads its PERSISTED snapshot (`snapshot.dat`): image, index and term
+   were written together. Never the live state machine: it is ahead of the
+   snapshot index, and a follower would apply the entries in between twice.
+3. Leader sends it via the `install_snapshot` RPC, labelled with the
+   snapshot's own index and term
+4. Follower refuses it from a stale term, and ignores it when it has already
+   applied up to that index (a retransmitted or older snapshot changes nothing)
+5. Follower persists the snapshot (a failed write installs nothing; the
+   leader sends it again)
+6. Follower keeps its log after the snapshot index only if it holds the
+   snapshot's last entry with the same term; otherwise its whole log is
+   superseded, in memory and in `log.dat`
+7. Follower recovers its registered state machines and member list from it
+   (later registrations recover at registration)
+8. Follower continues with normal log replication from `index + 1`
 
 ```rust
 // In send_follower_heartbeat()
 if follower.next_index <= last_snapshot_index {
-    // Follower needs compacted logs - send snapshot
-    let snapshot = master_sm.snapshot().unwrap();
+    let snapshot = StorageEntity::read_snapshot_at(dir, plane_id).await?;
     rpc.install_snapshot(
+        plane_id,
         term,
         leader_id,
-        last_snapshot_index,
-        last_snapshot_term,
-        snapshot
+        snapshot.last_included_index,
+        snapshot.last_included_term,
+        snapshot.snapshot,
     ).await;
 }
 ```
