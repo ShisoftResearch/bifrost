@@ -3345,10 +3345,11 @@ impl RaftService {
                             plane_id.raw(),
                             member_id
                         );
-                        if let Some(last_entries_id) = last_entries_id {
-                            follower.next_index = last_entries_id + 1;
-                            follower.match_index = last_entries_id;
-                        }
+                        // An empty heartbeat also verifies prev_log_id. A new
+                        // leader needs that confirmation for existing entries.
+                        let matched_id = last_entries_id.unwrap_or(follower_last_log_id);
+                        follower.next_index = matched_id + 1;
+                        follower.match_index = matched_id;
                     }
                     AppendEntriesResult::LogMismatch => {
                         debug!(
@@ -4669,6 +4670,85 @@ mod test {
     use crate::utils::time::async_wait_secs;
     use futures::FutureExt;
     use std::sync::Arc;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn empty_heartbeat_confirms_an_existing_log_after_election() {
+        use crate::rpc::ServiceClientWithId;
+        // A new leader starts each follower at next_index = last_log + 1,
+        // match_index = 0. The follower already holds the log in this case.
+        let reservation = tokio::net::TcpSocket::new_v4().unwrap();
+        reservation.set_reuseaddr(false).unwrap();
+        reservation.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = reservation.local_addr().unwrap().to_string();
+        reservation.set_reuseaddr(true).unwrap();
+        let service = RaftService::new(Options {
+            storage: Storage::MEMORY,
+            address: address.clone(),
+            service_id: DEFAULT_SERVICE_ID,
+        });
+        let server = Server::new(&address);
+        server.register_service(&service).await;
+        Server::listen_and_resume(&server).await;
+        let entry = LogEntry {
+            id: 3,
+            term: 1,
+            sm_id: 77,
+            fn_id: 0,
+            data: vec![],
+        };
+        let (logs, state_machine) = {
+            let meta = service.meta.read().await;
+            for id in 1..=entry.id {
+                meta.logs.write().await.insert(
+                    id,
+                    LogEntry {
+                        id,
+                        ..entry.clone()
+                    },
+                );
+            }
+            let leader_logs = meta.logs.read().await.clone();
+            (
+                Arc::new(super::RwLock::new(leader_logs)),
+                meta.state_machine.clone(),
+            )
+        };
+        let follower = Arc::new(super::Mutex::new(super::FollowerStatus {
+            next_index: 4,
+            match_index: 0,
+        }));
+        let client = crate::rpc::DEFAULT_CLIENT_POOL.get(&address).await.unwrap();
+        let rpc = super::AsyncServiceClient::new(&client);
+        let result = RaftService::send_follower_heartbeat(
+            PlaneId::type1(),
+            0,
+            2,
+            999,
+            0,
+            0,
+            0,
+            None,
+            state_machine,
+            logs,
+            follower.clone(),
+            rpc,
+            service.id,
+        )
+        .await;
+        let matched = match result {
+            super::HeartbeatReplicationResult::Matched(index) => index,
+            super::HeartbeatReplicationResult::TermOut { term, leader_id } => {
+                panic!("heartbeat rejected: term {term}, leader {leader_id}")
+            }
+        };
+        assert_eq!(matched, 3, "the empty heartbeat verifies prev_log_id");
+        let status = follower.lock().await;
+        assert_eq!(status.match_index, 3);
+        assert_eq!(status.next_index, 4);
+        drop(status);
+        service.shutdown().await;
+        server.shutdown().await;
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn runtime_spawn_does_not_escape_after_close_wins() {
