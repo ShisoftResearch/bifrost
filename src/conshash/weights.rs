@@ -79,3 +79,26 @@ impl Weights {
         Self::new_with_id(DEFAULT_SERVICE_ID, raft_service).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::executor::block_on;
+
+    #[test]
+    fn snapshot_round_trips_under_the_active_codec() {
+        let mut sm = Weights {
+            groups: HashMap::new(),
+            id: 1,
+        };
+        sm.groups.entry(7).or_default().insert(100, 3);
+        sm.groups.entry(7).or_default().insert(200, 5);
+        let snapshot = StateMachineCtl::snapshot(&sm);
+        let mut restored = Weights {
+            groups: HashMap::new(),
+            id: 1,
+        };
+        block_on(StateMachineCtl::recover(&mut restored, snapshot));
+        assert_eq!(restored.groups, sm.groups);
+    }
+}

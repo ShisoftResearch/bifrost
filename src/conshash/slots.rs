@@ -572,6 +572,27 @@ mod tests {
         }
     }
 
+    /// Raft snapshots go through `utils::serde`: serde_json in debug, serde_cbor
+    /// in release. A snapshot that only one codec can write panics inside
+    /// `take_snapshot`, so every state machine round-trips its own.
+    #[test]
+    fn snapshot_round_trips_under_the_active_codec() {
+        let mut sm = new_sm();
+        block_on(sm.adopt_slots(G, vec![(1, A), (2, B)]));
+        block_on(sm.begin_slot_migration(G, 2, B, C)).unwrap();
+        let snapshot = StateMachineCtl::snapshot(&sm);
+        let mut restored = new_sm();
+        block_on(StateMachineCtl::recover(&mut restored, snapshot));
+        assert_eq!(
+            block_on(restored.slot_state(G, 1)),
+            Some(SlotState::Stable { owner: A })
+        );
+        assert_eq!(
+            block_on(restored.slot_state(G, 2)),
+            Some(SlotState::Migrating { from: B, to: C })
+        );
+    }
+
     #[test]
     fn a_slot_has_no_owner_until_one_is_assigned() {
         // Callers must be able to tell "not placed yet" from "placed on some
