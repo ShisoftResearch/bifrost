@@ -546,34 +546,18 @@ async fn a_leader_change_after_compaction_continues_the_log() {
     assert_eq!(read, 8);
 
     // The compacted ex-leader restarts from its snapshot + WAL and catches up.
-    //
-    // It restarts at a term ABOVE the plane's: startup restores the term from
-    // the WAL's last log id (the record header holds the id; see
-    // `a_restart_never_lowers_the_term_below_the_log`). Its first answer to
-    // the leader names that term, the leader steps down, and the plane only
-    // commits again once an election lands above it -- after 10-30 s of
-    // election timeout. Drive that election rather than wait it out. (A
-    // pre-existing liveness cost of not persisting the term; see the review.)
-    // B can even win with C, D and E before A's higher term reaches it, then
-    // step down at its first heartbeat to A -- so elect until B leads at or
-    // above A's term.
+    // Its persisted term is the one it stopped at, below the new leader's: it
+    // follows B, and nobody is deposed (it used to restart at its last log
+    // id, far above the plane's term, and force an election).
+    let leader_term = members[0].svc.read_meta().await.term;
     let a = Member::launch(&a_dir, &a_addr, 1).await;
-    let restarted_term = a.svc.read_meta().await.term;
-    let mut settled = false;
-    for _ in 0..8 {
-        async_wait_secs().await;
-        let b_term = members[0].svc.read_meta().await.term;
-        if members[0].is_leader().await && b_term >= restarted_term {
-            settled = true;
-            break;
-        }
-        Service::reelect(members[0].svc.as_ref(), PlaneId::type1()).await;
-    }
     assert!(
-        settled,
-        "B must lead at or above the restarted member's term {}",
-        restarted_term
+        a.svc.read_meta().await.term <= leader_term,
+        "the restarted member came back above the plane's term"
     );
+    async_wait_secs().await;
+    assert!(members[0].is_leader().await, "the restart deposed B");
+    assert_eq!(members[0].svc.read_meta().await.term, leader_term);
     members[0].add(1).await;
     let mut all: Vec<&Member> = members.iter().collect();
     all.push(&a);

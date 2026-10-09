@@ -11,9 +11,20 @@
 //! leader.
 
 use super::disk::failpoints::{self, Fail};
+use super::disk::{self, HardState, StorageEntity};
 use super::multi_member_tests::{add_entry, cluster, wait_for_values, Member, NEVER};
 use super::*;
 use crate::utils::time::async_wait_secs;
+
+/// Stop a member's raft but keep its RPC server listening. A restarting
+/// member replays its "add member" entries by connecting to each member, and
+/// silently drops one it cannot reach -- with every peer gone it would come
+/// back as a single-member plane and promote itself (a pre-existing gap in
+/// membership recovery, reported separately). Paused peers stay reachable
+/// and run no elections.
+async fn pause(member: &Member) {
+    member.svc.shutdown().await;
+}
 
 fn acknowledged(answer: &ClientCmdResponse) -> bool {
     matches!(answer, ClientCmdResponse::Success { .. })
@@ -185,11 +196,14 @@ async fn a_vote_is_not_forgotten_by_a_restart() {
         assert_eq!(wait_for_values(&all, 1).await, vec![1, 1, 1]);
     }
     let (last_id, last_term) = members[0].position().await;
-    // Far above the plane's term, so no ordinary election overtakes it
-    // during the test.
     let term = members[2].svc.read_meta().await.term + 1000;
     let (a, b) = (members[0].svc.id, members[1].svc.id);
     let voter = members.remove(2);
+    // Only the voter runs raft from here: no election of A's or B's can move
+    // its term under the test.
+    for member in members.iter() {
+        pause(member).await;
+    }
     let first = Service::request_vote(
         voter.svc.as_ref(),
         PlaneId::type1(),
@@ -259,4 +273,215 @@ async fn a_restarted_follower_rejoins_without_an_election() {
     for member in members {
         member.stop().await;
     }
+}
+
+const HARD_STATE_POINTS: [Fail; 3] = [
+    Fail::HardStateWrite,
+    Fail::HardStateRename,
+    Fail::HardStateDirSync,
+];
+
+/// Whether a failed hard-state write at `point` already replaced the file
+/// (the rename happened; only the directory fsync was missing). A crash there
+/// may leave either state on disk; in-process, the new one is visible.
+fn renamed_before(point: Fail) -> bool {
+    point == Fail::HardStateDirSync
+}
+
+/// Each point of the write sequence, failing: the file holds the old state or
+/// the new one, never a mix, and a leftover temp file changes nothing.
+#[test]
+fn a_failed_hard_state_write_leaves_the_old_or_the_new_state() {
+    let dir = super::compaction_tests::scratch_dir("hard_state_points");
+    let old = HardState {
+        term: 5,
+        voted_for: Some(11),
+    };
+    let new = HardState {
+        term: 6,
+        voted_for: Some(22),
+    };
+    for point in HARD_STATE_POINTS {
+        disk::write_hard_state(&dir, &old).unwrap();
+        failpoints::arm(&dir, point);
+        assert!(disk::write_hard_state(&dir, &new).is_err());
+        failpoints::disarm(&dir, point);
+        let read = disk::read_hard_state(&dir).unwrap().unwrap();
+        let expected = if renamed_before(point) { new } else { old };
+        assert_eq!(read, expected, "{:?}", point);
+        // Whatever was left behind, the next write wins.
+        disk::write_hard_state(&dir, &new).unwrap();
+        assert_eq!(disk::read_hard_state(&dir).unwrap(), Some(new));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A damaged hard-state file stops the member from starting: guessing a term
+/// or forgetting a vote is how a member votes twice.
+#[test]
+fn a_damaged_hard_state_refuses_to_start() {
+    let dir = super::compaction_tests::scratch_dir("hard_state_damaged");
+    disk::write_hard_state(&dir, &HardState { term: 9, voted_for: None }).unwrap();
+    let path = dir.join("hardstate.dat");
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[6] ^= 0xff;
+    std::fs::write(&path, &bytes).unwrap();
+    let opts = super::compaction_tests::disk_options(&dir, NEVER, NEVER);
+    let (mut term, mut commit, mut applied) = (0, 0, 0);
+    let mut logs = LogsMap::new();
+    match StorageEntity::new_with_options(&opts, &mut term, &mut commit, &mut applied, &mut logs) {
+        Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
+        Ok(_) => panic!("a damaged hard state was accepted"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A vote whose persistence fails at any point is answered "not granted", and
+/// after a restart the member's durable state is the old one or the full new
+/// one (term and vote together) -- never a vote it could deny having cast.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_vote_is_granted_only_once_durable() {
+    let _ = env_logger::try_init();
+    // Four members: the voter's configuration after a restart is replayed
+    // from its log, which holds the members that JOINED (B and C) but not the
+    // bootstrap member A (a pre-existing gap in membership recovery). The
+    // candidates are B and C.
+    let mut members = cluster("vote_points", 4, NEVER).await;
+    members[0].add(1).await;
+    {
+        let all: Vec<&Member> = members.iter().collect();
+        assert_eq!(wait_for_values(&all, 1).await, vec![1, 1, 1, 1]);
+    }
+    let (last_id, last_term) = members[0].position().await;
+    let (a, b) = (members[1].svc.id, members[2].svc.id);
+    let mut voter = members.remove(3);
+    // Only the voter runs raft from here: no election of A's or B's can move
+    // its term under the test.
+    for member in members.iter() {
+        pause(member).await;
+    }
+    let base = voter.svc.read_meta().await.term + 1000;
+    for (round, point) in HARD_STATE_POINTS.iter().copied().enumerate() {
+        let term = base + 10 * round as u64;
+        let before = {
+            let meta = voter.svc.read_meta().await;
+            (meta.term, meta.vote_for)
+        };
+        failpoints::arm(&voter.dir, point);
+        let answer = Service::request_vote(
+            voter.svc.as_ref(),
+            PlaneId::type1(),
+            term,
+            a,
+            last_id,
+            last_term,
+        )
+        .await;
+        failpoints::disarm(&voter.dir, point);
+        assert!(!answer.1, "{:?}: a vote that was not durable was granted", point);
+
+        voter = restart(voter, NEVER).await;
+        let durable = voter.svc.read_meta().await;
+        let (durable_term, durable_vote) = (durable.term, durable.vote_for);
+        drop(durable);
+        if renamed_before(point) {
+            assert_eq!((durable_term, durable_vote), (term, Some(a)), "{:?}", point);
+        } else {
+            assert_eq!((durable_term, durable_vote), before, "{:?}", point);
+        }
+        // Either way exactly one candidate can hold this member's vote in
+        // `term`: A if the vote reached the disk, otherwise whoever asks.
+        let other = Service::request_vote(
+            voter.svc.as_ref(),
+            PlaneId::type1(),
+            term,
+            b,
+            last_id,
+            last_term,
+        )
+        .await;
+        assert_eq!(other.1, !renamed_before(point), "{:?}", point);
+    }
+    voter.stop().await;
+    for member in members {
+        member.stop().await;
+    }
+}
+
+/// A term adopted from a leader is durable before the follower answers in it:
+/// if persisting fails at any point the AppendEntries is not acknowledged.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_term_is_answered_in_only_once_durable() {
+    let _ = env_logger::try_init();
+    let mut members = cluster("term_points", 3, NEVER).await;
+    members[0].add(1).await;
+    {
+        let all: Vec<&Member> = members.iter().collect();
+        assert_eq!(wait_for_values(&all, 1).await, vec![1, 1, 1]);
+    }
+    let leader_id = members[0].svc.id;
+    let mut follower = members.remove(2);
+    for member in members.iter() {
+        pause(member).await;
+    }
+    for (round, point) in HARD_STATE_POINTS.iter().copied().enumerate() {
+        let before = follower.svc.read_meta().await.term;
+        let term = before + 5 + round as u64;
+        failpoints::arm(&follower.dir, point);
+        let (_, answer) = append_one(&follower, term, leader_id).await;
+        failpoints::disarm(&follower.dir, point);
+        assert!(
+            matches!(answer, AppendEntriesResult::NotPersisted),
+            "{:?}: answered {:?} in a term it could not persist",
+            point,
+            answer
+        );
+        follower = restart(follower, NEVER).await;
+        let durable_term = follower.svc.read_meta().await.term;
+        let expected = if renamed_before(point) { term } else { before };
+        assert_eq!(durable_term, expected, "{:?}", point);
+        assert_eq!(follower.value().await, 1, "{:?}: an entry applied", point);
+    }
+    follower.stop().await;
+    for member in members {
+        member.stop().await;
+    }
+}
+
+/// A store from before the hard state was persisted: the term is derived the
+/// old way (the log's floor), written once with a log line, and from then on
+/// read back as is.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_without_hard_state_is_upgraded_once() {
+    let _ = env_logger::try_init();
+    let mut members = cluster("upgrade", 1, NEVER).await;
+    let mut node = members.remove(0);
+    for _ in 0..4 {
+        node.add(1).await;
+    }
+    let (last_id, _) = node.position().await;
+    let dir = node.dir.clone();
+    let (dir_again, addr) = node.stop().await;
+    assert_eq!(dir, dir_again);
+    std::fs::remove_file(dir.join("hardstate.dat")).expect("the store had a hard state");
+
+    node = Member::launch(&dir, &addr, NEVER).await;
+    let upgraded = disk::read_hard_state(&dir)
+        .unwrap()
+        .expect("the upgrade writes the hard state");
+    assert!(
+        upgraded.term >= last_id,
+        "the derived term {} is below the old floor (last log id {})",
+        upgraded.term,
+        last_id
+    );
+    assert_eq!(upgraded.voted_for, None);
+    assert_eq!(node.value().await, 4);
+    // Later restarts read it back instead of deriving it again.
+    let term = node.svc.read_meta().await.term;
+    node = restart(node, NEVER).await;
+    assert_eq!(node.svc.read_meta().await.term, term);
+    let (value, _) = node.add(1).await;
+    assert_eq!(value, 5);
+    node.stop().await;
 }
