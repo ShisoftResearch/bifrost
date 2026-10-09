@@ -263,3 +263,162 @@ async fn perf_cmd_throughput_three_members() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Election latency on a three-member plane: a member campaigns (new term,
+/// self-vote, RequestVote to both peers) until it leads. Each election
+/// persists the candidate's term and vote and each granting voter's -- the
+/// cost of keeping the hard state durable. Reports the median of
+/// `RAFT_PERF_ELECTIONS` elections, rotating the candidate.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn perf_election_latency() {
+    let rounds = env_u64("RAFT_PERF_ELECTIONS", 30) as usize;
+    let dirs: Vec<PathBuf> = (0..3).map(|i| perf_dir(&format!("elect_{}", i))).collect();
+    let base = 20000 + (rand::random::<u16>() % 20000);
+    let addrs: Vec<String> = (0..3)
+        .map(|i| format!("127.0.0.1:{}", base + i as u16))
+        .collect();
+    let mut nodes = Vec::new();
+    for (i, (dir, addr)) in dirs.iter().zip(addrs.iter()).enumerate() {
+        let svc = RaftService::new(Options {
+            storage: Storage::DISK(disk::DiskOptions {
+                path: dir.to_str().unwrap().to_string(),
+                take_snapshots: true,
+                append_logs: true,
+                trim_logs: true,
+                snapshot_log_threshold: u64::MAX / 2,
+                log_compaction_threshold: u64::MAX / 2,
+            }),
+            address: addr.clone(),
+            service_id: DEFAULT_SERVICE_ID,
+        });
+        let server = Server::new(addr);
+        server.register_service(&svc).await;
+        Server::listen_and_resume(&server).await;
+        assert!(RaftService::start(&svc, false).await);
+        svc.register_state_machine(Box::new(PerfLedger { value: 0 }))
+            .await;
+        if i == 0 {
+            svc.bootstrap().await;
+        } else {
+            svc.join(&vec![addrs[0].clone()]).await.unwrap();
+        }
+        svc.recover_after_register().await;
+        nodes.push((svc, server));
+    }
+    async_wait_secs().await;
+    let mut samples = Vec::with_capacity(rounds);
+    let mut lost = 0;
+    for round in 0..rounds {
+        let (svc, _) = &nodes[(round + 1) % 3];
+        let started = Instant::now();
+        let won = Service::reelect(svc.as_ref(), PlaneId::type1()).await;
+        let ms = started.elapsed().as_secs_f64() * 1e3;
+        if won {
+            samples.push(ms);
+        } else {
+            lost += 1;
+        }
+    }
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = samples[samples.len() / 2];
+    println!(
+        "PERF election_ms={:.3} elections={} lost={}",
+        median,
+        samples.len(),
+        lost
+    );
+    for (svc, server) in nodes {
+        svc.shutdown().await;
+        server.shutdown().await;
+    }
+    for dir in dirs {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// One RequestVote, answered: the same candidate asks one voter in a new,
+/// higher term each time, which every version grants. With the hard state
+/// persisted, each grant first writes (term, vote) -- temp file, fsync,
+/// rename, directory fsync. Reports the median of `RAFT_PERF_VOTES` answers.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn perf_vote_latency() {
+    let votes = env_u64("RAFT_PERF_VOTES", 200) as usize;
+    let dirs: Vec<PathBuf> = (0..3).map(|i| perf_dir(&format!("vote_{}", i))).collect();
+    let base = 20000 + (rand::random::<u16>() % 20000);
+    let addrs: Vec<String> = (0..3)
+        .map(|i| format!("127.0.0.1:{}", base + i as u16))
+        .collect();
+    let mut nodes = Vec::new();
+    for (i, (dir, addr)) in dirs.iter().zip(addrs.iter()).enumerate() {
+        let svc = RaftService::new(Options {
+            storage: Storage::DISK(disk::DiskOptions {
+                path: dir.to_str().unwrap().to_string(),
+                take_snapshots: true,
+                append_logs: true,
+                trim_logs: true,
+                snapshot_log_threshold: u64::MAX / 2,
+                log_compaction_threshold: u64::MAX / 2,
+            }),
+            address: addr.clone(),
+            service_id: DEFAULT_SERVICE_ID,
+        });
+        let server = Server::new(addr);
+        server.register_service(&svc).await;
+        Server::listen_and_resume(&server).await;
+        assert!(RaftService::start(&svc, false).await);
+        svc.register_state_machine(Box::new(PerfLedger { value: 0 }))
+            .await;
+        if i == 0 {
+            svc.bootstrap().await;
+        } else {
+            svc.join(&vec![addrs[0].clone()]).await.unwrap();
+        }
+        svc.recover_after_register().await;
+        nodes.push((svc, server));
+    }
+    async_wait_secs().await;
+    let candidate = nodes[1].0.id;
+    let voter = nodes[2].0.clone();
+    let (last_id, last_term) = {
+        let meta = voter.read_meta().await;
+        let logs = meta.logs.read().await;
+        last_log_position(&meta, &logs)
+    };
+    // Far above the plane's term: the leader steps aside, and no election of
+    // its own interferes during the run.
+    let first_term = voter.read_meta().await.term + 1_000_000;
+    let mut samples = Vec::with_capacity(votes);
+    let mut refused = 0;
+    for i in 0..votes {
+        let started = Instant::now();
+        let (_, granted) = Service::request_vote(
+            voter.as_ref(),
+            PlaneId::type1(),
+            first_term + i as u64,
+            candidate,
+            last_id,
+            last_term + 1_000_000,
+        )
+        .await;
+        samples.push(started.elapsed().as_secs_f64() * 1e3);
+        if !granted {
+            refused += 1;
+        }
+    }
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    println!(
+        "PERF vote_ms={:.4} votes={} refused={}",
+        samples[samples.len() / 2],
+        samples.len(),
+        refused
+    );
+    for (svc, server) in nodes {
+        svc.shutdown().await;
+        server.shutdown().await;
+    }
+    for dir in dirs {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
