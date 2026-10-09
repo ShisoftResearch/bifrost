@@ -463,12 +463,15 @@ impl RaftPlaneRuntime {
 
         let master_sm = MasterStateMachine::new_on_plane(plane_opts.service_id, plane_id);
         let (shutdown_tx, _shutdown_rx) = watch::channel(LifecycleState::Running);
+        let vote_for = storage_entity
+            .as_ref()
+            .and_then(|entity| entity.hard_state.voted_for);
 
         Ok(Self {
             plane_id,
             meta: RwLock::new(RaftMeta {
                 term,
-                vote_for: None,
+                vote_for,
                 timeout: gen_timeout(),
                 last_checked: get_time(),
                 membership: Membership::Undefined,
@@ -937,7 +940,14 @@ impl RaftService {
                             debug_assert!(meta.timeout > 100);
                             let timeout_time = meta.last_checked + meta.timeout;
                             let time_remains = timeout_time - current_time;
-                            if meta.vote_for.is_none() && time_remains < 0 {
+                            // A vote cast does not stop this member from
+                            // campaigning once the election timeout passes:
+                            // campaigning moves to a new term, where that
+                            // vote no longer applies. (Granting a vote resets
+                            // the timeout.) Latching on it -- and the vote is
+                            // now persisted -- left every voter of a leader
+                            // that later died unable to ever start an election.
+                            if time_remains < 0 {
                                 // An UNSEEDED plane runtime -- alone, no term,
                                 // no log -- must never elect itself. It has no
                                 // peers to campaign to, so the election it
@@ -1207,9 +1217,17 @@ impl RaftService {
 
                     meta.last_snapshot_index = snapshot.last_included_index;
                     meta.last_snapshot_term = snapshot.last_included_term;
-                    // Like the WAL's entries, the snapshot's term bounds the
-                    // restored term from below.
-                    meta.term = max(meta.term, snapshot.last_included_term);
+                    // A check, not a source: the persisted term already
+                    // covers every term this member accepted state from.
+                    if meta.term < snapshot.last_included_term {
+                        error!(
+                            "Plane {}: restored term {} is below its snapshot's term {}; raising it",
+                            plane_id.raw(),
+                            meta.term,
+                            snapshot.last_included_term
+                        );
+                        alter_term(meta, snapshot.last_included_term);
+                    }
 
                     // Snapshot restore must reset the apply cursor to the snapshot index so
                     // post-snapshot WAL entries are replayed deterministically on startup.
@@ -2084,11 +2102,32 @@ fn is_leader(meta: &RwLockWriteGuard<RaftMeta>) -> bool {
         _ => false,
     }
 }
+/// Adopt a later term (and with it a fresh vote). Terms never go back: a
+/// lower or equal term changes nothing. Not durable by itself -- every effect
+/// that depends on the term (a reply, a RequestVote, an append) first calls
+/// `persist_hard_state`.
 fn alter_term(meta: &mut RwLockWriteGuard<RaftMeta>, term: u64) {
-    if meta.term != term {
+    if term > meta.term {
         meta.term = term;
         meta.vote_for = None;
     }
+}
+
+/// Make the in-memory (term, vote) durable before anything depends on it:
+/// granting a vote, answering an RPC in an adopted term, campaigning, leading.
+/// A no-op when nothing changed since the last write.
+async fn persist_hard_state(meta: &RaftMeta) -> io::Result<()> {
+    if let Some(storage) = &meta.storage {
+        storage
+            .lock()
+            .await
+            .persist_hard_state(HardState {
+                term: meta.term,
+                voted_for: meta.vote_for,
+            })
+            .await?;
+    }
+    Ok(())
 }
 
 fn ensure_direct_leader_term(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
@@ -2124,6 +2163,9 @@ impl RaftService {
         };
 
         let master_sm = MasterStateMachine::new_on_plane(opts.service_id, PlaneId::type1());
+        let vote_for = storage_entity
+            .as_ref()
+            .and_then(|entity| entity.hard_state.voted_for);
 
         let (shutdown_tx, _shutdown_rx) = watch::channel(LifecycleState::Running);
         let runtime = runtime::Builder::new_multi_thread()
@@ -2139,7 +2181,7 @@ impl RaftService {
         let server_obj = RaftService {
             meta: RwLock::new(RaftMeta {
                 term,
-                vote_for: None,
+                vote_for,
                 timeout: gen_timeout(),
                 last_checked: get_time(),
                 membership: Membership::Undefined,
@@ -2695,6 +2737,18 @@ impl RaftService {
         let term = meta.term;
         alter_term(meta, term + 1);
         meta.vote_for = Some(server_id);
+        // The new term and the self-vote are durable before any RequestVote
+        // leaves: a restart must not campaign (or vote) in this term again.
+        if let Err(e) = persist_hard_state(meta).await {
+            error!(
+                "Plane {}: cannot persist candidacy for term {}: {}; not campaigning",
+                plane_id.raw(),
+                meta.term,
+                e
+            );
+            self.switch_membership(meta, Membership::Follower);
+            return;
+        }
         self.switch_membership(meta, Membership::Candidate);
         let term = meta.term;
         let (last_log_id, last_log_term) = {
@@ -2770,6 +2824,14 @@ impl RaftService {
                             remote_term,
                             remote_leader_id,
                         );
+                        if let Err(e) = persist_hard_state(meta).await {
+                            error!(
+                                "Plane {}: cannot persist adopted term {}: {}",
+                                plane_id.raw(),
+                                remote_term,
+                                e
+                            );
+                        }
                         break;
                     }
                     Ok(RequestVoteResponse::Granted) => {
@@ -2839,6 +2901,17 @@ impl RaftService {
             self.id,
             meta.term
         );
+        // Entries will carry this term: it is durable first (a single-member
+        // promotion may just have moved it).
+        if let Err(e) = persist_hard_state(meta).await {
+            error!(
+                "Plane {}: cannot persist term {}: {}; not leading",
+                self.plane_id().raw(),
+                meta.term,
+                e
+            );
+            return;
+        }
         let leader_meta = RwLock::new(LeaderMeta::new());
         {
             let mut guard = leader_meta.write().await;
@@ -2996,6 +3069,14 @@ impl RaftService {
                     alter_term(meta, remote_term);
                     meta.leader_id = remote_leader_id;
                     self.switch_membership(meta, Membership::Follower);
+                    if let Err(e) = persist_hard_state(meta).await {
+                        error!(
+                            "Plane {}: cannot persist adopted term {}: {}",
+                            plane_id.raw(),
+                            remote_term,
+                            e
+                        );
+                    }
                     return false;
                 }
                 debug!(
@@ -3329,11 +3410,27 @@ impl RaftService {
     ) -> (u64, AppendEntriesResult) {
         self.reset_last_checked(&mut meta);
         let term_ok = self.check_term_on_plane(leader_flag, &mut meta, term, leader_id);
+        // A term adopted from this leader is durable before anything is
+        // answered in it.
+        if let Err(e) = persist_hard_state(&meta).await {
+            error!(
+                "Plane {}: cannot persist term {} from leader {}: {}; not acknowledging",
+                self.plane_id().raw(),
+                meta.term,
+                leader_id,
+                e
+            );
+            return (meta.term, AppendEntriesResult::NotPersisted);
+        }
         let result = if term_ok {
             if let Membership::Candidate = meta.membership {
                 debug!("SWITCH FROM CANDIDATE BACK TO FOLLOWER {}", self.id);
                 self.become_follower_on_plane(leader_flag, &mut meta, term, leader_id);
             }
+            // The sender leads this term. `check_term` records that only when
+            // the term is new to this member; a member that already moved to
+            // the term by voting in its election learns the leader here.
+            meta.leader_id = leader_id;
             // Positions covered by the snapshot are compacted away: the boundary
             // itself is verified against the snapshot's term, and anything
             // below it is a committed prefix that cannot conflict.
@@ -3429,20 +3526,27 @@ impl RaftService {
 
     async fn handle_request_vote_on_meta<'a>(
         &'a self,
+        leader_flag: &'a AtomicBool,
         mut meta: RwLockWriteGuard<'a, RaftMeta>,
         term: u64,
         candidate_id: u64,
         last_log_id: u64,
         last_log_term: u64,
     ) -> ((u64, u64), bool) {
-        let vote_for = meta.vote_for;
-        let mut vote_granted = false;
+        // Figure 2, all servers: a request from a later term moves this member
+        // to it (stepping down if it led), whatever the vote.
         if term > meta.term {
+            self.become_follower_on_plane(leader_flag, &mut meta, term, 0);
+        }
+        let mut vote_granted = false;
+        if term == meta.term {
             check_commit(&mut meta).await;
             let logs = meta.logs.read().await;
             let conf_sm = &meta.state_machine.read().await.configs;
             let candidate_valid = conf_sm.member_existed(candidate_id);
-            let can_vote = vote_for.map_or(true, |voted_for| voted_for == candidate_id);
+            let can_vote = meta
+                .vote_for
+                .map_or(true, |voted_for| voted_for == candidate_id);
             if can_vote && candidate_valid {
                 let (last_id, last_term) = get_last_log_info!(meta, logs);
                 // Raft section 5.4.1: the later last TERM wins, ties go to the
@@ -3456,6 +3560,22 @@ impl RaftService {
         }
         if vote_granted {
             meta.vote_for = Some(candidate_id);
+        }
+        // The vote (and any term adopted above) is durable before the answer:
+        // a granted vote a crash could forget is a second vote in this term.
+        match persist_hard_state(&meta).await {
+            Ok(()) if vote_granted => self.reset_last_checked(&mut meta),
+            Ok(()) => {}
+            Err(e) => {
+                error!(
+                    "Plane {}: cannot persist the vote for {} in term {}: {}; refusing it",
+                    self.plane_id().raw(),
+                    candidate_id,
+                    meta.term,
+                    e
+                );
+                vote_granted = false;
+            }
         }
         ((meta.term, meta.leader_id), vote_granted)
     }
@@ -3481,6 +3601,17 @@ impl RaftService {
             );
             return meta.term;
         }
+        if let Err(e) = persist_hard_state(&meta).await {
+            error!(
+                "Plane {}: cannot persist term {} from leader {}: {}; not installing",
+                self.plane_id().raw(),
+                meta.term,
+                leader_id,
+                e
+            );
+            return INSTALL_SNAPSHOT_NOT_PERSISTED;
+        }
+        meta.leader_id = leader_id;
         self.reset_last_checked(&mut meta);
         check_commit(&mut meta).await;
         if last_included_index <= meta.last_applied {
@@ -3722,7 +3853,18 @@ impl RaftService {
         // Strict write-ahead: persist to WAL before any application can observe/commit
         if let Some(storage_mutex) = &meta.storage {
             let mut storage = storage_mutex.lock().await;
-            if let Err(e) = storage.append_logs(meta, &logs).await {
+            let hard_state = HardState {
+                term: meta.term,
+                voted_for: meta.vote_for,
+            };
+            let appended = async {
+                // The entry carries the term; it is durable first (a no-op
+                // unless an earlier write of it failed).
+                storage.persist_hard_state(hard_state).await?;
+                storage.append_logs(meta, &logs).await
+            }
+            .await;
+            if let Err(e) = appended {
                 logs.remove(&new_log_id);
                 error!(
                     "Failed to persist log entry {} to storage on plane {}: {:?}; refusing the command",
@@ -4133,6 +4275,7 @@ impl Service for RaftService {
                 Ok((Some(runtime), _)) => {
                     let meta = runtime.meta.write().await;
                     self.handle_request_vote_on_meta(
+                        &runtime.is_leader,
                         meta,
                         term,
                         candidate_id,
@@ -4144,6 +4287,7 @@ impl Service for RaftService {
                 Ok((None, _)) => {
                     let meta = self.write_meta().await;
                     self.handle_request_vote_on_meta(
+                        &self._is_leader,
                         meta,
                         term,
                         candidate_id,
@@ -5866,6 +6010,7 @@ mod test {
                 plane_id: PlaneId::type1(),
                 wal_index: Default::default(),
                 poisoned: None,
+                hard_state: Default::default(),
             };
 
             storage.write_snapshot(&snapshot_entity).await.unwrap();
@@ -5919,6 +6064,7 @@ mod test {
                 plane_id: PlaneId::type1(),
                 wal_index: Default::default(),
                 poisoned: None,
+                hard_state: Default::default(),
             };
 
             // Write snapshot to disk
@@ -5966,6 +6112,7 @@ mod test {
                 plane_id: PlaneId::type1(),
                 wal_index: Default::default(),
                 poisoned: None,
+                hard_state: Default::default(),
             };
 
             // Write snapshot
@@ -6014,6 +6161,7 @@ mod test {
                 plane_id: PlaneId::type1(),
                 wal_index: Default::default(),
                 poisoned: None,
+                hard_state: Default::default(),
             };
 
             // Write valid snapshot
@@ -6576,6 +6724,7 @@ mod test {
                 plane_id: PlaneId::type1(),
                 wal_index: Default::default(),
                 poisoned: None,
+                hard_state: Default::default(),
             };
 
             // Create test logs in memory
@@ -7376,6 +7525,7 @@ mod test {
                     plane_id: PlaneId::type1(),
                     wal_index: Default::default(),
                     poisoned: None,
+                    hard_state: Default::default(),
                 };
                 storage.append_logs(&meta_guard, &logs_guard).await.unwrap();
                 // drop storage to flush/close
@@ -7518,6 +7668,7 @@ mod test {
                     plane_id: PlaneId::type1(),
                     wal_index: Default::default(),
                     poisoned: None,
+                    hard_state: Default::default(),
                 };
                 storage.append_logs(&meta_guard, &logs_guard).await.unwrap();
             }

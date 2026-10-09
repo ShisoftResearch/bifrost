@@ -98,6 +98,96 @@ impl DiskOptions {
     }
 }
 
+/// Raft's persistent hard state (Figure 2): the latest term this member has
+/// seen and the candidate it voted for in that term. Raft needs both to
+/// survive a crash -- forgetting the vote lets a member vote twice in one
+/// term (two leaders), forgetting the term lets it go back in time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HardState {
+    pub term: u64,
+    pub voted_for: Option<u64>,
+}
+
+/// `hardstate.dat`, beside `log.dat`, `commit.idx` and `snapshot.dat`. A fixed
+/// 25-byte record: magic, term, vote flag, vote, CRC32 of the preceding 21
+/// bytes. It is replaced whole (temp file, fsync, rename, fsync of the
+/// directory), so a crash leaves the old state or the new one, never a mix;
+/// the checksum catches media damage, which is an error, not a reset.
+const HARD_STATE_FILE: &str = "hardstate.dat";
+const HARD_STATE_TEMP: &str = "hardstate.dat.tmp";
+const HARD_STATE_MAGIC: [u8; 4] = *b"RHS1";
+const HARD_STATE_LEN: usize = 25;
+
+impl HardState {
+    fn encode(&self) -> [u8; HARD_STATE_LEN] {
+        let mut buf = [0u8; HARD_STATE_LEN];
+        buf[0..4].copy_from_slice(&HARD_STATE_MAGIC);
+        buf[4..12].copy_from_slice(&self.term.to_le_bytes());
+        buf[12] = self.voted_for.is_some() as u8;
+        buf[13..21].copy_from_slice(&self.voted_for.unwrap_or(0).to_le_bytes());
+        let crc = crc32fast::hash(&buf[0..21]);
+        buf[21..25].copy_from_slice(&crc.to_le_bytes());
+        buf
+    }
+
+    fn decode(bytes: &[u8]) -> std::result::Result<Self, String> {
+        if bytes.len() != HARD_STATE_LEN {
+            return Err(format!("{} bytes, expected {}", bytes.len(), HARD_STATE_LEN));
+        }
+        if bytes[0..4] != HARD_STATE_MAGIC {
+            return Err("bad magic".to_string());
+        }
+        let crc = u32::from_le_bytes(bytes[21..25].try_into().unwrap());
+        if crc != crc32fast::hash(&bytes[0..21]) {
+            return Err("checksum mismatch".to_string());
+        }
+        let term = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
+        let voted_for = match bytes[12] {
+            0 => None,
+            1 => Some(u64::from_le_bytes(bytes[13..21].try_into().unwrap())),
+            flag => return Err(format!("bad vote flag {}", flag)),
+        };
+        Ok(HardState { term, voted_for })
+    }
+}
+
+/// The persisted hard state under `base_path`, `None` if there is none yet.
+pub fn read_hard_state(base_path: &Path) -> io::Result<Option<HardState>> {
+    let path = base_path.join(HARD_STATE_FILE);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    HardState::decode(&bytes).map(Some).map_err(|what| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is corrupt: {}", path.display(), what),
+        )
+    })
+}
+
+/// Durably replace the hard state under `base_path`. Returns only once the
+/// new state is what a restart reads.
+pub fn write_hard_state(base_path: &Path, state: &HardState) -> io::Result<()> {
+    use std::io::Write;
+    #[cfg(test)]
+    failpoint(base_path, Fail::HardStateWrite)?;
+    let temp = base_path.join(HARD_STATE_TEMP);
+    {
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(&state.encode())?;
+        file.sync_all()?;
+    }
+    #[cfg(test)]
+    failpoint(base_path, Fail::HardStateRename)?;
+    std::fs::rename(&temp, base_path.join(HARD_STATE_FILE))?;
+    #[cfg(test)]
+    failpoint(base_path, Fail::HardStateDirSync)?;
+    // The rename is durable only once the directory is.
+    std::fs::File::open(base_path)?.sync_all()
+}
+
 pub struct StorageEntity {
     pub logs: Option<File>,
     pub snapshot: Option<File>,
@@ -116,6 +206,8 @@ pub struct StorageEntity {
     /// unknown, so every later WAL operation refuses until a restart replays
     /// what is really on disk.
     pub poisoned: Option<String>,
+    /// The hard state as last made durable.
+    pub hard_state: HardState,
 }
 
 /// Where each record of `log.dat` starts, so a discarded log suffix can be cut
@@ -256,6 +348,13 @@ impl StorageEntity {
                     .truncate(false);
                 let mut last_log_id = 0;
                 let mut wal_index = WalIndex::default();
+                // Floors for the term, from the log: the highest entry term
+                // (a member never holds an entry from a term beyond its own),
+                // and -- for stores without a hard-state file only -- the
+                // last log id, which the record header carries where a term
+                // was meant and which earlier releases restored the term from.
+                let mut entry_term_floor = 0u64;
+                let mut id_floor = 0u64;
                 let mut storage = Self {
                     logs: if options.append_logs {
                         let mut log_file = open_opts.open(log_path.as_path())?;
@@ -306,21 +405,8 @@ impl StorageEntity {
                             }
                             match DiskLogEntry::decode(&data_buf) {
                                 Ok(entry) => {
-                                    // The record header's `term` is the log ID
-                                    // (append_logs writes the map key there),
-                                    // not a term. Restoring the term from it
-                                    // usually lands far ABOVE the plane's term:
-                                    // the member's first answer then deposes the
-                                    // leader (an election per restart), but it
-                                    // also keeps the member out of any term it
-                                    // may have voted in, as neither the term nor
-                                    // the vote is persisted. Alone, though, it
-                                    // can sit BELOW the entries' own terms (more
-                                    // elections than entries), and the next
-                                    // leader term would rank older entries above
-                                    // newer ones (section 5.4.1). So the term
-                                    // never drops below the log's.
-                                    *term = (*term).max(entry.term).max(entry.log.term);
+                                    id_floor = id_floor.max(entry.term);
+                                    entry_term_floor = entry_term_floor.max(entry.log.term);
                                     // Do not trust commit/last_applied embedded in WAL for SM reconstruction
                                     // We'll derive commit_index from commit.idx and force replay from last_applied=0
                                     let id = entry.log.id;
@@ -408,8 +494,51 @@ impl StorageEntity {
                     plane_id,
                     wal_index,
                     poisoned: None,
+                    hard_state: HardState::default(),
                 };
                 storage.last_term = last_log_id;
+
+                let hard_state = match read_hard_state(base_path)? {
+                    Some(persisted) if persisted.term >= entry_term_floor => persisted,
+                    Some(persisted) => {
+                        // Cannot happen if every term was persisted before
+                        // entries of it were accepted; raise rather than run
+                        // below the log, and say so.
+                        error!(
+                            "Plane {}: persisted term {} is below its log's entry term {}; raising it (the vote is void)",
+                            plane_id.raw(),
+                            persisted.term,
+                            entry_term_floor
+                        );
+                        let raised = HardState {
+                            term: entry_term_floor,
+                            voted_for: None,
+                        };
+                        write_hard_state(base_path, &raised)?;
+                        raised
+                    }
+                    None => {
+                        let derived = HardState {
+                            term: id_floor.max(entry_term_floor),
+                            voted_for: None,
+                        };
+                        if derived.term > 0 {
+                            warn!(
+                                "Plane {}: no {} (a store written before the term and vote were persisted); \
+                                 deriving term {} from the WAL (last log id {}, highest entry term {}) and writing it now",
+                                plane_id.raw(),
+                                HARD_STATE_FILE,
+                                derived.term,
+                                id_floor,
+                                entry_term_floor
+                            );
+                        }
+                        write_hard_state(base_path, &derived)?;
+                        derived
+                    }
+                };
+                *term = hard_state.term;
+                storage.hard_state = hard_state;
 
                 // If commit progress side file exists, load it to ensure accurate indices
                 // Force full replay by resetting last_applied to 0 on startup
@@ -593,6 +722,17 @@ impl StorageEntity {
             self.plane_id.raw(),
             offset
         );
+        Ok(())
+    }
+
+    /// Make `state` the durable hard state. A no-op when it already is, so
+    /// callers can call it before every effect that depends on it.
+    pub async fn persist_hard_state(&mut self, state: HardState) -> io::Result<()> {
+        if state == self.hard_state {
+            return Ok(());
+        }
+        write_hard_state(&self.base_path, &state)?;
+        self.hard_state = state;
         Ok(())
     }
 
