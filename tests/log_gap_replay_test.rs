@@ -34,7 +34,11 @@ fn strip_first_log_record(log_path: &std::path::Path) {
 async fn replay_skips_holes_below_durable_entries() {
     let _ = env_logger::try_init();
 
-    let data_path = "/tmp/bifrost_test_log_gap_replay_18020".to_string();
+    // Under TMPDIR, so a run can keep its scratch data off /tmp.
+    let data_path = std::env::temp_dir()
+        .join("bifrost_test_log_gap_replay_18020")
+        .to_string_lossy()
+        .to_string();
     let _ = std::fs::remove_dir_all(&data_path);
     std::fs::create_dir_all(&data_path).unwrap();
     let address = "127.0.0.1:18020".to_string();
