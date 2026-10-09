@@ -27,7 +27,8 @@ pub enum ExecError {
         sm_id: u64,
         client_cursor: u64,
         server_applied: u64,
-        server_last_log: u64,
+        /// `None` when the member predates reporting it.
+        server_last_log: Option<u64>,
         stalled_rounds: u64,
         elapsed: std::time::Duration,
     },
@@ -40,7 +41,8 @@ pub enum ExecError {
         sm_id: u64,
         client_cursor: u64,
         server_applied: u64,
-        server_last_log: u64,
+        /// `None` when the member predates reporting it.
+        server_last_log: Option<u64>,
         stalled_rounds: u64,
         elapsed: std::time::Duration,
     },
@@ -770,7 +772,7 @@ mod tests {
             sm_id: 1,
             client_cursor: 2,
             server_applied: 1,
-            server_last_log: 1,
+            server_last_log: Some(1),
             stalled_rounds: 8,
             elapsed: std::time::Duration::from_millis(400),
         };
@@ -779,7 +781,7 @@ mod tests {
             sm_id: 1,
             client_cursor: 2,
             server_applied: 1,
-            server_last_log: 1,
+            server_last_log: Some(1),
             stalled_rounds: 8,
             elapsed: std::time::Duration::from_millis(400),
         };

@@ -903,7 +903,7 @@ impl RaftClient {
                             }
                             if left_behind_stalls >= stall_limit {
                                 error!(
-                                    "Query stalled on plane {} sm {}: client cursor {}, server applied {}, server last log {}, {} members, {} stalled rounds in {:?}",
+                                    "Query stalled on plane {} sm {}: client cursor {}, server applied {}, server last log {:?}, {} members, {} stalled rounds in {:?}",
                                     plane_id.raw(), sm_id, client_cursor, last_log_id, last_log_index,
                                     num_members, left_behind_stalls, query_started.elapsed()
                                 );
@@ -913,7 +913,9 @@ impl RaftClient {
                                 // One member whose whole log ends below the
                                 // cursor cannot catch up by waiting: the
                                 // position went backwards.
-                                return Err(if num_members == 1 && last_log_index < client_cursor {
+                                let behind_cursor =
+                                    last_log_index.map_or(false, |index| index < client_cursor);
+                                return Err(if num_members == 1 && behind_cursor {
                                     ExecError::LogIndexRegressed {
                                         plane,
                                         sm_id,

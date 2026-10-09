@@ -392,10 +392,46 @@ async fn left_behind_single_member_reports_a_regressed_log_index() {
         }) => {
             assert_eq!(client_cursor, 100_000);
             assert!(server_applied < client_cursor);
-            assert!(server_last_log < client_cursor);
+            assert!(server_last_log.expect("a current member reports it") < client_cursor);
         }
         other => panic!("expected LogIndexRegressed, got {:?}", other),
     }
     drop(node);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `LeftBehind.last_log_index` is new. The RPC codec is self-describing, so a
+/// member without the field and one with it must still decode each other's
+/// answers: the old shape decodes with the field absent, and the new shape
+/// decodes in the old one by ignoring it.
+#[test]
+fn left_behind_decodes_across_versions() {
+    #[derive(Serialize, Deserialize)]
+    enum PreviousShape {
+        LeftBehind { last_log_term: u64, last_log_id: u64 },
+    }
+    let old = crate::utils::serde::serialize(&PreviousShape::LeftBehind {
+        last_log_term: 3,
+        last_log_id: 9,
+    });
+    match crate::utils::serde::deserialize::<ClientQryResponse>(&old) {
+        Some(ClientQryResponse::LeftBehind {
+            last_log_term: 3,
+            last_log_id: 9,
+            last_log_index: None,
+        }) => {}
+        other => panic!("old LeftBehind did not decode: {:?}", other),
+    }
+    let new = crate::utils::serde::serialize(&ClientQryResponse::LeftBehind {
+        last_log_term: 3,
+        last_log_id: 9,
+        last_log_index: Some(12),
+    });
+    match crate::utils::serde::deserialize::<PreviousShape>(&new) {
+        Some(PreviousShape::LeftBehind {
+            last_log_term: 3,
+            last_log_id: 9,
+        }) => {}
+        _ => panic!("new LeftBehind did not decode in the previous shape"),
+    }
 }

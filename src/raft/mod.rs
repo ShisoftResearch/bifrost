@@ -139,7 +139,11 @@ pub enum ClientQryResponse {
         /// The serving member's last log position (entry or snapshot
         /// boundary), so the client can tell apply lag (`last_log_id` below
         /// this) from a cursor that is ahead of the member's whole log.
-        last_log_index: u64,
+        /// Absent (`None`) from a member that predates the field: the codec
+        /// is self-describing, so old and new members still understand each
+        /// other in both directions.
+        #[serde(default)]
+        last_log_index: Option<u64>,
     },
 }
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -3656,7 +3660,7 @@ impl RaftService {
             ClientQryResponse::LeftBehind {
                 last_log_term,
                 last_log_id: meta.last_applied,
-                last_log_index,
+                last_log_index: Some(last_log_index),
             }
         } else {
             let qry_res = meta.state_machine.read().await.exec_qry(entry).await;
@@ -4209,7 +4213,7 @@ impl Service for RaftService {
                     ClientQryResponse::LeftBehind {
                         last_log_term: 0,
                         last_log_id: 0,
-                        last_log_index: 0,
+                        last_log_index: None,
                     }
                 }
             }
