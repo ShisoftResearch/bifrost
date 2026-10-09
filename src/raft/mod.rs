@@ -1140,9 +1140,10 @@ impl RaftService {
         let storage = meta.storage.clone();
 
         if let Some(storage) = storage {
-            let storage = storage.lock().await;
+            let mut storage = storage.lock().await;
             match storage.read_snapshot().await {
                 Ok(Some(snapshot)) => {
+                    storage.forget_records_through(snapshot.last_included_index);
                     info!(
                         "Found snapshot on plane {}: index={}, term={}. Recovering state machine...",
                         plane_id.raw(),
@@ -2168,6 +2169,12 @@ impl RaftService {
                 meta.commit_index = snapshot.last_included_index;
             }
 
+            if let Some(ref storage) = meta.storage {
+                storage
+                    .lock()
+                    .await
+                    .forget_records_through(snapshot.last_included_index);
+            }
             // Compact logs: remove entries already covered by the snapshot
             {
                 let mut logs = meta.logs.write().await;
@@ -3307,58 +3314,62 @@ impl RaftService {
             } else if prev_log_id > 0 {
                 check_commit(&mut meta).await;
                 let mut logs = meta.logs.write().await;
-                let contains_prev_log = logs.contains_key(&prev_log_id);
-                let log_mismatch;
-
-                if contains_prev_log {
-                    let entry = match logs.get(&prev_log_id) {
-                        Some(entry) => entry,
-                        None => {
-                            error!("Log key {} exists in contains_key but not in get() - data inconsistency", prev_log_id);
-                            return (meta.term, AppendEntriesResult::LogMismatch);
-                        }
-                    };
-                    log_mismatch = entry.term != prev_log_term;
-                } else {
-                    return (meta.term, AppendEntriesResult::LogMismatch);
-                }
-                if log_mismatch {
-                    let ids_to_del: Vec<u64> = logs
-                        .range((Included(prev_log_id), Unbounded))
-                        .map(|(id, _)| *id)
-                        .collect();
-                    for id in ids_to_del {
-                        logs.remove(&id);
+                match logs.get(&prev_log_id).map(|entry| entry.term) {
+                    None => return (meta.term, AppendEntriesResult::LogMismatch),
+                    Some(held_term) if held_term != prev_log_term => {
+                        // The entry at prev conflicts with the leader's: it
+                        // and everything after it go, in memory and on disk.
+                        let _ = logs.split_off(&prev_log_id);
+                        self.discard_durable_suffix(&meta, prev_log_id).await;
+                        return (meta.term, AppendEntriesResult::LogMismatch);
                     }
-                    return (meta.term, AppendEntriesResult::LogMismatch);
+                    Some(_) => {}
                 }
             }
-            let mut last_new_entry = std::u64::MAX;
+            // Raft Figure 2: the commit index may advance only as far as the
+            // last entry verified against the leader -- prev, then each entry
+            // of this call -- never over a suffix the leader has not vouched
+            // for.
+            let mut last_new_entry = prev_log_id;
             {
                 let mut logs = meta.logs.write().await;
                 if let Some(ref entries) = entries {
+                    let mut discard_from = None;
                     for entry in entries {
-                        let entry_id = entry.id;
-                        if entry_id <= snapshot_index {
+                        last_new_entry = max(last_new_entry, entry.id);
+                        if entry.id <= snapshot_index {
                             // Covered by the snapshot: already applied, and
                             // re-inserting would resurrect a compacted entry.
                             continue;
                         }
-                        logs.entry(entry_id).or_insert(entry.clone());
-                        last_new_entry = max(last_new_entry, entry_id);
+                        match logs.get(&entry.id) {
+                            // Same index and term: the same entry (Log Matching).
+                            Some(held) if held.term == entry.term => continue,
+                            // Figure 2, AppendEntries step 3: a conflicting
+                            // entry is deleted with everything after it. Keeping
+                            // it would acknowledge the leader's entry while
+                            // holding -- and later applying -- another one.
+                            Some(_) => {
+                                let _ = logs.split_off(&entry.id);
+                                discard_from.get_or_insert(entry.id);
+                            }
+                            None => {}
+                        }
+                        logs.insert(entry.id, entry.clone());
                     }
-                } else if !logs.is_empty() || meta.last_snapshot_index > 0 {
-                    // Heartbeat: the commit index may advance only as far as
-                    // what this member holds, which after compaction is the
-                    // snapshot boundary even when the map is empty.
-                    last_new_entry = get_last_log_info!(meta, logs).0;
+                    if let Some(from) = discard_from {
+                        // Before the replacements are appended, so they land
+                        // where the discarded records were.
+                        self.discard_durable_suffix(&meta, from).await;
+                    }
                 }
                 if let Err(e) = self.logs_post_processing(&meta, logs).await {
                     error!("Failed to persist logs during append_entries: {:?}", e);
                 }
             }
-            if leader_commit > meta.commit_index {
-                meta.commit_index = min(leader_commit, last_new_entry);
+            let new_commit = min(leader_commit, last_new_entry);
+            if new_commit > meta.commit_index {
+                meta.commit_index = new_commit;
                 check_commit(&mut meta).await;
             }
             (meta.term, AppendEntriesResult::Ok)
@@ -3612,6 +3623,29 @@ impl RaftService {
         Ok(())
     }
 
+    /// Cut a discarded log suffix (ids `from_id` and above) off the WAL, so a
+    /// replay cannot bring it back. Called before the entries replacing it are
+    /// appended. A failed cut is not silent and not fatal: the append cursor
+    /// still moves below `from_id`, the replacements are written after the
+    /// stale records, and replay lets a record supersede everything from its
+    /// id on (see `StorageEntity::new_with_options_on_plane`).
+    async fn discard_durable_suffix<'a>(
+        &'a self,
+        meta: &'a RwLockWriteGuard<'a, RaftMeta>,
+        from_id: u64,
+    ) {
+        if let Some(storage) = &meta.storage {
+            if let Err(e) = storage.lock().await.truncate_from(from_id).await {
+                error!(
+                    "Failed to cut the discarded log suffix from id {} off the WAL on plane {}: {:?}",
+                    from_id,
+                    self.plane_id().raw(),
+                    e
+                );
+            }
+        }
+    }
+
     async fn try_sync_log_to_followers_on_plane<'a>(
         &'a self,
         plane_id: PlaneId,
@@ -3854,6 +3888,7 @@ impl RaftService {
                 snapshot_index
             );
 
+            _storage.forget_records_through(snapshot_index);
             // Only compact if we exceed the compaction threshold
             if before_count as u64 > compaction_threshold {
                 // Keep logs after last_snapshot_index
@@ -5681,6 +5716,7 @@ mod test {
                 last_term: 0,
                 base_path: temp_dir.clone(),
                 plane_id: PlaneId::type1(),
+                wal_index: Default::default(),
             };
 
             storage.write_snapshot(&snapshot_entity).await.unwrap();
@@ -5732,6 +5768,7 @@ mod test {
                 last_term: 0,
                 base_path: temp_dir.clone(),
                 plane_id: PlaneId::type1(),
+                wal_index: Default::default(),
             };
 
             // Write snapshot to disk
@@ -5777,6 +5814,7 @@ mod test {
                 last_term: 0,
                 base_path: temp_dir.clone(),
                 plane_id: PlaneId::type1(),
+                wal_index: Default::default(),
             };
 
             // Write snapshot
@@ -5823,6 +5861,7 @@ mod test {
                 last_term: 0,
                 base_path: temp_dir.clone(),
                 plane_id: PlaneId::type1(),
+                wal_index: Default::default(),
             };
 
             // Write valid snapshot
@@ -6352,6 +6391,7 @@ mod test {
                 last_term: 0,
                 base_path: temp_dir.clone(),
                 plane_id: PlaneId::type1(),
+                wal_index: Default::default(),
             };
 
             // Create test logs in memory
@@ -7145,6 +7185,7 @@ mod test {
                     last_term: 0,
                     base_path: temp_dir.clone(),
                     plane_id: PlaneId::type1(),
+                    wal_index: Default::default(),
                 };
                 storage.append_logs(&meta_guard, &logs_guard).await.unwrap();
                 // drop storage to flush/close
@@ -7284,6 +7325,7 @@ mod test {
                     last_term: 0,
                     base_path: temp_dir.clone(),
                     plane_id: PlaneId::type1(),
+                    wal_index: Default::default(),
                 };
                 storage.append_logs(&meta_guard, &logs_guard).await.unwrap();
             }

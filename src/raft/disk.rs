@@ -3,6 +3,7 @@
 use crate::raft::{LogEntry, LogsMap, Options, PlaneId, RaftMeta, SnapshotEntity, Storage};
 use async_std::sync::*;
 
+use std::collections::VecDeque;
 use std::convert::TryInto;
 use std::fs::OpenOptions;
 use std::io;
@@ -49,6 +50,20 @@ pub struct StorageEntity {
     pub last_term: u64,
     pub base_path: PathBuf,
     pub plane_id: PlaneId,
+    pub wal_index: WalIndex,
+}
+
+/// Where each record of `log.dat` starts, so a discarded log suffix can be cut
+/// off the file instead of resurrecting on the next replay.
+///
+/// Only records a follower may still have to discard are indexed: committed
+/// entries never conflict, so whatever a snapshot covers is forgotten.
+#[derive(Default)]
+pub struct WalIndex {
+    /// (log id, byte offset of its record), both strictly increasing.
+    records: VecDeque<(u64, u64)>,
+    /// Length of the valid prefix of the file: where the next record starts.
+    len: u64,
 }
 
 pub struct DiskLogEntry {
@@ -175,6 +190,7 @@ impl StorageEntity {
                     .read(true)
                     .truncate(false);
                 let mut last_log_id = 0;
+                let mut wal_index = WalIndex::default();
                 let mut storage = Self {
                     logs: if options.append_logs {
                         let mut log_file = open_opts.open(log_path.as_path())?;
@@ -228,7 +244,31 @@ impl StorageEntity {
                                     *term = entry.term;
                                     // Do not trust commit/last_applied embedded in WAL for SM reconstruction
                                     // We'll derive commit_index from commit.idx and force replay from last_applied=0
-                                    last_log_id = entry.log.id;
+                                    let id = entry.log.id;
+                                    if counter > 0 && id <= last_log_id {
+                                        // Records are appended in log order, and a
+                                        // discarded suffix is cut off the file
+                                        // (`truncate_from`) before its replacement
+                                        // is written. A record at or below its
+                                        // predecessor is a replacement whose cut
+                                        // did not reach the disk: it supersedes
+                                        // the record it repeats and all after it,
+                                        // exactly as it did in memory.
+                                        warn!(
+                                            "WAL record {} follows record {} on plane {}: replacing the suffix from {} on",
+                                            id,
+                                            last_log_id,
+                                            plane_id.raw(),
+                                            id
+                                        );
+                                        let _ = logs.split_off(&id);
+                                        let kept = wal_index
+                                            .records
+                                            .partition_point(|(indexed, _)| *indexed < id);
+                                        wal_index.records.truncate(kept);
+                                    }
+                                    last_log_id = id;
+                                    wal_index.records.push_back((id, pos_before));
                                     logs.insert(entry.log.id, entry.log);
                                     counter += 1;
                                     last_valid_pos = log_file
@@ -261,6 +301,7 @@ impl StorageEntity {
                             }
                         }
                         let _ = log_file.seek(SeekFrom::End(0));
+                        wal_index.len = last_valid_pos;
                         debug!(
                             "Recovered {} raft logs for plane {}",
                             counter,
@@ -278,6 +319,7 @@ impl StorageEntity {
                     last_term: 0,
                     base_path: base_path.to_path_buf(),
                     plane_id,
+                    wal_index,
                 };
                 storage.last_term = last_log_id;
 
@@ -329,9 +371,22 @@ impl StorageEntity {
                 let checksum = crc32fast::hash(&entry_data);
                 // Write: [8 bytes record_len = 4+payload_len][4 bytes CRC32][N bytes payload]
                 let record_len = 4u64 + entry_data.len() as u64;
-                f.write_all(&record_len.to_le_bytes()).await?;
-                f.write_all(&checksum.to_le_bytes()).await?;
-                f.write_all(entry_data.as_slice()).await?;
+                let written = async {
+                    f.write_all(&record_len.to_le_bytes()).await?;
+                    f.write_all(&checksum.to_le_bytes()).await?;
+                    f.write_all(entry_data.as_slice()).await
+                }
+                .await;
+                if let Err(e) = written {
+                    // A partial record may be on disk; the next one starts
+                    // wherever the file now ends.
+                    if let Ok(metadata) = f.metadata().await {
+                        self.wal_index.len = metadata.len();
+                    }
+                    return Err(e);
+                }
+                self.wal_index.records.push_back((*term, self.wal_index.len));
+                self.wal_index.len += 8 + record_len;
                 self.last_term = *term;
                 terms_appended.push(self.last_term);
                 counter += 1;
@@ -348,6 +403,51 @@ impl StorageEntity {
             }
         }
         Ok(())
+    }
+
+    /// Discard every record with log id `from_id` or above: the conflicting
+    /// suffix a follower deletes (Raft Figure 2, AppendEntries step 3), or the
+    /// log an InstallSnapshot replaces. The append cursor always moves below
+    /// `from_id`, so the replacement entries are written even when the cut
+    /// itself fails -- replay then lets them supersede the stale records.
+    pub async fn truncate_from(&mut self, from_id: u64) -> io::Result<()> {
+        self.last_term = self.last_term.min(from_id.saturating_sub(1));
+        let kept = self
+            .wal_index
+            .records
+            .partition_point(|(id, _)| *id < from_id);
+        let Some(&(first_cut, offset)) = self.wal_index.records.get(kept) else {
+            return Ok(());
+        };
+        let cut = self.wal_index.records.len() - kept;
+        // Forget the cut records even if the cut fails: the index must stay
+        // ordered for the replacement records appended next.
+        self.wal_index.records.truncate(kept);
+        let Some(f) = &mut self.logs else {
+            return Ok(());
+        };
+        f.set_len(offset).await?;
+        self.wal_index.len = offset;
+        // `set_len` leaves the cursor past the new end; writing there would
+        // leave a zero-filled gap that replay reads as a torn tail.
+        f.seek(SeekFrom::Start(offset)).await?;
+        f.sync_all().await?;
+        info!(
+            "Cut {} WAL records from log id {} on plane {} (file now {} bytes)",
+            cut,
+            first_cut,
+            self.plane_id.raw(),
+            offset
+        );
+        Ok(())
+    }
+
+    /// A snapshot at `index` covers every entry up to it: those records are
+    /// committed and never discarded, so their offsets are not needed.
+    pub fn forget_records_through(&mut self, index: u64) {
+        while matches!(self.wal_index.records.front(), Some((id, _)) if *id <= index) {
+            self.wal_index.records.pop_front();
+        }
     }
 
     pub async fn post_processing<'a>(
