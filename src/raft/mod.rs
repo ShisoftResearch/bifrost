@@ -2,11 +2,13 @@ use self::state_machine::callback::server::Subscriptions;
 use self::state_machine::callback::SMCallback;
 use self::state_machine::configs::commands::{member_address, new_member_};
 use self::state_machine::configs::{RaftMember, CONFIG_SM_ID};
-use self::state_machine::master::{ExecError, ExecResult, MasterStateMachine, SubStateMachine};
+use self::state_machine::master::{
+    ExecError, ExecResult, MasterStateMachine, SnapshotDataItems, SubStateMachine,
+};
 use self::state_machine::OpType;
 use crate::raft::client::{ClientError, RaftClient};
 use crate::raft::disk::*;
-use crate::raft::state_machine::StateMachineCtl;
+use crate::raft::state_machine::{RecoverError, StateMachineCtl};
 use crate::rpc;
 use crate::utils::time::get_time;
 use async_std::sync::*;
@@ -177,6 +179,10 @@ pub enum InstallSnapshotResult {
     NotPersisted,
     /// The member does not serve this plane (unknown or shutting down).
     Rejected,
+    /// The image does not restore: refused before anything changed (the
+    /// master image does not decode), or a registered state machine could
+    /// not restore its part -- then this member stopped serving the plane.
+    Unrestorable,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -316,6 +322,8 @@ pub enum PlaneError {
     InitializationFailed(PlaneId),
     /// A flush or write the caller asked for did not reach the disk.
     Persistence(io::Error),
+    /// A persisted state-machine image is present but cannot be restored.
+    Recovery(RecoverError),
 }
 
 impl Display for PlaneError {
@@ -329,6 +337,7 @@ impl Display for PlaneError {
                 write!(f, "failed to initialize plane {}", plane_id.raw())
             }
             PlaneError::Persistence(err) => write!(f, "plane storage write failed: {err}"),
+            PlaneError::Recovery(err) => write!(f, "plane recovery failed: {err}"),
         }
     }
 }
@@ -1152,11 +1161,20 @@ impl RaftService {
     /// Public helper for applications to trigger commit replay after registering
     /// their state machines. This ensures snapshot replay and log apply happen
     /// only after SMs are ready.
-    pub async fn recover_after_register(&self) {
+    /// Fails, and recovery stops, when a persisted image of a registered
+    /// state machine cannot be restored.
+    pub async fn recover_after_register(&self) -> Result<(), PlaneError> {
         let mut meta = self.meta.write().await;
         {
             let mut master_sm = meta.state_machine.write().await;
-            master_sm.recover_registered_snapshots().await;
+            if let Err(e) = master_sm.recover_registered_snapshots().await {
+                error!(
+                    "Plane {}: {}; recovery stopped",
+                    PlaneId::type1().raw(),
+                    e
+                );
+                return Err(PlaneError::Recovery(e));
+            }
         }
         info!(
             "Manual apply on plane {}: applying committed logs (commit_index={}, last_applied={})",
@@ -1170,6 +1188,7 @@ impl RaftService {
             PlaneId::type1().raw(),
             meta.last_applied
         );
+        Ok(())
     }
 }
 
@@ -1212,11 +1231,16 @@ impl RaftService {
                         snapshot.last_included_term
                     );
 
-                    meta.state_machine
+                    if let Err(e) = meta
+                        .state_machine
                         .write()
                         .await
-                        .recover(snapshot.snapshot.clone())
-                        .await;
+                        .try_recover(snapshot.snapshot.clone())
+                        .await
+                    {
+                        error!("Plane {}: {}; refusing to start the plane", plane_id.raw(), e);
+                        return Err(PlaneError::Recovery(e));
+                    }
 
                     meta.last_snapshot_index = snapshot.last_included_index;
                     meta.last_snapshot_term = snapshot.last_included_term;
@@ -1254,7 +1278,10 @@ impl RaftService {
 
                     {
                         let mut master_sm = meta.state_machine.write().await;
-                        master_sm.recover_registered_snapshots().await;
+                        if let Err(e) = master_sm.recover_registered_snapshots().await {
+                            error!("Plane {}: {}; refusing to start the plane", plane_id.raw(), e);
+                            return Err(PlaneError::Recovery(e));
+                        }
                     }
 
                     info!(
@@ -1923,7 +1950,10 @@ impl RaftService {
             let mut meta = runtime.meta.write().await;
             {
                 let mut master_sm = meta.state_machine.write().await;
-                master_sm.recover_registered_snapshots().await;
+                if let Err(e) = master_sm.recover_registered_snapshots().await {
+                    error!("Plane {}: {}; recovery stopped", plane_id.raw(), e);
+                    return Err(PlaneError::Recovery(e));
+                }
             }
             info!(
                 "Manual apply on plane {}: applying committed logs (commit_index={}, last_applied={})",
@@ -1935,8 +1965,7 @@ impl RaftService {
             return Ok(());
         }
 
-        self.recover_after_register().await;
-        Ok(())
+        self.recover_after_register().await
     }
 
     pub async fn register_state_machine_on_plane(
@@ -2235,7 +2264,10 @@ impl RaftService {
         }
 
         if recover_registered {
-            server.recover_after_register().await;
+            if let Err(e) = server.recover_after_register().await {
+                error!("Raft service did not start: {}", e);
+                return false;
+            }
         }
 
         server.start_managed_runtime(None).await;
@@ -3030,7 +3062,8 @@ impl RaftService {
                                     );
                                     if last_matched_id >= log_id {
                                         updated_followers += 1;
-                                        if is_majority(followers as u64, updated_followers) {
+                                        // The leader already persisted this entry and counts toward the majority.
+                                        if is_majority(followers as u64 + 1, updated_followers + 1) {
                                             return true;
                                         }
                                     }
@@ -3412,6 +3445,11 @@ impl RaftService {
         entries: &'a Option<LogEntries>,
         leader_commit: u64,
     ) -> (u64, AppendEntriesResult) {
+        if Self::lifecycle_is_stopping(meta.lifecycle) {
+            // Shutting down, or stopped on an unrestorable snapshot: this
+            // member acknowledges nothing more.
+            return (meta.term, AppendEntriesResult::NotPersisted);
+        }
         self.reset_last_checked(&mut meta);
         let term_ok = self.check_term_on_plane(leader_flag, &mut meta, term, leader_id);
         // A term adopted from this leader is durable before anything is
@@ -3537,6 +3575,9 @@ impl RaftService {
         last_log_id: u64,
         last_log_term: u64,
     ) -> ((u64, u64), bool) {
+        if Self::lifecycle_is_stopping(meta.lifecycle) {
+            return ((meta.term, meta.leader_id), false);
+        }
         // Figure 2, all servers: a request from a later term moves this member
         // to it (stepping down if it led), whatever the vote.
         if term > meta.term {
@@ -3594,6 +3635,9 @@ impl RaftService {
         last_included_term: u64,
         data: Vec<u8>,
     ) -> InstallSnapshotResult {
+        if Self::lifecycle_is_stopping(meta.lifecycle) {
+            return InstallSnapshotResult::Rejected;
+        }
         if !self.check_term_on_plane(leader_flag, &mut meta, term, leader_id) {
             // A deposed leader's image; the reply's term tells it so.
             warn!(
@@ -3644,6 +3688,16 @@ impl RaftService {
         // entry, the entries after it are valid and stay; otherwise its whole
         // log is superseded -- on disk first, then in memory, or a replay
         // would bring an unverified suffix back above the snapshot.
+        // The image must decode before anything is persisted or replaced.
+        if crate::utils::serde::deserialize::<SnapshotDataItems>(&snapshot_entity.snapshot).is_none() {
+            error!(
+                "Plane {}: the snapshot at {} from leader {} does not decode; not installing it",
+                self.plane_id().raw(),
+                last_included_index,
+                leader_id
+            );
+            return InstallSnapshotResult::Unrestorable;
+        }
         let keep_suffix = meta
             .logs
             .read()
@@ -3680,13 +3734,30 @@ impl RaftService {
             }
         }
 
-        {
+        let restored = {
             let mut master_sm = meta.state_machine.write().await;
-            master_sm.recover(snapshot_entity.snapshot).await;
-            // `recover` only stages the images; registered state machines
-            // (and the member list) take theirs now, later registrations at
-            // registration.
-            master_sm.recover_registered_snapshots().await;
+            // Staging only decodes the images (checked above); registered
+            // state machines (and the member list) restore theirs now, later
+            // registrations at registration.
+            match master_sm.try_recover(snapshot_entity.snapshot).await {
+                Ok(()) => master_sm.recover_registered_snapshots().await,
+                Err(e) => Err(e),
+            }
+        };
+        if let Err(e) = restored {
+            // Part of the state may already be replaced, and the snapshot is
+            // on disk, so a restart meets the same error. This member stops
+            // serving the plane rather than run on state it does not hold.
+            error!(
+                "Plane {}: {}; the installed snapshot at {} cannot be restored, stopping the plane",
+                self.plane_id().raw(),
+                e,
+                last_included_index
+            );
+            meta.lifecycle = LifecycleState::Stopping;
+            meta.membership = Membership::Offline;
+            leader_flag.store(false, Relaxed);
+            return InstallSnapshotResult::Unrestorable;
         }
         meta.last_snapshot_index = last_included_index;
         meta.last_snapshot_term = last_included_term;
@@ -3797,6 +3868,15 @@ impl RaftService {
         meta: RwLockReadGuard<'a, RaftMeta>,
         entry: &'a LogEntry,
     ) -> ClientQryResponse {
+        if Self::lifecycle_is_stopping(meta.lifecycle) {
+            // Shutting down, or stopped on an unrestorable snapshot: serve no
+            // state from this member.
+            return ClientQryResponse::LeftBehind {
+                last_log_term: 0,
+                last_log_id: 0,
+                last_log_index: 0,
+            };
+        }
         let logs = meta.logs.read().await;
         let (last_log_index, last_log_term) = get_last_log_info!(meta, logs);
         // Gate on what this member has APPLIED, not on what its log has
@@ -4926,7 +5006,9 @@ mod test {
         service
             .register_state_machine(Box::new(CounterStateMachine { value: 0 }))
             .await;
-        service.recover_after_register().await;
+        service.recover_after_register()
+            .await
+            .expect("recover the registered state machines");
 
         let client = RaftClient::new(&vec![addr], DEFAULT_SERVICE_ID)
             .await
@@ -7440,7 +7522,9 @@ mod test {
                 svc2.bootstrap().await;
 
                 // Replay committed WAL logs into the SM
-                svc2.recover_after_register().await;
+                svc2.recover_after_register()
+                    .await
+                    .expect("recover the registered state machines");
                 async_wait(Duration::from_secs(2)).await;
 
                 let client2 = RaftClient::new(&vec![addr2.clone()], DEFAULT_SERVICE_ID)
@@ -7917,7 +8001,9 @@ mod test {
                 svc2.bootstrap().await;
 
                 // Replay post-snapshot WAL entries (entries after snapshot index → shots 95→92)
-                svc2.recover_after_register().await;
+                svc2.recover_after_register()
+                    .await
+                    .expect("recover the registered state machines");
                 async_wait(Duration::from_secs(2)).await;
 
                 let client2 = RaftClient::new(&vec![addr2.clone()], DEFAULT_SERVICE_ID)

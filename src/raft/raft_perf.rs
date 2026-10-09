@@ -96,7 +96,9 @@ async fn start_node(
     svc.register_state_machine(Box::new(PerfLedger { value: 0 }))
         .await;
     svc.bootstrap().await;
-    svc.recover_after_register().await;
+    svc.recover_after_register()
+        .await
+        .expect("recover the registered state machines");
     (svc, server)
 }
 
@@ -240,7 +242,9 @@ async fn perf_cmd_throughput_three_members() {
         } else {
             svc.join(&vec![addrs[0].clone()]).await.unwrap();
         }
-        svc.recover_after_register().await;
+        svc.recover_after_register()
+            .await
+            .expect("recover the registered state machines");
         nodes.push((svc, server));
     }
     async_wait_secs().await;
@@ -303,7 +307,9 @@ async fn perf_election_latency() {
         } else {
             svc.join(&vec![addrs[0].clone()]).await.unwrap();
         }
-        svc.recover_after_register().await;
+        svc.recover_after_register()
+            .await
+            .expect("recover the registered state machines");
         nodes.push((svc, server));
     }
     async_wait_secs().await;
@@ -375,7 +381,9 @@ async fn perf_vote_latency() {
         } else {
             svc.join(&vec![addrs[0].clone()]).await.unwrap();
         }
-        svc.recover_after_register().await;
+        svc.recover_after_register()
+            .await
+            .expect("recover the registered state machines");
         nodes.push((svc, server));
     }
     async_wait_secs().await;

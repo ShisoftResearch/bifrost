@@ -40,7 +40,9 @@ impl Member {
         assert!(RaftService::start(&svc, false).await);
         svc.register_state_machine(Box::new(Ledger { value: 0 }))
             .await;
-        svc.recover_after_register().await;
+        svc.recover_after_register()
+            .await
+            .expect("recover the registered state machines");
         Member {
             svc,
             server,

@@ -108,7 +108,9 @@ async fn start_node(
     svc.register_state_machine(Box::new(Ledger { value: initial }))
         .await;
     svc.bootstrap().await;
-    svc.recover_after_register().await;
+    svc.recover_after_register()
+        .await
+        .expect("recover the registered state machines");
     async_wait_secs().await;
     Node { svc, server }
 }

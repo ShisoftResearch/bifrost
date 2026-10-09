@@ -12,6 +12,7 @@
 
 use super::disk::failpoints::{self, Fail};
 use super::disk::{self, HardState, StorageEntity};
+use super::state_machine::master::SnapshotDataItems;
 use super::multi_member_tests::{add_entry, cluster, wait_for_values, Member, NEVER};
 use super::*;
 use crate::utils::time::async_wait_secs;
@@ -512,4 +513,132 @@ fn a_new_store_creates_its_hard_state() {
     assert_eq!(disk::read_hard_state(&dir).unwrap(), Some(HardState::default()));
     drop(storage);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Replace the persisted snapshot of the store at `dir` with `image` (a valid
+/// file around it -- checksum and framing intact -- so only the image is bad).
+async fn persist_snapshot_image(dir: &std::path::Path, index: u64, image: Vec<u8>) {
+    let mut storage = StorageEntity {
+        logs: None,
+        snapshot: None,
+        last_term: 0,
+        base_path: dir.to_path_buf(),
+        plane_id: PlaneId::type1(),
+        wal_index: Default::default(),
+        poisoned: None,
+        hard_state: Default::default(),
+    };
+    storage
+        .write_snapshot(&SnapshotEntity {
+            last_included_index: index,
+            last_included_term: 0,
+            snapshot: image,
+        })
+        .await
+        .unwrap();
+}
+
+/// A persisted snapshot whose image does not restore stops startup: the
+/// master image itself, or a part of it (here the member list). It never
+/// starts from an empty or stale state.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_that_does_not_restore_stops_startup() {
+    let _ = env_logger::try_init();
+    let bad_parts: SnapshotDataItems = vec![(
+        crate::raft::state_machine::configs::CONFIG_SM_ID,
+        vec![0xff, 0x00, 0x13],
+    )];
+    let images = [
+        ("master", vec![0xff, 0x00, 0x13, 0x37]),
+        ("member_list", crate::utils::serde::serialize(&bad_parts)),
+    ];
+    for (what, image) in images {
+        let mut members = cluster(&format!("bad_snapshot_{}", what), 1, NEVER).await;
+        let node = members.remove(0);
+        node.add(1).await;
+        let applied = node.svc.read_meta().await.last_applied;
+        let (dir, addr) = node.stop().await;
+        persist_snapshot_image(&dir, applied, image).await;
+
+        let mut opts = super::compaction_tests::disk_options(&dir, NEVER, NEVER);
+        opts.address = addr.clone();
+        let svc = RaftService::new(opts);
+        assert!(
+            !RaftService::start(&svc, false).await,
+            "{}: started on a snapshot it cannot restore",
+            what
+        );
+        svc.shutdown().await;
+    }
+}
+
+/// InstallSnapshot of an image that does not decode is refused before
+/// anything is persisted or replaced; one whose part cannot be restored stops
+/// the member's plane (it acknowledges nothing more) instead of running on
+/// state it does not hold.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unrestorable_installed_snapshot_is_refused_or_stops_the_plane() {
+    let _ = env_logger::try_init();
+    let mut members = cluster("bad_install", 3, NEVER).await;
+    members[0].add(1).await;
+    {
+        let all: Vec<&Member> = members.iter().collect();
+        assert_eq!(wait_for_values(&all, 1).await, vec![1, 1, 1]);
+    }
+    let leader_id = members[0].svc.id;
+    let follower = members.remove(2);
+    for member in members.iter() {
+        pause(member).await;
+    }
+    let (term, applied) = {
+        let meta = follower.svc.read_meta().await;
+        (meta.term, meta.last_applied)
+    };
+    let snapshot_file = follower.dir.join("snapshot.dat");
+    let before = std::fs::read(&snapshot_file).unwrap_or_default();
+
+    let answer = Service::install_snapshot(
+        follower.svc.as_ref(),
+        PlaneId::type1(),
+        term,
+        leader_id,
+        applied + 10,
+        term,
+        vec![0xff, 0x00, 0x13, 0x37],
+    )
+    .await;
+    assert_eq!(answer, InstallSnapshotResult::Unrestorable);
+    assert_eq!(follower.svc.read_meta().await.last_applied, applied);
+    assert_eq!(
+        std::fs::read(&snapshot_file).unwrap_or_default(),
+        before,
+        "an undecodable snapshot was persisted"
+    );
+    assert_eq!(follower.value().await, 1);
+
+    let bad_parts: SnapshotDataItems = vec![(
+        crate::raft::state_machine::configs::CONFIG_SM_ID,
+        vec![0xff, 0x00, 0x13],
+    )];
+    let answer = Service::install_snapshot(
+        follower.svc.as_ref(),
+        PlaneId::type1(),
+        term,
+        leader_id,
+        applied + 10,
+        term,
+        crate::utils::serde::serialize(&bad_parts),
+    )
+    .await;
+    assert_eq!(answer, InstallSnapshotResult::Unrestorable);
+    let (_, after) = append_one(&follower, term, leader_id).await;
+    assert!(
+        matches!(after, AppendEntriesResult::NotPersisted),
+        "a member that stopped on an unrestorable snapshot acknowledged {:?}",
+        after
+    );
+    follower.stop().await;
+    for member in members {
+        member.stop().await;
+    }
 }

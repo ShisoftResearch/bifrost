@@ -117,7 +117,9 @@ async fn replay_skips_holes_below_durable_entries() {
 
         // The application-side replay entry point: this is what Nebuchadnezzar
         // calls at startup, and what wedged behind the hole.
-        raft_service.recover_after_register().await;
+        raft_service.recover_after_register()
+            .await
+            .expect("recover the registered state machines");
         let applied = raft_service.last_applied_index().await;
         // Phase 1 committed ids 1..=4 and the hole is id 1: a healthy replay
         // lands on the last durable id. Wedged replay reports 0.

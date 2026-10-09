@@ -24,7 +24,7 @@
 //! onto a slot space however they like — a hash, a key prefix, an id field —
 //! and only need the mapping to be stable for a given key.
 
-use crate::raft::state_machine::StateMachineCtl;
+use crate::raft::state_machine::{RecoverError, StateMachineCtl};
 use crate::raft::RaftService;
 use bifrost_plugins::hash_ident;
 use futures::FutureExt;
@@ -498,37 +498,15 @@ impl StateMachineCtl for Slots {
         crate::utils::serde::serialize(&(self.groups.clone(), self.controls.clone()))
     }
     fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
-        // Current format first, then the pre-control format (a bare groups
-        // map). The fallback is not optional politeness: a persisted snapshot
-        // from before the controls existed that failed to decode would leave
-        // this member's table EMPTY, which claims nothing is placed anywhere
-        // -- the exact placement wipe the loud error below exists to prevent.
-        type WithControls = (HashMap<u64, GroupSlots>, HashMap<u64, GroupControl>);
-        if let Some((groups, controls)) =
-            crate::utils::serde::deserialize::<WithControls>(data.as_slice())
-        {
-            self.groups = groups;
-            self.controls = controls;
-            return future::ready(()).boxed();
-        }
-        match crate::utils::serde::deserialize::<HashMap<u64, GroupSlots>>(data.as_slice()) {
-            Some(groups) => {
-                self.groups = groups;
-                self.controls = HashMap::new();
-            }
-            None => {
-                // Deliberately loud and deliberately NOT silently emptied the
-                // way a weights table can be: an empty placement table claims
-                // nothing is placed anywhere, which would send every lookup to
-                // the wrong member. Keep what we have and let the caller see a
-                // stale table rather than an empty one.
-                error!(
-                    "Failed to deserialize slot placement snapshot; keeping the current table. \
-                     Placement may be stale on this member."
-                );
-            }
+        if let Err(e) = self.restore(data) {
+            // Raft recovery calls `try_recover`; this path cannot report the
+            // failure, and keeps the current table.
+            error!("{}; keeping the current table", e);
         }
         future::ready(()).boxed()
+    }
+    fn try_recover(&mut self, data: Vec<u8>) -> BoxFuture<Result<(), RecoverError>> {
+        future::ready(self.restore(data)).boxed()
     }
     fn recoverable(&self) -> bool {
         // Members must converge on ONE placement table. A member that joins
@@ -539,6 +517,22 @@ impl StateMachineCtl for Slots {
 }
 
 impl Slots {
+    /// Restore the placement table from its image. An image that does not
+    /// decode is an error: an empty table claims nothing is placed anywhere,
+    /// and a stale one places by an old table -- either sends lookups to the
+    /// wrong member. (One format only: the (groups, controls) pair.)
+    fn restore(&mut self, data: Vec<u8>) -> Result<(), RecoverError> {
+        type WithControls = (HashMap<u64, GroupSlots>, HashMap<u64, GroupControl>);
+        let (groups, controls) = crate::utils::serde::deserialize::<WithControls>(data.as_slice())
+            .ok_or_else(|| RecoverError {
+                sm_id: self.id,
+                reason: format!("the slot placement image ({} bytes) does not decode", data.len()),
+            })?;
+        self.groups = groups;
+        self.controls = controls;
+        Ok(())
+    }
+
     pub async fn new_with_id(id: u64, raft_service: &Arc<RaftService>) {
         raft_service
             .register_state_machine(Box::new(Slots {
@@ -841,6 +835,24 @@ mod tests {
         );
     }
 
+    /// Recovery (`try_recover`, what raft calls) refuses an image that does
+    /// not decode with a typed error and leaves the table as it was.
+    #[test]
+    fn a_corrupt_image_stops_recovery_with_a_typed_error() {
+        let mut sm = new_sm();
+        block_on(sm.adopt_slots(G, vec![(1, A), (2, B)]));
+        let before = sm.groups.clone();
+        let err = block_on(sm.try_recover(vec![0xff, 0x00, 0x13, 0x37]))
+            .expect_err("garbage must not restore");
+        assert_eq!(err.sm_id, sm.id);
+        assert_eq!(sm.groups, before);
+        // A valid image still restores.
+        let image = sm.snapshot();
+        let mut restored = new_sm();
+        block_on(restored.try_recover(image)).expect("a valid image restores");
+        assert_eq!(restored.groups, before);
+    }
+
     #[test]
     fn a_corrupt_snapshot_keeps_the_current_table_rather_than_emptying_it() {
         // An empty placement table asserts that nothing is placed anywhere,
@@ -973,24 +985,13 @@ mod control_tests {
         );
         assert_eq!(restored.groups, sm.groups, "the table itself must round-trip");
 
-        // A snapshot from before the controls existed is a bare groups map.
-        // It must recover the TABLE -- losing it claims nothing is placed
-        // anywhere -- with default controls.
+        // A snapshot from before the controls existed (a bare groups map) is
+        // not this format: recovery refuses it with a typed error and keeps
+        // the table it had -- no upgrade path, stores are reimported.
         let old_format = crate::utils::serde::serialize(&sm.groups);
-        let mut upgraded = Slots {
-            groups: HashMap::new(),
-            controls: HashMap::new(),
-            id: 1,
-        };
-        block_on(upgraded.recover(old_format));
-        assert_eq!(upgraded.groups, sm.groups, "pre-control snapshot must keep the table");
-        assert_eq!(
-            block_on(upgraded.migration_control(G)),
-            MigrationControlView {
-                budget: 0,
-                frozen: false,
-                in_flight: 0,
-            }
-        );
+        let err = block_on(restored.try_recover(old_format))
+            .expect_err("a pre-control image is not the current format");
+        assert_eq!(err.sm_id, 1);
+        assert_eq!(restored.groups, sm.groups, "a refused image changes nothing");
     }
 }
