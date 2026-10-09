@@ -6206,9 +6206,17 @@ mod test {
 
             // Create valid snapshot data (SnapshotDataItems format)
             use crate::raft::state_machine::master::SnapshotDataItems;
+            // Images the state machines can actually decode: an installed
+            // snapshot now reaches registered state machines (it used to be
+            // staged and never applied, which hid undecodable test data).
+            let config_image = {
+                let meta = raft_service.read_meta().await;
+                let master = meta.state_machine.read().await;
+                StateMachineCtl::snapshot(&master.configs)
+            };
             let snapshot_items: SnapshotDataItems = vec![
-                (CONFIG_SM_ID, vec![1u8, 2, 3]), // Config SM snapshot
-                (15u64, vec![42u8; 10]),         // Test SM snapshot
+                (CONFIG_SM_ID, config_image),                      // Config SM snapshot
+                (15u64, crate::utils::serde::serialize(&42i32)), // Test SM snapshot
             ];
             let snapshot_data = crate::utils::serde::serialize(&snapshot_items);
 
@@ -6226,6 +6234,30 @@ mod test {
 
             let after_count = raft_service.num_logs().await;
             info!("Logs after install_snapshot: {}", after_count);
+            {
+                let meta = raft_service.read_meta().await;
+                assert_eq!(meta.last_applied, 10, "the snapshot sets the apply cursor");
+            }
+            let shots = {
+                let (fn_id, _, data) = commands::get_shot::new().encode();
+                let entry = LogEntry {
+                    id: 0,
+                    term: 0,
+                    sm_id: 15,
+                    fn_id,
+                    data,
+                };
+                match (&*raft_service as &dyn Service)
+                    .c_query(PlaneId::type1(), &entry)
+                    .await
+                {
+                    ClientQryResponse::Success { data: Ok(data), .. } => {
+                        commands::get_shot::decode_return(&data)
+                    }
+                    other => panic!("query after install_snapshot failed: {:?}", other),
+                }
+            };
+            assert_eq!(shots, 42, "the installed image must reach the registered state machine");
 
             // Should have removed logs 1-10, keeping logs with id > 10
             assert!(
