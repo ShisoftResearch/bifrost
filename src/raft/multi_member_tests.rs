@@ -519,6 +519,11 @@ async fn a_leader_change_after_compaction_continues_the_log() {
         Service::reelect(members[0].svc.as_ref(), PlaneId::type1()).await,
         "B must win the election without A"
     );
+    // Let B's first heartbeats name it to C, D and E. Right after the
+    // election they still answer NotLeader(A), and the client's six leader
+    // attempts (no backoff) can all land on A or on that stale answer -- a
+    // client failover limit, not what this test is about.
+    async_wait_secs().await;
     let (value, id) = client
         .execute_command_with_index_on_plane(PlaneId::type1(), LEDGER_SM_ID, add::new(&1))
         .await
