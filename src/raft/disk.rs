@@ -3,6 +3,7 @@
 use crate::raft::{LogEntry, LogsMap, Options, PlaneId, RaftMeta, SnapshotEntity, Storage};
 use async_std::sync::*;
 
+use std::collections::VecDeque;
 use std::convert::TryInto;
 use std::fs::OpenOptions;
 use std::io;
@@ -13,6 +14,65 @@ use tokio::fs::*;
 use tokio::io::*;
 
 // const MAX_LOG_CAPACITY: usize = 10;
+
+/// Test-only fault injection for the persistence paths: a test arms a point
+/// for one storage directory, and the I/O at that point fails with an
+/// `io::Error` exactly as a failing disk would. Release and non-test builds
+/// compile every check to `Ok(())`.
+#[cfg(test)]
+pub(crate) mod failpoints {
+    use std::io;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Fail {
+        /// Writing a WAL record.
+        WalAppend,
+        /// fsync of `log.dat`.
+        WalSync,
+        /// Writing `commit.idx`.
+        CommitProgress,
+        /// Writing the hard state: before the temp file is written.
+        HardStateWrite,
+        /// Writing the hard state: temp file written, not renamed.
+        HardStateRename,
+        /// Writing the hard state: renamed, directory not yet fsynced.
+        HardStateDirSync,
+    }
+
+    static ARMED: Mutex<Vec<(PathBuf, Fail)>> = Mutex::new(Vec::new());
+
+    pub fn arm(dir: &Path, point: Fail) {
+        ARMED.lock().unwrap().push((dir.to_path_buf(), point));
+    }
+
+    pub fn disarm(dir: &Path, point: Fail) {
+        ARMED
+            .lock()
+            .unwrap()
+            .retain(|(armed_dir, armed)| !(armed_dir == dir && *armed == point));
+    }
+
+    pub fn check(dir: &Path, point: Fail) -> io::Result<()> {
+        let armed = ARMED
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(armed_dir, armed)| armed_dir == dir && *armed == point);
+        if armed {
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("injected {:?} failure in {}", point, dir.display()),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+use failpoints::{check as failpoint, Fail};
 
 #[derive(Clone)]
 pub struct DiskOptions {
@@ -38,12 +98,190 @@ impl DiskOptions {
     }
 }
 
+/// Raft's persistent hard state (Figure 2): the latest term this member has
+/// seen and the candidate it voted for in that term. Raft needs both to
+/// survive a crash -- forgetting the vote lets a member vote twice in one
+/// term (two leaders), forgetting the term lets it go back in time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HardState {
+    pub term: u64,
+    pub voted_for: Option<u64>,
+}
+
+/// `hardstate.dat`, beside `log.dat`, `commit.idx` and `snapshot.dat`. A fixed
+/// 25-byte record: magic, term, vote flag, vote, CRC32 of the preceding 21
+/// bytes. It is replaced whole (temp file, fsync, rename, fsync of the
+/// directory), so a crash leaves the old state or the new one, never a mix;
+/// the checksum catches media damage, which is an error, not a reset.
+const HARD_STATE_FILE: &str = "hardstate.dat";
+const HARD_STATE_TEMP: &str = "hardstate.dat.tmp";
+const HARD_STATE_MAGIC: [u8; 4] = *b"RHS1";
+const HARD_STATE_LEN: usize = 25;
+
+impl HardState {
+    fn encode(&self) -> [u8; HARD_STATE_LEN] {
+        let mut buf = [0u8; HARD_STATE_LEN];
+        buf[0..4].copy_from_slice(&HARD_STATE_MAGIC);
+        buf[4..12].copy_from_slice(&self.term.to_le_bytes());
+        buf[12] = self.voted_for.is_some() as u8;
+        buf[13..21].copy_from_slice(&self.voted_for.unwrap_or(0).to_le_bytes());
+        let crc = crc32fast::hash(&buf[0..21]);
+        buf[21..25].copy_from_slice(&crc.to_le_bytes());
+        buf
+    }
+
+    fn decode(bytes: &[u8]) -> std::result::Result<Self, HardStateProblem> {
+        // The version is the magic's last byte; another version is not read.
+        if bytes.len() >= 4 && bytes[0..3] == HARD_STATE_MAGIC[0..3] && bytes[3] != HARD_STATE_MAGIC[3] {
+            return Err(HardStateProblem::Version(bytes[3]));
+        }
+        let damaged = |what: String| Err(HardStateProblem::Damaged(what));
+        if bytes.len() != HARD_STATE_LEN {
+            return damaged(format!("{} bytes, expected {}", bytes.len(), HARD_STATE_LEN));
+        }
+        if bytes[0..4] != HARD_STATE_MAGIC {
+            return damaged("bad magic".to_string());
+        }
+        let crc = u32::from_le_bytes(bytes[21..25].try_into().unwrap());
+        if crc != crc32fast::hash(&bytes[0..21]) {
+            return damaged("checksum mismatch".to_string());
+        }
+        let term = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
+        let voted_for = match bytes[12] {
+            0 => None,
+            1 => Some(u64::from_le_bytes(bytes[13..21].try_into().unwrap())),
+            flag => return damaged(format!("bad vote flag {}", flag)),
+        };
+        Ok(HardState { term, voted_for })
+    }
+}
+
+/// Startup error: the store has a log, snapshot or commit index but no hard
+/// state, so its term and vote are unknown. (There is no derivation for
+/// stores written before the hard state existed; they are reimported.)
+#[derive(Debug)]
+pub struct MissingHardState {
+    pub plane_id: PlaneId,
+    pub path: PathBuf,
+}
+
+impl std::fmt::Display for MissingHardState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "plane {} has raft history but no hard state at {}: its term and vote are unknown",
+            self.plane_id.raw(),
+            self.path.display()
+        )
+    }
+}
+
+impl std::error::Error for MissingHardState {}
+
+/// The persisted hard state under `base_path`, `None` if there is none yet.
+pub fn read_hard_state(base_path: &Path) -> io::Result<Option<HardState>> {
+    let path = base_path.join(HARD_STATE_FILE);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    HardState::decode(&bytes).map(Some).map_err(|problem| {
+        io::Error::new(io::ErrorKind::InvalidData, BadHardState { path, problem })
+    })
+}
+
+/// What is wrong with a hard-state file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HardStateProblem {
+    /// Written in another format version (the magic's last byte).
+    Version(u8),
+    /// Not a whole, intact record of this version.
+    Damaged(String),
+}
+
+/// Startup error: the hard-state file exists but cannot be read as this
+/// version's record. Never reset: guessing the term or forgetting the vote is
+/// how a member votes twice.
+#[derive(Debug)]
+pub struct BadHardState {
+    pub path: PathBuf,
+    pub problem: HardStateProblem,
+}
+
+impl std::fmt::Display for BadHardState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.problem {
+            HardStateProblem::Version(found) => write!(
+                f,
+                "{} is hard-state version {:?}, this build reads version {:?}",
+                self.path.display(),
+                *found as char,
+                HARD_STATE_MAGIC[3] as char
+            ),
+            HardStateProblem::Damaged(what) => {
+                write!(f, "{} is damaged: {}", self.path.display(), what)
+            }
+        }
+    }
+}
+
+impl std::error::Error for BadHardState {}
+
+/// Durably replace the hard state under `base_path`. Returns only once the
+/// new state is what a restart reads.
+pub fn write_hard_state(base_path: &Path, state: &HardState) -> io::Result<()> {
+    use std::io::Write;
+    #[cfg(test)]
+    failpoint(base_path, Fail::HardStateWrite)?;
+    let temp = base_path.join(HARD_STATE_TEMP);
+    {
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(&state.encode())?;
+        file.sync_all()?;
+    }
+    #[cfg(test)]
+    failpoint(base_path, Fail::HardStateRename)?;
+    std::fs::rename(&temp, base_path.join(HARD_STATE_FILE))?;
+    #[cfg(test)]
+    failpoint(base_path, Fail::HardStateDirSync)?;
+    // The rename is durable only once the directory is.
+    std::fs::File::open(base_path)?.sync_all()
+}
+
 pub struct StorageEntity {
     pub logs: Option<File>,
     pub snapshot: Option<File>,
+    /// Despite the name: the id of the last log entry appended to `log.dat`.
+    /// `append_logs` writes only the entries above it. That is sound because
+    /// a leader's ids only grow -- including across snapshot and compaction,
+    /// where the next id continues from the snapshot's last included index
+    /// (`last_log_position`) instead of restarting at 1 -- and because a
+    /// follower that discards a conflicting suffix moves it back below that
+    /// suffix (`truncate_from`), so the replacing entries are written.
     pub last_term: u64,
     pub base_path: PathBuf,
     pub plane_id: PlaneId,
+    pub wal_index: WalIndex,
+    /// Set when a failed WAL write could not be undone: the file's state is
+    /// unknown, so every later WAL operation refuses until a restart replays
+    /// what is really on disk.
+    pub poisoned: Option<String>,
+    /// The hard state as last made durable.
+    pub hard_state: HardState,
+}
+
+/// Where each record of `log.dat` starts, so a discarded log suffix can be cut
+/// off the file instead of resurrecting on the next replay.
+///
+/// Only records a follower may still have to discard are indexed: committed
+/// entries never conflict, so whatever a snapshot covers is forgotten.
+#[derive(Default)]
+pub struct WalIndex {
+    /// (log id, byte offset of its record), both strictly increasing.
+    records: VecDeque<(u64, u64)>,
+    /// Length of the valid prefix of the file: where the next record starts.
+    len: u64,
 }
 
 pub struct DiskLogEntry {
@@ -170,6 +408,12 @@ impl StorageEntity {
                     .read(true)
                     .truncate(false);
                 let mut last_log_id = 0;
+                let mut wal_index = WalIndex::default();
+                // The highest entry term: a member never holds an entry from a
+                // term beyond its own, so the persisted term is checked
+                // against it.
+                let mut entry_term_floor = 0u64;
+                let mut wal_records = 0u64;
                 let mut storage = Self {
                     logs: if options.append_logs {
                         let mut log_file = open_opts.open(log_path.as_path())?;
@@ -220,10 +464,35 @@ impl StorageEntity {
                             }
                             match DiskLogEntry::decode(&data_buf) {
                                 Ok(entry) => {
-                                    *term = entry.term;
+                                    wal_records += 1;
+                                    entry_term_floor = entry_term_floor.max(entry.log.term);
                                     // Do not trust commit/last_applied embedded in WAL for SM reconstruction
                                     // We'll derive commit_index from commit.idx and force replay from last_applied=0
-                                    last_log_id = entry.log.id;
+                                    let id = entry.log.id;
+                                    if counter > 0 && id <= last_log_id {
+                                        // Records are appended in log order, and a
+                                        // discarded suffix is cut off the file
+                                        // (`truncate_from`) before its replacement
+                                        // is written. A record at or below its
+                                        // predecessor is a replacement whose cut
+                                        // did not reach the disk: it supersedes
+                                        // the record it repeats and all after it,
+                                        // exactly as it did in memory.
+                                        warn!(
+                                            "WAL record {} follows record {} on plane {}: replacing the suffix from {} on",
+                                            id,
+                                            last_log_id,
+                                            plane_id.raw(),
+                                            id
+                                        );
+                                        let _ = logs.split_off(&id);
+                                        let kept = wal_index
+                                            .records
+                                            .partition_point(|(indexed, _)| *indexed < id);
+                                        wal_index.records.truncate(kept);
+                                    }
+                                    last_log_id = id;
+                                    wal_index.records.push_back((id, pos_before));
                                     logs.insert(entry.log.id, entry.log);
                                     counter += 1;
                                     last_valid_pos = log_file
@@ -248,14 +517,23 @@ impl StorageEntity {
                                 current_len - last_valid_pos,
                                 last_valid_pos
                             );
+                            // Appends must start right after the last valid
+                            // record: written after a torn tail, they would sit
+                            // beyond bytes the next replay stops at.
                             if let Err(e) = log_file.set_len(last_valid_pos) {
-                                warn!(
-                                    "Failed to truncate WAL to {} bytes: {:?}",
-                                    last_valid_pos, e
-                                );
+                                return Err(io::Error::new(
+                                    e.kind(),
+                                    format!(
+                                        "cannot cut the torn WAL tail of plane {} at {} bytes: {}",
+                                        plane_id.raw(),
+                                        last_valid_pos,
+                                        e
+                                    ),
+                                ));
                             }
                         }
                         let _ = log_file.seek(SeekFrom::End(0));
+                        wal_index.len = last_valid_pos;
                         debug!(
                             "Recovered {} raft logs for plane {}",
                             counter,
@@ -273,14 +551,63 @@ impl StorageEntity {
                     last_term: 0,
                     base_path: base_path.to_path_buf(),
                     plane_id,
+                    wal_index,
+                    poisoned: None,
+                    hard_state: HardState::default(),
                 };
                 storage.last_term = last_log_id;
+
+                let hard_state = match read_hard_state(base_path)? {
+                    Some(persisted) if persisted.term >= entry_term_floor => persisted,
+                    Some(persisted) => {
+                        // Cannot happen if every term was persisted before
+                        // entries of it were accepted; raise rather than run
+                        // below the log, and say so.
+                        error!(
+                            "Plane {}: persisted term {} is below its log's entry term {}; raising it (the vote is void)",
+                            plane_id.raw(),
+                            persisted.term,
+                            entry_term_floor
+                        );
+                        let raised = HardState {
+                            term: entry_term_floor,
+                            voted_for: None,
+                        };
+                        write_hard_state(base_path, &raised)?;
+                        raised
+                    }
+                    None => {
+                        // A brand-new store starts at term 0 with no vote. A
+                        // store with any history but no hard state cannot say
+                        // which term it is in or whom it voted for, and
+                        // guessing is how a member votes twice: refuse it.
+                        let has_history = wal_records > 0
+                            || std::fs::metadata(&snapshot_path).map_or(false, |m| m.len() > 0)
+                            || base_path.join("commit.idx").exists();
+                        if has_history {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                MissingHardState {
+                                    plane_id,
+                                    path: base_path.join(HARD_STATE_FILE),
+                                },
+                            ));
+                        }
+                        let fresh = HardState::default();
+                        write_hard_state(base_path, &fresh)?;
+                        fresh
+                    }
+                };
+                *term = hard_state.term;
+                storage.hard_state = hard_state;
 
                 // If commit progress side file exists, load it to ensure accurate indices
                 // Force full replay by resetting last_applied to 0 on startup
                 *last_applied = 0;
-                if let Ok(Some((ci, _la))) =
-                    futures::executor::block_on(storage.read_commit_progress())
+                // A damaged commit.idx is an error, not a 0: replay stops at
+                // the commit index, and 0 would hide acknowledged commits.
+                if let Some((ci, _la)) =
+                    futures::executor::block_on(storage.read_commit_progress())?
                 {
                     *commit_index = ci;
                     debug!(
@@ -289,7 +616,7 @@ impl StorageEntity {
                         ci
                     );
                 } else {
-                    // If no commit progress found, default to 0 to avoid partial state
+                    // No commit progress yet: nothing was committed here.
                     *commit_index = 0;
                 }
 
@@ -304,6 +631,61 @@ impl StorageEntity {
         meta: &'a RwLockWriteGuard<'a, RaftMeta>,
         logs: &'a RwLockWriteGuard<'a, LogsMap>,
     ) -> io::Result<()> {
+        self.refuse_if_poisoned()?;
+        let batch_start = (self.last_term, self.wal_index.len, self.wal_index.records.len());
+        let written = self.write_batch(meta, logs).await;
+        if let Err(e) = written {
+            // Nothing of a failed batch may stay: a record written but not
+            // fsynced can surface after a crash (and after a failed fsync
+            // Linux may already have dropped the dirty pages, so a later
+            // fsync would not save it either). Cut the file back to where the
+            // batch began, so the WAL holds exactly what was acknowledged.
+            self.rollback_batch(batch_start).await;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    async fn rollback_batch(&mut self, (cursor, len, records): (u64, u64, usize)) {
+        self.last_term = cursor;
+        self.wal_index.records.truncate(records);
+        self.wal_index.len = len;
+        let Some(f) = &mut self.logs else {
+            return;
+        };
+        let cut = async {
+            f.set_len(len).await?;
+            f.seek(SeekFrom::Start(len)).await?;
+            f.sync_all().await
+        }
+        .await;
+        if let Err(e) = cut {
+            let reason = format!(
+                "a failed WAL batch could not be cut back to {} bytes: {}",
+                len, e
+            );
+            error!("Plane {}: {}; refusing WAL writes until restart", self.plane_id.raw(), reason);
+            self.poisoned = Some(reason);
+        }
+    }
+
+    fn refuse_if_poisoned(&self) -> io::Result<()> {
+        match &self.poisoned {
+            Some(reason) => Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("WAL of plane {} is unusable: {}", self.plane_id.raw(), reason),
+            )),
+            None => Ok(()),
+        }
+    }
+
+    async fn write_batch<'a>(
+        &mut self,
+        meta: &'a RwLockWriteGuard<'a, RaftMeta>,
+        logs: &'a RwLockWriteGuard<'a, LogsMap>,
+    ) -> io::Result<()> {
+        #[cfg(test)]
+        let base_path = self.base_path.clone();
         if let Some(f) = &mut self.logs {
             let was_last_term = self.last_term;
             let mut counter = 0;
@@ -324,14 +706,24 @@ impl StorageEntity {
                 let checksum = crc32fast::hash(&entry_data);
                 // Write: [8 bytes record_len = 4+payload_len][4 bytes CRC32][N bytes payload]
                 let record_len = 4u64 + entry_data.len() as u64;
-                f.write_all(&record_len.to_le_bytes()).await?;
-                f.write_all(&checksum.to_le_bytes()).await?;
-                f.write_all(entry_data.as_slice()).await?;
+                let written = async {
+                    #[cfg(test)]
+                    failpoint(&base_path, Fail::WalAppend)?;
+                    f.write_all(&record_len.to_le_bytes()).await?;
+                    f.write_all(&checksum.to_le_bytes()).await?;
+                    f.write_all(entry_data.as_slice()).await
+                }
+                .await;
+                written?;
+                self.wal_index.records.push_back((*term, self.wal_index.len));
+                self.wal_index.len += 8 + record_len;
                 self.last_term = *term;
                 terms_appended.push(self.last_term);
                 counter += 1;
             }
             if counter > 0 {
+                #[cfg(test)]
+                failpoint(&base_path, Fail::WalSync)?;
                 f.sync_all().await?;
                 debug!(
                     "Appended and persisted {} logs for plane {}, was {}, appended {:?}",
@@ -343,6 +735,74 @@ impl StorageEntity {
             }
         }
         Ok(())
+    }
+
+    /// Discard every record with log id `from_id` or above: the conflicting
+    /// suffix a follower deletes (Raft Figure 2, AppendEntries step 3), or the
+    /// log an InstallSnapshot replaces. The append cursor always moves below
+    /// `from_id`, so the replacement entries are written even when the cut
+    /// itself fails -- replay then lets them supersede the stale records.
+    pub async fn truncate_from(&mut self, from_id: u64) -> io::Result<()> {
+        self.refuse_if_poisoned()?;
+        self.last_term = self.last_term.min(from_id.saturating_sub(1));
+        let kept = self
+            .wal_index
+            .records
+            .partition_point(|(id, _)| *id < from_id);
+        let Some(&(first_cut, offset)) = self.wal_index.records.get(kept) else {
+            return Ok(());
+        };
+        let cut = self.wal_index.records.len() - kept;
+        // Forget the cut records even if the cut fails: the index must stay
+        // ordered for the replacement records appended next.
+        self.wal_index.records.truncate(kept);
+        let Some(f) = &mut self.logs else {
+            return Ok(());
+        };
+        f.set_len(offset).await?;
+        self.wal_index.len = offset;
+        // `set_len` leaves the cursor past the new end; writing there would
+        // leave a zero-filled gap that replay reads as a torn tail. With the
+        // file already cut, a failure here leaves its position unknown.
+        let settled = async {
+            f.seek(SeekFrom::Start(offset)).await?;
+            f.sync_all().await
+        }
+        .await;
+        if let Err(e) = settled {
+            self.poisoned = Some(format!(
+                "the WAL was cut to {} bytes but not settled: {}",
+                offset, e
+            ));
+            return Err(e);
+        }
+        info!(
+            "Cut {} WAL records from log id {} on plane {} (file now {} bytes)",
+            cut,
+            first_cut,
+            self.plane_id.raw(),
+            offset
+        );
+        Ok(())
+    }
+
+    /// Make `state` the durable hard state. A no-op when it already is, so
+    /// callers can call it before every effect that depends on it.
+    pub async fn persist_hard_state(&mut self, state: HardState) -> io::Result<()> {
+        if state == self.hard_state {
+            return Ok(());
+        }
+        write_hard_state(&self.base_path, &state)?;
+        self.hard_state = state;
+        Ok(())
+    }
+
+    /// A snapshot at `index` covers every entry up to it: those records are
+    /// committed and never discarded, so their offsets are not needed.
+    pub fn forget_records_through(&mut self, index: u64) {
+        while matches!(self.wal_index.records.front(), Some((id, _)) if *id <= index) {
+            self.wal_index.records.pop_front();
+        }
     }
 
     pub async fn post_processing<'a>(
@@ -394,11 +854,14 @@ impl StorageEntity {
 
     /// Ensure WAL file is fully synced to disk.
     pub async fn flush_wal(&mut self) -> io::Result<()> {
+        self.refuse_if_poisoned()?;
         if let Some(f) = &mut self.logs {
             info!(
                 "WAL fsync for plane {}: syncing log.dat to disk",
                 self.plane_id.raw()
             );
+            #[cfg(test)]
+            failpoint(&self.base_path, Fail::WalSync)?;
             f.sync_all().await?;
             info!("WAL fsync for plane {}: completed", self.plane_id.raw());
         }
@@ -413,6 +876,8 @@ impl StorageEntity {
     ) -> io::Result<()> {
         let commit_path = self.base_path.join("commit.idx");
         let temp_path = self.base_path.join("commit.idx.tmp");
+        #[cfg(test)]
+        failpoint(&self.base_path, Fail::CommitProgress)?;
         let mut f = File::create(&temp_path).await?;
         f.write_all(&commit_index.to_le_bytes()).await?;
         f.write_all(&last_applied.to_le_bytes()).await?;
@@ -428,11 +893,19 @@ impl StorageEntity {
         if !commit_path.exists() {
             return Ok(None);
         }
-        let mut f = File::open(&commit_path).await?;
-        let mut buf = [0u8; 16];
-        if f.read_exact(&mut buf).await.is_err() {
-            return Ok(None);
-        }
+        // Written by rename, so it is whole or absent; anything else is
+        // damage, and guessing 0 would hide acknowledged commits from replay.
+        let bytes = std::fs::read(&commit_path)?;
+        let buf: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "commit.idx of plane {} holds {} bytes, expected 16",
+                    self.plane_id.raw(),
+                    bytes.len()
+                ),
+            )
+        })?;
         let commit_index = u64::from_le_bytes(buf[0..8].try_into().unwrap());
         let last_applied = u64::from_le_bytes(buf[8..16].try_into().unwrap());
         Ok(Some((commit_index, last_applied)))
@@ -483,70 +956,69 @@ impl StorageEntity {
 
     /// Read and validate snapshot from disk
     pub async fn read_snapshot(&self) -> io::Result<Option<SnapshotEntity>> {
-        let snapshot_path = self.base_path.join("snapshot.dat");
+        Self::read_snapshot_at(&self.base_path, self.plane_id).await
+    }
+
+    /// Read the snapshot persisted under `base_path` without the storage
+    /// lock. `write_snapshot` replaces the file by rename, so a concurrent
+    /// read sees one complete snapshot or the other, never a mix.
+    pub async fn read_snapshot_at(
+        base_path: &Path,
+        plane_id: PlaneId,
+    ) -> io::Result<Option<SnapshotEntity>> {
+        let snapshot_path = base_path.join("snapshot.dat");
 
         // Check if snapshot file exists
         if !snapshot_path.exists() {
             debug!(
                 "No snapshot file found for plane {} at {:?}",
-                self.plane_id.raw(),
+                plane_id.raw(),
                 snapshot_path
             );
             return Ok(None);
         }
 
-        let mut file = File::open(&snapshot_path).await?;
-
-        // Read checksum
-        let mut checksum_buf = [0u8; 4];
-        if file.read_exact(&mut checksum_buf).await.is_err() {
-            warn!(
-                "Failed to read snapshot checksum for plane {}, file may be corrupted",
-                self.plane_id.raw()
-            );
+        let bytes = tokio::fs::read(&snapshot_path).await?;
+        // Storage creates an empty snapshot.dat up front; empty is "none yet".
+        if bytes.is_empty() {
             return Ok(None);
         }
-        let expected_checksum = u32::from_le_bytes(checksum_buf);
-
-        // Read length
-        let mut len_buf = [0u8; 8];
-        if file.read_exact(&mut len_buf).await.is_err() {
-            warn!(
-                "Failed to read snapshot length for plane {}, file may be corrupted",
-                self.plane_id.raw()
-            );
-            return Ok(None);
+        // Anything else was written whole and renamed into place, so a short
+        // or mismatched file is damage. Starting without it would silently
+        // drop state the log no longer holds (an installed snapshot), so it
+        // is an error.
+        let corrupt = |what: String| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("snapshot of plane {} is corrupt: {}", plane_id.raw(), what),
+            )
+        };
+        if bytes.len() < 12 {
+            return Err(corrupt(format!("{} bytes, shorter than its header", bytes.len())));
         }
-        let len = u64::from_le_bytes(len_buf);
-
-        // Read data
-        let mut data_buf = vec![0u8; len as usize];
-        if file.read_exact(&mut data_buf).await.is_err() {
-            warn!(
-                "Failed to read snapshot data for plane {}, file may be corrupted",
-                self.plane_id.raw()
-            );
-            return Ok(None);
+        let expected_checksum = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let len = u64::from_le_bytes(bytes[4..12].try_into().unwrap()) as usize;
+        let data_buf = &bytes[12..];
+        if data_buf.len() != len {
+            return Err(corrupt(format!(
+                "header says {} bytes of data, file holds {}",
+                len,
+                data_buf.len()
+            )));
         }
-
-        // Verify checksum
-        let actual_checksum = crc32fast::hash(&data_buf);
+        let actual_checksum = crc32fast::hash(data_buf);
         if actual_checksum != expected_checksum {
-            error!(
-                "Snapshot checksum mismatch on plane {}! Expected: {}, Got: {}. File is corrupted.",
-                self.plane_id.raw(),
-                expected_checksum,
-                actual_checksum
-            );
-            return Ok(None);
+            return Err(corrupt(format!(
+                "checksum {:#010x}, expected {:#010x}",
+                actual_checksum, expected_checksum
+            )));
         }
-
-        // Deserialize
-        let snapshot = crate::utils::serde::deserialize::<SnapshotEntity>(&data_buf).unwrap();
+        let snapshot = crate::utils::serde::deserialize::<SnapshotEntity>(data_buf)
+            .ok_or_else(|| corrupt("its contents do not decode".to_string()))?;
 
         info!(
             "Snapshot loaded from disk for plane {}: index={}, term={}, size={} bytes",
-            self.plane_id.raw(),
+            plane_id.raw(),
             snapshot.last_included_index,
             snapshot.last_included_term,
             data_buf.len()

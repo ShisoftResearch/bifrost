@@ -1,6 +1,6 @@
 use crate::raft::state_machine::callback::server::Subscriptions;
 use crate::raft::state_machine::callback::SubKey;
-use crate::raft::state_machine::StateMachineCtl;
+use crate::raft::state_machine::{RecoverError, StateMachineCtl};
 use crate::raft::AsyncServiceClient;
 use crate::rpc::{self, ServiceClient};
 use async_std::sync::*;
@@ -117,15 +117,23 @@ impl StateMachineCtl for Configures {
         crate::utils::serde::serialize(&snapshot)
     }
     fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
-        match crate::utils::serde::deserialize::<ConfigSnapshot>(&data) {
-            Some(snapshot) => self.recover_members(snapshot.members).boxed(),
-            None => {
-                error!(
-                    "Failed to deserialize config state machine snapshot. Config recovery failed."
-                );
-                // Return empty future - state machine will start with empty config
-                future::ready(()).boxed()
+        async move {
+            if let Err(e) = self.try_recover(data).await {
+                // Raft recovery calls `try_recover`; this path cannot report
+                // the failure, and leaves the member list as it was.
+                error!("{}; member list unchanged", e);
             }
+        }
+        .boxed()
+    }
+    fn try_recover(&mut self, data: Vec<u8>) -> BoxFuture<Result<(), RecoverError>> {
+        match crate::utils::serde::deserialize::<ConfigSnapshot>(&data) {
+            Some(snapshot) => self.recover_members(snapshot.members).map(Ok).boxed(),
+            None => future::ready(Err(RecoverError {
+                sm_id: CONFIG_SM_ID,
+                reason: format!("the member-list image ({} bytes) does not decode", data.len()),
+            }))
+            .boxed(),
         }
     }
     fn recoverable(&self) -> bool {
@@ -239,11 +247,14 @@ mod tests {
     async fn test_recover_invalid_data() {
         let mut config = Configures::new(1);
 
-        // Try to recover from invalid data
+        // An image that does not decode stops recovery with a typed error and
+        // leaves the member list as it was.
         let invalid_data = vec![0xFF, 0xFF, 0xFF];
-        config.recover(invalid_data).await;
-
-        // Should not crash, just log error and continue with empty config
+        let err = config
+            .try_recover(invalid_data)
+            .await
+            .expect_err("garbage must not restore the member list");
+        assert_eq!(err.sm_id, CONFIG_SM_ID);
         assert!(config.members.is_empty());
     }
 

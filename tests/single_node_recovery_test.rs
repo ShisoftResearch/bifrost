@@ -13,7 +13,11 @@ async fn test_single_node_cluster_recovery_becomes_leader() {
     let _ = env_logger::try_init();
 
     // Use test-specific directory
-    let data_path = "/tmp/bifrost_test_single_node_recovery_18000".to_string();
+    // Under TMPDIR, so a run can keep its scratch data off /tmp.
+    let data_path = std::env::temp_dir()
+        .join("bifrost_test_single_node_recovery_18000")
+        .to_string_lossy()
+        .to_string();
     // Clean up any existing data from previous runs
     let _ = std::fs::remove_dir_all(&data_path);
     std::fs::create_dir_all(&data_path).unwrap();
@@ -194,7 +198,11 @@ async fn test_single_node_cluster_recovery_becomes_leader() {
 async fn test_single_node_multiple_restart_cycles() {
     let _ = env_logger::try_init();
 
-    let data_path = "/tmp/bifrost_test_single_node_cycles_18001".to_string();
+    // Under TMPDIR, so a run can keep its scratch data off /tmp.
+    let data_path = std::env::temp_dir()
+        .join("bifrost_test_single_node_cycles_18001")
+        .to_string_lossy()
+        .to_string();
     // Clean up any existing data from previous runs
     let _ = std::fs::remove_dir_all(&data_path);
     std::fs::create_dir_all(&data_path).unwrap();

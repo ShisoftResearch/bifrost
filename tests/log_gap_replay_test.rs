@@ -34,7 +34,11 @@ fn strip_first_log_record(log_path: &std::path::Path) {
 async fn replay_skips_holes_below_durable_entries() {
     let _ = env_logger::try_init();
 
-    let data_path = "/tmp/bifrost_test_log_gap_replay_18020".to_string();
+    // Under TMPDIR, so a run can keep its scratch data off /tmp.
+    let data_path = std::env::temp_dir()
+        .join("bifrost_test_log_gap_replay_18020")
+        .to_string_lossy()
+        .to_string();
     let _ = std::fs::remove_dir_all(&data_path);
     std::fs::create_dir_all(&data_path).unwrap();
     let address = "127.0.0.1:18020".to_string();
@@ -81,7 +85,10 @@ async fn replay_skips_holes_below_durable_entries() {
         sleep(Duration::from_millis(300)).await;
         // Persist commit progress; a kill preserves commit.idx from the last
         // flush, and replay is driven by it.
-        raft_service.flush_persistence().await;
+        raft_service
+            .flush_persistence()
+            .await
+            .expect("flush the WAL and commit progress");
     }
     // Give the tokio runtime a beat to drop file handles.
     sleep(Duration::from_millis(300)).await;
@@ -110,7 +117,9 @@ async fn replay_skips_holes_below_durable_entries() {
 
         // The application-side replay entry point: this is what Nebuchadnezzar
         // calls at startup, and what wedged behind the hole.
-        raft_service.recover_after_register().await;
+        raft_service.recover_after_register()
+            .await
+            .expect("recover the registered state machines");
         let applied = raft_service.last_applied_index().await;
         // Phase 1 committed ids 1..=4 and the hole is id 1: a healthy replay
         // lands on the last durable id. Wedged replay reports 0.

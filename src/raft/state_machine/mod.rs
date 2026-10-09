@@ -14,10 +14,48 @@ pub enum OpType {
     SUBSCRIBE,
 }
 
+/// A persisted image that is present but cannot be restored. Recovery stops
+/// on it: starting from an empty or stale state instead would silently drop
+/// what the image held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverError {
+    pub sm_id: u64,
+    pub reason: String,
+}
+
+impl std::fmt::Display for RecoverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "state machine {} cannot recover its persisted image: {}",
+            self.sm_id, self.reason
+        )
+    }
+}
+
+impl std::error::Error for RecoverError {}
+
 pub trait StateMachineCtl: Sync + Send + Any {
     fn id(&self) -> u64;
     fn snapshot(&self) -> Vec<u8>;
     fn recover(&mut self, data: Vec<u8>) -> ::futures::future::BoxFuture<()>;
+    /// Recover from a persisted image, refusing one that does not decode.
+    /// Raft recovery calls this, never `recover`. The default trusts
+    /// `recover`, for state machines whose images cannot fail to decode or
+    /// that report failure themselves; a state machine that can fail to decode
+    /// overrides it so the failure stops recovery instead of leaving it empty.
+    fn try_recover(
+        &mut self,
+        data: Vec<u8>,
+    ) -> ::futures::future::BoxFuture<Result<(), RecoverError>> {
+        use futures::FutureExt;
+        let recovered = self.recover(data);
+        async move {
+            recovered.await;
+            Ok(())
+        }
+        .boxed()
+    }
     fn recoverable(&self) -> bool;
     /// Whether entries buffered while this state machine was unregistered
     /// should be replayed into it at registration. State machines that
