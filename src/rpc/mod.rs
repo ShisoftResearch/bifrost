@@ -85,6 +85,13 @@ pub enum RPCError {
     ClientCannotDecodeResponse,
 }
 
+impl RPCError {
+    /// True only when the transport did not send this request.
+    pub fn request_was_not_sent(&self) -> bool {
+        matches!(self, Self::IOError(error) if crate::tcp::client::request_was_not_sent(error))
+    }
+}
+
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct ShortcutToken(Arc<()>);

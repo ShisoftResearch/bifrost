@@ -19,6 +19,30 @@ use tokio::sync::oneshot;
 use tokio::time;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
+// This marker proves that this request did not reach the socket or callback.
+#[derive(Debug)]
+struct RequestNotSent(io::Error);
+
+impl std::fmt::Display for RequestNotSent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for RequestNotSent {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+fn not_sent(error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), RequestNotSent(error))
+}
+
+pub(crate) fn request_was_not_sent(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|cause| cause.is::<RequestNotSent>())
+}
+
 type ResponseSenders = Arc<SyncMutex<HashMap<u64, oneshot::Sender<BytesMut>>>>;
 
 struct Connection {
@@ -141,13 +165,14 @@ impl Client {
 
     pub async fn send_msg(&self, msg: TcpReq) -> io::Result<BytesMut> {
         let Some(network) = &self.network else {
-            return shortcut::call(self.server_id, msg).await;
+            return shortcut::call(self.server_id, msg).await.map_err(not_sent);
         };
         let connection = {
             let mut connection = network.connection.lock().await;
             if connection.closed.load(Ordering::Acquire) {
                 // Only a new request can use a new connection. Never retry a sent request.
-                *connection = Connection::connect(&network.address, self.timeout).await?;
+                *connection = Connection::connect(&network.address, self.timeout)
+                    .await.map_err(not_sent)?;
             }
             connection.clone()
         };
@@ -159,10 +184,10 @@ impl Client {
         {
             let mut senders = connection.senders.lock();
             if connection.closed.load(Ordering::Acquire) {
-                return Err(io::Error::new(
+                return Err(not_sent(io::Error::new(
                     io::ErrorKind::BrokenPipe,
                     "TCP connection closed",
-                ));
+                )));
             }
             senders.insert(msg_id, sender);
         }
@@ -170,6 +195,7 @@ impl Client {
             senders: connection.senders.clone(),
             id: msg_id,
         };
+        let mut send_started = false;
         let sent = time::timeout(self.timeout, async {
             let mut writer = connection.writer.lock().await;
             if connection.closed.load(Ordering::Acquire) {
@@ -178,6 +204,7 @@ impl Client {
                     "TCP connection closed",
                 ));
             }
+            send_started = true;
             writer.send(frame.freeze()).await
         })
         .await;
@@ -185,11 +212,12 @@ impl Client {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 connection.invalidate();
-                return Err(error);
+                return Err(if send_started { error } else { not_sent(error) });
             }
             Err(error) => {
                 connection.invalidate();
-                return Err(error.into());
+                let error = error.into();
+                return Err(if send_started { error } else { not_sent(error) });
             }
         }
         match time::timeout(self.timeout, receiver).await? {
@@ -213,6 +241,33 @@ mod tests {
     use super::*;
     use bytes::{BufMut, BytesMut};
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn commit_transport_classifies_timeouts_before_and_after_send() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let client = Client::connect_with_timeout(&address, Duration::from_millis(50)).await.unwrap();
+        let (_peer, _) = listener.accept().await.unwrap();
+        let connection = client.network.as_ref().unwrap().connection.lock().await.clone();
+        let writer = connection.writer.lock().await;
+        let error = client.send_msg(BytesMut::from(&b"unsent"[..])).await.unwrap_err();
+        assert!(request_was_not_sent(&error), "{error:?}");
+        drop(writer);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let client = Client::connect_with_timeout(&address, Duration::from_millis(50)).await.unwrap();
+        let peer = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut frames = Framed::new(socket, LengthDelimitedCodec::new());
+            let request = frames.next().await.unwrap().unwrap();
+            assert_eq!(&request[8..], b"sent");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+        let error = client.send_msg(BytesMut::from(&b"sent"[..])).await.unwrap_err();
+        assert!(!request_was_not_sent(&error), "a lost reply is uncertain: {error:?}");
+        peer.await.unwrap();
+    }
 
     #[cfg(disable_shortcut)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
