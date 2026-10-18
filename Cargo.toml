@@ -28,6 +28,7 @@ tokio-util = {version = "0.7", features = ["full"]}
 tokio-stream = "0.1"
 bytes = "1"
 crc32fast = "*"
+serde_json = "1.0.51"
 
 futures = {version = "0.3", features = ["executor", "thread-pool"] }
 futures-timer = "3"
@@ -35,5 +36,4 @@ async-std = "1"
 lightning-containers = { git = "ssh://git@192.168.10.134/shisoft-x/Lightning.git", branch = "develop" }
 
 [dev-dependencies]
-serde_json = "1.0.51"
 env_logger = "*"
