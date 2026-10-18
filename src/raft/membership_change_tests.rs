@@ -418,3 +418,29 @@ async fn a_discarded_config_entry_leaves_the_voters() {
     assert!(matches!(result, AppendEntriesResult::Ok), "{:?}", result);
     assert_eq!(voter_addresses(&member).await, vec![member.addr.clone()]);
 }
+
+/// Observed in the campaign (K-GR3d): after both followers were restarted, a
+/// stop of the leader left the plane without a leader for ever, because a
+/// restarted member stayed in state `Undefined` and never timed out. A restarted
+/// voter is a follower with an election timer.
+#[tokio::test(flavor = "multi_thread")]
+async fn restarted_followers_elect_a_leader_when_the_leader_stops() {
+    let mut members = cluster("mc_elect", 3, NEVER).await;
+    let leader = members.remove(0);
+    let f2 = members.pop().unwrap();
+    let f1 = members.pop().unwrap();
+    let f1 = restart(f1).await;
+    let f2 = restart(f2).await;
+    leader.stop().await;
+    // The election timeout is 10 to 30 s.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut elected = false;
+    while std::time::Instant::now() < deadline {
+        if f1.is_leader().await || f2.is_leader().await {
+            elected = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(elected, "no leader 60 s after the leader stopped");
+}

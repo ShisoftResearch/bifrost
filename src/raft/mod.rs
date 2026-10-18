@@ -1529,6 +1529,16 @@ impl RaftService {
             }
         } else if bootstrap_if_fresh && fresh {
             self.bootstrap_as_seed(plane_id, leader_flag, meta).await;
+        } else if meta.voters.contains_key(&self.id)
+            && matches!(meta.membership, Membership::Undefined)
+        {
+            // A restarted voter starts as a follower with an election timer.
+            // Left `Undefined` it never times out, and a plane whose other
+            // voters were all restarted has nobody who can campaign when the
+            // leader stops (Observed: K-GR3d, `seq-1`). The grace period
+            // gives the leader time to reach this member first.
+            self.switch_membership(meta, Membership::Follower);
+            meta.last_checked = get_time() + (CHECKER_MS * 10);
         }
         Ok(())
     }
