@@ -879,6 +879,18 @@ impl StateMachineCmds for Membership {
     }
 }
 impl StateMachineCtl for Membership {
+    #[cfg(multisite_test)]
+    fn msraft_diagnostic(&self) -> serde_json::Value {
+        serde_json::json!({
+            "members": self.members.iter().map(|(id, m)| serde_json::json!({
+                "id": id, "address": m.address, "groups": m.groups,
+                "online": self.heartbeat.status.get(id).map(|s| s.online),
+                "last_updated": self.heartbeat.status.get(id).map(|s| s.last_updated),
+            })).collect::<Vec<_>>(),
+            "groups": self.groups, "version": self.version, "recoverable": self.recoverable()
+        })
+    }
+
     raft_sm_complete!();
     fn id(&self) -> u64 {
         DEFAULT_SERVICE_ID

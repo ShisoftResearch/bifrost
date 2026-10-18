@@ -604,3 +604,11 @@ mod test {
         assert_eq!(group_member_offline_count.load(Ordering::Relaxed), 1);
     }
 }
+
+/// Test control: deliver the unchanged heartbeat RPC to an explicit member.
+#[cfg(multisite_test)]
+pub async fn msraft_ping(address: &String, id: u64) {
+    if let Ok(client) = crate::rpc::DEFAULT_CLIENT_POOL.get(address).await {
+        let _ = heartbeat_rpc::ImmeServiceClient::ping(DEFAULT_SERVICE_ID, &client, id).await;
+    }
+}

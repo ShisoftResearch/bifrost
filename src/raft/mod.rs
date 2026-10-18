@@ -1360,6 +1360,18 @@ impl RaftService {
 
         let recovered_from_disk = Self::load_snapshot_into_meta(plane_id, meta).await?;
         Self::recover_config_state_from_logs(plane_id, meta).await;
+        #[cfg(multisite_test)]
+        {
+            let sm = meta.state_machine.read().await;
+            warn!(
+                "MSRAFT_RECOVER plane={} local={} snapshot={} commit={} voters={:?}",
+                plane_id.raw(),
+                self.id,
+                meta.last_snapshot_index,
+                meta.commit_index,
+                sm.configs.members.keys().collect::<Vec<_>>()
+            );
+        }
         let server_address = self.options.address.clone();
 
         {
@@ -2749,6 +2761,22 @@ impl RaftService {
     }
     async fn write_meta<'a>(&'a self) -> RwLockWriteGuard<'a, RaftMeta> {
         self.meta.write().await
+    }
+
+    #[cfg(multisite_test)]
+    pub async fn msraft_diagnostic(&self) -> serde_json::Value {
+        let meta = self.meta.read().await;
+        let sm = meta.state_machine.read().await;
+        let logs = meta.logs.read().await;
+        serde_json::json!({
+            "id": self.id, "term": meta.term, "leader_id": meta.leader_id,
+            "is_leader": matches!(meta.membership, Membership::Leader(_)),
+            "commit": meta.commit_index, "applied": meta.last_applied,
+            "snapshot": meta.last_snapshot_index,
+            "voters": sm.configs.members.values().map(|m| serde_json::json!({"id":m.id,"address":m.address})).collect::<Vec<_>>(),
+            "config_entries": logs.values().filter(|e| e.sm_id == CONFIG_SM_ID).map(|e| serde_json::json!({"index":e.id,"term":e.term,"fn":e.fn_id,"data":e.data})).collect::<Vec<_>>(),
+            "roster": sm.msraft_diagnostic()
+        })
     }
 
     pub async fn read_meta(&self) -> RwLockReadGuard<'_, RaftMeta> {

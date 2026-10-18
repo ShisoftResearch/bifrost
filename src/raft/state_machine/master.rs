@@ -111,6 +111,14 @@ pub fn parse_output<'a>(r: Option<Vec<u8>>) -> ExecResult {
 }
 
 impl MasterStateMachine {
+    #[cfg(multisite_test)]
+    pub fn msraft_diagnostic(&self) -> serde_json::Value {
+        self.subs
+            .get(&crate::membership::DEFAULT_SERVICE_ID)
+            .map(|sm| sm.msraft_diagnostic())
+            .unwrap_or(serde_json::Value::Null)
+    }
+
     pub fn new(service_id: u64) -> MasterStateMachine {
         Self::new_on_plane(service_id, PlaneId::type1())
     }

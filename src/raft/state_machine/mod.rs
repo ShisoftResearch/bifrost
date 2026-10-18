@@ -36,6 +36,10 @@ impl std::fmt::Display for RecoverError {
 impl std::error::Error for RecoverError {}
 
 pub trait StateMachineCtl: Sync + Send + Any {
+    #[cfg(multisite_test)]
+    fn msraft_diagnostic(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
     fn id(&self) -> u64;
     fn snapshot(&self) -> Vec<u8>;
     fn recover(&mut self, data: Vec<u8>) -> ::futures::future::BoxFuture<()>;

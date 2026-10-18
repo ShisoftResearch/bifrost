@@ -1338,6 +1338,11 @@ impl RaftClient {
             }
         }
     }
+    #[cfg(multisite_test)]
+    pub fn msraft_cached_leader(&self) -> u64 {
+        self.type1_state.leader_id.load(Relaxed)
+    }
+
     pub async fn current_leader_rpc_client(&self) -> Result<Arc<rpc::RPCClient>, ()> {
         let (_, client) = self
             .current_leader_client_on_plane(PlaneId::type1(), &self.type1_state)
