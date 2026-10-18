@@ -1066,6 +1066,43 @@ mod test {
             multisite_tcp_client_control(false).await;
         }
 
+        #[cfg(disable_shortcut)]
+        async fn multisite_tcp_restart_control(retain_client: bool) {
+            let port = std::env::var("MULTISITE_TEST_PORT").expect("reserved test port");
+            let addr = format!("127.0.0.1:{port}");
+            let first = Server::new(&addr);
+            first.register_service_with_id(0, &Arc::new(HelloServer)).await;
+            Server::listen_and_resume(&first).await;
+            sleep(Duration::from_millis(30)).await;
+            let old_client = RPCClient::new_async(&addr).await.unwrap();
+            let old_service = AsyncServiceClient::new_with_service_id(0, &old_client);
+            assert_eq!(old_service.hello("before".into()).await.unwrap(), "Hello, before!");
+            first.shutdown().await;
+            let second = Server::new(&addr);
+            second.register_service_with_id(0, &Arc::new(HelloServer)).await;
+            Server::listen_and_resume(&second).await;
+            sleep(Duration::from_millis(30)).await;
+            let client = if retain_client { old_client } else { RPCClient::new_async(&addr).await.unwrap() };
+            let service = AsyncServiceClient::new_with_service_id(0, &client);
+            // A request concurrent with disconnection can fail. It must not be replayed implicitly.
+            let _ = service.hello("detect disconnect".into()).await;
+            let result = service.hello("after".into()).await;
+            second.shutdown().await;
+            assert_eq!(result.expect("a later request must reconnect"), "Hello, after!");
+        }
+
+        #[cfg(disable_shortcut)]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn multisite_tcp_retained_client_reconnects() {
+            multisite_tcp_restart_control(true).await;
+        }
+
+        #[cfg(disable_shortcut)]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn multisite_tcp_fresh_client_restart_control() {
+            multisite_tcp_restart_control(false).await;
+        }
+
         #[tokio::test(flavor = "multi_thread")]
         pub async fn simple_rpc() {
             let _ = env_logger::try_init();
