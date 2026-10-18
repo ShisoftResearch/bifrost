@@ -60,7 +60,19 @@ impl Client {
                     ));
                 }
                 debug!("Create socket on {}", address);
-                let socket = time::timeout(timeout, TcpStream::connect(address)).await??;
+                // Test routing keeps the advertised identity but sends bytes through a proxy.
+                #[cfg(multisite_test)]
+                let routed = std::env::var("MULTISITE_ROUTES").ok().and_then(|routes| {
+                    routes.split(';').find_map(|route| {
+                        let (target, proxy) = route.split_once('=')?;
+                        (target == address).then(|| proxy.to_owned())
+                    })
+                });
+                #[cfg(multisite_test)]
+                let connect_address = routed.as_ref().unwrap_or(address);
+                #[cfg(not(multisite_test))]
+                let connect_address = address;
+                let socket = time::timeout(timeout, TcpStream::connect(connect_address)).await??;
                 let transport = Framed::new(socket, LengthDelimitedCodec::new());
                 let (writer, mut reader) = transport.split();
                 let cloned_senders = senders.clone();
