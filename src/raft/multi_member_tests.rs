@@ -652,16 +652,31 @@ async fn a_restart_never_lowers_the_term_below_the_log() {
     let _ = env_logger::try_init();
     const ENTRY_TERM: u64 = 7;
     let dir = scratch_dir("term_restore");
+    let addr = addresses(1).remove(0);
     {
-        // Three committed entries written in term 7 (seven elections, three
-        // entries -- routine on a multi-member plane).
+        // The first entry adds the member as a voter (the log is the only
+        // source of the configuration). Three more committed entries written
+        // in term 7 (seven elections, three entries -- routine on a
+        // multi-member plane).
         let mut wal = std::fs::File::create(dir.join("log.dat")).unwrap();
-        for id in 1..=3 {
+        for id in 1..=4 {
+            let log = if id == 1 {
+                let (fn_id, _, data) = super::state_machine::configs::commands::new_member_::new(&addr).encode();
+                LogEntry {
+                    id,
+                    term: ENTRY_TERM,
+                    sm_id: super::state_machine::configs::CONFIG_SM_ID,
+                    fn_id,
+                    data,
+                }
+            } else {
+                add_entry(id, ENTRY_TERM, 1)
+            };
             let record = DiskLogEntry {
                 term: id, // the header field holds the log id, as append_logs writes it
                 commit_index: id,
                 last_applied: id,
-                log: add_entry(id, ENTRY_TERM, 1),
+                log,
             }
             .encode();
             wal.write_all(&(4u64 + record.len() as u64).to_le_bytes())
@@ -671,8 +686,8 @@ async fn a_restart_never_lowers_the_term_below_the_log() {
             wal.write_all(&record).unwrap();
         }
         let mut commit = std::fs::File::create(dir.join("commit.idx")).unwrap();
-        commit.write_all(&3u64.to_le_bytes()).unwrap();
-        commit.write_all(&3u64.to_le_bytes()).unwrap();
+        commit.write_all(&4u64.to_le_bytes()).unwrap();
+        commit.write_all(&4u64.to_le_bytes()).unwrap();
         // A hard state below the log's terms -- what an inconsistent store
         // would hold.
         super::disk::write_hard_state(
@@ -684,7 +699,6 @@ async fn a_restart_never_lowers_the_term_below_the_log() {
         )
         .unwrap();
     }
-    let addr = addresses(1).remove(0);
     let node = Member::launch(&dir, &addr, NEVER).await;
     assert_eq!(node.value().await, 3);
     let restored_term = node.svc.read_meta().await.term;
@@ -695,8 +709,8 @@ async fn a_restart_never_lowers_the_term_below_the_log() {
         ENTRY_TERM
     );
     let (value, id) = node.add(1).await;
-    assert_eq!((value, id), (4, 4));
-    let entry_term = node.svc.read_meta().await.logs.read().await[&4].term;
+    assert_eq!((value, id), (4, 5));
+    let entry_term = node.svc.read_meta().await.logs.read().await[&5].term;
     assert!(
         entry_term >= ENTRY_TERM,
         "entry 4 has term {} below entry 3's term {}",

@@ -2,6 +2,7 @@ use futures::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::conshash::weights::client::SMClient as WeightSMClient;
 use crate::conshash::weights::DEFAULT_SERVICE_ID;
@@ -11,6 +12,9 @@ use crate::raft::state_machine::master::ExecError;
 use crate::utils::serde::serialize;
 use bifrost_hasher::{hash_bytes, hash_str};
 use parking_lot::*;
+
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+const SYNC_ATTEMPTS: usize = 10;
 
 pub mod fill;
 pub mod slots;
@@ -25,11 +29,37 @@ pub enum Action {
 #[derive(Debug)]
 pub enum InitTableError {
     GroupNotExisted,
+    /// The group reads older than the version that a notice or the caller
+    /// needs, after the retries.
+    StaleRead {
+        read: u64,
+        wanted: u64,
+    },
     NoWeightService(ExecError),
     NoWeightGroup,
     NoWeightInfo,
     Unknown,
 }
+
+/// No source knows the address of a server. Names the server and every source
+/// that was asked, with its answer.
+#[derive(Debug)]
+pub struct AddressSearchError {
+    pub server_id: u64,
+    pub tried: Vec<(&'static str, String)>,
+}
+
+impl std::fmt::Display for AddressSearchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no address known for server id {}:", self.server_id)?;
+        for (source, answer) in &self.tried {
+            write!(f, " [{}: {}]", source, answer)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for AddressSearchError {}
 
 #[derive(Debug)]
 pub enum CHError {
@@ -161,6 +191,17 @@ pub struct ConsistentHashing {
     update_lock: async_std::sync::Mutex<()>,
     version: AtomicU64,
     num_addrs: AtomicUsize,
+    /// The greatest membership version that a notice announced.
+    wanted_version: AtomicU64,
+    raft_client: Arc<RaftClient>,
+    /// Address searches that no source could answer.
+    address_search_failures: AtomicU64,
+    /// Test hook: the previous successful read, and how many of the next
+    /// reads are answered from it (a member that lags behind a notice).
+    #[cfg(test)]
+    last_read: Mutex<Option<(Vec<Member>, u64)>>,
+    #[cfg(test)]
+    stale_reads: AtomicUsize,
 }
 
 impl ConsistentHashing {
@@ -183,6 +224,13 @@ impl ConsistentHashing {
             version: AtomicU64::new(0),
             update_lock: async_std::sync::Mutex::new(()),
             num_addrs: AtomicUsize::new(0),
+            wanted_version: AtomicU64::new(0),
+            raft_client: raft_client.clone(),
+            address_search_failures: AtomicU64::new(0),
+            #[cfg(test)]
+            last_read: Mutex::new(None),
+            #[cfg(test)]
+            stale_reads: AtomicUsize::new(0),
         });
         {
             let ch = ch.clone();
@@ -252,7 +300,164 @@ impl ConsistentHashing {
                 return Err(CHError::WatchError(res));
             }
         }
+        Self::spawn_reconcile(&ch);
         Ok(ch)
+    }
+
+    /// Heal a table that missed an event: every `RECONCILE_INTERVAL` the ring
+    /// reads the group and installs a newer result. One task per ring object;
+    /// it ends when the ring is dropped.
+    fn spawn_reconcile(ch: &Arc<ConsistentHashing>) {
+        let weak = Arc::downgrade(ch);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(RECONCILE_INTERVAL).await;
+                let ch = match weak.upgrade() {
+                    Some(ch) => ch,
+                    None => break,
+                };
+                let before = ch.version.load(Ordering::Relaxed);
+                if before == 0 {
+                    // Never initialised: the owner of the ring has not asked
+                    // for a table yet.
+                    continue;
+                }
+                let old_online = ch.online_ids();
+                match ch.init_table().await {
+                    Ok(version) if version > before => {
+                        warn!(
+                            "Ring of group {} reconciled from version {} to {}",
+                            ch.group_name, before, version
+                        );
+                        ch.notify_watchers_of_difference(old_online);
+                    }
+                    Ok(_) => {}
+                    Err(e) => debug!("Ring reconcile of group {} failed: {:?}", ch.group_name, e),
+                }
+            }
+        });
+    }
+
+    fn online_ids(&self) -> std::collections::BTreeSet<u64> {
+        self.tables.read().nodes.iter().copied().collect()
+    }
+
+    /// Tell the watchers about members whose routing state changed without a
+    /// notice (a reconcile found them).
+    fn notify_watchers_of_difference(&self, old_online: std::collections::BTreeSet<u64>) {
+        let new_nodes = self.tables.read().nodes.clone();
+        let new_online: std::collections::BTreeSet<u64> = new_nodes.iter().copied().collect();
+        let old_nodes: Vec<u64> = old_online.iter().copied().collect();
+        let changed: Vec<(u64, bool)> = new_online
+            .difference(&old_online)
+            .map(|id| (*id, true))
+            .chain(old_online.difference(&new_online).map(|id| (*id, false)))
+            .collect();
+        for (id, joined) in changed {
+            let member = Member {
+                id,
+                address: self.try_server_name(id).unwrap_or_default(),
+                online: joined,
+            };
+            let action = if joined { Action::Joined } else { Action::Left };
+            for watch in self.watchers.read().iter() {
+                watch(&member, &action, &new_nodes, &old_nodes);
+            }
+        }
+    }
+
+    /// The number of address searches that failed in every source.
+    pub fn address_search_failures(&self) -> u64 {
+        self.address_search_failures.load(Ordering::Relaxed)
+    }
+
+    /// The address of a server, searched in order: the ring (all members, also
+    /// the offline ones), the roster of the membership service, and the raft
+    /// configuration. Each remote source has a bound of one second. The error
+    /// names the server and every source with its answer.
+    pub async fn resolve_address(&self, server_id: u64) -> Result<String, AddressSearchError> {
+        if let Some(address) = self.try_server_name(server_id) {
+            return Ok(address);
+        }
+        let mut tried: Vec<(&'static str, String)> =
+            vec![("ring", "the address table has no entry".to_string())];
+        match tokio::time::timeout(Duration::from_secs(1), self.membership.all_members(false)).await
+        {
+            Ok(Ok((members, _))) => match members.iter().find(|m| m.id == server_id) {
+                Some(member) => {
+                    self.tables
+                        .write()
+                        .addrs
+                        .insert(server_id, member.address.clone());
+                    return Ok(member.address.clone());
+                }
+                None => tried.push(("roster", "the server is not in the roster".to_string())),
+            },
+            Ok(Err(e)) => tried.push(("roster", format!("read failed: {:?}", e))),
+            Err(_) => tried.push(("roster", "read timed out after 1 s".to_string())),
+        }
+        match tokio::time::timeout(
+            Duration::from_secs(1),
+            self.raft_client
+                .cluster_info_on_plane(crate::raft::PlaneId::type1()),
+        )
+        .await
+        {
+            Ok(Ok(info)) => {
+                match info
+                    .member_addresses()
+                    .into_iter()
+                    .find(|address| hash_str(address) == server_id)
+                {
+                    Some(address) => {
+                        self.tables.write().addrs.insert(server_id, address.clone());
+                        return Ok(address);
+                    }
+                    None => tried.push((
+                        "raft configuration",
+                        "the server is not a voter".to_string(),
+                    )),
+                }
+            }
+            Ok(Err(e)) => tried.push(("raft configuration", format!("read failed: {:?}", e))),
+            Err(_) => tried.push(("raft configuration", "read timed out after 1 s".to_string())),
+        }
+        self.address_search_failures.fetch_add(1, Ordering::Relaxed);
+        Err(AddressSearchError { server_id, tried })
+    }
+
+    /// The version of the membership group that the table reflects.
+    pub fn table_version(&self) -> u64 {
+        self.version.load(Ordering::Relaxed)
+    }
+
+    /// Read until the table reflects `wanted` or a later version. The group
+    /// answers from any member, so a read right after a notice can be older
+    /// than the notice (the answering member has applied fewer entries).
+    pub async fn sync_to(&self, wanted: u64) -> Result<u64, InitTableError> {
+        let mut delay = Duration::from_millis(100);
+        let mut read = self.version.load(Ordering::Relaxed);
+        for _ in 0..SYNC_ATTEMPTS {
+            if read >= wanted {
+                return Ok(read);
+            }
+            // Raise the client cursor to the leader's log position first: the
+            // query gate then refuses answers from members that lag behind it.
+            let _ = self.raft_client.refresh_leader(0).await;
+            match self.init_table().await {
+                Ok(version) => {
+                    read = version;
+                    if read >= wanted {
+                        return Ok(read);
+                    }
+                }
+                Err(InitTableError::StaleRead { read: stale, .. }) => read = stale,
+                Err(e) => debug!("Ring read for version {} failed: {:?}", wanted, e),
+            }
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(2));
+        }
+        Err(InitTableError::StaleRead { read, wanted })
     }
     pub async fn new(
         group: &str,
@@ -276,10 +481,15 @@ impl ConsistentHashing {
     ) -> Result<Arc<ConsistentHashing>, CHError> {
         match ConsistentHashing::new_with_id(id, group, raft_client, membership_client).await {
             Err(e) => Err(e),
-            Ok(ch) => match ch.init_table().await {
-                Err(e) => Err(CHError::InitTableError(e)),
-                Ok(_) => Ok(ch.clone()),
-            },
+            Ok(ch) => {
+                // Read the group after the cursor reached the leader's log
+                // position (a start has no notice to wait for).
+                let _ = ch.raft_client.refresh_leader(0).await;
+                match ch.init_table().await {
+                    Err(e) => Err(CHError::InitTableError(e)),
+                    Ok(_) => Ok(ch.clone()),
+                }
+            }
         }
     }
     /// The address of a member, or `None` if this ring has never seen it.
@@ -487,7 +697,11 @@ impl ConsistentHashing {
         self.watch_all_actions(wrapper);
     }
 
-    pub async fn init_table(&self) -> Result<(), InitTableError> {
+    /// Install the group as the table. Returns the installed version. A read
+    /// older than the installed table installs nothing (monotonic install).
+    /// The address table holds every member of the group, online or not, and
+    /// is never pruned; routing uses the online members only.
+    pub async fn init_table(&self) -> Result<u64, InitTableError> {
         let group_name = &self.group_name;
         let _lock = self.update_lock.lock().await;
         debug!(
@@ -495,9 +709,37 @@ impl ConsistentHashing {
             group_name
         );
         debug!("Get group members for {}", group_name);
-        let group_members = self.membership.group_members(group_name, true).await;
+        let group_members = self.membership.group_members(group_name, false).await;
+        #[cfg(test)]
+        let group_members = match group_members {
+            Ok(Some(read)) => {
+                if self
+                    .stale_reads
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                    .is_ok()
+                {
+                    Ok(Some(self.last_read.lock().clone().unwrap_or(read)))
+                } else {
+                    *self.last_read.lock() = Some(read.clone());
+                    Ok(Some(read))
+                }
+            }
+            other => other,
+        };
         debug!("Got group members for {}", group_name);
-        if let Ok(Some((members, version))) = group_members {
+        if let Ok(Some((all_members, version))) = group_members {
+            let installed = self.version.load(Ordering::Relaxed);
+            if version < installed {
+                debug!(
+                    "Read of group {} at version {} is older than the table at {}; not installed",
+                    group_name, version, installed
+                );
+                return Err(InitTableError::StaleRead {
+                    read: installed,
+                    wanted: installed.max(self.wanted_version.load(Ordering::Relaxed)),
+                });
+            }
+            let members: Vec<Member> = all_members.iter().filter(|m| m.online).cloned().collect();
             let group_id = hash_str(group_name);
             debug!("Getting weights for {}", group_name);
             match self.weight_sm_client.get_weights(&group_id).await {
@@ -517,7 +759,7 @@ impl ConsistentHashing {
                         let factor_sum: u32 = factors.values().sum();
                         let mut lookup_table = self.tables.write();
                         lookup_table.nodes = Vec::with_capacity(factor_sum as usize);
-                        for member in members.iter() {
+                        for member in all_members.iter() {
                             lookup_table.addrs.insert(member.id, member.address.clone());
                         }
                         for (server_id, weight) in factors.into_iter() {
@@ -527,7 +769,7 @@ impl ConsistentHashing {
                         }
                         self.num_addrs.store(members.len(), Ordering::Relaxed);
                         self.version.store(version, Ordering::Relaxed);
-                        Ok(())
+                        Ok(version)
                     } else {
                         Err(InitTableError::NoWeightInfo)
                     }
@@ -568,24 +810,28 @@ async fn server_changed(ch: Arc<ConsistentHashing>, member: Member, action: Acti
         "Detected server membership change, member {:?}, action {:?}, version {}",
         member, action, version
     );
+    ch.wanted_version.fetch_max(version, Ordering::Relaxed);
     let ch_version = ch.version.load(Ordering::Relaxed);
     if ch_version <= version {
-        {
-            debug!("Obtaining conshash table write lock");
-            let old_nodes = (&*ch.tables.read()).nodes.clone();
-            debug!("Reinit conshash table");
-            let reinit_res = ch.init_table().await;
-            if let Err(e) = &reinit_res {
+        let old_nodes = (&*ch.tables.read()).nodes.clone();
+        // The read must reach the version of the notice; it can come from a
+        // member that has applied fewer entries.
+        if ch_version < version {
+            if let Err(e) = ch.sync_to(version).await {
                 error!(
-                    "Cannot reinit table {:?}, member {:?}, action {:?}, version {} -> {}",
-                    e, member, action, ch_version, version
+                    "Cannot bring the table to version {}: {:?}, member {:?}, action {:?}, was {}",
+                    version, e, member, action, ch_version
                 );
             }
-            debug!("Triggering conshash watchers");
-            let new_nodes = (&*ch.tables.read()).nodes.clone();
-            for watch in ch.watchers.read().iter() {
-                watch(&member, &action, &new_nodes, &old_nodes);
-            }
+        } else {
+            // The table is at this version already; read once more for the
+            // changed online flags.
+            let _ = ch.init_table().await;
+        }
+        debug!("Triggering conshash watchers");
+        let new_nodes = (&*ch.tables.read()).nodes.clone();
+        for watch in ch.watchers.read().iter() {
+            watch(&member, &action, &new_nodes, &old_nodes);
         }
         debug!("Server change processing completed");
     } else {
@@ -604,6 +850,7 @@ mod test {
     use crate::raft::{Options, RaftService, Storage};
     use crate::rpc::Server;
     use crate::utils::time::async_wait_secs;
+    use bifrost_hasher::hash_str;
     use std::collections::HashMap;
     use std::sync::atomic::*;
     use std::sync::Arc;
@@ -648,6 +895,101 @@ mod test {
         assert!(!slots.note_owner(0, 11, 2, 11));
 
         assert_eq!(slots.owner_with_index(0), Some((99, 12)));
+    }
+
+    /// F (RC7, RC8): a notice for version N, a read that answers an older
+    /// version, and the table must still reach N. `stale_reads` makes the next
+    /// read(s) answer from the previous result.
+    async fn ring_after_a_notice(stale: bool) -> Arc<ConsistentHashing> {
+        let _ = env_logger::try_init();
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = reserved.local_addr().unwrap().to_string();
+        drop(reserved);
+        let raft_service = RaftService::new(Options {
+            storage: Storage::default(),
+            address: addr.clone(),
+            service_id: 0,
+        });
+        let server = Server::new(&addr);
+        let _membership = Membership::new(&server, &raft_service).await;
+        server.register_service_with_id(0, &raft_service).await;
+        Server::listen_and_resume(&server).await;
+        RaftService::start(&raft_service, false).await;
+        raft_service.bootstrap().await;
+        let group = String::from("ring_stale_group");
+        let client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
+        let observer = Arc::new(ObserverClient::new(&client));
+        RaftClient::prepare_subscription(&server).await;
+        observer.new_group(&group).await.unwrap().unwrap();
+        Weights::new(&raft_service).await;
+        let member1_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
+        let member1 = MemberService::new(&"ring_server_1".to_string(), &member1_client, &raft_service).await;
+        member1.join_group(&group).await.unwrap();
+        let ch = ConsistentHashing::new(&group, &client, &observer).await.unwrap();
+        ch.set_weight(&"ring_server_1".to_string(), 1).await.unwrap();
+        ch.set_weight(&"ring_server_2".to_string(), 1).await.unwrap();
+        ch.init_table().await.unwrap();
+        assert_eq!(ch.server_count(), 1);
+        if stale {
+            ch.stale_reads.store(1, Ordering::Relaxed);
+        }
+        let member2_client = RaftClient::new(&vec![addr.clone()], 0).await.unwrap();
+        let member2 = MemberService::new(&"ring_server_2".to_string(), &member2_client, &raft_service).await;
+        member2.join_group(&group).await.unwrap();
+        // The notice arrives; the table must reach the new version.
+        for _ in 0..100 {
+            if ch.server_count() == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        // Keep the services alive until the caller is done.
+        std::mem::forget((raft_service, server, member1, member2));
+        ch
+    }
+
+    /// Control: the read answers the version of the notice.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn control_a_ring_follows_a_notice_when_the_read_is_current() {
+        let _callback_guard = crate::raft::client::callback_test_support::CALLBACK_TEST_GUARD
+            .write()
+            .await;
+        let ch = ring_after_a_notice(false).await;
+        assert_eq!(ch.server_count(), 2);
+    }
+
+    /// The first read after the notice answers the older version. The ring
+    /// reads again until it reaches the notified version.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_ring_follows_a_notice_when_the_first_read_is_older() {
+        let _callback_guard = crate::raft::client::callback_test_support::CALLBACK_TEST_GUARD
+            .write()
+            .await;
+        let ch = ring_after_a_notice(true).await;
+        assert_eq!(ch.server_count(), 2, "the ring kept the older read");
+        assert!(ch.try_server_name(hash_str("ring_server_2")).is_some());
+    }
+
+    /// A late older read installs nothing (monotonic install).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_late_older_read_does_not_replace_a_newer_table() {
+        let _callback_guard = crate::raft::client::callback_test_support::CALLBACK_TEST_GUARD
+            .write()
+            .await;
+        let ch = ring_after_a_notice(false).await;
+        let installed = ch.table_version();
+        ch.stale_reads.store(1, Ordering::Relaxed);
+        // The stale answer is the previous successful read, one version back.
+        {
+            let mut last = ch.last_read.lock();
+            if let Some((members, version)) = last.as_mut() {
+                *version = installed - 1;
+                members.truncate(1);
+            }
+        }
+        assert!(ch.init_table().await.is_err());
+        assert_eq!(ch.table_version(), installed);
+        assert_eq!(ch.server_count(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread")]

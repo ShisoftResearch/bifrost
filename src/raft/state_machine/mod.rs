@@ -91,6 +91,8 @@ pub trait StateMachineClient {
 
 pub const MASTER_SM_ID: u64 = 0;
 pub const CONFIG_SM_ID: u64 = 1;
+/// Entries of this state machine are kept in the log and applied as nothing.
+pub const NOOP_SM_ID: u64 = 2;
 pub const RESERVED_INTERNAL_SM_ID_END: u64 = 2;
 
 pub const fn is_reserved_internal_sm_id(sm_id: u64) -> bool {

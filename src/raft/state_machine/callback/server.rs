@@ -214,10 +214,11 @@ impl SMCallback {
                 return Err(NotifyError::IsNotLeader);
             }
         };
-        let is_leader = raft_service
-            .is_leader_on_plane(self.plane_id)
-            .await
-            .unwrap_or(false);
+        let is_leader = !raft_service.is_replaying()
+            && raft_service
+                .is_leader_on_plane(self.plane_id)
+                .await
+                .unwrap_or(false);
         if !is_leader {
             debug!(
                 "Will not send notification from {} on plane {} because this node is not a leader",

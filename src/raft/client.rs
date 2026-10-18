@@ -1343,6 +1343,24 @@ impl RaftClient {
         self.type1_state.leader_id.load(Relaxed)
     }
 
+    /// The leader this client knows is wrong or gone. Point at `hint` if the
+    /// client holds a connection to it; otherwise ask the servers again.
+    /// Returns whether a leader candidate is known afterwards.
+    pub async fn refresh_leader(&self, hint: u64) -> bool {
+        if hint != 0 && hint != self.type1_state.leader_id.load(ORDERING) {
+            let members = self.members.read().await;
+            if members.clients.contains_key(&hint) {
+                self.type1_state.leader_id.store(hint, ORDERING);
+                return true;
+            }
+        }
+        let servers = {
+            let members = self.members.read().await;
+            Vec::from_iter(members.id_map.values().cloned())
+        };
+        self.update_plane_info(PlaneId::type1(), &servers).await.is_ok()
+    }
+
     pub async fn current_leader_rpc_client(&self) -> Result<Arc<rpc::RPCClient>, ()> {
         let (_, client) = self
             .current_leader_client_on_plane(PlaneId::type1(), &self.type1_state)

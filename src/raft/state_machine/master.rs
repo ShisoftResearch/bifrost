@@ -1,4 +1,5 @@
 use self::configs::{Configures, RaftMember, CONFIG_SM_ID};
+use super::NOOP_SM_ID;
 use super::super::*;
 use super::*;
 use std::collections::HashMap;
@@ -36,6 +37,9 @@ pub enum ExecError {
     /// is unknown -- its entry may still commit -- and the failure is the
     /// storage's, which a retry does not fix).
     StorageFailure(String),
+    /// A committed command does not decode. This member cannot apply it and
+    /// must not skip it: the plane stops (a typed error, not a panic).
+    CommandDoesNotDecode { sm_id: u64, fn_id: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +102,35 @@ impl StateMachineCtl for MasterStateMachine {
     }
     fn recoverable(&self) -> bool {
         true
+    }
+}
+
+/// Run a dispatch of a committed command. A command that does not decode makes
+/// the generated dispatch panic; here it becomes the typed error
+/// `CommandDoesNotDecode`, which stops the plane instead of the process. Any
+/// other panic is not touched.
+async fn decode_guard<F>(entry: &LogEntry, dispatch: F) -> Result<Option<Vec<u8>>, ExecError>
+where
+    F: std::future::Future<Output = Option<Vec<u8>>>,
+{
+    use futures::FutureExt;
+    match std::panic::AssertUnwindSafe(dispatch).catch_unwind().await {
+        Ok(out) => Ok(out),
+        Err(payload) => {
+            let text = payload
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("");
+            if text.contains("Failed to deserialize function call data") {
+                Err(ExecError::CommandDoesNotDecode {
+                    sm_id: entry.sm_id,
+                    fn_id: entry.fn_id,
+                })
+            } else {
+                std::panic::resume_unwind(payload)
+            }
+        }
     }
 }
 
@@ -243,8 +276,13 @@ impl MasterStateMachine {
 
     pub async fn commit_cmd(&mut self, entry: &LogEntry) -> ExecResult {
         match entry.sm_id {
+            NOOP_SM_ID => Ok(crate::utils::serde::serialize(&())),
             CONFIG_SM_ID => {
-                let out = self.configs.fn_dispatch_cmd(entry.fn_id, &entry.data).await;
+                let out = decode_guard(
+                    entry,
+                    self.configs.fn_dispatch_cmd(entry.fn_id, &entry.data),
+                )
+                .await?;
                 match out {
                     Some(d) => Ok(d),
                     None => {
@@ -262,7 +300,11 @@ impl MasterStateMachine {
             _ => {
                 match self.subs.get_mut(&entry.sm_id) {
                     Some(sm) => {
-                        let out = sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data).await;
+                        let out = decode_guard(
+                            entry,
+                            sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data),
+                        )
+                        .await?;
                         match out {
                             Some(data) => Ok(data),
                             None => {

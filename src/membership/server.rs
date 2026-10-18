@@ -47,8 +47,21 @@ pub struct HeartbeatService {
 }
 
 impl Service for HeartbeatService {
-    fn ping(&self, id: u64) -> BoxFuture<()> {
+    fn ping(&self, id: u64) -> BoxFuture<PingReply> {
         async move {
+            // Only the raft leader keeps the liveness of members. A follower
+            // says so and names the leader it knows, so the sender can route
+            // the next ping there (the sender's cache of the leader can be
+            // stale after a leader change). The check reads one atomic.
+            match self.raft_service.upgrade() {
+                Some(raft_service) if raft_service.is_leader() => {}
+                Some(raft_service) => {
+                    return PingReply::NotLeader {
+                        leader_hint: raft_service.leader_id().await,
+                    }
+                }
+                None => return PingReply::NotLeader { leader_hint: 0 },
+            }
             let current_time = time::get_time();
             // Update existing status or create new one
             let old_status = self.status.get(&id);
@@ -75,6 +88,7 @@ impl Service for HeartbeatService {
                 }
             };
             self.status.insert(id, new_status);
+            PingReply::Accepted
         }
         .boxed()
     }
@@ -145,10 +159,23 @@ impl HeartbeatService {
 }
 dispatch_rpc_service_functions!(HeartbeatService);
 service_with_id!(HeartbeatService, DEFAULT_SERVICE_ID);
-#[derive(Debug)]
+/// A member of the roster. `online` is part of the replicated state: it
+/// changes only through the logged command `hb_online_changed` (and `join`),
+/// so a node that replays the log or loads a snapshot rebuilds it exactly.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Member {
     pub address: String,
     pub groups: HashSet<u64>,
+    pub online: bool,
+}
+
+/// The persisted image of the roster. The heartbeat timers are not part of it:
+/// they are local and start at the time of recovery.
+#[derive(Serialize, Deserialize)]
+struct MembershipImage {
+    members: BTreeMap<u64, Member>,
+    groups: BTreeMap<u64, MemberGroup>,
+    version: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -160,14 +187,11 @@ pub struct MemberGroup {
 
 /// Membership service manages member groups and heartbeat status.
 ///
-/// IMPORTANT: This service does NOT persist its state to disk. On each restart,
-/// it starts with empty state and rebuilds membership through:
-/// 1. Members sending join() commands
-/// 2. Heartbeat ping() messages updating online/offline status
-/// 3. Group membership operations (join_group, leave_group, etc.)
-///
-/// This design ensures membership always reflects current network reality,
-/// not stale persisted state that might be outdated after crashes.
+/// The roster (members, groups, version and the `online` flag of each member)
+/// is replicated state: its log entries stay in the WAL and its snapshot holds
+/// the roster, so a restarted node rebuilds it from the log. Only the heartbeat
+/// timers are local; they start at the time of recovery, and a new leader gives
+/// every member a grace period.
 pub struct Membership {
     heartbeat: Arc<HeartbeatService>,
     groups: BTreeMap<u64, MemberGroup>,
@@ -182,14 +206,42 @@ impl Drop for Membership {
 }
 
 impl Membership {
-    /// Creates a new Membership service with fresh, empty state.
-    ///
-    /// The service will discover members through:
-    /// - join() commands from members joining the cluster
-    /// - ping() heartbeats indicating member liveness
-    /// - join_group/leave_group commands for group management
-    ///
-    /// No state is recovered from disk - all membership is learned from the network.
+    /// Replace the roster by a persisted image. The heartbeat timers start now.
+    fn restore_image(
+        &mut self,
+        data: &Vec<u8>,
+    ) -> Result<(), crate::raft::state_machine::RecoverError> {
+        let image = crate::utils::serde::deserialize::<MembershipImage>(data).ok_or_else(|| {
+            crate::raft::state_machine::RecoverError {
+                sm_id: DEFAULT_SERVICE_ID,
+                reason: format!("the roster image ({} bytes) does not decode", data.len()),
+            }
+        })?;
+        self.members = image.members;
+        self.groups = image.groups;
+        self.version = image.version;
+        let now = time::get_time();
+        for (id, _) in self.heartbeat.status.entries() {
+            self.heartbeat.status.remove(&id);
+        }
+        for (id, member) in self.members.iter() {
+            self.heartbeat.status.insert(
+                *id,
+                HBStatus {
+                    last_updated: now,
+                    online: member.online,
+                    consecutive_failures: 0,
+                    consecutive_successes: 0,
+                    last_state_change: now,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// Creates a new Membership service with an empty roster. The roster is
+    /// filled by log replay or by the snapshot at recovery, and by commands
+    /// afterwards. Register it before the raft service starts.
     pub async fn new(server: &Arc<Server>, raft_service: &Arc<RaftService>) {
         let service = Arc::new(HeartbeatService {
             status: PtrHashMap::with_capacity(32),
@@ -201,7 +253,7 @@ impl Membership {
         let service_clone = service.clone();
         let service_for_task = service.clone();
         let handle = raft_service.rt.spawn(async move {
-            info!("Starting membership heartbeat watcher (fresh state, learning from network)");
+            info!("Starting membership heartbeat watcher");
             while !service_for_task.closed.load(Ordering::Relaxed) {
                 let service = &service_for_task;
                 let raft_service = match service.raft_service.upgrade() {
@@ -220,6 +272,12 @@ impl Membership {
                 }
                 if is_leader {
                     trace!("Resync Membership as leader id {}", raft_service.id);
+                    // The leader needs no RPC to know that it is alive.
+                    if let Some(mut own) = service.status.get(&raft_service.id) {
+                        own.last_updated = start_time;
+                        own.consecutive_failures = 0;
+                        service.status.insert(raft_service.id, own);
+                    }
                     let mut outdated_members: Vec<u64> = Vec::new();
                     let mut back_in_members: Vec<u64> = Vec::new();
                     {
@@ -351,10 +409,10 @@ impl Membership {
         // 3. Group operations (join_group, leave_group, etc.)
         let mut membership_service = Membership {
             heartbeat: service_clone.clone(),
-            groups: BTreeMap::new(), // Empty groups - will be populated as groups are created
-            members: BTreeMap::new(), // Empty members - will be populated as members join
+            groups: BTreeMap::new(),
+            members: BTreeMap::new(),
             callback: None,
-            version: 0, // Version starts at 0
+            version: 0,
         };
         membership_service.init_callback(raft_service).await;
         raft_service
@@ -364,11 +422,10 @@ impl Membership {
     }
     async fn compose_client_member(&self, id: u64) -> Option<ClientMember> {
         let member = self.members.get(&id)?;
-        let status = self.heartbeat.status.get(&id)?;
         Some(ClientMember {
             id,
             address: member.address.clone(),
-            online: status.online,
+            online: member.online,
         })
     }
     async fn init_callback(&mut self, raft_service: &Arc<RaftService>) {
@@ -504,10 +561,8 @@ impl Membership {
     async fn group_first_online_member_id(&self, group: u64) -> Result<Option<u64>, ()> {
         if let Some(group) = self.groups.get(&group) {
             for member in group.members.iter() {
-                if let Some(member_stat) = self.heartbeat.status.get(&member) {
-                    if member_stat.online {
-                        return Ok(Some(*member));
-                    }
+                if self.members.get(member).map_or(false, |m| m.online) {
+                    return Ok(Some(*member));
                 }
             }
             Ok(None)
@@ -614,6 +669,9 @@ impl StateMachineCmds for Membership {
             let current_time = time::get_time();
             {
                 for id in &online {
+                    if let Some(member) = self.members.get_mut(id) {
+                        member.online = true;
+                    }
                     if let Some(mut stat) = self.heartbeat.status.get(&id) {
                         stat.online = true;
                         stat.last_state_change = current_time;
@@ -624,6 +682,9 @@ impl StateMachineCmds for Membership {
                     }
                 }
                 for id in &offline {
+                    if let Some(member) = self.members.get_mut(id) {
+                        member.online = false;
+                    }
                     if let Some(mut stat) = self.heartbeat.status.get(&id) {
                         stat.online = false;
                         stat.last_state_change = current_time;
@@ -652,13 +713,15 @@ impl StateMachineCmds for Membership {
             let mut joined = false;
             {
                 let current_time = time::get_time();
-                self.members.entry(id).or_insert_with(|| {
+                let member = self.members.entry(id).or_insert_with(|| {
                     joined = true;
                     Member {
                         address: address.clone(),
                         groups: HashSet::new(),
+                        online: true,
                     }
                 });
+                member.online = true;
                 self.heartbeat.status.insert(
                     id,
                     HBStatus {
@@ -896,18 +959,26 @@ impl StateMachineCtl for Membership {
         DEFAULT_SERVICE_ID
     }
     fn snapshot(&self) -> Vec<u8> {
-        // Membership service intentionally does NOT persist its state.
-        // It starts fresh on each restart and learns membership from the network
-        // via heartbeats and join/leave commands.
-        // This ensures membership reflects current network reality, not stale disk state.
-        unreachable!()
+        crate::utils::serde::serialize(&MembershipImage {
+            members: self.members.clone(),
+            groups: self.groups.clone(),
+            version: self.version,
+        })
     }
-    fn recover(&mut self, _: Vec<u8>) -> BoxFuture<()> {
-        // Membership service does not recover from snapshots.
-        // It rebuilds its state from network discovery and heartbeats.
+    fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
+        // Raft recovery calls `try_recover`; this path cannot report a failure.
+        if let Err(e) = self.restore_image(&data) {
+            error!("{}; roster unchanged", e);
+        }
         future::ready(()).boxed()
     }
+    fn try_recover(
+        &mut self,
+        data: Vec<u8>,
+    ) -> BoxFuture<Result<(), crate::raft::state_machine::RecoverError>> {
+        future::ready(self.restore_image(&data)).boxed()
+    }
     fn recoverable(&self) -> bool {
-        false
+        true
     }
 }

@@ -41,9 +41,19 @@ pub mod raft {
 // The service only responsible for receiving heartbeat and
 // Updating last updated time
 // Expired update time will trigger timeout in the raft state machine
-mod heartbeat_rpc {
+pub mod heartbeat_rpc {
+    use serde::{Deserialize, Serialize};
+
+    /// The answer of a ping. A node that is not the raft leader does not keep
+    /// liveness; it names the leader it knows.
+    #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum PingReply {
+        Accepted,
+        NotLeader { leader_hint: u64 },
+    }
+
     service! {
-        rpc ping(id: u64);
+        rpc ping(id: u64) -> PingReply;
     }
 }
 
