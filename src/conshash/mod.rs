@@ -161,6 +161,12 @@ pub struct ConsistentHashing {
     update_lock: async_std::sync::Mutex<()>,
     version: AtomicU64,
     num_addrs: AtomicUsize,
+    /// Test hook (multisite_test): the previous successful read, and how many
+    /// of the next reads answer from it, as a member that lags behind a notice.
+    #[cfg(multisite_test)]
+    last_read: Mutex<Option<(Vec<Member>, u64)>>,
+    #[cfg(multisite_test)]
+    stale_reads: AtomicUsize,
 }
 
 impl ConsistentHashing {
@@ -183,6 +189,10 @@ impl ConsistentHashing {
             version: AtomicU64::new(0),
             update_lock: async_std::sync::Mutex::new(()),
             num_addrs: AtomicUsize::new(0),
+            #[cfg(multisite_test)]
+            last_read: Mutex::new(None),
+            #[cfg(multisite_test)]
+            stale_reads: AtomicUsize::new(0),
         });
         {
             let ch = ch.clone();
@@ -487,6 +497,13 @@ impl ConsistentHashing {
         self.watch_all_actions(wrapper);
     }
 
+    /// Test hook: the next `count` reads of the group answer from the previous
+    /// successful read (an older version than the notice that caused them).
+    #[cfg(multisite_test)]
+    pub fn inject_stale_reads(&self, count: usize) {
+        self.stale_reads.store(count, Ordering::Relaxed);
+    }
+
     pub async fn init_table(&self) -> Result<(), InitTableError> {
         let group_name = &self.group_name;
         let _lock = self.update_lock.lock().await;
@@ -496,6 +513,22 @@ impl ConsistentHashing {
         );
         debug!("Get group members for {}", group_name);
         let group_members = self.membership.group_members(group_name, true).await;
+        #[cfg(multisite_test)]
+        let group_members = match group_members {
+            Ok(Some(read)) => {
+                if self
+                    .stale_reads
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                    .is_ok()
+                {
+                    Ok(Some(self.last_read.lock().clone().unwrap_or(read)))
+                } else {
+                    *self.last_read.lock() = Some(read.clone());
+                    Ok(Some(read))
+                }
+            }
+            other => other,
+        };
         debug!("Got group members for {}", group_name);
         if let Ok(Some((members, version))) = group_members {
             let group_id = hash_str(group_name);
