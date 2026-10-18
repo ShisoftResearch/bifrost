@@ -1,7 +1,7 @@
 use self::state_machine::callback::server::Subscriptions;
 use self::state_machine::callback::SMCallback;
-use self::state_machine::configs::commands::{del_member_, member_address, new_member_};
-use self::state_machine::configs::{RaftMember, CONFIG_SM_ID};
+use self::state_machine::configs::commands::{del_member_, new_member_};
+use self::state_machine::configs::CONFIG_SM_ID;
 use self::state_machine::NOOP_SM_ID;
 use self::state_machine::master::{
     ExecError, ExecResult, MasterStateMachine, SnapshotDataItems, SubStateMachine,
@@ -2264,7 +2264,6 @@ impl RaftService {
         if let Some(runtime) = self.runtime_for_plane(plane_id).await? {
             let meta = runtime.meta.read().await;
             let logs = meta.logs.read().await;
-            let sm = meta.state_machine.read().await;
             let (last_log_id, last_log_term) = get_last_log_info!(meta, logs);
 
             // An UNSEEDED runtime knows nothing worth repeating. Its config
@@ -4217,10 +4216,15 @@ impl RaftService {
         }
     }
 
-    /// Rules C6 and C7 for a configuration change on the leader.
+    /// Rules C7 and C6 for a configuration change on the leader.
     /// `Ok(Some((id, term)))`: the same change is already in the log and not
     /// committed; the caller waits for that entry. `Ok(None)`: append a new
     /// entry. `Err(response)`: answer the client with it.
+    ///
+    /// C7 comes first. A new leader does not know which of the configuration
+    /// entries in its log are committed; the commit of its own no-op settles
+    /// that. Checking C6 first would refuse every change for ever after a
+    /// leader change that left a committed entry unconfirmed.
     async fn admit_config_change(
         &self,
         plane_id: PlaneId,
@@ -4228,6 +4232,48 @@ impl RaftService {
         meta: &mut RwLockWriteGuard<'_, RaftMeta>,
         change: &ConfigChange,
     ) -> Result<Option<(u64, u64)>, ClientCmdResponse> {
+        // C7: commit an entry of this term first.
+        let own_term_committed = {
+            let ci = meta.commit_index;
+            let term_at_commit = if ci == 0 {
+                0
+            } else if ci <= meta.last_snapshot_index {
+                meta.last_snapshot_term
+            } else {
+                meta.logs.read().await.get(&ci).map(|e| e.term).unwrap_or(0)
+            };
+            term_at_commit == meta.term
+        };
+        if !own_term_committed {
+            let mut noop = noop_entry();
+            let (id, _) = match self.leader_append_log(meta, &mut noop).await {
+                Ok(position) => position,
+                Err(e) => {
+                    let reason =
+                        self.note_persist_failure(leader_flag, meta, "appending a no-op", &e);
+                    return Err(ClientCmdResponse::StorageFailure(reason));
+                }
+            };
+            match self
+                .try_sync_log_to_followers_on_plane(plane_id, leader_flag, meta, &noop, id)
+                .await
+            {
+                SyncOutcome::Committed(_) => {}
+                SyncOutcome::NotCommitted => {
+                    let (last_log_id, last_log_term) = {
+                        let logs = meta.logs.read().await;
+                        get_last_log_info!(meta, logs)
+                    };
+                    return Err(ClientCmdResponse::NotCommitted {
+                        last_log_term,
+                        last_log_id,
+                    });
+                }
+                SyncOutcome::StorageFailure(reason) => {
+                    return Err(ClientCmdResponse::StorageFailure(reason))
+                }
+            }
+        }
         let (last_log_id, last_log_term) = {
             let logs = meta.logs.read().await;
             get_last_log_info!(meta, logs)
@@ -4256,8 +4302,11 @@ impl RaftService {
             ConfigChange::Remove(address) => !meta.voters.contains_key(&hash_str(address)),
         };
         if already {
+            // `true` for an add: the address is a voter and its entry is
+            // committed. A retry after a NotCommitted answer finds the change
+            // done and must see the same answer as the first call would have.
             let data = match change {
-                ConfigChange::Add(_) => crate::utils::serde::serialize(&false),
+                ConfigChange::Add(_) => crate::utils::serde::serialize(&true),
                 ConfigChange::Remove(_) => crate::utils::serde::serialize(&()),
             };
             return Err(ClientCmdResponse::Success {
@@ -4265,39 +4314,6 @@ impl RaftService {
                 last_log_term,
                 last_log_id,
             });
-        }
-        // C7: commit an entry of this term first.
-        let own_term_committed = {
-            let ci = meta.commit_index;
-            let term_at_commit = if ci == 0 {
-                0
-            } else if ci <= meta.last_snapshot_index {
-                meta.last_snapshot_term
-            } else {
-                meta.logs.read().await.get(&ci).map(|e| e.term).unwrap_or(0)
-            };
-            term_at_commit == meta.term
-        };
-        if !own_term_committed {
-            let mut noop = noop_entry();
-            let (id, _) = match self.leader_append_log(meta, &mut noop).await {
-                Ok(position) => position,
-                Err(e) => {
-                    let reason =
-                        self.note_persist_failure(leader_flag, meta, "appending a no-op", &e);
-                    return Err(ClientCmdResponse::StorageFailure(reason));
-                }
-            };
-            match self
-                .try_sync_log_to_followers_on_plane(plane_id, leader_flag, meta, &noop, id)
-                .await
-            {
-                SyncOutcome::Committed(_) => {}
-                SyncOutcome::NotCommitted => return Err(not_committed),
-                SyncOutcome::StorageFailure(reason) => {
-                    return Err(ClientCmdResponse::StorageFailure(reason))
-                }
-            }
         }
         Ok(None)
     }
@@ -7277,7 +7293,7 @@ mod test {
                     service_id: DEFAULT_SERVICE_ID,
                 };
                 // Another address on the same store: the explicit restore makes it the only voter.
-                restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID).await.unwrap();
+                crate::raft::restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID).await.unwrap();
                 let raft_service2 = RaftService::new(opts_restore);
 
                 // New SM with different initial state
@@ -7584,7 +7600,7 @@ mod test {
                     service_id: DEFAULT_SERVICE_ID,
                 };
                 // Another address on the same store: the explicit restore makes it the only voter.
-                restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID).await.unwrap();
+                crate::raft::restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID).await.unwrap();
                 let raft_service2 = RaftService::new(opts_restore);
 
                 // Start with SAME initial state (WAL only replays commands, not full state)
@@ -7896,7 +7912,7 @@ mod test {
                     service_id: DEFAULT_SERVICE_ID,
                 };
                 // Another address on the same store: the explicit restore makes it the only voter.
-                restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID).await.unwrap();
+                crate::raft::restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID).await.unwrap();
                 let service2 = RaftService::new(opts_restore);
 
                 // IMPORTANT: start with same initial state; WAL replays deltas
@@ -8045,7 +8061,7 @@ mod test {
                     service_id: DEFAULT_SERVICE_ID,
                 };
                 // Another address on the same store: the explicit restore makes it the only voter.
-                restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID).await.unwrap();
+                crate::raft::restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID).await.unwrap();
                 let svc2 = RaftService::new(opts_restore);
                 let server2 = Server::new(&addr2);
                 server2.register_service(&svc2).await;
@@ -8531,7 +8547,7 @@ mod test {
                     service_id: DEFAULT_SERVICE_ID,
                 };
                 // Another address on the same store: the explicit restore makes it the only voter.
-                restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID).await.unwrap();
+                crate::raft::restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID).await.unwrap();
                 let svc2 = RaftService::new(opts_restore);
                 let server2 = Server::new(&addr2);
                 server2.register_service(&svc2).await;

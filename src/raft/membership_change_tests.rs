@@ -4,7 +4,7 @@
 //! commits an entry of its term first. Tests marked "control" show that the
 //! test can pass; the others failed before the change.
 
-use super::compaction_tests::scratch_dir;
+use super::compaction_tests::{scratch_dir, snapshot_and_compact};
 use super::multi_member_tests::{add_entry, addresses, cluster, Member, NEVER};
 use super::state_machine::configs::commands::{del_member_, new_member_};
 use super::state_machine::configs::{Configures, CONFIG_SM_ID};
@@ -66,7 +66,7 @@ async fn a_config_entry_without_a_quorum_is_not_committed() {
 async fn control_a_config_entry_with_a_quorum_commits() {
     let members = cluster("mc_cfg_ok", 3, NEVER).await;
     let spare = Member::launch(&scratch_dir("mc_cfg_ok_spare"), &addresses(1)[0], NEVER).await;
-    let response = Service::c_command(members[0].svc.as_ref(), PlaneId::type1(), config_entry(&spare.addr)).await;
+    let response = command_with_retry(&members[0], config_entry(&spare.addr)).await;
     assert!(matches!(response, ClientCmdResponse::Success { .. }), "{:?}", response);
 }
 
@@ -109,6 +109,19 @@ fn removal_entry(address: &String) -> LogEntry {
         fn_id,
         data,
     }
+}
+
+/// A command the way a client sends it: `NotCommitted` is retried (the leader
+/// waits one second for each follower, and a new voter may be slow).
+async fn command_with_retry(member: &Member, entry: LogEntry) -> ClientCmdResponse {
+    let mut response = Service::c_command(member.svc.as_ref(), PlaneId::type1(), entry.clone()).await;
+    for _ in 0..8 {
+        if !matches!(response, ClientCmdResponse::NotCommitted { .. }) {
+            break;
+        }
+        response = Service::c_command(member.svc.as_ref(), PlaneId::type1(), entry.clone()).await;
+    }
+    response
 }
 
 async fn voter_addresses(member: &Member) -> Vec<String> {
@@ -199,8 +212,7 @@ async fn a_voter_change_waits_for_an_entry_of_the_new_term() {
     let mut members = cluster("mc_c7", 1, NEVER).await;
     let member = restart(members.pop().unwrap()).await;
     let spare = Member::launch(&scratch_dir("mc_c7_spare"), &addresses(1)[0], NEVER).await;
-    let response =
-        Service::c_command(member.svc.as_ref(), PlaneId::type1(), config_entry(&spare.addr)).await;
+    let response = command_with_retry(&member, config_entry(&spare.addr)).await;
     assert!(matches!(response, ClientCmdResponse::Success { .. }), "{:?}", response);
     let log = entries(&member).await;
     let noop = log.iter().position(|e| e.sm_id == NOOP_SM_ID);
@@ -218,8 +230,7 @@ async fn control_no_noop_when_the_term_has_a_committed_entry() {
     let member = restart(members.pop().unwrap()).await;
     member.add(1).await; // an entry of the new term, committed
     let spare = Member::launch(&scratch_dir("mc_c7_ctl_spare"), &addresses(1)[0], NEVER).await;
-    let response =
-        Service::c_command(member.svc.as_ref(), PlaneId::type1(), config_entry(&spare.addr)).await;
+    let response = command_with_retry(&member, config_entry(&spare.addr)).await;
     assert!(matches!(response, ClientCmdResponse::Success { .. }), "{:?}", response);
     assert!(entries(&member).await.iter().all(|e| e.sm_id != NOOP_SM_ID));
 }
@@ -315,4 +326,95 @@ async fn control_a_committed_command_that_decodes_applies() {
     assert!(!RaftService::lifecycle_is_stopping(
         members[1].svc.read_meta().await.lifecycle
     ));
+}
+
+/// Rule C1 and C11: the voters are the snapshot image plus the configuration
+/// entries of the log after it.
+#[tokio::test(flavor = "multi_thread")]
+async fn voters_are_recovered_from_a_snapshot_and_the_log_suffix() {
+    let addrs = addresses(2);
+    let a = Member::launch(&scratch_dir("mc_snap_a"), &addrs[0], 1).await;
+    a.svc.bootstrap().await;
+    let b = Member::launch(&scratch_dir("mc_snap_b"), &addrs[1], 1).await;
+    b.svc.join(&vec![addrs[0].clone()]).await.expect("join");
+    for _ in 0..3 {
+        a.add(1).await;
+    }
+    snapshot_and_compact(&a.svc).await; // the log map is empty, the image holds {a, b}
+    let spare = Member::launch(&scratch_dir("mc_snap_spare"), &addresses(1)[0], 1).await;
+    let response = command_with_retry(&a, config_entry(&spare.addr)).await;
+    assert!(matches!(response, ClientCmdResponse::Success { .. }), "{:?}", response);
+    let mut expected = vec![addrs[0].clone(), addrs[1].clone(), spare.addr.clone()];
+    expected.sort();
+    assert_eq!(voter_addresses(&a).await, expected);
+    // Restart: the image gives {a, b}; the entry above the snapshot adds the spare.
+    let a = restart(a).await;
+    assert_eq!(voter_addresses(&a).await, expected);
+}
+
+/// Rule C2 and C11: a member that receives a snapshot has the voters of its
+/// image, then those of the entries after it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_that_installs_a_snapshot_has_the_voters_of_its_image() {
+    let addrs = addresses(2);
+    let a = Member::launch(&scratch_dir("mc_inst_a"), &addrs[0], 1).await;
+    a.svc.bootstrap().await;
+    for _ in 0..10 {
+        a.add(1).await;
+    }
+    snapshot_and_compact(&a.svc).await;
+    let b = Member::launch(&scratch_dir("mc_inst_b"), &addrs[1], 1).await;
+    b.svc.join(&vec![addrs[0].clone()]).await.expect("join after compaction");
+    let all: Vec<&Member> = vec![&a, &b];
+    assert_eq!(super::multi_member_tests::wait_for_values(&all, 10).await, vec![10, 10]);
+    let mut expected = vec![addrs[0].clone(), addrs[1].clone()];
+    expected.sort();
+    assert!(b.svc.read_meta().await.last_snapshot_index > 0, "b did not install the snapshot");
+    assert_eq!(voter_addresses(&b).await, expected);
+    let b = restart(b).await;
+    assert_eq!(voter_addresses(&b).await, expected);
+}
+
+/// Rule C2: a configuration entry that a new leader's entry replaces is gone
+/// from the voters.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_discarded_config_entry_leaves_the_voters() {
+    let member = Member::launch(&scratch_dir("mc_trunc"), &addresses(1)[0], NEVER).await;
+    let spare = "127.0.0.1:1".to_string();
+    let stale_leader = 11u64;
+    let first = |id, address: &String| {
+        let mut entry = config_entry(address);
+        entry.id = id;
+        entry.term = 1;
+        entry
+    };
+    let (_, result) = Service::append_entries(
+        member.svc.as_ref(),
+        PlaneId::type1(),
+        1,
+        stale_leader,
+        0,
+        0,
+        &Some(vec![first(1, &member.addr), first(2, &spare)]),
+        1,
+    )
+    .await;
+    assert!(matches!(result, AppendEntriesResult::Ok), "{:?}", result);
+    assert_eq!(voter_addresses(&member).await.len(), 2, "the held entry counts at once");
+    // A leader of term 2 replaces entry 2.
+    let mut replacement = add_entry(2, 2, 1);
+    replacement.term = 2;
+    let (_, result) = Service::append_entries(
+        member.svc.as_ref(),
+        PlaneId::type1(),
+        2,
+        12,
+        1,
+        1,
+        &Some(vec![replacement]),
+        1,
+    )
+    .await;
+    assert!(matches!(result, AppendEntriesResult::Ok), "{:?}", result);
+    assert_eq!(voter_addresses(&member).await, vec![member.addr.clone()]);
 }
