@@ -4675,6 +4675,8 @@ impl RaftStateMachine {
 #[cfg(test)]
 mod compaction_tests;
 #[cfg(test)]
+mod membership_change_tests;
+#[cfg(test)]
 mod multi_member_tests;
 #[cfg(test)]
 mod persistence_tests;
