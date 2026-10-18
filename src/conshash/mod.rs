@@ -198,9 +198,9 @@ pub struct ConsistentHashing {
     address_search_failures: AtomicU64,
     /// Test hook: the previous successful read, and how many of the next
     /// reads are answered from it (a member that lags behind a notice).
-    #[cfg(test)]
+    #[cfg(any(test, multisite_test))]
     last_read: Mutex<Option<(Vec<Member>, u64)>>,
-    #[cfg(test)]
+    #[cfg(any(test, multisite_test))]
     stale_reads: AtomicUsize,
 }
 
@@ -227,9 +227,9 @@ impl ConsistentHashing {
             wanted_version: AtomicU64::new(0),
             raft_client: raft_client.clone(),
             address_search_failures: AtomicU64::new(0),
-            #[cfg(test)]
+            #[cfg(any(test, multisite_test))]
             last_read: Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, multisite_test))]
             stale_reads: AtomicUsize::new(0),
         });
         {
@@ -697,6 +697,13 @@ impl ConsistentHashing {
         self.watch_all_actions(wrapper);
     }
 
+    /// Test hook: the next `count` reads of the group answer from the previous
+    /// successful read (an older version than the notice that caused them).
+    #[cfg(any(test, multisite_test))]
+    pub fn inject_stale_reads(&self, count: usize) {
+        self.stale_reads.store(count, Ordering::Relaxed);
+    }
+
     /// Install the group as the table. Returns the installed version. A read
     /// older than the installed table installs nothing (monotonic install).
     /// The address table holds every member of the group, online or not, and
@@ -710,7 +717,7 @@ impl ConsistentHashing {
         );
         debug!("Get group members for {}", group_name);
         let group_members = self.membership.group_members(group_name, false).await;
-        #[cfg(test)]
+        #[cfg(any(test, multisite_test))]
         let group_members = match group_members {
             Ok(Some(read)) => {
                 if self
