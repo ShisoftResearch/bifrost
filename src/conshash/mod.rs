@@ -175,7 +175,9 @@ impl ConsistentHashing {
         let ch = Arc::new(ConsistentHashing {
             tables: RwLock::new(LookupTables {
                 nodes: Vec::new(),
-                addrs: HashMap::new(),
+                // Membership does not restore its roster. A first group read can
+                // omit peers that the recovered Raft configuration still names.
+                addrs: raft_client.known_server_addresses().await,
             }),
             slot_overrides: RwLock::new(SlotOverrides::default()),
             membership: membership_client.clone(),
@@ -286,18 +288,13 @@ impl ConsistentHashing {
             },
         }
     }
-    /// The address of a member, or `None` if this ring has never seen it.
-    ///
-    /// Prefer this over [`Self::to_server_name`]. An unknown server id is a
-    /// *routine* input, not a bug: a stored placement table can name a member that
-    /// has since left the ring, an operator can ask to drain onto a member that is
-    /// not there, and a stale watcher can hand over an id from a previous
-    /// membership. All of those want an error the caller can handle.
     #[cfg(feature = "c3doubt_trace")]
     pub fn trace_version(&self) -> u64 {
         self.version.load(Ordering::Relaxed)
     }
 
+    /// The known address of a group member or a configured Raft peer.
+    /// Addresses remain cached when a peer goes offline.
     pub fn try_server_name(&self, server_id: u64) -> Option<String> {
         let address = self.tables.read().addrs.get(&server_id).cloned();
         crate::doubt_trace!(
@@ -611,6 +608,12 @@ async fn server_changed(ch: Arc<ConsistentHashing>, member: Member, action: Acti
         action,
         member
     );
+    // The notice already supplies the address. Its following group read can
+    // be older than the notice. Keep the address even when that read is stale.
+    ch.tables
+        .write()
+        .addrs
+        .insert(member.id, member.address.clone());
     let ch_version = ch.version.load(Ordering::Relaxed);
     if ch_version <= version {
         {

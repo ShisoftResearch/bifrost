@@ -1251,6 +1251,11 @@ impl RaftClient {
         }
     }
 
+    /// Addresses already read from the Raft configuration, including offline peers.
+    pub(crate) async fn known_server_addresses(&self) -> HashMap<u64, String> {
+        self.members.read().await.id_map.clone()
+    }
+
     pub fn leader_id(&self) -> u64 {
         self.type1_state.leader_id.load(ORDERING)
     }
