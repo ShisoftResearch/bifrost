@@ -6212,6 +6212,9 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn server_membership() {
+        use super::{config_change, ConfigChange};
+        use std::time::Duration;
+
         let _ = env_logger::try_init();
         let s1_addr = String::from("127.0.0.1:2001");
         let s2_addr = String::from("127.0.0.1:2002");
@@ -6273,6 +6276,46 @@ mod test {
         info!("Server 3 join server 1 and server 2");
         let join_result = service3.join(&vec![s1_addr.clone(), s2_addr.clone()]).await;
         assert!(join_result.unwrap());
+        // A join commits and applies on the leader before it returns. A quorum
+        // can exclude service2, so its local membership can still lag.
+        let join_index = {
+            let meta = service1.read_meta().await;
+            let logs = meta.logs.read().await;
+            let entry = logs
+                .values()
+                .rev()
+                .find(|entry| {
+                    matches!(config_change(entry), Some(ConfigChange::Add(address)) if address == s3_addr)
+                })
+                .expect("the leader must hold the join entry");
+            assert!(
+                meta.commit_index >= entry.id,
+                "the join returned before the leader committed its entry"
+            );
+            assert!(
+                meta.last_applied >= entry.id,
+                "the join returned before the leader applied its entry"
+            );
+            entry.id
+        };
+        let expected_members = [service1.id, service2.id, service3.id];
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut all_applied = true;
+                for service in [&service1, &service2, &service3] {
+                    let meta = service.read_meta().await;
+                    all_applied &= meta.last_applied >= join_index
+                        && meta.voters.len() == expected_members.len()
+                        && expected_members.iter().all(|id| meta.voters.contains_key(id));
+                }
+                if all_applied {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("every member must apply the joined membership within 10 s");
         info!("Checking numbers of users on 3 servers");
         assert_eq!(service1.num_members().await, 3);
         assert_eq!(service2.num_members().await, 3);
