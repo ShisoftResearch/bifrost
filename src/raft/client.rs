@@ -13,6 +13,7 @@ use futures::future::BoxFuture;
 use std::clone::Clone;
 use std::cmp::max;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use lightning::map::{Map as _, PtrHashMap};
 use std::iter::FromIterator;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
@@ -164,6 +165,8 @@ impl RaftPlaneClient {
 
 pub struct RaftClient {
     members: RwLock<Members>,
+    // Keyed discovery retains addresses independently of the live RPC roster.
+    known_addresses: Arc<PtrHashMap<u64, String>>,
     type1_state: Arc<PlaneClientState>,
     plane_states: RwLock<HashMap<PlaneId, Arc<PlaneClientState>>>,
     service_id: u64,
@@ -197,6 +200,7 @@ impl RaftClient {
                 clients: BTreeMap::new(),
                 id_map: HashMap::new(),
             }),
+            known_addresses: Arc::new(PtrHashMap::with_capacity(32)),
             type1_state: Self::new_plane_state(),
             plane_states: RwLock::new(HashMap::new()),
             service_id,
@@ -457,8 +461,13 @@ impl RaftClient {
         let cluster_info = self.cluster_info(PlaneId::type1(), servers).await;
         match cluster_info {
             Some(info) => {
-                let mut members = self.members.write().await;
                 let remote_members = info.members;
+                // This response is owned here. Publish addresses without a
+                // shared roster lock or a complete dictionary copy.
+                for (id, address) in &remote_members {
+                    self.known_addresses.insert(*id, address.clone());
+                }
+                let mut members = self.members.write().await;
                 let mut remote_ids = HashSet::with_capacity(remote_members.len());
                 members.id_map.clear();
                 for (id, addr) in remote_members {
@@ -1251,6 +1260,11 @@ impl RaftClient {
         }
     }
 
+    /// Share keyed address discovery. The map is never used for iteration.
+    pub(crate) fn known_server_addresses(&self) -> Arc<PtrHashMap<u64, String>> {
+        self.known_addresses.clone()
+    }
+
     pub fn leader_id(&self) -> u64 {
         self.type1_state.leader_id.load(ORDERING)
     }
@@ -1411,6 +1425,7 @@ mod tests {
                 clients: BTreeMap::new(),
                 id_map: HashMap::new(),
             }),
+            known_addresses: Arc::new(PtrHashMap::with_capacity(32)),
             type1_state: RaftClient::new_plane_state(),
             plane_states: RwLock::new(HashMap::new()),
             service_id: DEFAULT_SERVICE_ID,
