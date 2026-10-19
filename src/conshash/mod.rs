@@ -1,5 +1,6 @@
 use futures::prelude::*;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+use lightning::map::{Map as _, PtrHashMap};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -69,7 +70,6 @@ pub enum CHError {
 
 struct LookupTables {
     nodes: Vec<u64>,
-    addrs: HashMap<u64, String>,
 }
 
 #[derive(Default)]
@@ -171,6 +171,8 @@ impl SlotOverrides {
 
 pub struct ConsistentHashing {
     tables: RwLock<LookupTables>,
+    /// Keyed address discovery is separate from the group's routing nodes.
+    addrs: Arc<PtrHashMap<u64, String>>,
     /// Stored slot ownership that overrides the computed answer, indexed by slot.
     ///
     /// `None` means this group has no slot table and placement is purely derived,
@@ -202,6 +204,8 @@ pub struct ConsistentHashing {
     last_read: Mutex<Option<(Vec<Member>, u64)>>,
     #[cfg(any(test, multisite_test))]
     stale_reads: AtomicUsize,
+    #[cfg(test)]
+    test_read: std::sync::Mutex<Option<(Vec<Member>, u64)>>,
 }
 
 impl ConsistentHashing {
@@ -214,8 +218,10 @@ impl ConsistentHashing {
         let ch = Arc::new(ConsistentHashing {
             tables: RwLock::new(LookupTables {
                 nodes: Vec::new(),
-                addrs: HashMap::new(),
             }),
+            // The client fills this map from its owned configuration response.
+            // No roster copy or address-map iteration is needed here.
+            addrs: raft_client.known_server_addresses(),
             slot_overrides: RwLock::new(SlotOverrides::default()),
             membership: membership_client.clone(),
             weight_sm_client: WeightSMClient::new(id, &raft_client),
@@ -231,6 +237,8 @@ impl ConsistentHashing {
             last_read: Mutex::new(None),
             #[cfg(any(test, multisite_test))]
             stale_reads: AtomicUsize::new(0),
+            #[cfg(test)]
+            test_read: std::sync::Mutex::new(None),
         });
         {
             let ch = ch.clone();
@@ -385,10 +393,7 @@ impl ConsistentHashing {
         {
             Ok(Ok((members, _))) => match members.iter().find(|m| m.id == server_id) {
                 Some(member) => {
-                    self.tables
-                        .write()
-                        .addrs
-                        .insert(server_id, member.address.clone());
+                    self.addrs.insert(server_id, member.address.clone());
                     return Ok(member.address.clone());
                 }
                 None => tried.push(("roster", "the server is not in the roster".to_string())),
@@ -410,7 +415,7 @@ impl ConsistentHashing {
                     .find(|address| hash_str(address) == server_id)
                 {
                     Some(address) => {
-                        self.tables.write().addrs.insert(server_id, address.clone());
+                        self.addrs.insert(server_id, address.clone());
                         return Ok(address);
                     }
                     None => tried.push((
@@ -492,15 +497,24 @@ impl ConsistentHashing {
             }
         }
     }
-    /// The address of a member, or `None` if this ring has never seen it.
-    ///
-    /// Prefer this over [`Self::to_server_name`]. An unknown server id is a
-    /// *routine* input, not a bug: a stored placement table can name a member that
-    /// has since left the ring, an operator can ask to drain onto a member that is
-    /// not there, and a stale watcher can hand over an id from a previous
-    /// membership. All of those want an error the caller can handle.
+    #[cfg(feature = "c3doubt_trace")]
+    pub fn trace_version(&self) -> u64 {
+        self.version.load(Ordering::Relaxed)
+    }
+
+    /// The known address of a group member or a configured Raft peer.
+    /// Addresses remain cached when a peer goes offline.
     pub fn try_server_name(&self, server_id: u64) -> Option<String> {
-        self.tables.read().addrs.get(&server_id).cloned()
+        let address = self.addrs.get(&server_id);
+        crate::doubt_trace!(
+            "lookup ring={:p} group={} version={} peer={} address={:?}",
+            self,
+            self.group_name,
+            self.version.load(Ordering::Relaxed),
+            server_id,
+            address
+        );
+        address
     }
 
     /// **Panics** on an unknown server id. Prefer [`Self::try_server_name`].
@@ -517,8 +531,7 @@ impl ConsistentHashing {
     }
     pub fn to_server_name_option(&self, server_id: Option<u64>) -> Option<String> {
         if let Some(sid) = server_id {
-            let lookup_table = self.tables.read();
-            lookup_table.addrs.get(&sid).cloned()
+            self.addrs.get(&sid)
         } else {
             None
         }
@@ -648,6 +661,12 @@ impl ConsistentHashing {
         let rand = rand::random::<u64>();
         self.get_server_id(rand)
     }
+    /// Whether the current group routing snapshot includes this server.
+    /// Address knowledge alone does not establish group membership.
+    pub fn is_routing_member(&self, server_id: u64) -> bool {
+        self.tables.read().nodes.contains(&server_id)
+    }
+
     pub fn nodes_count(&self) -> usize {
         let lookup_table = self.tables.read();
         return lookup_table.nodes.len();
@@ -717,6 +736,9 @@ impl ConsistentHashing {
         );
         debug!("Get group members for {}", group_name);
         let group_members = self.membership.group_members(group_name, false).await;
+        #[cfg(test)]
+        let group_members = self.test_read.lock().unwrap().take()
+            .map(|read| Ok(Some(read))).unwrap_or(group_members);
         #[cfg(any(test, multisite_test))]
         let group_members = match group_members {
             Ok(Some(read)) => {
@@ -734,6 +756,13 @@ impl ConsistentHashing {
             other => other,
         };
         debug!("Got group members for {}", group_name);
+        crate::doubt_trace!(
+            "ring_read ring={:p} group={} installed={} result={:?}",
+            self,
+            group_name,
+            self.version.load(Ordering::Relaxed),
+            group_members
+        );
         if let Ok(Some((all_members, version))) = group_members {
             let installed = self.version.load(Ordering::Relaxed);
             if version < installed {
@@ -764,11 +793,12 @@ impl ConsistentHashing {
                             factors.insert(k, (w / min_weight) as u32);
                         }
                         let factor_sum: u32 = factors.values().sum();
+                        // Keep offline addresses without adding routing nodes.
+                        for member in all_members.iter() {
+                            self.addrs.insert(member.id, member.address.clone());
+                        }
                         let mut lookup_table = self.tables.write();
                         lookup_table.nodes = Vec::with_capacity(factor_sum as usize);
-                        for member in all_members.iter() {
-                            lookup_table.addrs.insert(member.id, member.address.clone());
-                        }
                         for (server_id, weight) in factors.into_iter() {
                             for _ in 0..weight {
                                 lookup_table.nodes.push(server_id);
@@ -776,6 +806,13 @@ impl ConsistentHashing {
                         }
                         self.num_addrs.store(members.len(), Ordering::Relaxed);
                         self.version.store(version, Ordering::Relaxed);
+                        crate::doubt_trace!(
+                            "ring_install ring={:p} group={} version={} members={:?}",
+                            self,
+                            group_name,
+                            version,
+                            members
+                        );
                         Ok(version)
                     } else {
                         Err(InitTableError::NoWeightInfo)
@@ -818,6 +855,17 @@ async fn server_changed(ch: Arc<ConsistentHashing>, member: Member, action: Acti
         member, action, version
     );
     ch.wanted_version.fetch_max(version, Ordering::Relaxed);
+    crate::doubt_trace!(
+        "ring_notice ring={:p} group={} event_version={} action={:?} member={:?}",
+        &*ch,
+        ch.group_name,
+        version,
+        action,
+        member
+    );
+    // The notice already supplies the address. Its following group read can
+    // be older than the notice. Keep the address even when that read is stale.
+    ch.addrs.insert(member.id, member.address.clone());
     let ch_version = ch.version.load(Ordering::Relaxed);
     if ch_version <= version {
         let old_nodes = (&*ch.tables.read()).nodes.clone();
@@ -858,9 +906,78 @@ mod test {
     use crate::rpc::Server;
     use crate::utils::time::async_wait_secs;
     use bifrost_hasher::hash_str;
+    use lightning::map::Map as _;
     use std::collections::HashMap;
     use std::sync::atomic::*;
     use std::sync::Arc;
+
+    async fn ring_address_fixture(stale: bool) {
+        let _guard = crate::raft::client::callback_test_support::CALLBACK_TEST_GUARD.write().await;
+        let address = std::env::var("C3DOUBT_FIXTURE_ADDRESS")
+            .unwrap_or_else(|_| "127.0.0.1:41400".to_string());
+        let server = Server::new(&address);
+        let raft = RaftService::new(Options {
+            storage: Storage::MEMORY,
+            address: address.clone(),
+            service_id: 0,
+        });
+        Membership::new(&server, &raft).await;
+        Weights::new(&raft).await;
+        server.register_service_with_id(0, &raft).await;
+        Server::listen_and_resume(&server).await;
+        assert!(RaftService::start(&raft, false).await);
+        raft.bootstrap().await;
+        let client = RaftClient::new(&vec![address.clone()], 0).await.unwrap();
+        RaftClient::prepare_subscription(&server).await;
+        let member = MemberService::new(&address, &client, &raft).await;
+        let group = "ring_address_fixture".to_string();
+        member.join_group(&group).await.unwrap();
+        let observer = Arc::new(ObserverClient::new(&client));
+        let ring = ConsistentHashing::new(&group, &client, &observer).await.unwrap();
+        ring.set_weight(&address, 1).await.unwrap();
+        if stale {
+            // A restarted member can answer with only itself at version 4.
+            *ring.test_read.lock().unwrap() = Some((vec![crate::membership::client::Member {
+                id: bifrost_hasher::hash_str("restarted-participant"),
+                address: "restarted-participant".to_string(),
+                online: true,
+            }], 4));
+        }
+        ring.init_table().await.unwrap();
+        let found = ring.try_server_name(bifrost_hasher::hash_str(&address));
+        let pool = crate::rpc::ClientPool::new();
+        let client_result = pool.get_by_id(bifrost_hasher::hash_str(&address), |id| ring.try_server_name(id)).await;
+        let event_peer = crate::membership::client::Member {
+            id: bifrost_hasher::hash_str("event-participant"),
+            address: "event-participant".to_string(),
+            online: true,
+        };
+        if stale {
+            assert_eq!(ring.get_server_id(0), Some(bifrost_hasher::hash_str("restarted-participant")));
+            *ring.test_read.lock().unwrap() = Some((vec![], 4));
+            super::server_changed(ring.clone(), event_peer.clone(), super::Action::Joined, 11).await;
+        }
+        let event_address = ring.try_server_name(event_peer.id);
+        member.close();
+        raft.shutdown().await;
+        server.shutdown().await;
+        assert_eq!(found, Some(address), "a configured peer must keep its address after a stale group read");
+        assert!(client_result.is_ok(), "the data-site pool must locate the configured peer: {:?}", client_result.err());
+        if stale {
+            assert_eq!(event_address, Some(event_peer.address), "a stale group read must not lose the notice's address");
+            assert_eq!(ring.nodes_count(), 0, "an address entry must not add a routing node");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stale_group_read_keeps_the_configured_peer_address() {
+        ring_address_fixture(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn control_a_current_group_read_keeps_the_peer_address() {
+        ring_address_fixture(false).await;
+    }
 
     #[test]
     fn older_slot_snapshot_is_refused() {
@@ -998,13 +1115,13 @@ mod test {
             ch.try_server_name(member).unwrap()
         );
         // 2. The ring has no entry; the roster has it.
-        ch.tables.write().addrs.remove(&member);
+        ch.addrs.remove(&member);
         assert!(ch.try_server_name(member).is_none());
         let from_roster = ch.resolve_address(member).await.unwrap();
         assert_eq!(hash_str(&from_roster), member);
         // 3. Neither the ring nor the roster has it; the raft configuration has.
         let voter = hash_str(&raft_address);
-        ch.tables.write().addrs.remove(&voter);
+        ch.addrs.remove(&voter);
         assert_eq!(ch.resolve_address(voter).await.unwrap(), raft_address);
         // 4. No source has it: the error names each source.
         let unknown = hash_str("nobody");
