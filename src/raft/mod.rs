@@ -406,6 +406,9 @@ pub enum PlaneError {
     Persistence(io::Error),
     /// A persisted state-machine image is present but cannot be restored.
     Recovery(RecoverError),
+    /// The restore found more than one voter and `force_new_cluster` was not
+    /// set. It would cut live members off and found a second cluster.
+    RestoreRefused { plane_id: PlaneId, voters: Vec<String> },
 }
 
 impl Display for PlaneError {
@@ -420,6 +423,13 @@ impl Display for PlaneError {
             }
             PlaneError::Persistence(err) => write!(f, "plane storage write failed: {err}"),
             PlaneError::Recovery(err) => write!(f, "plane recovery failed: {err}"),
+            PlaneError::RestoreRefused { plane_id, voters } => write!(
+                f,
+                "restore refused: plane {} names {} voters ({:?}); set force_new_cluster only if every other member is stopped for ever",
+                plane_id.raw(),
+                voters.len(),
+                voters
+            ),
         }
     }
 }
@@ -693,17 +703,25 @@ pub struct RestoredPlane {
 /// configuration names the old address, and without this step the new member
 /// is not a voter and never leads. Run it once, before the server starts, on
 /// the raft storage of the server. See `RaftService::restore_meta_sole_voter`.
+///
+/// The call refuses a plane that names two or more voters (typed error
+/// `RestoreRefused`) unless `force_new_cluster` is true. Forcing cuts the
+/// other voters off: every one of them must stay stopped for ever, or the
+/// restore makes a second cluster with the same log prefix. The refusal is
+/// decided for every plane before any plane is changed. The call can run
+/// again after a stop in the middle.
 pub async fn restore_sole_voter(
     storage: Storage,
     new_address: &str,
     service_id: u64,
+    force_new_cluster: bool,
 ) -> Result<Vec<RestoredPlane>, PlaneError> {
     let service = RaftService::new(Options {
         storage,
         address: new_address.to_string(),
         service_id,
     });
-    let restored = service.restore_all_planes().await;
+    let restored = service.restore_all_planes(force_new_cluster).await;
     service.shutdown().await;
     restored
 }
@@ -1543,12 +1561,31 @@ impl RaftService {
         Ok(())
     }
 
-    async fn restore_all_planes(self: &Arc<Self>) -> Result<Vec<RestoredPlane>, PlaneError> {
-        let mut restored = Vec::new();
+    async fn restore_all_planes(
+        self: &Arc<Self>,
+        force_new_cluster: bool,
+    ) -> Result<Vec<RestoredPlane>, PlaneError> {
+        // Decide the refusal for every plane first: a refusal on a later plane
+        // must not leave an earlier plane changed.
         {
             let mut meta = self.meta.write().await;
             self.initialize_runtime_meta(PlaneId::type1(), &self._is_leader, &mut meta, false)
                 .await?;
+            Self::check_restorable(PlaneId::type1(), &meta, force_new_cluster)?;
+        }
+        let mut runtimes = Vec::new();
+        for plane_id in self.persisted_type2_planes() {
+            let (runtime, _) = self.resolve_plane_runtime(plane_id, false, false).await?;
+            let Some(runtime) = runtime else { continue };
+            {
+                let meta = runtime.meta.read().await;
+                Self::check_restorable(plane_id, &meta, force_new_cluster)?;
+            }
+            runtimes.push((plane_id, runtime));
+        }
+        let mut restored = Vec::new();
+        {
+            let mut meta = self.meta.write().await;
             let removed = self
                 .restore_meta_sole_voter(PlaneId::type1(), &self._is_leader, &mut meta)
                 .await?;
@@ -1557,9 +1594,7 @@ impl RaftService {
                 removed,
             });
         }
-        for plane_id in self.persisted_type2_planes() {
-            let (runtime, _) = self.resolve_plane_runtime(plane_id, false, false).await?;
-            let Some(runtime) = runtime else { continue };
+        for (plane_id, runtime) in runtimes {
             let mut meta = runtime.meta.write().await;
             let removed = self
                 .restore_meta_sole_voter(plane_id, &runtime.is_leader, &mut meta)
@@ -1567,6 +1602,20 @@ impl RaftService {
             restored.push(RestoredPlane { plane_id, removed });
         }
         Ok(restored)
+    }
+
+    fn check_restorable(
+        plane_id: PlaneId,
+        meta: &RaftMeta,
+        force_new_cluster: bool,
+    ) -> Result<(), PlaneError> {
+        if meta.voters.len() >= 2 && !force_new_cluster {
+            return Err(PlaneError::RestoreRefused {
+                plane_id,
+                voters: meta.voters.values().cloned().collect(),
+            });
+        }
+        Ok(())
     }
 
     /// Operator step, the counterpart of etcd `--force-new-cluster`: make this
@@ -2303,7 +2352,7 @@ impl RaftService {
                 members,
                 last_log_id,
                 last_log_term,
-                leader_id: meta.leader_id,
+                leader_id: advertised_leader(&meta),
             });
         }
 
@@ -2412,6 +2461,26 @@ fn is_leader(meta: &RwLockWriteGuard<RaftMeta>) -> bool {
 /// lower or equal term changes nothing. Not durable by itself -- every effect
 /// that depends on the term (a reply, a RequestVote, an append) first calls
 /// `persist_hard_state`.
+/// The leader this member can name to a client, or 0 when it cannot name one.
+///
+/// A leader names itself. A follower names the leader of its last heartbeat
+/// only while that heartbeat is younger than its election timeout: after that
+/// the leader is likely dead, and a client that follows the name only retries
+/// against a dead member. A member never names itself unless it leads.
+fn advertised_leader(meta: &RaftMeta) -> u64 {
+    match meta.membership {
+        Membership::Leader(_) => meta.leader_id,
+        Membership::Follower | Membership::Candidate => {
+            if meta.leader_id == 0 || get_time() >= meta.last_checked + meta.timeout {
+                0
+            } else {
+                meta.leader_id
+            }
+        }
+        _ => 0,
+    }
+}
+
 fn alter_term(meta: &mut RwLockWriteGuard<RaftMeta>, term: u64) {
     if term > meta.term {
         meta.term = term;
@@ -2840,7 +2909,7 @@ impl RaftService {
             members,
             last_log_id,
             last_log_term,
-            leader_id: meta.leader_id,
+            leader_id: advertised_leader(&meta),
         }
     }
     pub async fn num_members(&self) -> usize {
@@ -3149,13 +3218,10 @@ impl RaftService {
                     break;
                 }
                 match res {
-                    Ok(RequestVoteResponse::TermOut(remote_term, remote_leader_id)) => {
-                        self.become_follower_on_plane(
-                            leader_flag,
-                            meta,
-                            remote_term,
-                            remote_leader_id,
-                        );
+                    Ok(RequestVoteResponse::TermOut(remote_term, _remote_leader_id)) => {
+                        // The remote leader is of an older term, so it is not
+                        // the leader of the term adopted here.
+                        self.become_follower_on_plane(leader_flag, meta, remote_term, 0);
                         if let Err(e) = persist_hard_state(meta).await {
                             error!(
                                 "Plane {}: cannot persist adopted term {}: {}",
@@ -3402,7 +3468,14 @@ impl RaftService {
                         remote_leader_id
                     );
                     alter_term(meta, remote_term);
-                    meta.leader_id = remote_leader_id;
+                    // The reply carries the remote member's last known leader.
+                    // That member may name this very member (its leader of an
+                    // older term), and it says nothing about the new term. A
+                    // stepped-down leader that kept its own id answered
+                    // `NotLeader(0)` to every client. The leader of the new
+                    // term is unknown until its first heartbeat.
+                    let _ = remote_leader_id;
+                    meta.leader_id = 0;
                     self.switch_membership(meta, Membership::Follower);
                     if let Err(e) = persist_hard_state(meta).await {
                         error!(
@@ -7303,7 +7376,7 @@ mod test {
                     service_id: DEFAULT_SERVICE_ID,
                 };
                 // Another address on the same store: the explicit restore makes it the only voter.
-                crate::raft::restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID).await.unwrap();
+                crate::raft::restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID, false).await.unwrap();
                 let raft_service2 = RaftService::new(opts_restore);
 
                 // New SM with different initial state
@@ -7610,7 +7683,7 @@ mod test {
                     service_id: DEFAULT_SERVICE_ID,
                 };
                 // Another address on the same store: the explicit restore makes it the only voter.
-                crate::raft::restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID).await.unwrap();
+                crate::raft::restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID, false).await.unwrap();
                 let raft_service2 = RaftService::new(opts_restore);
 
                 // Start with SAME initial state (WAL only replays commands, not full state)
@@ -7922,7 +7995,7 @@ mod test {
                     service_id: DEFAULT_SERVICE_ID,
                 };
                 // Another address on the same store: the explicit restore makes it the only voter.
-                crate::raft::restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID).await.unwrap();
+                crate::raft::restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID, false).await.unwrap();
                 let service2 = RaftService::new(opts_restore);
 
                 // IMPORTANT: start with same initial state; WAL replays deltas
@@ -8071,7 +8144,7 @@ mod test {
                     service_id: DEFAULT_SERVICE_ID,
                 };
                 // Another address on the same store: the explicit restore makes it the only voter.
-                crate::raft::restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID).await.unwrap();
+                crate::raft::restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID, false).await.unwrap();
                 let svc2 = RaftService::new(opts_restore);
                 let server2 = Server::new(&addr2);
                 server2.register_service(&svc2).await;
@@ -8557,7 +8630,7 @@ mod test {
                     service_id: DEFAULT_SERVICE_ID,
                 };
                 // Another address on the same store: the explicit restore makes it the only voter.
-                crate::raft::restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID).await.unwrap();
+                crate::raft::restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID, false).await.unwrap();
                 let svc2 = RaftService::new(opts_restore);
                 let server2 = Server::new(&addr2);
                 server2.register_service(&svc2).await;

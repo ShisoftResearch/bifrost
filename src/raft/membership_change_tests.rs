@@ -4,7 +4,7 @@
 //! commits an entry of its term first. Tests marked "control" show that the
 //! test can pass; the others failed before the change.
 
-use super::compaction_tests::{scratch_dir, snapshot_and_compact};
+use super::compaction_tests::{disk_options, scratch_dir, snapshot_and_compact};
 use super::multi_member_tests::{add_entry, addresses, cluster, Member, NEVER};
 use super::state_machine::configs::commands::{del_member_, new_member_};
 use super::state_machine::configs::{Configures, CONFIG_SM_ID};
@@ -443,4 +443,168 @@ async fn restarted_followers_elect_a_leader_when_the_leader_stops() {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
     assert!(elected, "no leader 60 s after the leader stopped");
+}
+
+/// Observed in the campaign (K-GR5n): a restarted member asked a node that the
+/// cluster named as leader, and that node answered `NotLeader(0)` for ever.
+/// Read in the code: a leader that steps down because a follower reports a
+/// higher term took the leader of that follower as its own leader. A follower
+/// that became a candidate still names the old leader, which is the stepped
+/// down member itself. The member must name no leader until a heartbeat of the
+/// new term arrives.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_leader_that_steps_down_on_a_higher_term_does_not_name_itself() {
+    let mut members = cluster("mc_stepdown", 3, NEVER).await;
+    let leader = members.remove(0);
+    assert!(leader.is_leader().await);
+    let leader_id = leader.svc.id;
+    for follower in &members {
+        // The follower campaigned in a term that the leader did not see. It
+        // keeps the old leader as its leader, as `become_candidate` does.
+        let mut meta = follower.svc.write_meta().await;
+        assert_eq!(meta.leader_id, leader_id);
+        meta.term += 5;
+    }
+    // A replication round learns the higher term from the followers. No
+    // quorum answers, so the command is not acknowledged.
+    let response = Service::c_command(leader.svc.as_ref(), PlaneId::type1(), add_entry(0, 0, 1)).await;
+    assert!(!matches!(response, ClientCmdResponse::Success { .. }), "{:?}", response);
+    assert!(!leader.is_leader().await, "the leader did not step down");
+    let meta = leader.svc.read_meta().await;
+    assert_ne!(meta.leader_id, leader_id, "a follower names itself as leader");
+    drop(meta);
+    let info = leader.svc.cluster_info().await;
+    assert_ne!(info.leader_id, leader_id);
+}
+
+/// A follower whose last heartbeat is older than its election timeout names no
+/// leader: the client must not follow a name of a dead leader.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_follower_names_no_leader_after_its_election_timeout() {
+    let mut members = cluster("mc_stale_name", 3, NEVER).await;
+    let _leader = members.remove(0);
+    let follower = members.pop().unwrap();
+    assert_ne!(follower.svc.cluster_info().await.leader_id, 0);
+    {
+        let mut meta = follower.svc.write_meta().await;
+        meta.last_checked -= meta.timeout + 1;
+    }
+    assert_eq!(follower.svc.cluster_info().await.leader_id, 0);
+}
+
+/// IC1 (RC8): the first server that names a leader answers the cluster
+/// information, so the cursor of a new client may come from a follower that
+/// lags. `refresh_leader(0)` must raise the cursor to the leader's position.
+#[tokio::test(flavor = "multi_thread")]
+async fn refresh_leader_takes_the_cursor_from_the_leader() {
+    let mut members = cluster("mc_cursor", 3, NEVER).await;
+    let leader = members.remove(0);
+    for value in 1..=3 {
+        let response = command_with_retry(&leader, add_entry(0, 0, value)).await;
+        assert!(matches!(response, ClientCmdResponse::Success { .. }), "{:?}", response);
+    }
+    let follower = members.pop().unwrap();
+    let leader_last = leader.svc.cluster_info().await.last_log_id;
+    {
+        // The follower lags by one entry.
+        let meta = follower.svc.write_meta().await;
+        let mut logs = meta.logs.write().await;
+        let last = *logs.keys().next_back().unwrap();
+        logs.remove(&last);
+    }
+    let client = RaftClient::new(&vec![follower.addr.clone()], leader.svc.options.service_id)
+        .await
+        .unwrap();
+    assert!(
+        client.read_cursor().1 < leader_last,
+        "test setup: the first answer must lag"
+    );
+    assert!(client.refresh_leader(0).await);
+    assert!(
+        client.read_cursor().1 >= leader_last,
+        "the cursor {:?} is below the leader's log id {}",
+        client.read_cursor(),
+        leader_last
+    );
+}
+
+/// IC3: the restore refuses a store that names two or more voters, and it
+/// changes nothing. With `force_new_cluster` it makes the member the only
+/// voter. The second run changes nothing more (IC4).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_restore_refuses_a_store_with_two_voters_unless_it_is_forced() {
+    let mut members = cluster("mc_restore2", 2, NEVER).await;
+    let second = members.pop().unwrap();
+    let first = members.pop().unwrap();
+    let (dir, _addr) = second.stop().await;
+    first.stop().await;
+    let new_address = addresses(1).remove(0);
+    let storage = disk_options(&dir, NEVER, NEVER).storage;
+    let refused = restore_sole_voter(storage.clone(), &new_address, DEFAULT_SERVICE_ID, false).await;
+    match refused {
+        Err(PlaneError::RestoreRefused { voters, .. }) => assert_eq!(voters.len(), 2),
+        other => panic!("the restore of a 2-voter store was not refused: {:?}", other),
+    }
+    // The refusal wrote nothing: the store still names two voters.
+    let again = restore_sole_voter(storage.clone(), &new_address, DEFAULT_SERVICE_ID, false).await;
+    assert!(matches!(again, Err(PlaneError::RestoreRefused { .. })));
+    let forced = restore_sole_voter(storage.clone(), &new_address, DEFAULT_SERVICE_ID, true)
+        .await
+        .unwrap();
+    let removed: usize = forced.iter().map(|plane| plane.removed.len()).sum();
+    assert_eq!(removed, 2, "{:?}", forced);
+    // A second run (even without force: one voter is left) changes nothing.
+    let second_run = restore_sole_voter(storage, &new_address, DEFAULT_SERVICE_ID, false)
+        .await
+        .unwrap();
+    assert!(second_run.iter().all(|plane| plane.removed.is_empty()), "{:?}", second_run);
+}
+
+/// Control for C6: after the first change commits, a second change is admitted.
+#[tokio::test(flavor = "multi_thread")]
+async fn control_a_second_voter_change_after_the_first_commits_is_admitted() {
+    let members = cluster("mc_c6_ok", 3, NEVER).await;
+    let spare1 = Member::launch(&scratch_dir("mc_c6_ok_s1"), &addresses(1)[0], NEVER).await;
+    let spare2 = Member::launch(&scratch_dir("mc_c6_ok_s2"), &addresses(1)[0], NEVER).await;
+    let leader = &members[0];
+    let first = command_with_retry(leader, config_entry(&spare1.addr)).await;
+    assert!(matches!(first, ClientCmdResponse::Success { .. }), "{:?}", first);
+    let second = command_with_retry(leader, config_entry(&spare2.addr)).await;
+    assert!(matches!(second, ClientCmdResponse::Success { .. }), "{:?}", second);
+    let voters = voter_addresses(leader).await;
+    assert!(voters.contains(&spare1.addr) && voters.contains(&spare2.addr), "{:?}", voters);
+}
+
+/// C7 with several members: a leader of a new term has not committed an entry
+/// of its term. Its first voter change commits a no-op first, and that no-op
+/// reaches the followers before the change does. Without C7 two overlapping
+/// changes across a leader change can give two leaders in one term (model
+/// `control-no-own-term-commit-rule-4voters`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_voter_change_of_a_new_term_follows_a_committed_noop_on_every_follower() {
+    let members = cluster("mc_c7_multi", 3, NEVER).await;
+    let spare = Member::launch(&scratch_dir("mc_c7_multi_spare"), &addresses(1)[0], NEVER).await;
+    let leader = &members[0];
+    // The leader enters a new term without an entry of that term.
+    {
+        let mut meta = leader.svc.write_meta().await;
+        meta.term += 1;
+        persist_hard_state(&meta).await.unwrap();
+    }
+    for follower in &members[1..] {
+        let mut meta = follower.svc.write_meta().await;
+        meta.term += 1;
+        persist_hard_state(&meta).await.unwrap();
+    }
+    let response = command_with_retry(leader, config_entry(&spare.addr)).await;
+    assert!(matches!(response, ClientCmdResponse::Success { .. }), "{:?}", response);
+    for member in &members {
+        let log = entries(member).await;
+        let noop = log.iter().position(|e| e.sm_id == NOOP_SM_ID);
+        let change = log
+            .iter()
+            .rposition(|e| config_change(e) == Some(ConfigChange::Add(spare.addr.clone())));
+        assert!(noop.is_some() && change.is_some(), "{}: noop {:?} change {:?}", member.addr, noop, change);
+        assert!(noop < change, "{}: the change came before the no-op", member.addr);
+    }
 }

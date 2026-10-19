@@ -1172,7 +1172,14 @@ impl RaftClient {
                             plane_id.raw(), e
                         );
                     }
-                    sleep(Duration::from_millis(UPDATE_INFO_RETRY_DELAY_MS)).await;
+                    // Back off: an election takes seconds, and a tight loop
+                    // against a member that has no leader only adds load.
+                    // The delay grows from 10 ms to 250 ms.
+                    let backoff_ms = std::cmp::min(
+                        UPDATE_INFO_RETRY_DELAY_MS * (1 + update_info_depth as u64 / 4),
+                        250,
+                    );
+                    sleep(Duration::from_millis(backoff_ms)).await;
                     continue;
                 }
                 FailureAction::SwitchLeader => {
@@ -1358,7 +1365,31 @@ impl RaftClient {
             let members = self.members.read().await;
             Vec::from_iter(members.id_map.values().cloned())
         };
-        self.update_plane_info(PlaneId::type1(), &servers).await.is_ok()
+        if self.update_plane_info(PlaneId::type1(), &servers).await.is_err() {
+            return false;
+        }
+        // `cluster_info` returns the first server that names a leader, so the
+        // cursor above may come from a follower that lags. A read that starts
+        // from this cursor may be served by such a follower. Raise the cursor
+        // to the position of the leader itself (RC8).
+        let leader_id = self.type1_state.leader_id.load(ORDERING);
+        if leader_id != 0 {
+            if let Ok(info) = self.cluster_info_on_plane(PlaneId::type1()).await {
+                if info.leader_id == leader_id {
+                    swap_when_greater(&self.type1_state.last_log_id, info.last_log_id);
+                    swap_when_greater(&self.type1_state.last_log_term, info.last_log_term);
+                }
+            }
+        }
+        true
+    }
+
+    /// The position that a query of this client must see at least.
+    pub fn read_cursor(&self) -> (u64, u64) {
+        (
+            self.type1_state.last_log_term.load(ORDERING),
+            self.type1_state.last_log_id.load(ORDERING),
+        )
     }
 
     pub async fn current_leader_rpc_client(&self) -> Result<Arc<rpc::RPCClient>, ()> {

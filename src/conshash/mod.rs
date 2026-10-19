@@ -908,6 +908,11 @@ mod test {
     /// version, and the table must still reach N. `stale_reads` makes the next
     /// read(s) answer from the previous result.
     async fn ring_after_a_notice(stale: bool) -> Arc<ConsistentHashing> {
+        ring_with_address(stale).await.0
+    }
+
+    /// `ring_after_a_notice`, and the address of the raft member.
+    async fn ring_with_address(stale: bool) -> (Arc<ConsistentHashing>, String) {
         let _ = env_logger::try_init();
         let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = reserved.local_addr().unwrap().to_string();
@@ -952,7 +957,7 @@ mod test {
         }
         // Keep the services alive until the caller is done.
         std::mem::forget((raft_service, server, member1, member2));
-        ch
+        (ch, addr)
     }
 
     /// Control: the read answers the version of the notice.
@@ -975,6 +980,39 @@ mod test {
         let ch = ring_after_a_notice(true).await;
         assert_eq!(ch.server_count(), 2, "the ring kept the older read");
         assert!(ch.try_server_name(hash_str("ring_server_2")).is_some());
+    }
+
+    /// RC13: a server that the ring does not know is searched in the roster,
+    /// then in the raft configuration. The error names every source.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_address_is_searched_in_the_ring_the_roster_and_the_raft_configuration() {
+        let _callback_guard = crate::raft::client::callback_test_support::CALLBACK_TEST_GUARD
+            .write()
+            .await;
+        let (ch, raft_address) = ring_with_address(false).await;
+        // 1. The ring has the entry.
+        let member = hash_str("ring_server_2");
+        assert!(ch.try_server_name(member).is_some());
+        assert_eq!(
+            ch.resolve_address(member).await.unwrap(),
+            ch.try_server_name(member).unwrap()
+        );
+        // 2. The ring has no entry; the roster has it.
+        ch.tables.write().addrs.remove(&member);
+        assert!(ch.try_server_name(member).is_none());
+        let from_roster = ch.resolve_address(member).await.unwrap();
+        assert_eq!(hash_str(&from_roster), member);
+        // 3. Neither the ring nor the roster has it; the raft configuration has.
+        let voter = hash_str(&raft_address);
+        ch.tables.write().addrs.remove(&voter);
+        assert_eq!(ch.resolve_address(voter).await.unwrap(), raft_address);
+        // 4. No source has it: the error names each source.
+        let unknown = hash_str("nobody");
+        let before = ch.address_search_failures();
+        let error = ch.resolve_address(unknown).await.unwrap_err();
+        let sources: Vec<&str> = error.tried.iter().map(|(source, _)| *source).collect();
+        assert_eq!(sources, vec!["ring", "roster", "raft configuration"], "{}", error);
+        assert_eq!(ch.address_search_failures(), before + 1);
     }
 
     /// A late older read installs nothing (monotonic install).
