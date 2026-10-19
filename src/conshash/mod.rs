@@ -161,6 +161,8 @@ pub struct ConsistentHashing {
     update_lock: async_std::sync::Mutex<()>,
     version: AtomicU64,
     num_addrs: AtomicUsize,
+    #[cfg(test)]
+    test_read: std::sync::Mutex<Option<(Vec<Member>, u64)>>,
 }
 
 impl ConsistentHashing {
@@ -183,6 +185,8 @@ impl ConsistentHashing {
             version: AtomicU64::new(0),
             update_lock: async_std::sync::Mutex::new(()),
             num_addrs: AtomicUsize::new(0),
+            #[cfg(test)]
+            test_read: std::sync::Mutex::new(None),
         });
         {
             let ch = ch.clone();
@@ -510,6 +514,9 @@ impl ConsistentHashing {
         );
         debug!("Get group members for {}", group_name);
         let group_members = self.membership.group_members(group_name, true).await;
+        #[cfg(test)]
+        let group_members = self.test_read.lock().unwrap().take()
+            .map(|read| Ok(Some(read))).unwrap_or(group_members);
         debug!("Got group members for {}", group_name);
         crate::doubt_trace!(
             "ring_read ring={:p} group={} installed={} result={:?}",
@@ -643,6 +650,74 @@ mod test {
     use std::collections::HashMap;
     use std::sync::atomic::*;
     use std::sync::Arc;
+
+    async fn ring_address_fixture(stale: bool) {
+        let _guard = crate::raft::client::callback_test_support::CALLBACK_TEST_GUARD.write().await;
+        let address = std::env::var("C3DOUBT_FIXTURE_ADDRESS")
+            .unwrap_or_else(|_| "127.0.0.1:41400".to_string());
+        let server = Server::new(&address);
+        let raft = RaftService::new(Options {
+            storage: Storage::MEMORY,
+            address: address.clone(),
+            service_id: 0,
+        });
+        Membership::new(&server, &raft).await;
+        Weights::new(&raft).await;
+        server.register_service_with_id(0, &raft).await;
+        Server::listen_and_resume(&server).await;
+        assert!(RaftService::start(&raft, false).await);
+        raft.bootstrap().await;
+        let client = RaftClient::new(&vec![address.clone()], 0).await.unwrap();
+        RaftClient::prepare_subscription(&server).await;
+        let member = MemberService::new(&address, &client, &raft).await;
+        let group = "ring_address_fixture".to_string();
+        member.join_group(&group).await.unwrap();
+        let observer = Arc::new(ObserverClient::new(&client));
+        let ring = ConsistentHashing::new(&group, &client, &observer).await.unwrap();
+        ring.set_weight(&address, 1).await.unwrap();
+        if stale {
+            // A restarted member can answer with only itself at version 4.
+            *ring.test_read.lock().unwrap() = Some((vec![crate::membership::client::Member {
+                id: bifrost_hasher::hash_str("restarted-participant"),
+                address: "restarted-participant".to_string(),
+                online: true,
+            }], 4));
+        }
+        ring.init_table().await.unwrap();
+        let found = ring.try_server_name(bifrost_hasher::hash_str(&address));
+        let pool = crate::rpc::ClientPool::new();
+        let client_result = pool.get_by_id(bifrost_hasher::hash_str(&address), |id| ring.try_server_name(id)).await;
+        let event_peer = crate::membership::client::Member {
+            id: bifrost_hasher::hash_str("event-participant"),
+            address: "event-participant".to_string(),
+            online: true,
+        };
+        if stale {
+            assert_eq!(ring.get_server_id(0), Some(bifrost_hasher::hash_str("restarted-participant")));
+            *ring.test_read.lock().unwrap() = Some((vec![], 4));
+            super::server_changed(ring.clone(), event_peer.clone(), super::Action::Joined, 11).await;
+        }
+        let event_address = ring.try_server_name(event_peer.id);
+        member.close();
+        raft.shutdown().await;
+        server.shutdown().await;
+        assert_eq!(found, Some(address), "a configured peer must keep its address after a stale group read");
+        assert!(client_result.is_ok(), "the data-site pool must locate the configured peer: {:?}", client_result.err());
+        if stale {
+            assert_eq!(event_address, Some(event_peer.address), "a stale group read must not lose the notice's address");
+            assert_eq!(ring.nodes_count(), 0, "an address entry must not add a routing node");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stale_group_read_keeps_the_configured_peer_address() {
+        ring_address_fixture(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn control_a_current_group_read_keeps_the_peer_address() {
+        ring_address_fixture(false).await;
+    }
 
     #[test]
     fn older_slot_snapshot_is_refused() {
