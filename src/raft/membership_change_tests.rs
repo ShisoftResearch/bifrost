@@ -477,9 +477,15 @@ async fn a_leader_that_steps_down_on_a_higher_term_does_not_name_itself() {
     assert_ne!(info.leader_id, leader_id);
 }
 
-/// A follower whose last heartbeat is older than its election timeout names no
-/// leader: the client must not follow the name of a stopped or restarted
-/// leader. Observed in the campaigns K-G3d and K-GR5n without this rule.
+/// A follower whose last heartbeat exceeds its election timeout names no leader.
+/// Observed: without this rule, K-G3d completed 184 events, then server 0 timed
+/// out at start during event 185. Its server-0-20.stderr records 2 redirects
+/// from member 8393045598479251070 to itself, member 2412923645008276890.
+/// Read: cluster_info rejects leader 0. This rule excludes an expired hint
+/// from discovery; command replies still use the raw leader_id.
+/// Hypothesis: the expired hint caused the start timeout. The log does not
+/// record heartbeat ages or discovery replies. K-GR5n and K-X3n also timed
+/// out, but their failed start logs contain no notleader-redirect line.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_follower_names_no_leader_after_its_election_timeout() {
     let mut members = cluster("mc_stale_name", 3, NEVER).await;

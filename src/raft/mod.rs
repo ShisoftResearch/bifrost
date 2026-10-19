@@ -2460,12 +2460,11 @@ fn is_leader(meta: &RwLockWriteGuard<RaftMeta>) -> bool {
 /// The leader this member can name to a client, or 0 when it cannot name one.
 ///
 /// A leader names itself. A follower names the leader of its last heartbeat
-/// only while that heartbeat is younger than its election timeout. After that
-/// the leader is likely stopped, and a client that follows the name only
-/// retries against a dead or restarted member. Observed (K-G3d and K-GR5n,
-/// second review pass): without this rule a restarted old leader asks a
-/// follower for the leader, the follower names the restarted member itself,
-/// and the start does not finish in time.
+/// only while that heartbeat is younger than its election timeout.
+/// Observed: K-G3d without this rule timed out at start after 184 completed
+/// events. A peer redirected the client to the restarted member itself.
+/// Hypothesis: an expired discovery hint caused this timeout. The log does
+/// not record heartbeat ages. See the follower timeout test for the evidence.
 fn advertised_leader(meta: &RaftMeta) -> u64 {
     match meta.membership {
         Membership::Leader(_) => meta.leader_id,
