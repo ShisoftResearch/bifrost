@@ -475,7 +475,14 @@ Put these items in backticks.
   * **Observed**: you saw it in a test, a log or a measurement.
   * **Read**: you found it in the code or a document, but did not run it.
   * **Hypothesis**: you think it is true, but did not verify it.
-* Write numbers as digits and include the unit. Example: "11.9 s", "5 M edges", "+3 %".
+* Write numbers as digits and include the unit. Example: "11.9 s", "5 M edges". A number without a unit is an error.
+* For each comparison (a percentage, a ratio or "N times"), write all of these:
+  * The two sides: what is compared with what. Example: "E2 against the old head".
+  * The metric and its unit. Example: "p50 time per call, in ms".
+  * The direction that is better. Example: "lower is better".
+  * The absolute values of both sides, with units. Example: "50.0 ms against 17.9 ms: +179 %, 2.8 times slower".
+  * The sign rule for a signed percentage: "+" means larger than the reference side.
+* In a table of results, put the unit in each column heading or cell. Write "lower is better" or "higher is better" for each metric.
 
 ### Structure
 
