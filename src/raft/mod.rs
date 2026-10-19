@@ -2352,7 +2352,7 @@ impl RaftService {
                 members,
                 last_log_id,
                 last_log_term,
-                leader_id: meta.leader_id,
+                leader_id: advertised_leader(&meta),
             });
         }
 
@@ -2457,6 +2457,29 @@ fn is_leader(meta: &RwLockWriteGuard<RaftMeta>) -> bool {
         _ => false,
     }
 }
+/// The leader this member can name to a client, or 0 when it cannot name one.
+///
+/// A leader names itself. A follower names the leader of its last heartbeat
+/// only while that heartbeat is younger than its election timeout. After that
+/// the leader is likely stopped, and a client that follows the name only
+/// retries against a dead or restarted member. Observed (K-G3d and K-GR5n,
+/// second review pass): without this rule a restarted old leader asks a
+/// follower for the leader, the follower names the restarted member itself,
+/// and the start does not finish in time.
+fn advertised_leader(meta: &RaftMeta) -> u64 {
+    match meta.membership {
+        Membership::Leader(_) => meta.leader_id,
+        Membership::Follower | Membership::Candidate => {
+            if meta.leader_id == 0 || get_time() >= meta.last_checked + meta.timeout {
+                0
+            } else {
+                meta.leader_id
+            }
+        }
+        _ => 0,
+    }
+}
+
 /// Adopt a later term (and with it a fresh vote). Terms never go back: a
 /// lower or equal term changes nothing. Not durable by itself -- every effect
 /// that depends on the term (a reply, a RequestVote, an append) first calls
@@ -2889,7 +2912,7 @@ impl RaftService {
             members,
             last_log_id,
             last_log_term,
-            leader_id: meta.leader_id,
+            leader_id: advertised_leader(&meta),
         }
     }
     pub async fn num_members(&self) -> usize {

@@ -477,6 +477,22 @@ async fn a_leader_that_steps_down_on_a_higher_term_does_not_name_itself() {
     assert_ne!(info.leader_id, leader_id);
 }
 
+/// A follower whose last heartbeat is older than its election timeout names no
+/// leader: the client must not follow the name of a stopped or restarted
+/// leader. Observed in the campaigns K-G3d and K-GR5n without this rule.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_follower_names_no_leader_after_its_election_timeout() {
+    let mut members = cluster("mc_stale_name", 3, NEVER).await;
+    let _leader = members.remove(0);
+    let follower = members.pop().unwrap();
+    assert_ne!(follower.svc.cluster_info().await.leader_id, 0);
+    {
+        let mut meta = follower.svc.write_meta().await;
+        meta.last_checked -= meta.timeout + 1;
+    }
+    assert_eq!(follower.svc.cluster_info().await.leader_id, 0);
+}
+
 /// IC1 (RC8): the first server that names a leader answers the cluster
 /// information, so the cursor of a new client may come from a follower that
 /// lags. `refresh_leader(0)` must raise the cursor to the leader's position.
