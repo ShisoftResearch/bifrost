@@ -1,5 +1,6 @@
 use futures::prelude::*;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+use lightning::map::{Map as _, PtrHashMap};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -39,7 +40,6 @@ pub enum CHError {
 
 struct LookupTables {
     nodes: Vec<u64>,
-    addrs: HashMap<u64, String>,
 }
 
 #[derive(Default)]
@@ -141,6 +141,8 @@ impl SlotOverrides {
 
 pub struct ConsistentHashing {
     tables: RwLock<LookupTables>,
+    /// Keyed address discovery is separate from the group's routing nodes.
+    addrs: Arc<PtrHashMap<u64, String>>,
     /// Stored slot ownership that overrides the computed answer, indexed by slot.
     ///
     /// `None` means this group has no slot table and placement is purely derived,
@@ -175,10 +177,10 @@ impl ConsistentHashing {
         let ch = Arc::new(ConsistentHashing {
             tables: RwLock::new(LookupTables {
                 nodes: Vec::new(),
-                // Membership does not restore its roster. A first group read can
-                // omit peers that the recovered Raft configuration still names.
-                addrs: raft_client.known_server_addresses().await,
             }),
+            // The client fills this map from its owned configuration response.
+            // No roster copy or address-map iteration is needed here.
+            addrs: raft_client.known_server_addresses(),
             slot_overrides: RwLock::new(SlotOverrides::default()),
             membership: membership_client.clone(),
             weight_sm_client: WeightSMClient::new(id, &raft_client),
@@ -296,7 +298,7 @@ impl ConsistentHashing {
     /// The known address of a group member or a configured Raft peer.
     /// Addresses remain cached when a peer goes offline.
     pub fn try_server_name(&self, server_id: u64) -> Option<String> {
-        let address = self.tables.read().addrs.get(&server_id).cloned();
+        let address = self.addrs.get(&server_id);
         crate::doubt_trace!(
             "lookup ring={:p} group={} version={} peer={} address={:?}",
             self,
@@ -322,8 +324,7 @@ impl ConsistentHashing {
     }
     pub fn to_server_name_option(&self, server_id: Option<u64>) -> Option<String> {
         if let Some(sid) = server_id {
-            let lookup_table = self.tables.read();
-            lookup_table.addrs.get(&sid).cloned()
+            self.addrs.get(&sid)
         } else {
             None
         }
@@ -453,6 +454,12 @@ impl ConsistentHashing {
         let rand = rand::random::<u64>();
         self.get_server_id(rand)
     }
+    /// Whether the current group routing snapshot includes this server.
+    /// Address knowledge alone does not establish group membership.
+    pub fn is_routing_member(&self, server_id: u64) -> bool {
+        self.tables.read().nodes.contains(&server_id)
+    }
+
     pub fn nodes_count(&self) -> usize {
         let lookup_table = self.tables.read();
         return lookup_table.nodes.len();
@@ -540,11 +547,11 @@ impl ConsistentHashing {
                             factors.insert(k, (w / min_weight) as u32);
                         }
                         let factor_sum: u32 = factors.values().sum();
+                        for member in members.iter() {
+                            self.addrs.insert(member.id, member.address.clone());
+                        }
                         let mut lookup_table = self.tables.write();
                         lookup_table.nodes = Vec::with_capacity(factor_sum as usize);
-                        for member in members.iter() {
-                            lookup_table.addrs.insert(member.id, member.address.clone());
-                        }
                         for (server_id, weight) in factors.into_iter() {
                             for _ in 0..weight {
                                 lookup_table.nodes.push(server_id);
@@ -610,10 +617,7 @@ async fn server_changed(ch: Arc<ConsistentHashing>, member: Member, action: Acti
     );
     // The notice already supplies the address. Its following group read can
     // be older than the notice. Keep the address even when that read is stale.
-    ch.tables
-        .write()
-        .addrs
-        .insert(member.id, member.address.clone());
+    ch.addrs.insert(member.id, member.address.clone());
     let ch_version = ch.version.load(Ordering::Relaxed);
     if ch_version <= version {
         {
