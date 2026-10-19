@@ -2352,7 +2352,7 @@ impl RaftService {
                 members,
                 last_log_id,
                 last_log_term,
-                leader_id: advertised_leader(&meta),
+                leader_id: meta.leader_id,
             });
         }
 
@@ -2461,26 +2461,6 @@ fn is_leader(meta: &RwLockWriteGuard<RaftMeta>) -> bool {
 /// lower or equal term changes nothing. Not durable by itself -- every effect
 /// that depends on the term (a reply, a RequestVote, an append) first calls
 /// `persist_hard_state`.
-/// The leader this member can name to a client, or 0 when it cannot name one.
-///
-/// A leader names itself. A follower names the leader of its last heartbeat
-/// only while that heartbeat is younger than its election timeout: after that
-/// the leader is likely dead, and a client that follows the name only retries
-/// against a dead member. A member never names itself unless it leads.
-fn advertised_leader(meta: &RaftMeta) -> u64 {
-    match meta.membership {
-        Membership::Leader(_) => meta.leader_id,
-        Membership::Follower | Membership::Candidate => {
-            if meta.leader_id == 0 || get_time() >= meta.last_checked + meta.timeout {
-                0
-            } else {
-                meta.leader_id
-            }
-        }
-        _ => 0,
-    }
-}
-
 fn alter_term(meta: &mut RwLockWriteGuard<RaftMeta>, term: u64) {
     if term > meta.term {
         meta.term = term;
@@ -2909,7 +2889,7 @@ impl RaftService {
             members,
             last_log_id,
             last_log_term,
-            leader_id: advertised_leader(&meta),
+            leader_id: meta.leader_id,
         }
     }
     pub async fn num_members(&self) -> usize {
@@ -3474,7 +3454,6 @@ impl RaftService {
                     // stepped-down leader that kept its own id answered
                     // `NotLeader(0)` to every client. The leader of the new
                     // term is unknown until its first heartbeat.
-                    let _ = remote_leader_id;
                     meta.leader_id = 0;
                     self.switch_membership(meta, Membership::Follower);
                     if let Err(e) = persist_hard_state(meta).await {

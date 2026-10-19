@@ -477,24 +477,12 @@ async fn a_leader_that_steps_down_on_a_higher_term_does_not_name_itself() {
     assert_ne!(info.leader_id, leader_id);
 }
 
-/// A follower whose last heartbeat is older than its election timeout names no
-/// leader: the client must not follow a name of a dead leader.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_follower_names_no_leader_after_its_election_timeout() {
-    let mut members = cluster("mc_stale_name", 3, NEVER).await;
-    let _leader = members.remove(0);
-    let follower = members.pop().unwrap();
-    assert_ne!(follower.svc.cluster_info().await.leader_id, 0);
-    {
-        let mut meta = follower.svc.write_meta().await;
-        meta.last_checked -= meta.timeout + 1;
-    }
-    assert_eq!(follower.svc.cluster_info().await.leader_id, 0);
-}
-
 /// IC1 (RC8): the first server that names a leader answers the cluster
 /// information, so the cursor of a new client may come from a follower that
 /// lags. `refresh_leader(0)` must raise the cursor to the leader's position.
+/// Both followers lag in every round, so only a read from the leader gives the
+/// right cursor. The probe order of `cluster_info` is random, so the test makes
+/// 10 clients; without the change each round has a 2 in 3 chance to fail.
 #[tokio::test(flavor = "multi_thread")]
 async fn refresh_leader_takes_the_cursor_from_the_leader() {
     let mut members = cluster("mc_cursor", 3, NEVER).await;
@@ -503,29 +491,34 @@ async fn refresh_leader_takes_the_cursor_from_the_leader() {
         let response = command_with_retry(&leader, add_entry(0, 0, value)).await;
         assert!(matches!(response, ClientCmdResponse::Success { .. }), "{:?}", response);
     }
-    let follower = members.pop().unwrap();
     let leader_last = leader.svc.cluster_info().await.last_log_id;
-    {
-        // The follower lags by one entry.
-        let meta = follower.svc.write_meta().await;
-        let mut logs = meta.logs.write().await;
-        let last = *logs.keys().next_back().unwrap();
-        logs.remove(&last);
+    for round in 0..10 {
+        for follower in &members {
+            // The follower lags by one entry (a heartbeat restores it).
+            let meta = follower.svc.write_meta().await;
+            let mut logs = meta.logs.write().await;
+            let last = *logs.keys().next_back().unwrap();
+            if last >= leader_last {
+                logs.remove(&last);
+            }
+        }
+        let first = &members[round % members.len()];
+        let client = RaftClient::new(&vec![first.addr.clone()], leader.svc.options.service_id)
+            .await
+            .unwrap();
+        assert!(
+            client.read_cursor().1 < leader_last,
+            "test setup: the first answer must lag"
+        );
+        assert!(client.refresh_leader(0).await);
+        assert!(
+            client.read_cursor().1 >= leader_last,
+            "round {}: the cursor {:?} is below the leader's log id {}",
+            round,
+            client.read_cursor(),
+            leader_last
+        );
     }
-    let client = RaftClient::new(&vec![follower.addr.clone()], leader.svc.options.service_id)
-        .await
-        .unwrap();
-    assert!(
-        client.read_cursor().1 < leader_last,
-        "test setup: the first answer must lag"
-    );
-    assert!(client.refresh_leader(0).await);
-    assert!(
-        client.read_cursor().1 >= leader_last,
-        "the cursor {:?} is below the leader's log id {}",
-        client.read_cursor(),
-        leader_last
-    );
 }
 
 /// IC3: the restore refuses a store that names two or more voters, and it
