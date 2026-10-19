@@ -85,6 +85,13 @@ pub enum RPCError {
     ClientCannotDecodeResponse,
 }
 
+impl RPCError {
+    /// True only when the transport did not send this request.
+    pub fn request_was_not_sent(&self) -> bool {
+        matches!(self, Self::IOError(error) if crate::tcp::client::request_was_not_sent(error))
+    }
+}
+
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct ShortcutToken(Arc<()>);
@@ -771,7 +778,11 @@ impl ClientPool {
             if let Some(client) = self.clients.get(&server_id) {
                 return Ok(client);
             }
-            let observed_registration = tcp::shortcut::registration_token(server_id).await;
+            let observed_registration = if crate::DISABLE_SHORTCUT {
+                None
+            } else {
+                tcp::shortcut::registration_token(server_id).await
+            };
             let access = {
                 let mut constructions = self
                     .constructions
@@ -856,7 +867,11 @@ impl ClientPool {
                     hook();
                 }
             }
-            let current_registration = tcp::shortcut::registration_token(server_id).await;
+            let current_registration = if crate::DISABLE_SHORTCUT {
+                None
+            } else {
+                tcp::shortcut::registration_token(server_id).await
+            };
             let (result, completed) = {
                 let mut constructions = self
                     .constructions
@@ -1021,6 +1036,79 @@ mod test {
             }
         }
         dispatch_rpc_service_functions!(HelloServer);
+
+        // Real TCP must work even when this process also owns the listener.
+        #[cfg(disable_shortcut)]
+        async fn multisite_tcp_client_control(pooled: bool) {
+            assert!(crate::DISABLE_SHORTCUT);
+            let port = std::env::var("MULTISITE_TEST_PORT").expect("reserved test port");
+            let addr = format!("127.0.0.1:{port}");
+            let server = Server::new(&addr);
+            server.register_service_with_id(0, &Arc::new(HelloServer)).await;
+            Server::listen_and_resume(&server).await;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            while crate::tcp::shortcut::registration_token(server.server_id).await.is_none() {
+                assert!(tokio::time::Instant::now() < deadline);
+                tokio::task::yield_now().await;
+            }
+            let pool = crate::rpc::ClientPool::new();
+            let result = tokio::time::timeout(Duration::from_millis(250), async {
+                let client = if pooled { pool.get(&addr).await } else { RPCClient::new_async(&addr).await }.unwrap();
+                assert!(client.client.shortcut_token().is_none());
+                AsyncServiceClient::new_with_service_id(0, &client).hello("TCP".into()).await.unwrap()
+            }).await;
+            server.shutdown().await;
+            assert_eq!(result.expect("real TCP client construction must complete"), "Hello, TCP!");
+        }
+
+        #[cfg(disable_shortcut)]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn multisite_tcp_pool_with_local_listener() {
+            multisite_tcp_client_control(true).await;
+        }
+
+        #[cfg(disable_shortcut)]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn multisite_tcp_direct_with_local_listener_control() {
+            multisite_tcp_client_control(false).await;
+        }
+
+        #[cfg(disable_shortcut)]
+        async fn multisite_tcp_restart_control(retain_client: bool) {
+            let port = std::env::var("MULTISITE_TEST_PORT").expect("reserved test port");
+            let addr = format!("127.0.0.1:{port}");
+            let first = Server::new(&addr);
+            first.register_service_with_id(0, &Arc::new(HelloServer)).await;
+            Server::listen_and_resume(&first).await;
+            sleep(Duration::from_millis(30)).await;
+            let old_client = RPCClient::new_async(&addr).await.unwrap();
+            let old_service = AsyncServiceClient::new_with_service_id(0, &old_client);
+            assert_eq!(old_service.hello("before".into()).await.unwrap(), "Hello, before!");
+            first.shutdown().await;
+            let second = Server::new(&addr);
+            second.register_service_with_id(0, &Arc::new(HelloServer)).await;
+            Server::listen_and_resume(&second).await;
+            sleep(Duration::from_millis(30)).await;
+            let client = if retain_client { old_client } else { RPCClient::new_async(&addr).await.unwrap() };
+            let service = AsyncServiceClient::new_with_service_id(0, &client);
+            // A request concurrent with disconnection can fail. It must not be replayed implicitly.
+            let _ = service.hello("detect disconnect".into()).await;
+            let result = service.hello("after".into()).await;
+            second.shutdown().await;
+            assert_eq!(result.expect("a later request must reconnect"), "Hello, after!");
+        }
+
+        #[cfg(disable_shortcut)]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn multisite_tcp_retained_client_reconnects() {
+            multisite_tcp_restart_control(true).await;
+        }
+
+        #[cfg(disable_shortcut)]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn multisite_tcp_fresh_client_restart_control() {
+            multisite_tcp_restart_control(false).await;
+        }
 
         #[tokio::test(flavor = "multi_thread")]
         pub async fn simple_rpc() {
