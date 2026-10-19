@@ -80,6 +80,10 @@ impl ObserverClient {
             .group_members(&hash_str(group), &online_only)
             .await
     }
+    /// Read one member through a committed command, after completed removals.
+    pub async fn ordered_member(&self, id: u64) -> Result<(Option<Member>, u64), ExecError> {
+        self.sm_client.ordered_member(&id).await
+    }
     pub async fn all_members(&self, online_only: bool) -> Result<(Vec<Member>, u64), ExecError> {
         #[cfg(feature = "c3doubt_trace")]
         if let Some((members, version)) = self.test_roster.get() {
