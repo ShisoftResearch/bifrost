@@ -603,6 +603,10 @@ impl Membership {
 }
 
 impl StateMachineCmds for Membership {
+    fn ordered_member(&mut self, id: u64) -> BoxFuture<(Option<ClientMember>, u64)> {
+        // Applying this command orders discovery after completed membership changes.
+        async move { (self.compose_client_member(id).await, self.version) }.boxed()
+    }
     fn hb_online_changed(&mut self, online: Vec<u64>, offline: Vec<u64>) -> BoxFuture<()> {
         debug!(
             "Member status changed, back online  {}, gone offline {}",
