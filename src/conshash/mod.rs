@@ -289,8 +289,22 @@ impl ConsistentHashing {
     /// has since left the ring, an operator can ask to drain onto a member that is
     /// not there, and a stale watcher can hand over an id from a previous
     /// membership. All of those want an error the caller can handle.
+    #[cfg(feature = "c3doubt_trace")]
+    pub fn trace_version(&self) -> u64 {
+        self.version.load(Ordering::Relaxed)
+    }
+
     pub fn try_server_name(&self, server_id: u64) -> Option<String> {
-        self.tables.read().addrs.get(&server_id).cloned()
+        let address = self.tables.read().addrs.get(&server_id).cloned();
+        crate::doubt_trace!(
+            "lookup ring={:p} group={} version={} peer={} address={:?}",
+            self,
+            self.group_name,
+            self.version.load(Ordering::Relaxed),
+            server_id,
+            address
+        );
+        address
     }
 
     /// **Panics** on an unknown server id. Prefer [`Self::try_server_name`].
@@ -497,6 +511,13 @@ impl ConsistentHashing {
         debug!("Get group members for {}", group_name);
         let group_members = self.membership.group_members(group_name, true).await;
         debug!("Got group members for {}", group_name);
+        crate::doubt_trace!(
+            "ring_read ring={:p} group={} installed={} result={:?}",
+            self,
+            group_name,
+            self.version.load(Ordering::Relaxed),
+            group_members
+        );
         if let Ok(Some((members, version))) = group_members {
             let group_id = hash_str(group_name);
             debug!("Getting weights for {}", group_name);
@@ -527,6 +548,13 @@ impl ConsistentHashing {
                         }
                         self.num_addrs.store(members.len(), Ordering::Relaxed);
                         self.version.store(version, Ordering::Relaxed);
+                        crate::doubt_trace!(
+                            "ring_install ring={:p} group={} version={} members={:?}",
+                            self,
+                            group_name,
+                            version,
+                            members
+                        );
                         Ok(())
                     } else {
                         Err(InitTableError::NoWeightInfo)
@@ -567,6 +595,14 @@ async fn server_changed(ch: Arc<ConsistentHashing>, member: Member, action: Acti
     warn!(
         "Detected server membership change, member {:?}, action {:?}, version {}",
         member, action, version
+    );
+    crate::doubt_trace!(
+        "ring_notice ring={:p} group={} event_version={} action={:?} member={:?}",
+        &*ch,
+        ch.group_name,
+        version,
+        action,
+        member
     );
     let ch_version = ch.version.load(Ordering::Relaxed);
     if ch_version <= version {

@@ -37,3 +37,6 @@ lightning-containers = { git = "ssh://git@192.168.10.134/shisoft-x/Lightning.git
 [dev-dependencies]
 serde_json = "1.0.51"
 env_logger = "*"
+
+[features]
+c3doubt_trace = []
