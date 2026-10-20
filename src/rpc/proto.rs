@@ -295,6 +295,36 @@ mod registry_tests {
     }
 
     #[tokio::test]
+    async fn bflock_dead_weak_uses_normal_tcp_dispatch() {
+        use bytes::{Buf, BufMut};
+        use tokio_util::codec::{Framed, LengthDelimitedCodec};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let server_id = bifrost_hasher::hash_str(&address);
+        let stale = Arc::new(TestService(1));
+        let token = register(&stale, server_id);
+        drop(stale);
+        let peer = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut frames = Framed::new(socket, LengthDelimitedCodec::new());
+            let mut frame = frames.next().await.unwrap().unwrap();
+            let message = frame.get_u64_le();
+            assert_eq!(frame.get_u64_le(), 1);
+            let body = TestService(9).dispatch(frame).await.unwrap();
+            let mut reply = bytes::BytesMut::new();
+            reply.put_u64_le(message);
+            reply.put_u8(0);
+            reply.extend_from_slice(&body);
+            frames.send(reply.freeze()).await.unwrap();
+        });
+        let client = RPCClient::new_async(&address).await.unwrap();
+        assert_eq!(ImmeServiceClient::value(1, &client).await.unwrap(), 9);
+        assert!(RPC_SVRS.get(&(server_id, 1)).is_some());
+        TestService(0).unregister_shortcut_service(server_id, 1, &token);
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn bflock_old_unregister_preserves_concurrent_replacement() {
         let old = Arc::new(TestService(1));
         let old_token = register(&old, 4702);
