@@ -158,14 +158,15 @@ macro_rules! service {
         pub async fn get_local(server_id: u64, service_id: u64) -> Option<Arc<dyn Service>> {
             let key = (server_id, service_id);
             // Cleanup and owner removal run outside this read-only client path.
-            RPC_SVRS.get(&key).and_then(|(_, service)| service.upgrade())
+            RPC_SVRS.get(&key).and_then(|registration| registration.1.upgrade())
         }
 
         /// Remove a dead registration outside the client call path.
         #[allow(dead_code)]
         pub fn cleanup_stale_local(server_id: u64, service_id: u64) {
             let key = (server_id, service_id);
-            if let Some((token, _)) = RPC_SVRS.get(&key) {
+            if let Some(registration) = RPC_SVRS.get(&key) {
+                let token = &registration.0;
                 RPC_SVRS.unregister_if(&key, |(current_token, service)| {
                     current_token.is_same(&token) && service.upgrade().is_none()
                 });
