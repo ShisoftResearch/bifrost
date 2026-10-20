@@ -157,9 +157,19 @@ macro_rules! service {
         #[allow(dead_code)]
         pub async fn get_local(server_id: u64, service_id: u64) -> Option<Arc<dyn Service>> {
             let key = (server_id, service_id);
-            // Owner removal or replacement retires a dead Weak. Client calls
-            // only read, including when the service has already been dropped.
+            // Cleanup and owner removal run outside this read-only client path.
             RPC_SVRS.get(&key).and_then(|(_, service)| service.upgrade())
+        }
+
+        /// Remove a dead registration outside the client call path.
+        #[allow(dead_code)]
+        pub fn cleanup_stale_local(server_id: u64, service_id: u64) {
+            let key = (server_id, service_id);
+            if let Some((token, _)) = RPC_SVRS.get(&key) {
+                RPC_SVRS.unregister_if(&key, |(current_token, service)| {
+                    current_token.is_same(&token) && service.upgrade().is_none()
+                });
+            }
         }
 
         #[allow(dead_code)]
@@ -292,6 +302,25 @@ mod registry_tests {
         assert_eq!(get_local(4701, 1).await.unwrap().value().await, 2);
         replacement.unregister_shortcut_service(4701, 1, &new_token);
         assert!(get_local(4701, 1).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn bflock_stale_cleanup_preserves_live_service_and_removes_dead_service() {
+        let service = Arc::new(TestService(4));
+        let token = register(&service, 4704);
+        cleanup_stale_local(4704, 1);
+        assert_eq!(get_local(4704, 1).await.unwrap().value().await, 4);
+        drop(service);
+        assert!(get_local(4704, 1).await.is_none());
+        assert!(RPC_SVRS.get(&(4704, 1)).is_some());
+        cleanup_stale_local(4704, 1);
+        assert!(RPC_SVRS.get(&(4704, 1)).is_none());
+        let replacement = Arc::new(TestService(5));
+        let replacement_token = register(&replacement, 4704);
+        replacement.unregister_shortcut_service(4704, 1, &token);
+        cleanup_stale_local(4704, 1);
+        assert_eq!(get_local(4704, 1).await.unwrap().value().await, 5);
+        replacement.unregister_shortcut_service(4704, 1, &replacement_token);
     }
 
     #[tokio::test]
