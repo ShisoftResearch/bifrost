@@ -1,22 +1,21 @@
 use crate::tcp::server::{TcpReq, TcpRes};
+use crate::utils::shortcut_registry::ShortcutRegistry;
 use bifrost_hasher::hash_str;
 use bytes::BytesMut;
-use parking_lot::RwLock;
-use std::collections::BTreeMap;
 use std::io::{Error, ErrorKind, Result};
 use std::sync::Arc;
 
 trait TcpCallbackFunc = Fn(TcpReq) -> TcpRes;
 trait TcpCallbackFuncShareable = TcpCallbackFunc + Send + Sync;
 
+#[derive(Clone)]
 struct CallbackRegistration {
     token: ShortcutToken,
     callback: Arc<dyn TcpCallbackFuncShareable>,
 }
 
 lazy_static! {
-    static ref TCP_CALLBACKS: RwLock<BTreeMap<u64, CallbackRegistration>> =
-        RwLock::new(BTreeMap::new());
+    static ref TCP_CALLBACKS: ShortcutRegistry<u64, CallbackRegistration> = ShortcutRegistry::new();
 }
 
 #[derive(Clone)]
@@ -45,19 +44,9 @@ impl ShortcutRegistration {
 
 impl Drop for ShortcutRegistration {
     fn drop(&mut self) {
-        let removed = {
-            let mut callbacks = TCP_CALLBACKS.write();
-            if callbacks
-                .get(&self.server_id)
-                .map(|registration| registration.token.is_same(&self.token))
-                == Some(true)
-            {
-                callbacks.remove(&self.server_id)
-            } else {
-                None
-            }
-        };
-        drop(removed);
+        TCP_CALLBACKS.unregister_if(&self.server_id, |registration| {
+            registration.token.is_same(&self.token)
+        });
     }
 }
 
@@ -67,17 +56,13 @@ pub fn register_server(
 ) -> ShortcutRegistration {
     let server_id = hash_str(server_address);
     let token = ShortcutToken::new();
-    let replaced = {
-        let mut callbacks = TCP_CALLBACKS.write();
-        callbacks.insert(
-            server_id,
-            CallbackRegistration {
-                token: token.clone(),
-                callback: callback.clone(),
-            },
-        )
-    };
-    drop(replaced);
+    TCP_CALLBACKS.register(
+        server_id,
+        CallbackRegistration {
+            token: token.clone(),
+            callback: callback.clone(),
+        },
+    );
     ShortcutRegistration { server_id, token }
 }
 
@@ -96,7 +81,6 @@ pub async fn call(server_id: u64, data: TcpReq) -> Result<BytesMut> {
     // costs one flag check when budget remains.
     tokio::task::coop::consume_budget().await;
     let callback = TCP_CALLBACKS
-        .read()
         .get(&server_id)
         .map(|registration| registration.callback.clone());
     match callback {
@@ -109,12 +93,11 @@ pub async fn call(server_id: u64, data: TcpReq) -> Result<BytesMut> {
 }
 
 pub async fn is_local(server_id: u64) -> bool {
-    TCP_CALLBACKS.read().contains_key(&server_id)
+    TCP_CALLBACKS.get(&server_id).is_some()
 }
 
 pub(crate) async fn registration_token(server_id: u64) -> Option<ShortcutToken> {
     TCP_CALLBACKS
-        .read()
         .get(&server_id)
         .map(|registration| registration.token.clone())
 }
@@ -138,5 +121,43 @@ mod tests {
 
         drop(newer);
         assert!(!is_local(hash_str(&address)).await);
+    }
+}
+
+#[cfg(test)]
+mod concurrent_tests {
+    use super::*;
+    use futures::FutureExt;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn bflock_callback_replacement_during_message() {
+        let address = "bflock-callback-inflight".to_string();
+        let server_id = hash_str(&address);
+        let (entered_tx, entered_rx) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let callback_release = release.clone();
+        let callback: Arc<dyn TcpCallbackFuncShareable> = Arc::new(move |_request| {
+            let release = callback_release.clone();
+            let entered = entered_tx.clone();
+            async move {
+                entered.send(()).unwrap();
+                release.notified().await;
+                BytesMut::from(&b"old"[..])
+            }
+            .boxed()
+        });
+        let old = register_server(&address, &callback);
+        let pending = tokio::spawn(call(server_id, BytesMut::new()));
+        let mut entered_rx = entered_rx;
+        entered_rx.recv().await.unwrap();
+        let new_callback: Arc<dyn TcpCallbackFuncShareable> =
+            Arc::new(|_| async { BytesMut::from(&b"new"[..]) }.boxed());
+        let new = register_server(&address, &new_callback);
+        drop(old);
+        assert_eq!(&call(server_id, BytesMut::new()).await.unwrap()[..], b"new");
+        drop(new);
+        assert!(call(server_id, BytesMut::new()).await.is_err());
+        release.notify_one();
+        assert_eq!(&pending.await.unwrap().unwrap()[..], b"old");
     }
 }
