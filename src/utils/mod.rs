@@ -3,3 +3,6 @@ pub mod time;
 pub mod bindings;
 pub mod math;
 pub mod serde;
+
+#[doc(hidden)]
+pub mod shortcut_registry;
