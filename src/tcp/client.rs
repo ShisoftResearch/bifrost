@@ -1,31 +1,128 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::tcp::server::TcpReq;
 use crate::tcp::{shortcut, STANDALONE_ADDRESS};
 use crate::DISABLE_SHORTCUT;
-use bifrost_hasher::hash_str;
-
-use crate::tcp::server::TcpReq;
 use async_std::sync::Mutex;
+use bifrost_hasher::hash_str;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::prelude::*;
 use futures::stream::SplitSink;
 use futures::SinkExt;
 use parking_lot::Mutex as SyncMutex;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::io;
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio::time;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
+// This marker proves that this request did not reach the socket or callback.
+#[derive(Debug)]
+struct RequestNotSent(io::Error);
+
+impl std::fmt::Display for RequestNotSent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for RequestNotSent {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+fn not_sent(error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), RequestNotSent(error))
+}
+
+pub(crate) fn request_was_not_sent(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|cause| cause.is::<RequestNotSent>())
+}
+
+type ResponseSenders = Arc<SyncMutex<HashMap<u64, oneshot::Sender<BytesMut>>>>;
+
+struct Connection {
+    writer: Mutex<SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>>,
+    senders: ResponseSenders,
+    closed: Arc<AtomicBool>,
+    reader: tokio::task::AbortHandle,
+}
+
+impl Connection {
+    async fn connect(address: &String, timeout: Duration) -> io::Result<Arc<Self>> {
+        #[cfg(multisite_test)]
+        let routed = std::env::var("MULTISITE_ROUTES").ok().and_then(|routes| {
+            routes.split(';').find_map(|route| {
+                let (target, proxy) = route.split_once('=')?;
+                (target == address).then(|| proxy.to_owned())
+            })
+        });
+        #[cfg(multisite_test)]
+        let connect_address = routed.as_ref().unwrap_or(address);
+        #[cfg(not(multisite_test))]
+        let connect_address = address;
+        let socket = time::timeout(timeout, TcpStream::connect(connect_address)).await??;
+        let (writer, mut reader) = Framed::new(socket, LengthDelimitedCodec::new()).split();
+        let senders: ResponseSenders = Arc::new(SyncMutex::new(HashMap::new()));
+        let closed = Arc::new(AtomicBool::new(false));
+        let reader_senders = senders.clone();
+        let reader_closed = closed.clone();
+        let task = tokio::spawn(async move {
+            while let Some(Ok(mut data)) = reader.next().await {
+                let message = data.get_u64_le();
+                if let Some(sender) = reader_senders.lock().remove(&message) {
+                    let _ = sender.send(data);
+                }
+            }
+            reader_closed.store(true, Ordering::Release);
+            // A missing response has an unknown outcome. Never replay it here.
+            reader_senders.lock().clear();
+        });
+        Ok(Arc::new(Self {
+            writer: Mutex::new(writer),
+            senders,
+            closed,
+            reader: task.abort_handle(),
+        }))
+    }
+
+    fn invalidate(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.reader.abort();
+        self.senders.lock().clear();
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
+}
+
+struct NetworkClient {
+    address: String,
+    connection: Mutex<Arc<Connection>>,
+}
+
+// Remove a waiter also when the caller cancels or times out.
+struct PendingResponse {
+    senders: ResponseSenders,
+    id: u64,
+}
+
+impl Drop for PendingResponse {
+    fn drop(&mut self) {
+        self.senders.lock().remove(&self.id);
+    }
+}
+
 pub struct Client {
-    //client: Option<SplitSink<Bytes>>,
-    client: Option<Mutex<SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>>>,
+    network: Option<NetworkClient>,
     msg_counter: AtomicU64,
-    senders: Arc<SyncMutex<HashMap<u64, oneshot::Sender<BytesMut>>>>,
     timeout: Duration,
     pub server_id: u64,
     shortcut_token: Option<shortcut::ShortcutToken>,
@@ -34,100 +131,101 @@ pub struct Client {
 impl Client {
     pub async fn connect_with_timeout(address: &String, timeout: Duration) -> io::Result<Self> {
         let server_id = hash_str(address);
-        let senders = Arc::new(SyncMutex::new(
-            HashMap::<u64, oneshot::Sender<BytesMut>>::new(),
-        ));
-        debug!(
-            "TCP connect to {}, server id {}, timeout {}ms",
-            address,
-            server_id,
-            timeout.as_millis()
-        );
         let shortcut_token = if DISABLE_SHORTCUT {
             None
         } else {
             shortcut::registration_token(server_id).await
         };
-        let client = {
-            if shortcut_token.is_some() {
-                debug!("Local connection, using shortcut");
-                None
-            } else {
-                if address.eq(&STANDALONE_ADDRESS) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        "STANDALONE server is not found",
-                    ));
-                }
-                debug!("Create socket on {}", address);
-                let socket = time::timeout(timeout, TcpStream::connect(address)).await??;
-                let transport = Framed::new(socket, LengthDelimitedCodec::new());
-                let (writer, mut reader) = transport.split();
-                let cloned_senders = senders.clone();
-                debug!("Streaming messages for {}", address);
-                let address = address.clone();
-                tokio::spawn(async move {
-                    while let Some(res) = reader.next().await {
-                        if let Ok(mut data) = res {
-                            let res_msg_id = data.get_u64_le();
-                            trace!("Received msg for {}, size {}", res_msg_id, data.len());
-                            let mut senders = cloned_senders.lock();
-                            if let Some(sender) = senders.remove(&res_msg_id) {
-                                if let Err(e) = sender.send(data) {
-                                    error!(
-                                        "Failed to send response for msg {}: {:?}",
-                                        res_msg_id, e
-                                    );
-                                }
-                            } else {
-                                error!("No sender found for response msg {}", res_msg_id);
-                            }
-                        }
-                    }
-                    debug!("Stream from TCP server {} broken", address);
-                });
-                Some(Mutex::new(writer))
+        let network = if shortcut_token.is_some() {
+            None
+        } else {
+            if address == STANDALONE_ADDRESS {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "STANDALONE server is not found",
+                ));
             }
+            Some(NetworkClient {
+                address: address.clone(),
+                connection: Mutex::new(Connection::connect(address, timeout).await?),
+            })
         };
-        Ok(Client {
-            client,
-            server_id,
-            senders,
-            timeout,
+        Ok(Self {
+            network,
             msg_counter: AtomicU64::new(0),
+            timeout,
+            server_id,
             shortcut_token,
         })
     }
+
     pub async fn connect(address: &String) -> io::Result<Self> {
-        Client::connect_with_timeout(address, Duration::from_secs(2)).await
+        Self::connect_with_timeout(address, Duration::from_secs(2)).await
     }
+
     pub async fn send_msg(&self, msg: TcpReq) -> io::Result<BytesMut> {
-        if let Some(ref transport) = self.client {
-            let msg_id = self.msg_counter.fetch_add(1, Relaxed);
-            let mut frame = BytesMut::with_capacity(8 + msg.len());
-            let rx = {
-                frame.put_u64_le(msg_id);
-                frame.extend_from_slice(msg.as_ref());
-                let (tx, rx) = oneshot::channel();
-                let mut senders = self.senders.lock();
-                senders.insert(msg_id, tx);
-                rx
-            };
-            trace!("Sending msg {}, size {}", msg_id, frame.len());
-            time::timeout(self.timeout, transport.lock().await.send(frame.freeze())).await??;
-            trace!("Sent msg {}", msg_id);
-            match time::timeout(self.timeout, rx).await? {
-                Ok(response) => Ok(response),
-                Err(e) => {
-                    error!("Failed to receive response for msg {}: {:?}", msg_id, e);
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        "Response channel closed",
-                    ))
-                }
+        let Some(network) = &self.network else {
+            return shortcut::call(self.server_id, msg).await.map_err(not_sent);
+        };
+        let connection = {
+            let mut connection = network.connection.lock().await;
+            if connection.closed.load(Ordering::Acquire) {
+                // Only a new request can use a new connection. Never retry a sent request.
+                *connection = Connection::connect(&network.address, self.timeout)
+                    .await.map_err(not_sent)?;
             }
-        } else {
-            Ok(shortcut::call(self.server_id, msg).await?)
+            connection.clone()
+        };
+        let msg_id = self.msg_counter.fetch_add(1, Ordering::Relaxed);
+        let mut frame = BytesMut::with_capacity(8 + msg.len());
+        frame.put_u64_le(msg_id);
+        frame.extend_from_slice(msg.as_ref());
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut senders = connection.senders.lock();
+            if connection.closed.load(Ordering::Acquire) {
+                return Err(not_sent(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "TCP connection closed",
+                )));
+            }
+            senders.insert(msg_id, sender);
+        }
+        let _pending = PendingResponse {
+            senders: connection.senders.clone(),
+            id: msg_id,
+        };
+        let mut send_started = false;
+        let sent = time::timeout(self.timeout, async {
+            let mut writer = connection.writer.lock().await;
+            if connection.closed.load(Ordering::Acquire) {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "TCP connection closed",
+                ));
+            }
+            send_started = true;
+            writer.send(frame.freeze()).await
+        })
+        .await;
+        match sent {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                connection.invalidate();
+                return Err(if send_started { error } else { not_sent(error) });
+            }
+            Err(error) => {
+                connection.invalidate();
+                let error = error.into();
+                return Err(if send_started { error } else { not_sent(error) });
+            }
+        }
+        match time::timeout(self.timeout, receiver).await? {
+            Ok(response) => Ok(response),
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Response channel closed",
+            )),
         }
     }
 
@@ -143,6 +241,78 @@ mod tests {
     use super::*;
     use bytes::{BufMut, BytesMut};
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn commit_transport_classifies_timeouts_before_and_after_send() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let client = Client::connect_with_timeout(&address, Duration::from_millis(50)).await.unwrap();
+        let (_peer, _) = listener.accept().await.unwrap();
+        let connection = client.network.as_ref().unwrap().connection.lock().await.clone();
+        let writer = connection.writer.lock().await;
+        let error = client.send_msg(BytesMut::from(&b"unsent"[..])).await.unwrap_err();
+        assert!(request_was_not_sent(&error), "{error:?}");
+        drop(writer);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let client = Client::connect_with_timeout(&address, Duration::from_millis(50)).await.unwrap();
+        let peer = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut frames = Framed::new(socket, LengthDelimitedCodec::new());
+            let request = frames.next().await.unwrap().unwrap();
+            assert_eq!(&request[8..], b"sent");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+        let error = client.send_msg(BytesMut::from(&b"sent"[..])).await.unwrap_err();
+        assert!(!request_was_not_sent(&error), "a lost reply is uncertain: {error:?}");
+        peer.await.unwrap();
+    }
+
+    #[cfg(disable_shortcut)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn multisite_tcp_does_not_replay_lost_response() {
+        let port: u16 = std::env::var("MULTISITE_TEST_PORT")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let address = format!("127.0.0.1:{}", port + 1);
+        let listener = tokio::net::TcpListener::bind(&address).await.unwrap();
+        let peer = tokio::spawn(async move {
+            let (first, _) = listener.accept().await.unwrap();
+            let mut first = Framed::new(first, LengthDelimitedCodec::new());
+            let request = first.next().await.unwrap().unwrap();
+            assert_eq!(&request[8..], b"first");
+            drop(first); // The request was taken, but its response was lost.
+            let (second, _) = listener.accept().await.unwrap();
+            let mut second = Framed::new(second, LengthDelimitedCodec::new());
+            let request = second.next().await.unwrap().unwrap();
+            assert_eq!(
+                &request[8..],
+                b"second",
+                "do not replay an uncertain request"
+            );
+            second.send(request.freeze()).await.unwrap();
+        });
+        let client = Client::connect_with_timeout(&address, Duration::from_millis(500))
+            .await
+            .unwrap();
+        assert!(client
+            .send_msg(BytesMut::from(&b"first"[..]))
+            .await
+            .is_err());
+        assert_eq!(
+            &client
+                .send_msg(BytesMut::from(&b"second"[..]))
+                .await
+                .unwrap()[..],
+            b"second"
+        );
+        time::timeout(Duration::from_secs(2), peer)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_client_connect_timeout() {

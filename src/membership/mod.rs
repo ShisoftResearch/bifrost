@@ -18,6 +18,7 @@ pub mod raft {
         def cmd hb_online_changed(online: Vec<u64>, offline: Vec<u64>);
         def cmd join(address: String) -> Option<u64>;
         def cmd leave(id: u64) -> bool;
+        def cmd ordered_member(id: u64) -> (Option<ClientMember>, u64);
         def cmd join_group(group_name: String, id: u64) -> bool;
         def cmd leave_group(group: u64, id: u64) -> bool;
         def cmd new_group(name: String) -> Result<u64, u64>;
