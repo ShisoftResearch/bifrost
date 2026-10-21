@@ -8,16 +8,16 @@ use async_std::sync::Mutex;
 use bifrost_hasher::hash_str;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::prelude::*;
-use futures::stream::SplitSink;
 use futures::SinkExt;
 use parking_lot::Mutex as SyncMutex;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use tokio::io;
 use tokio::net::TcpStream;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
+use tokio_util::sync::CancellationToken;
 
 // This marker proves that this request did not reach the socket or callback.
 #[derive(Debug)]
@@ -40,13 +40,90 @@ fn not_sent(error: io::Error) -> io::Error {
 }
 
 pub(crate) fn request_was_not_sent(error: &io::Error) -> bool {
-    error.get_ref().is_some_and(|cause| cause.is::<RequestNotSent>())
+    error
+        .get_ref()
+        .is_some_and(|cause| cause.is::<RequestNotSent>())
 }
 
 type ResponseSenders = Arc<SyncMutex<HashMap<u64, oneshot::Sender<BytesMut>>>>;
 
+const WRITE_QUEUED: u8 = 0;
+const WRITE_STARTED: u8 = 1;
+const WRITE_CANCELLED: u8 = 2;
+
+struct WriteRequest {
+    frame: Bytes,
+    state: Arc<AtomicU8>,
+    completed: oneshot::Sender<io::Result<()>>,
+}
+
+struct PendingWrite(Arc<AtomicU8>);
+
+impl Drop for PendingWrite {
+    fn drop(&mut self) {
+        let _ = self.0.compare_exchange(
+            WRITE_QUEUED,
+            WRITE_CANCELLED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+}
+
+// Only this task owns the sink. Queue order defines frame order on the socket.
+async fn write_frames<S>(
+    mut sink: S,
+    mut requests: mpsc::Receiver<WriteRequest>,
+    closed: Arc<AtomicBool>,
+    stop: CancellationToken,
+    #[cfg(test)] gate: Arc<tokio::sync::Semaphore>,
+) where
+    S: futures::Sink<Bytes, Error = io::Error> + Unpin,
+{
+    loop {
+        let request = tokio::select! {
+            _ = stop.cancelled() => break,
+            request = requests.recv() => match request { Some(request) => request, None => break },
+        };
+        #[cfg(test)]
+        let _permit = tokio::select! {
+            _ = stop.cancelled() => break,
+            permit = gate.acquire() => permit.unwrap(),
+        };
+        if closed.load(Ordering::Acquire) {
+            break;
+        }
+        if request.completed.is_closed()
+            || request
+                .state
+                .compare_exchange(
+                    WRITE_QUEUED,
+                    WRITE_STARTED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+        {
+            continue;
+        }
+        let result = tokio::select! {
+            _ = stop.cancelled() => break,
+            result = sink.send(request.frame) => result,
+        };
+        let failed = result.is_err();
+        let _ = request.completed.send(result);
+        if failed {
+            break;
+        }
+    }
+}
+
 struct Connection {
-    writer: Mutex<SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>>,
+    writer: mpsc::Sender<WriteRequest>,
+    writer_task: tokio::task::AbortHandle,
+    stop: CancellationToken,
+    #[cfg(test)]
+    writer_gate: Arc<tokio::sync::Semaphore>,
     senders: ResponseSenders,
     closed: Arc<AtomicBool>,
     reader: tokio::task::AbortHandle,
@@ -69,10 +146,17 @@ impl Connection {
         let (writer, mut reader) = Framed::new(socket, LengthDelimitedCodec::new()).split();
         let senders: ResponseSenders = Arc::new(SyncMutex::new(HashMap::new()));
         let closed = Arc::new(AtomicBool::new(false));
+        let stop = CancellationToken::new();
+        let reader_stop = stop.clone();
         let reader_senders = senders.clone();
         let reader_closed = closed.clone();
         let task = tokio::spawn(async move {
-            while let Some(Ok(mut data)) = reader.next().await {
+            loop {
+                let data = tokio::select! {
+                    _ = reader_stop.cancelled() => break,
+                    data = reader.next() => data,
+                };
+                let Some(Ok(mut data)) = data else { break };
                 let message = data.get_u64_le();
                 if let Some(sender) = reader_senders.lock().remove(&message) {
                     let _ = sender.send(data);
@@ -81,9 +165,36 @@ impl Connection {
             reader_closed.store(true, Ordering::Release);
             // A missing response has an unknown outcome. Never replay it here.
             reader_senders.lock().clear();
+            reader_stop.cancel();
+        });
+        let (requests, receiver) = mpsc::channel(64);
+        let writer_closed = closed.clone();
+        let writer_stop = stop.clone();
+        let writer_senders = senders.clone();
+        #[cfg(test)]
+        let writer_gate = Arc::new(tokio::sync::Semaphore::new(1));
+        #[cfg(test)]
+        let gate = writer_gate.clone();
+        let writer_task = tokio::spawn(async move {
+            write_frames(
+                writer,
+                receiver,
+                writer_closed.clone(),
+                writer_stop.clone(),
+                #[cfg(test)]
+                gate,
+            )
+            .await;
+            writer_closed.store(true, Ordering::Release);
+            writer_senders.lock().clear();
+            writer_stop.cancel();
         });
         Ok(Arc::new(Self {
-            writer: Mutex::new(writer),
+            writer: requests,
+            writer_task: writer_task.abort_handle(),
+            stop,
+            #[cfg(test)]
+            writer_gate,
             senders,
             closed,
             reader: task.abort_handle(),
@@ -92,14 +203,18 @@ impl Connection {
 
     fn invalidate(&self) {
         self.closed.store(true, Ordering::Release);
+        self.stop.cancel();
         self.reader.abort();
+        self.writer_task.abort();
         self.senders.lock().clear();
     }
 }
 
 impl Drop for Connection {
     fn drop(&mut self) {
+        self.stop.cancel();
         self.reader.abort();
+        self.writer_task.abort();
     }
 }
 
@@ -172,7 +287,8 @@ impl Client {
             if connection.closed.load(Ordering::Acquire) {
                 // Only a new request can use a new connection. Never retry a sent request.
                 *connection = Connection::connect(&network.address, self.timeout)
-                    .await.map_err(not_sent)?;
+                    .await
+                    .map_err(not_sent)?;
             }
             connection.clone()
         };
@@ -195,30 +311,39 @@ impl Client {
             senders: connection.senders.clone(),
             id: msg_id,
         };
-        let mut send_started = false;
-        let sent = time::timeout(self.timeout, async {
-            let mut writer = connection.writer.lock().await;
-            if connection.closed.load(Ordering::Acquire) {
-                return Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "TCP connection closed",
-                ));
-            }
-            send_started = true;
-            writer.send(frame.freeze()).await
+        let state = Arc::new(AtomicU8::new(WRITE_QUEUED));
+        let pending_write = PendingWrite(state.clone());
+        let (completed, sent) = oneshot::channel();
+        let request = WriteRequest {
+            frame: frame.freeze(),
+            state: state.clone(),
+            completed,
+        };
+        let result = time::timeout(self.timeout, async {
+            connection
+                .writer
+                .send(request)
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "TCP writer closed"))?;
+            sent.await
+                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "TCP writer stopped"))?
         })
         .await;
-        match sent {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                connection.invalidate();
-                return Err(if send_started { error } else { not_sent(error) });
-            }
-            Err(error) => {
-                connection.invalidate();
-                let error = error.into();
-                return Err(if send_started { error } else { not_sent(error) });
-            }
+        // Cancel a queued request before classifying the result. The writer
+        // claims STARTED atomically, so a reported unsent request cannot start.
+        drop(pending_write);
+        let error = match result {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error),
+            Err(error) => Some(error.into()),
+        };
+        if let Some(error) = error {
+            connection.invalidate();
+            return Err(if state.load(Ordering::Acquire) == WRITE_STARTED {
+                error
+            } else {
+                not_sent(error)
+            });
         }
         match time::timeout(self.timeout, receiver).await? {
             Ok(response) => Ok(response),
@@ -240,23 +365,245 @@ unsafe impl Send for Client {}
 mod tests {
     use super::*;
     use bytes::{BufMut, BytesMut};
+    use std::convert::TryInto;
     use std::time::Duration;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn bflock_socket_backpressure_keeps_other_connection_live() {
+        let listener = tokio::net::TcpSocket::new_v4().unwrap();
+        listener.set_recv_buffer_size(1024).unwrap();
+        listener.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = listener.listen(128).unwrap();
+        let address = listener.local_addr().unwrap();
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_send_buffer_size(1024).unwrap();
+        let socket = socket.connect(address).await.unwrap();
+        let (_blocked_peer, _) = listener.accept().await.unwrap();
+        let (sink, _reader) = Framed::new(socket, LengthDelimitedCodec::new()).split();
+        let (requests, receiver) = mpsc::channel(2);
+        let stop = CancellationToken::new();
+        let writer = tokio::spawn(write_frames(
+            sink,
+            receiver,
+            Arc::new(AtomicBool::new(false)),
+            stop.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        ));
+        let state = Arc::new(AtomicU8::new(WRITE_QUEUED));
+        let (completed, mut sent) = oneshot::channel();
+        requests
+            .send(WriteRequest {
+                frame: Bytes::from(vec![7; 4 * 1024 * 1024]),
+                state: state.clone(),
+                completed,
+            })
+            .await
+            .unwrap();
+        // The small kernel buffers cannot flush this frame without a reader.
+        assert!(time::timeout(Duration::from_millis(20), &mut sent)
+            .await
+            .is_err());
+        assert_eq!(state.load(Ordering::Acquire), WRITE_STARTED);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let peer = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut frames = Framed::new(socket, LengthDelimitedCodec::new());
+            let frame = frames.next().await.unwrap().unwrap();
+            frames.send(frame.freeze()).await.unwrap();
+        });
+        let client = Client::connect_with_timeout(&address, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            &client
+                .send_msg(BytesMut::from(&b"independent"[..]))
+                .await
+                .unwrap()[..],
+            b"independent"
+        );
+        assert!(matches!(
+            sent.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        stop.cancel();
+        writer.await.unwrap();
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bflock_cancelled_queued_frame_never_reaches_socket() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let client = Client::connect_with_timeout(&address, Duration::from_secs(1))
+            .await
+            .unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut frames = Framed::new(socket, LengthDelimitedCodec::new());
+        let connection = client
+            .network
+            .as_ref()
+            .unwrap()
+            .connection
+            .lock()
+            .await
+            .clone();
+        let gate = connection.writer_gate.acquire().await.unwrap();
+        let cancelled = Arc::new(AtomicU8::new(WRITE_QUEUED));
+        let (completed, skipped) = oneshot::channel();
+        connection
+            .writer
+            .send(WriteRequest {
+                frame: Bytes::from_static(b"cancelled"),
+                state: cancelled.clone(),
+                completed,
+            })
+            .await
+            .unwrap();
+        drop(PendingWrite(cancelled.clone()));
+        let (completed, sent) = oneshot::channel();
+        connection
+            .writer
+            .send(WriteRequest {
+                frame: Bytes::from_static(b"whole-frame"),
+                state: Arc::new(AtomicU8::new(WRITE_QUEUED)),
+                completed,
+            })
+            .await
+            .unwrap();
+        drop(gate);
+        assert_eq!(&frames.next().await.unwrap().unwrap()[..], b"whole-frame");
+        sent.await.unwrap().unwrap();
+        assert!(skipped.await.is_err());
+        assert_eq!(cancelled.load(Ordering::Acquire), WRITE_CANCELLED);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn bflock_concurrent_frames_keep_integrity_and_sender_order() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let peer = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut frames = Framed::new(socket, LengthDelimitedCodec::new());
+            let mut next = [0_u64; 16];
+            for _ in 0..512 {
+                let frame = frames.next().await.unwrap().unwrap();
+                assert_eq!(frame.len(), 8 + 16 + 4096);
+                let sender = u64::from_le_bytes(frame[8..16].try_into().unwrap()) as usize;
+                let sequence = u64::from_le_bytes(frame[16..24].try_into().unwrap());
+                assert_eq!(sequence, next[sender]);
+                next[sender] += 1;
+                assert!(frame[24..].iter().all(|byte| *byte == sender as u8));
+                frames.send(frame.freeze()).await.unwrap();
+            }
+            assert_eq!(next, [32; 16]);
+        });
+        let client = Arc::new(
+            Client::connect_with_timeout(&address, Duration::from_secs(5))
+                .await
+                .unwrap(),
+        );
+        let mut tasks = Vec::new();
+        for sender in 0..16_u64 {
+            let client = client.clone();
+            tasks.push(tokio::spawn(async move {
+                for sequence in 0..32_u64 {
+                    let mut frame = BytesMut::new();
+                    frame.put_u64_le(sender);
+                    frame.put_u64_le(sequence);
+                    frame.extend_from_slice(&vec![sender as u8; 4096]);
+                    assert_eq!(client.send_msg(frame.clone()).await.unwrap(), frame);
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        peer.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn bflock_blocked_writer_does_not_block_other_connection() {
+        let blocked_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let blocked_address = blocked_listener.local_addr().unwrap().to_string();
+        let blocked = Arc::new(
+            Client::connect_with_timeout(&blocked_address, Duration::from_secs(5))
+                .await
+                .unwrap(),
+        );
+        let (_blocked_socket, _) = blocked_listener.accept().await.unwrap();
+        let connection = blocked
+            .network
+            .as_ref()
+            .unwrap()
+            .connection
+            .lock()
+            .await
+            .clone();
+        // Hold this connection's sink before its first socket poll.
+        let writer = connection.writer_gate.acquire().await.unwrap();
+        let sender = {
+            let blocked = blocked.clone();
+            tokio::spawn(async move { blocked.send_msg(BytesMut::from(&b"blocked"[..])).await })
+        };
+        while connection.senders.lock().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        assert!(!sender.is_finished());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let peer = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut frames = Framed::new(socket, LengthDelimitedCodec::new());
+            let frame = frames.next().await.unwrap().unwrap();
+            frames.send(frame.freeze()).await.unwrap();
+        });
+        let client = Client::connect_with_timeout(&address, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            &client
+                .send_msg(BytesMut::from(&b"independent"[..]))
+                .await
+                .unwrap()[..],
+            b"independent"
+        );
+        assert!(!sender.is_finished());
+        sender.abort();
+        let _ = sender.await;
+        drop(writer);
+        peer.await.unwrap();
+    }
 
     #[tokio::test]
     async fn commit_transport_classifies_timeouts_before_and_after_send() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap().to_string();
-        let client = Client::connect_with_timeout(&address, Duration::from_millis(50)).await.unwrap();
+        let client = Client::connect_with_timeout(&address, Duration::from_millis(50))
+            .await
+            .unwrap();
         let (_peer, _) = listener.accept().await.unwrap();
-        let connection = client.network.as_ref().unwrap().connection.lock().await.clone();
-        let writer = connection.writer.lock().await;
-        let error = client.send_msg(BytesMut::from(&b"unsent"[..])).await.unwrap_err();
+        let connection = client
+            .network
+            .as_ref()
+            .unwrap()
+            .connection
+            .lock()
+            .await
+            .clone();
+        let writer = connection.writer_gate.acquire().await.unwrap();
+        let error = client
+            .send_msg(BytesMut::from(&b"unsent"[..]))
+            .await
+            .unwrap_err();
         assert!(request_was_not_sent(&error), "{error:?}");
         drop(writer);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap().to_string();
-        let client = Client::connect_with_timeout(&address, Duration::from_millis(50)).await.unwrap();
+        let client = Client::connect_with_timeout(&address, Duration::from_millis(50))
+            .await
+            .unwrap();
         let peer = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
             let mut frames = Framed::new(socket, LengthDelimitedCodec::new());
@@ -264,8 +611,14 @@ mod tests {
             assert_eq!(&request[8..], b"sent");
             tokio::time::sleep(Duration::from_millis(100)).await;
         });
-        let error = client.send_msg(BytesMut::from(&b"sent"[..])).await.unwrap_err();
-        assert!(!request_was_not_sent(&error), "a lost reply is uncertain: {error:?}");
+        let error = client
+            .send_msg(BytesMut::from(&b"sent"[..]))
+            .await
+            .unwrap_err();
+        assert!(
+            !request_was_not_sent(&error),
+            "a lost reply is uncertain: {error:?}"
+        );
         peer.await.unwrap();
     }
 
