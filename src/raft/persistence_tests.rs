@@ -345,9 +345,10 @@ fn a_damaged_hard_state_refuses_to_start() {
     // Another format version is refused as such, not read or reset.
     let mut other_version = std::fs::read(&path).unwrap();
     other_version[6] ^= 0xff; // restore the byte damaged above
-    other_version[3] = b'2';
+    // `RHS1` is the store before the seed became a voter in the log: refused.
+    other_version[3] = b'1';
     std::fs::write(&path, &other_version).unwrap();
-    assert_eq!(problem(&dir), disk::HardStateProblem::Version(b'2'));
+    assert_eq!(problem(&dir), disk::HardStateProblem::Version(b'1'));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

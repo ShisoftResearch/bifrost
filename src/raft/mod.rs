@@ -1,7 +1,8 @@
 use self::state_machine::callback::server::Subscriptions;
 use self::state_machine::callback::SMCallback;
-use self::state_machine::configs::commands::{member_address, new_member_};
-use self::state_machine::configs::{RaftMember, CONFIG_SM_ID};
+use self::state_machine::configs::commands::{del_member_, new_member_};
+use self::state_machine::configs::CONFIG_SM_ID;
+use self::state_machine::NOOP_SM_ID;
 use self::state_machine::master::{
     ExecError, ExecResult, MasterStateMachine, SnapshotDataItems, SubStateMachine,
 };
@@ -283,6 +284,87 @@ pub struct RaftMeta {
     /// Consecutive persistence failures while leading; see
     /// `PERSIST_FAILURES_BEFORE_STEP_DOWN`.
     persist_failures: u32,
+    /// The voters of the plane: the single source for votes, quorums,
+    /// replication targets and the leader meta. It is a function of
+    /// `base_voters` and the configuration entries of the log after the
+    /// snapshot (committed or not), and of nothing else. See `Voters`.
+    voters: Voters,
+    /// The voters at `last_snapshot_index`, from the snapshot image.
+    base_voters: Voters,
+}
+
+/// Voters by id (the hash of the address) with their addresses.
+pub type Voters = BTreeMap<u64, String>;
+
+/// A change of the configuration that a log entry carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigChange {
+    Add(String),
+    Remove(String),
+}
+
+fn config_fn_ids() -> (u64, u64) {
+    static IDS: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
+    *IDS.get_or_init(|| {
+        let empty = String::new();
+        (
+            new_member_::new(&empty).encode().0,
+            del_member_::new(&empty).encode().0,
+        )
+    })
+}
+
+/// The configuration change of an entry, or `None` if the entry is not one.
+/// Only `new_member_` and `del_member_` of the configuration state machine
+/// change the voters. Subscriptions are in the same state machine and do not.
+pub fn config_change(entry: &LogEntry) -> Option<ConfigChange> {
+    if entry.sm_id != CONFIG_SM_ID {
+        return None;
+    }
+    let (add_fn, remove_fn) = config_fn_ids();
+    if entry.fn_id != add_fn && entry.fn_id != remove_fn {
+        return None;
+    }
+    let (address,): (String,) = crate::utils::serde::deserialize(&entry.data)?;
+    Some(if entry.fn_id == add_fn {
+        ConfigChange::Add(address)
+    } else {
+        ConfigChange::Remove(address)
+    })
+}
+
+fn apply_config_change(voters: &mut Voters, change: ConfigChange) {
+    match change {
+        ConfigChange::Add(address) => {
+            voters.insert(hash_str(&address), address);
+        }
+        ConfigChange::Remove(address) => {
+            voters.remove(&hash_str(&address));
+        }
+    }
+}
+
+/// The voters after the configuration entries of `logs` above `after`.
+fn fold_voters(base: &Voters, logs: &LogsMap, after: u64) -> Voters {
+    let mut voters = base.clone();
+    for (_, entry) in logs.range((std::ops::Bound::Excluded(after), Unbounded)) {
+        if let Some(change) = config_change(entry) {
+            apply_config_change(&mut voters, change);
+        }
+    }
+    voters
+}
+
+/// An entry that no state machine applies. A new leader commits one before it
+/// changes the configuration (rule C7).
+fn noop_entry() -> LogEntry {
+    LogEntry {
+        id: 0,
+        term: 0,
+        sm_id: NOOP_SM_ID,
+        fn_id: 0,
+        data: Vec::new(),
+    }
 }
 
 #[derive(Clone)]
@@ -324,6 +406,9 @@ pub enum PlaneError {
     Persistence(io::Error),
     /// A persisted state-machine image is present but cannot be restored.
     Recovery(RecoverError),
+    /// The restore found more than one voter and `force_new_cluster` was not
+    /// set. It would cut live members off and found a second cluster.
+    RestoreRefused { plane_id: PlaneId, voters: Vec<String> },
 }
 
 impl Display for PlaneError {
@@ -338,6 +423,13 @@ impl Display for PlaneError {
             }
             PlaneError::Persistence(err) => write!(f, "plane storage write failed: {err}"),
             PlaneError::Recovery(err) => write!(f, "plane recovery failed: {err}"),
+            PlaneError::RestoreRefused { plane_id, voters } => write!(
+                f,
+                "restore refused: plane {} names {} voters ({:?}); set force_new_cluster only if every other member is stopped for ever",
+                plane_id.raw(),
+                voters.len(),
+                voters
+            ),
         }
     }
 }
@@ -497,6 +589,8 @@ impl RaftPlaneRuntime {
                 last_snapshot_term: 0,
                 lifecycle: LifecycleState::Running,
                 persist_failures: 0,
+                voters: crate::raft::Voters::new(),
+                base_voters: crate::raft::Voters::new(),
             }),
             is_leader: AtomicBool::new(false),
             checker_task: TokioMutex::new(None),
@@ -596,6 +690,42 @@ fn options_for_plane(opts: &Options, plane_id: PlaneId) -> Options {
     }
 }
 
+/// What `restore_sole_voter` changed on one plane.
+#[derive(Debug, Clone)]
+pub struct RestoredPlane {
+    pub plane_id: PlaneId,
+    /// The voters that were removed. Empty if the plane needed no change.
+    pub removed: Vec<String>,
+}
+
+/// Operator step for a store that is reopened under a new address: make
+/// `new_address` the only voter of every plane in the store. The stored
+/// configuration names the old address, and without this step the new member
+/// is not a voter and never leads. Run it once, before the server starts, on
+/// the raft storage of the server. See `RaftService::restore_meta_sole_voter`.
+///
+/// The call refuses a plane that names two or more voters (typed error
+/// `RestoreRefused`) unless `force_new_cluster` is true. Forcing cuts the
+/// other voters off: every one of them must stay stopped for ever, or the
+/// restore makes a second cluster with the same log prefix. The refusal is
+/// decided for every plane before any plane is changed. The call can run
+/// again after a stop in the middle.
+pub async fn restore_sole_voter(
+    storage: Storage,
+    new_address: &str,
+    service_id: u64,
+    force_new_cluster: bool,
+) -> Result<Vec<RestoredPlane>, PlaneError> {
+    let service = RaftService::new(Options {
+        storage,
+        address: new_address.to_string(),
+        service_id,
+    });
+    let restored = service.restore_all_planes(force_new_cluster).await;
+    service.shutdown().await;
+    restored
+}
+
 pub struct RaftService {
     meta: RwLock<RaftMeta>,
     planes: RwLock<BTreeMap<PlaneId, Arc<RaftPlaneRuntime>>>,
@@ -605,6 +735,9 @@ pub struct RaftService {
     rt_id: runtime::Id,
     rt_lifecycle: StdMutex<RuntimeLifecycle>,
     _is_leader: AtomicBool,
+    /// Replays in progress (start-up recovery). State machines must not send
+    /// notifications for entries that only replay (RC9).
+    replaying: std::sync::atomic::AtomicU32,
     checker_task: TokioMutex<Option<tokio::task::JoinHandle<()>>>,
     shutdown_tx: watch::Sender<LifecycleState>,
     self_ref: StdMutex<StdWeak<RaftService>>,
@@ -840,6 +973,18 @@ async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
                 );
                 meta.last_applied = next_log_id;
             }
+            Err(ExecError::CommandDoesNotDecode { sm_id, fn_id }) => {
+                // A committed command that this member cannot read must not
+                // be skipped: the member would run on a state the others do
+                // not have. The plane stops with a typed error.
+                error!(
+                    "Committed log entry {} (sm {}, fn {}) does not decode; stopping the plane",
+                    next_log_id, sm_id, fn_id
+                );
+                meta.lifecycle = LifecycleState::Stopping;
+                meta.membership = Membership::Offline;
+                break;
+            }
             Err(e) => {
                 error!(
                     "Failed to commit command for log entry {}: {:?}",
@@ -971,10 +1116,11 @@ impl RaftService {
                                 // promotion, recovery from disk, or a join
                                 // importing the real member list. All three
                                 // leave a term, a log, or peers behind.
-                                let unseeded = !plane_id.is_type1()
-                                    && meta.term == 0
-                                    && meta.state_machine.read().await.members().len() <= 1
-                                    && meta.logs.read().await.is_empty();
+                                // A member that the latest configuration of
+                                // its log does not list never campaigns (a
+                                // joiner before its first entry, a removed
+                                // member).
+                                let unseeded = !meta.voters.contains_key(&server.id);
                                 if unseeded {
                                     CheckerAction::None
                                 } else {
@@ -1164,6 +1310,13 @@ impl RaftService {
     /// Fails, and recovery stops, when a persisted image of a registered
     /// state machine cannot be restored.
     pub async fn recover_after_register(&self) -> Result<(), PlaneError> {
+        self.replaying.fetch_add(1, Relaxed);
+        let result = self.recover_after_register_inner().await;
+        self.replaying.fetch_sub(1, Relaxed);
+        result
+    }
+
+    async fn recover_after_register_inner(&self) -> Result<(), PlaneError> {
         let mut meta = self.meta.write().await;
         {
             let mut master_sm = meta.state_machine.write().await;
@@ -1183,6 +1336,15 @@ impl RaftService {
             meta.last_applied
         );
         check_commit(&mut meta).await;
+        if Self::lifecycle_is_stopping(meta.lifecycle) {
+            return Err(PlaneError::Recovery(RecoverError {
+                sm_id: 0,
+                reason: format!(
+                    "a committed log entry above {} does not decode",
+                    meta.last_applied
+                ),
+            }));
+        }
         info!(
             "Manual apply on plane {}: applied logs up to last_applied={}",
             PlaneId::type1().raw(),
@@ -1276,13 +1438,23 @@ impl RaftService {
                         );
                     }
 
+                    let base_voters: Voters;
                     {
                         let mut master_sm = meta.state_machine.write().await;
                         if let Err(e) = master_sm.recover_registered_snapshots().await {
                             error!("Plane {}: {}; refusing to start the plane", plane_id.raw(), e);
                             return Err(PlaneError::Recovery(e));
                         }
+                        // The applied member list of the image is the base of
+                        // the voter set at the snapshot index.
+                        base_voters = master_sm
+                            .configs
+                            .members
+                            .values()
+                            .map(|m| (m.id, m.address.clone()))
+                            .collect();
                     }
+                    meta.base_voters = base_voters;
 
                     info!(
                         "Snapshot recovery completed successfully for plane {}",
@@ -1314,38 +1486,14 @@ impl RaftService {
         }
     }
 
-    async fn recover_config_state_from_logs(
-        plane_id: PlaneId,
-        meta: &mut RwLockWriteGuard<'_, RaftMeta>,
-    ) {
-        let committed_entries = {
+    /// Rebuild the voters from the snapshot base and the configuration
+    /// entries of the log after the snapshot, committed or not (rule C1).
+    async fn refresh_voters(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
+        let voters = {
             let logs = meta.logs.read().await;
-            logs.range((Unbounded, Included(&meta.commit_index)))
-                .filter_map(|(_, entry)| {
-                    if entry.sm_id == CONFIG_SM_ID {
-                        Some(entry.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
+            fold_voters(&meta.base_voters, &logs, meta.last_snapshot_index)
         };
-
-        if committed_entries.is_empty() {
-            return;
-        }
-
-        let mut master_sm = meta.state_machine.write().await;
-        for entry in committed_entries {
-            if let Err(err) = master_sm.commit_cmd(&entry).await {
-                warn!(
-                    "Failed to recover config log {} on plane {} during runtime initialization: {:?}",
-                    entry.id,
-                    plane_id.raw(),
-                    err
-                );
-            }
-        }
+        meta.voters = voters;
     }
 
     async fn initialize_runtime_meta(
@@ -1359,73 +1507,269 @@ impl RaftService {
         meta.last_checked = get_time() + (CHECKER_MS * 10);
 
         let recovered_from_disk = Self::load_snapshot_into_meta(plane_id, meta).await?;
-        Self::recover_config_state_from_logs(plane_id, meta).await;
-        let server_address = self.options.address.clone();
-
+        Self::refresh_voters(meta).await;
+        #[cfg(multisite_test)]
         {
-            let mut sm = meta.state_machine.write().await;
-            let start_time = get_time();
-            while get_time() < start_time + 5000 {
-                if sm.configs.new_member(server_address.clone()).await
-                    || sm.configs.member_existed(self.id)
-                {
-                    break;
-                }
-                sleep(Duration::from_millis(50)).await;
-            }
-
-            if !sm.configs.member_existed(self.id) {
-                return Err(PlaneError::InitializationFailed(plane_id));
-            }
-
-            let num_members = sm.configs.members.len();
-            let has_logs = !meta.logs.read().await.is_empty();
-            let has_term = meta.term > 0;
-            let should_promote = num_members == 1
-                && ((recovered_from_disk || has_logs || has_term) || bootstrap_if_fresh);
-
-            debug!(
-                "Plane {} initialization: recovered_from_disk={}, num_members={}, has_logs={}, has_term={}, bootstrap_if_fresh={}, membership={:?}",
+            warn!(
+                "MSRAFT_RECOVER plane={} local={} snapshot={} commit={} voters={:?}",
                 plane_id.raw(),
-                recovered_from_disk,
-                num_members,
-                has_logs,
-                has_term,
-                bootstrap_if_fresh,
-                match &meta.membership {
-                    Membership::Leader(_) => "Leader",
-                    Membership::Follower => "Follower",
-                    Membership::Candidate => "Candidate",
-                    Membership::Offline => "Offline",
-                    Membership::Undefined => "Undefined",
-                }
+                self.id,
+                meta.last_snapshot_index,
+                meta.commit_index,
+                meta.voters.keys().collect::<Vec<_>>()
             );
+        }
+        let has_logs = !meta.logs.read().await.is_empty();
+        let has_term = meta.term > 0;
+        let sole_voter = meta.voters.len() == 1 && meta.voters.contains_key(&self.id);
+        let fresh = meta.voters.is_empty() && !recovered_from_disk && !has_logs && !has_term;
+        debug!(
+            "Plane {} initialization: recovered_from_disk={}, voters={}, has_logs={}, has_term={}, bootstrap_if_fresh={}",
+            plane_id.raw(),
+            recovered_from_disk,
+            meta.voters.len(),
+            has_logs,
+            has_term,
+            bootstrap_if_fresh
+        );
+        if sole_voter {
+            // The log names this member as the only voter: it wins an
+            // election alone, in a new term (rule C5, RC1).
+            info!(
+                "Plane {} on {}: the only voter, term {}, logs {}. Electing itself.",
+                plane_id.raw(),
+                self.options.address,
+                meta.term,
+                has_logs
+            );
+            if self.promote_sole_voter(leader_flag, meta).await {
+                info!("Plane {} became leader of its one voter", plane_id.raw());
+            }
+        } else if bootstrap_if_fresh && fresh {
+            self.bootstrap_as_seed(plane_id, leader_flag, meta).await;
+        } else if meta.voters.contains_key(&self.id)
+            && matches!(meta.membership, Membership::Undefined)
+        {
+            // A restarted voter starts as a follower with an election timer.
+            // Left `Undefined` it never times out, and a plane whose other
+            // voters were all restarted has nobody who can campaign when the
+            // leader stops (Observed: K-GR3d, `seq-1`). The grace period
+            // gives the leader time to reach this member first.
+            self.switch_membership(meta, Membership::Follower);
+            meta.last_checked = get_time() + (CHECKER_MS * 10);
+        }
+        Ok(())
+    }
 
-            if should_promote {
-                info!(
-                    "Single-node plane {} detected during initialization on {} (term={}, logs={}, members={}). Becoming leader immediately.",
-                    plane_id.raw(),
-                    self.options.address,
-                    meta.term,
-                    has_logs,
-                    num_members
-                );
-                let (last_log_id, _) = {
-                    let logs = meta.logs.read().await;
-                    get_last_log_info!(meta, logs)
-                };
-                drop(sm);
-                ensure_direct_leader_term(meta);
-                self.become_leader_on_plane(leader_flag, meta, last_log_id)
-                    .await;
-                info!(
-                    "Plane {} successfully transitioned to Leader state",
-                    plane_id.raw()
-                );
+    async fn restore_all_planes(
+        self: &Arc<Self>,
+        force_new_cluster: bool,
+    ) -> Result<Vec<RestoredPlane>, PlaneError> {
+        // Decide the refusal for every plane first: a refusal on a later plane
+        // must not leave an earlier plane changed.
+        {
+            let mut meta = self.meta.write().await;
+            self.initialize_runtime_meta(PlaneId::type1(), &self._is_leader, &mut meta, false)
+                .await?;
+            Self::check_restorable(PlaneId::type1(), &meta, force_new_cluster)?;
+        }
+        let mut runtimes = Vec::new();
+        for plane_id in self.persisted_type2_planes() {
+            let (runtime, _) = self.resolve_plane_runtime(plane_id, false, false).await?;
+            let Some(runtime) = runtime else { continue };
+            {
+                let meta = runtime.meta.read().await;
+                Self::check_restorable(plane_id, &meta, force_new_cluster)?;
+            }
+            runtimes.push((plane_id, runtime));
+        }
+        let mut restored = Vec::new();
+        {
+            let mut meta = self.meta.write().await;
+            let removed = self
+                .restore_meta_sole_voter(PlaneId::type1(), &self._is_leader, &mut meta)
+                .await?;
+            restored.push(RestoredPlane {
+                plane_id: PlaneId::type1(),
+                removed,
+            });
+        }
+        for (plane_id, runtime) in runtimes {
+            let mut meta = runtime.meta.write().await;
+            let removed = self
+                .restore_meta_sole_voter(plane_id, &runtime.is_leader, &mut meta)
+                .await?;
+            restored.push(RestoredPlane { plane_id, removed });
+        }
+        Ok(restored)
+    }
+
+    fn check_restorable(
+        plane_id: PlaneId,
+        meta: &RaftMeta,
+        force_new_cluster: bool,
+    ) -> Result<(), PlaneError> {
+        if meta.voters.len() >= 2 && !force_new_cluster {
+            return Err(PlaneError::RestoreRefused {
+                plane_id,
+                voters: meta.voters.values().cloned().collect(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Operator step, the counterpart of etcd `--force-new-cluster`: make this
+    /// member the only voter of a plane whose stored configuration names other
+    /// members (a store reopened under a new address). It starts an election as
+    /// the only voter in a new term and writes the configuration entries that
+    /// make the log fold to this member alone. It leaves the safety envelope on
+    /// purpose: the old voters are cut off. Returns the removed addresses.
+    async fn restore_meta_sole_voter(
+        &self,
+        plane_id: PlaneId,
+        leader_flag: &AtomicBool,
+        meta: &mut RwLockWriteGuard<'_, RaftMeta>,
+    ) -> Result<Vec<String>, PlaneError> {
+        let me = self.options.address.clone();
+        if meta.voters.len() == 1 && meta.voters.contains_key(&self.id) {
+            return Ok(Vec::new());
+        }
+        let old: Vec<String> = meta
+            .voters
+            .values()
+            .filter(|address| **address != me)
+            .cloned()
+            .collect();
+        let had_self = meta.voters.contains_key(&self.id);
+        meta.voters.clear();
+        meta.voters.insert(self.id, me.clone());
+        if !self.promote_sole_voter(leader_flag, meta).await {
+            return Err(PlaneError::InitializationFailed(plane_id));
+        }
+        let mut changes = Vec::new();
+        if !had_self {
+            changes.push(new_member_::new(&me).encode());
+        }
+        for address in &old {
+            changes.push(del_member_::new(address).encode());
+        }
+        for (fn_id, _, data) in changes {
+            let mut entry = LogEntry {
+                id: 0,
+                term: 0,
+                sm_id: CONFIG_SM_ID,
+                fn_id,
+                data,
+            };
+            let (id, _) = self
+                .leader_append_log(meta, &mut entry)
+                .await
+                .map_err(PlaneError::Persistence)?;
+            match self
+                .try_sync_log_to_followers_on_plane(plane_id, leader_flag, meta, &entry, id)
+                .await
+            {
+                SyncOutcome::Committed(_) => {}
+                _ => return Err(PlaneError::InitializationFailed(plane_id)),
             }
         }
+        Ok(old)
+    }
 
-        Ok(())
+    fn persisted_type2_planes(&self) -> Vec<PlaneId> {
+        let Storage::DISK(ref disk) = self.options.storage else {
+            return Vec::new();
+        };
+        let Ok(dir) = std::fs::read_dir(Path::new(&disk.path).join("planes")) else {
+            return Vec::new();
+        };
+        let mut planes: Vec<PlaneId> = dir
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.file_name().to_str()?.parse::<u64>().ok())
+            .filter_map(|raw| PlaneId::type2(raw).ok())
+            .collect();
+        planes.sort();
+        planes
+    }
+
+    /// Win an election as the only voter: a new term, a vote for self, both
+    /// durable, and then the lead. Never lead in a term that was persisted
+    /// before (RC1): that term may already have a leader.
+    async fn promote_sole_voter(
+        &self,
+        leader_flag: &AtomicBool,
+        meta: &mut RwLockWriteGuard<'_, RaftMeta>,
+    ) -> bool {
+        let term = meta.term;
+        alter_term(meta, term + 1);
+        meta.vote_for = Some(self.id);
+        if let Err(e) = persist_hard_state(meta).await {
+            error!(
+                "Plane {}: cannot persist term {} of the sole voter: {}; not leading",
+                self.plane_id().raw(),
+                meta.term,
+                e
+            );
+            self.switch_membership(meta, Membership::Follower);
+            return false;
+        }
+        let (last_log_id, _) = {
+            let logs = meta.logs.read().await;
+            get_last_log_info!(meta, logs)
+        };
+        self.become_leader_on_plane(leader_flag, meta, last_log_id)
+            .await;
+        true
+    }
+
+    /// Found a new plane: win term 1, then write the first entry, which adds
+    /// this member as a voter (rule C3). The seed is an ordinary member from
+    /// the first entry. The term is durable before the entry is written.
+    async fn bootstrap_as_seed(
+        &self,
+        plane_id: PlaneId,
+        leader_flag: &AtomicBool,
+        meta: &mut RwLockWriteGuard<'_, RaftMeta>,
+    ) -> bool {
+        meta.voters.insert(self.id, self.options.address.clone());
+        if !self.promote_sole_voter(leader_flag, meta).await {
+            meta.voters.clear();
+            return false;
+        }
+        let (fn_id, _, data) = new_member_::new(&self.options.address).encode();
+        let mut entry = LogEntry {
+            id: 0,
+            term: 0,
+            sm_id: CONFIG_SM_ID,
+            fn_id,
+            data,
+        };
+        let appended = self.leader_append_log(meta, &mut entry).await;
+        match appended {
+            Ok((id, _)) => {
+                match self
+                    .try_sync_log_to_followers_on_plane(plane_id, leader_flag, meta, &entry, id)
+                    .await
+                {
+                    SyncOutcome::Committed(_) => true,
+                    _ => {
+                        error!("Plane {}: the first entry did not commit", plane_id.raw());
+                        false
+                    }
+                }
+            }
+            Err(e) => {
+                error!(
+                    "Plane {}: cannot write the first entry: {}",
+                    plane_id.raw(),
+                    e
+                );
+                meta.voters.clear();
+                self.switch_membership(meta, Membership::Follower);
+                leader_flag.store(false, Relaxed);
+                false
+            }
+        }
     }
 
     async fn resolve_plane_runtime(
@@ -1524,26 +1868,14 @@ impl RaftService {
     async fn plane_member_addresses(&self, plane_id: PlaneId) -> Result<Vec<String>, PlaneError> {
         if let Some(runtime) = self.runtime_for_plane(plane_id).await? {
             let meta = runtime.meta.read().await;
-            let master_sm = meta.state_machine.read().await;
             return Ok(Self::canonicalize_member_addresses(
-                master_sm
-                    .configs
-                    .members
-                    .values()
-                    .map(|member| member.address.clone())
-                    .collect(),
+                meta.voters.values().cloned().collect(),
             ));
         }
 
         let meta = self.meta.read().await;
-        let master_sm = meta.state_machine.read().await;
         Ok(Self::canonicalize_member_addresses(
-            master_sm
-                .configs
-                .members
-                .values()
-                .map(|member| member.address.clone())
-                .collect(),
+            meta.voters.values().cloned().collect(),
         ))
     }
 
@@ -1636,13 +1968,9 @@ impl RaftService {
                 return Ok(true);
             }
             let already_member = meta
-                .state_machine
-                .read()
-                .await
-                .configs
-                .members
+                .voters
                 .values()
-                .any(|member| member.address == self.options.address);
+                .any(|address| address == &self.options.address);
             if already_member && meta.leader_id != 0 {
                 debug!(
                     "join_plane {}: already a member with a known leader; nothing to join",
@@ -1659,19 +1987,11 @@ impl RaftService {
         let admitted = plane_client
             .execute(CONFIG_SM_ID, new_member_::new(&self.options.address))
             .await?;
-        let members = plane_client
-            .execute(CONFIG_SM_ID, member_address::new())
-            .await?;
         let info = plane_client.cluster_info().await?;
 
         {
             let mut meta = runtime.meta.write().await;
-            {
-                let mut sm = meta.state_machine.write().await;
-                for member in members {
-                    sm.configs.new_member(member).await;
-                }
-            }
+            // The voters arrive by replication from the leader (rule C4).
             self.become_follower_on_plane(&runtime.is_leader, &mut meta, 0, info.leader_id());
             self.reset_last_checked(&mut meta);
         }
@@ -1750,21 +2070,15 @@ impl RaftService {
         };
         let mut meta = runtime.meta.write().await;
         let already_seeded = {
-            let sm = meta.state_machine.read().await;
             !matches!(meta.membership, Membership::Follower | Membership::Undefined)
                 || meta.term > 0
-                || sm.members().len() > 1
+                || !meta.voters.is_empty()
                 || !meta.logs.read().await.is_empty()
         };
         if already_seeded {
             return Ok(());
         }
-        let (last_log_id, _) = {
-            let logs = meta.logs.read().await;
-            get_last_log_info!(meta, logs)
-        };
-        ensure_direct_leader_term(&mut meta);
-        self.become_leader_on_plane(&runtime.is_leader, &mut meta, last_log_id)
+        self.bootstrap_as_seed(plane_id, &runtime.is_leader, &mut meta)
             .await;
         info!(
             "Bootstrapped previously-passive plane {} on {}",
@@ -1833,15 +2147,8 @@ impl RaftService {
         let Some(info) = self.probe_plane_members(plane_id, seed_nodes).await else {
             return Err(ExecError::ServersUnreachable);
         };
-        let members = info.member_addresses();
         {
             let mut meta = runtime.meta.write().await;
-            {
-                let mut sm = meta.state_machine.write().await;
-                for member in members {
-                    sm.configs.new_member(member).await;
-                }
-            }
             if info.leader_id() != 0 && info.leader_id() != self.id {
                 self.become_follower_on_plane(
                     &runtime.is_leader,
@@ -1946,6 +2253,16 @@ impl RaftService {
         &self,
         plane_id: PlaneId,
     ) -> Result<(), PlaneError> {
+        self.replaying.fetch_add(1, Relaxed);
+        let result = self.recover_after_register_on_plane_inner(plane_id).await;
+        self.replaying.fetch_sub(1, Relaxed);
+        result
+    }
+
+    async fn recover_after_register_on_plane_inner(
+        &self,
+        plane_id: PlaneId,
+    ) -> Result<(), PlaneError> {
         if let Some(runtime) = self.runtime_for_plane(plane_id).await? {
             let mut meta = runtime.meta.write().await;
             {
@@ -2006,7 +2323,6 @@ impl RaftService {
         if let Some(runtime) = self.runtime_for_plane(plane_id).await? {
             let meta = runtime.meta.read().await;
             let logs = meta.logs.read().await;
-            let sm = meta.state_machine.read().await;
             let (last_log_id, last_log_term) = get_last_log_info!(meta, logs);
 
             // An UNSEEDED runtime knows nothing worth repeating. Its config
@@ -2026,9 +2342,9 @@ impl RaftService {
             let members = if unseeded {
                 Vec::new()
             } else {
-                sm.members()
+                meta.voters
                     .iter()
-                    .map(|(id, member)| (*id, member.address.clone()))
+                    .map(|(id, address)| (*id, address.clone()))
                     .collect::<Vec<_>>()
             };
 
@@ -2036,7 +2352,7 @@ impl RaftService {
                 members,
                 last_log_id,
                 last_log_term,
-                leader_id: meta.leader_id,
+                leader_id: advertised_leader(&meta),
             });
         }
 
@@ -2098,6 +2414,13 @@ impl RaftService {
     }
 }
 
+/// An RPC client for a voter. It connects when it is used, so that applying a
+/// configuration entry never depends on the network (rule C10).
+async fn member_rpc(service_id: u64, address: &String) -> io::Result<Arc<AsyncServiceClient>> {
+    let client = rpc::DEFAULT_CLIENT_POOL.get(address).await?;
+    Ok(AsyncServiceClient::new_with_service_id(service_id, &client))
+}
+
 fn is_majority(members: u64, granted: u64) -> bool {
     let required = members / 2 + 1;
     let majority = granted >= (required);
@@ -2134,6 +2457,28 @@ fn is_leader(meta: &RwLockWriteGuard<RaftMeta>) -> bool {
         _ => false,
     }
 }
+/// The leader this member can name to a client, or 0 when it cannot name one.
+///
+/// A leader names itself. A follower names the leader of its last heartbeat
+/// only while that heartbeat is younger than its election timeout.
+/// Observed: K-G3d without this rule timed out at start after 184 completed
+/// events. A peer redirected the client to the restarted member itself.
+/// Hypothesis: an expired discovery hint caused this timeout. The log does
+/// not record heartbeat ages. See the follower timeout test for the evidence.
+fn advertised_leader(meta: &RaftMeta) -> u64 {
+    match meta.membership {
+        Membership::Leader(_) => meta.leader_id,
+        Membership::Follower | Membership::Candidate => {
+            if meta.leader_id == 0 || get_time() >= meta.last_checked + meta.timeout {
+                0
+            } else {
+                meta.leader_id
+            }
+        }
+        _ => 0,
+    }
+}
+
 /// Adopt a later term (and with it a fresh vote). Terms never go back: a
 /// lower or equal term changes nothing. Not durable by itself -- every effect
 /// that depends on the term (a reply, a RequestVote, an append) first calls
@@ -2160,12 +2505,6 @@ async fn persist_hard_state(meta: &RaftMeta) -> io::Result<()> {
             .await?;
     }
     Ok(())
-}
-
-fn ensure_direct_leader_term(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
-    if meta.term == 0 {
-        meta.term = 1;
-    }
 }
 
 impl RaftService {
@@ -2227,6 +2566,8 @@ impl RaftService {
                 last_snapshot_term: 0,
                 lifecycle: LifecycleState::Running,
                 persist_failures: 0,
+                voters: crate::raft::Voters::new(),
+                base_voters: crate::raft::Voters::new(),
             }),
             planes: RwLock::new(BTreeMap::new()),
             id: server_id,
@@ -2238,6 +2579,7 @@ impl RaftService {
                 teardown: None,
             }),
             _is_leader: AtomicBool::new(false),
+            replaying: std::sync::atomic::AtomicU32::new(0),
             checker_task: TokioMutex::new(None),
             shutdown_tx,
             self_ref: StdMutex::new(StdWeak::new()),
@@ -2252,6 +2594,17 @@ impl RaftService {
             "Waiting for raft server to be initialized on plane {}",
             PlaneId::type1().raw()
         );
+        if recover_registered {
+            server.replaying.fetch_add(1, Relaxed);
+        }
+        let started = Self::start_inner(server, recover_registered).await;
+        if recover_registered {
+            server.replaying.fetch_sub(1, Relaxed);
+        }
+        started
+    }
+
+    async fn start_inner(server: &Arc<RaftService>, recover_registered: bool) -> bool {
         {
             let mut meta = server.meta.write().await;
             if server
@@ -2309,13 +2662,28 @@ impl RaftService {
             self.join(servers).await
         }
     }
+    /// Found the cluster: win term 1 and write the first entry, which adds
+    /// this member as a voter. Only a fresh store is founded. A store with a
+    /// log, a term or voters keeps the election rules: this call never makes
+    /// a member lead without a vote (it did, in the same term, before).
     pub async fn bootstrap(&self) {
         let mut meta = self.write_meta().await;
-        let (last_log_id, _) = {
-            let logs = meta.logs.read().await;
-            get_last_log_info!(meta, logs)
-        };
-        self.become_leader(&mut meta, last_log_id).await;
+        let fresh = meta.voters.is_empty()
+            && meta.term == 0
+            && meta.last_snapshot_index == 0
+            && meta.logs.read().await.is_empty();
+        if fresh {
+            self.bootstrap_as_seed(self.plane_id(), &self._is_leader, &mut meta)
+                .await;
+        } else {
+            info!(
+                "Plane {} on {} is not a fresh store (term {}, voters {}): not founding a cluster",
+                self.plane_id().raw(),
+                self.options.address,
+                meta.term,
+                meta.voters.len()
+            );
+        }
     }
     pub async fn conservative_bootstrap(&self, servers: &Vec<String>) {
         let meta = self.meta.read().await;
@@ -2377,39 +2745,9 @@ impl RaftService {
                 self.id
             );
             let result = client.add_root_member(&self.options.address).await;
-            debug!(
-                "Getting member address for plane {}: {}",
-                self.plane_id().raw(),
-                self.id
-            );
-            let members = client.root_member_addresses().await;
-            debug!(
-                "Updating local meta for plane {} by acquiring lock: {}",
-                self.plane_id().raw(),
-                self.id
-            );
+            // The voters arrive by replication from the leader (rule C4): the
+            // joiner no longer writes to its own member list.
             let mut meta = self.write_meta().await;
-            debug!(
-                "Local meta lock acquired for plane {}: {}",
-                self.plane_id().raw(),
-                self.id
-            );
-            if let Ok(members) = members {
-                debug!(
-                    "We have following members for plane {} node {}: {:?}",
-                    self.plane_id().raw(),
-                    self.id,
-                    members
-                );
-                for member in members {
-                    meta.state_machine
-                        .write()
-                        .await
-                        .configs
-                        .new_member(member)
-                        .await;
-                }
-            }
             debug!(
                 "Become follower because of join on plane {}: {}",
                 self.plane_id().raw(),
@@ -2442,6 +2780,9 @@ impl RaftService {
         }
     }
     pub async fn leave(&self) -> bool {
+        // A leader that removes itself steps down when the change commits
+        // (rule C9); it still hands the lead to a member, as before.
+        let was_leader = self.is_leader();
         let members = self.cluster_info().await.members;
         let servers: Vec<_> = members
             .iter()
@@ -2484,20 +2825,22 @@ impl RaftService {
             return false;
         }
         let mut meta = self.write_meta().await;
-        if is_leader(&meta) {
+        if is_leader(&meta) || was_leader {
             info!(
                 "Leader step down on plane {}: {}",
                 self.plane_id().raw(),
                 self.options.address
             );
-            if !self.send_followers_heartbeat(&mut meta, None, true).await {
-                error!("Leader cannot step down on plane {}", self.plane_id().raw());
-                return false;
+            if is_leader(&meta) {
+                if !self.send_followers_heartbeat(&mut meta, None, true).await {
+                    error!("Leader cannot step down on plane {}", self.plane_id().raw());
+                    return false;
+                }
+                info!(
+                    "Step down heartbeat sent to followers on plane {}",
+                    self.plane_id().raw()
+                );
             }
-            info!(
-                "Step down heartbeat sent to followers on plane {}",
-                self.plane_id().raw()
-            );
             let mut reelected = false;
             for (_id, addr) in members {
                 if addr != self.options.address {
@@ -2559,25 +2902,21 @@ impl RaftService {
     pub async fn cluster_info(&self) -> ClientClusterInfo {
         let meta = self.meta.read().await;
         let logs = meta.logs.read().await;
-        let sm = &meta.state_machine.read().await;
-        let sm_members = sm.members();
         let mut members = Vec::new();
-        for (id, member) in sm_members.iter() {
-            members.push((*id, member.address.clone()))
+        for (id, address) in meta.voters.iter() {
+            members.push((*id, address.clone()))
         }
         let (last_log_id, last_log_term) = get_last_log_info!(meta, logs);
         ClientClusterInfo {
             members,
             last_log_id,
             last_log_term,
-            leader_id: meta.leader_id,
+            leader_id: advertised_leader(&meta),
         }
     }
     pub async fn num_members(&self) -> usize {
         let meta = self.meta.read().await;
-        let member_sm = meta.state_machine.read().await;
-        let ref members = member_sm.configs.members;
-        members.len()
+        meta.voters.len()
     }
     pub async fn num_logs(&self) -> usize {
         let meta = self.meta.read().await;
@@ -2605,6 +2944,11 @@ impl RaftService {
     }
     pub fn is_leader(&self) -> bool {
         self._is_leader.load(Relaxed)
+    }
+    /// Whether a start-up replay is running. State machines send no
+    /// notification then: nobody subscribed to a replayed entry.
+    pub fn is_replaying(&self) -> bool {
+        self.replaying.load(Relaxed) > 0
     }
     pub fn get_server_id(&self) -> u64 {
         self.id
@@ -2739,16 +3083,33 @@ impl RaftService {
     }
     fn reload_leader_meta(
         &self,
-        member_map: &HashMap<u64, RaftMember>,
+        voters: &Voters,
         leader_meta: &mut RwLockWriteGuard<LeaderMeta>,
         last_log_id: u64,
     ) {
-        for member in member_map.values() {
-            self.insert_leader_follower_meta(leader_meta, last_log_id, member.id);
+        for id in voters.keys() {
+            self.insert_leader_follower_meta(leader_meta, last_log_id, *id);
         }
     }
     async fn write_meta<'a>(&'a self) -> RwLockWriteGuard<'a, RaftMeta> {
         self.meta.write().await
+    }
+
+    #[cfg(multisite_test)]
+    pub async fn msraft_diagnostic(&self) -> serde_json::Value {
+        let meta = self.meta.read().await;
+        let sm = meta.state_machine.read().await;
+        let logs = meta.logs.read().await;
+        serde_json::json!({
+            "id": self.id, "term": meta.term, "leader_id": meta.leader_id,
+            "is_leader": matches!(meta.membership, Membership::Leader(_)),
+            "commit": meta.commit_index, "applied": meta.last_applied,
+            "snapshot": meta.last_snapshot_index,
+            "voters": meta.voters.iter().map(|(id, address)| serde_json::json!({"id":id,"address":address})).collect::<Vec<_>>(),
+            "applied_members": sm.configs.members.values().map(|m| serde_json::json!({"id":m.id,"address":m.address})).collect::<Vec<_>>(),
+            "config_entries": logs.values().filter(|e| e.sm_id == CONFIG_SM_ID).map(|e| serde_json::json!({"index":e.id,"term":e.term,"fn":e.fn_id,"data":e.data})).collect::<Vec<_>>(),
+            "roster": sm.msraft_diagnostic()
+        })
     }
 
     pub async fn read_meta(&self) -> RwLockReadGuard<'_, RaftMeta> {
@@ -2762,6 +3123,11 @@ impl RaftService {
         meta: &'a mut RwLockWriteGuard<'_, RaftMeta>,
     ) {
         let server_id = self.id;
+        if !meta.voters.contains_key(&server_id) {
+            // Not in the latest configuration: this member does not campaign.
+            self.reset_last_checked(meta);
+            return;
+        }
         debug!(
             "Plane {} server {} become candidate",
             plane_id.raw(),
@@ -2791,23 +3157,25 @@ impl RaftService {
             get_last_log_info!(meta, logs)
         };
         let (mut members_vote_response_stream, num_members) = {
-            let members: Vec<_> = {
-                let member_sm = meta.state_machine.read().await;
-                let ref members = member_sm.configs.members;
-                members
-                    .values()
-                    .map(|member| (member.rpc.clone(), member.id))
-                    .collect()
-            };
+            let members: Vec<(String, u64)> = meta
+                .voters
+                .iter()
+                .map(|(id, address)| (address.clone(), *id))
+                .collect();
             let len = members.len();
+            let service_id = self.options.service_id;
             let futs: FuturesUnordered<_> = members
                 .into_iter()
-                .map(|(rpc, member_id)| {
+                .map(|(address, member_id)| {
                     let vote_fut = async move {
                         if member_id == server_id {
                             debug!("Plane {} member {} vote for itself", plane_id.raw(), member_id);
                             RequestVoteResponse::Granted
                         } else {
+                            let rpc = match member_rpc(service_id, &address).await {
+                                Ok(rpc) => rpc,
+                                Err(_) => return RequestVoteResponse::NotGranted,
+                            };
                             if let Ok(((remote_term, remote_leader_id), vote_granted)) = rpc
                                 .request_vote(plane_id, term, server_id, last_log_id, last_log_term)
                                 .await
@@ -2852,13 +3220,10 @@ impl RaftService {
                     break;
                 }
                 match res {
-                    Ok(RequestVoteResponse::TermOut(remote_term, remote_leader_id)) => {
-                        self.become_follower_on_plane(
-                            leader_flag,
-                            meta,
-                            remote_term,
-                            remote_leader_id,
-                        );
+                    Ok(RequestVoteResponse::TermOut(remote_term, _remote_leader_id)) => {
+                        // The remote leader is of an older term, so it is not
+                        // the leader of the term adopted here.
+                        self.become_follower_on_plane(leader_flag, meta, remote_term, 0);
                         if let Err(e) = persist_hard_state(meta).await {
                             error!(
                                 "Plane {}: cannot persist adopted term {}: {}",
@@ -2950,9 +3315,7 @@ impl RaftService {
         let leader_meta = RwLock::new(LeaderMeta::new());
         {
             let mut guard = leader_meta.write().await;
-            let member_sm = meta.state_machine.read().await;
-            let ref members = member_sm.configs.members;
-            self.reload_leader_meta(members, &mut guard, last_log_id);
+            self.reload_leader_meta(&meta.voters, &mut guard, last_log_id);
             guard.last_updated = get_time();
         }
         meta.leader_id = self.id;
@@ -2997,10 +3360,8 @@ impl RaftService {
             // Send out heartbeats
             {
                 let leader_meta = leader_meta.read().await;
-                let member_sm = meta.state_machine.read().await;
-                let ref members = member_sm.configs.members;
-                for member in members.values() {
-                    let member_id = member.id;
+                for (member_id, member_address) in meta.voters.iter() {
+                    let member_id = *member_id;
                     if member_id == self.id {
                         continue;
                     }
@@ -3028,7 +3389,8 @@ impl RaftService {
                         meta.state_machine.clone(),
                         meta.logs.clone(),
                         follower.clone(),
-                        member.rpc.clone(),
+                        self.options.service_id,
+                        member_address.clone(),
                         member_id,
                     );
                     let heartbeat_fut = async move { (member_id, hb_fut.await) }.boxed();
@@ -3040,9 +3402,14 @@ impl RaftService {
                 }
             }
             let followers = heartbeat_futs.len();
+            // The quorum is a majority of the voters. The leader counts itself
+            // only if it is a voter (a leader that removed itself is not).
+            let voter_count = meta.voters.len() as u64;
+            let self_votes: u64 = if meta.voters.contains_key(&self.id) { 1 } else { 0 };
             if followers <= 0 {
-                // Early quit if no followers
-                return true;
+                // No other voter has a replication target. That is a quorum
+                // only when the leader alone is the whole configuration.
+                return is_majority(voter_count, self_votes);
             }
             if let (Some(log_id), &Membership::Leader(ref leader_meta)) = (log_id, &meta.membership)
             {
@@ -3063,7 +3430,7 @@ impl RaftService {
                                     if last_matched_id >= log_id {
                                         updated_followers += 1;
                                         // The leader already persisted this entry and counts toward the majority.
-                                        if is_majority(followers as u64 + 1, updated_followers + 1) {
+                                        if is_majority(voter_count, updated_followers + self_votes) {
                                             return true;
                                         }
                                     }
@@ -3103,7 +3470,13 @@ impl RaftService {
                         remote_leader_id
                     );
                     alter_term(meta, remote_term);
-                    meta.leader_id = remote_leader_id;
+                    // The reply carries the remote member's last known leader.
+                    // That member may name this very member (its leader of an
+                    // older term), and it says nothing about the new term. A
+                    // stepped-down leader that kept its own id answered
+                    // `NotLeader(0)` to every client. The leader of the new
+                    // term is unknown until its first heartbeat.
+                    meta.leader_id = 0;
                     self.switch_membership(meta, Membership::Follower);
                     if let Err(e) = persist_hard_state(meta).await {
                         error!(
@@ -3154,7 +3527,8 @@ impl RaftService {
         master_sm: Arc<RwLock<MasterStateMachine>>,
         logs: Arc<RwLock<LogsMap>>,
         follower: Arc<Mutex<FollowerStatus>>,
-        rpc: Arc<AsyncServiceClient>,
+        service_id: u64,
+        member_address: String,
         member_id: u64,
     ) -> HeartbeatReplicationResult {
         // let commit_index = meta.commit_index;
@@ -3171,6 +3545,19 @@ impl RaftService {
             member_id
         );
         let mut follower = follower.lock().await;
+        let rpc = match member_rpc(service_id, &member_address).await {
+            Ok(rpc) => rpc,
+            Err(err) => {
+                debug!(
+                    "No connection to voter {} ({}) on plane {}: {:?}",
+                    member_id,
+                    member_address,
+                    plane_id.raw(),
+                    err
+                );
+                return HeartbeatReplicationResult::Matched(follower.match_index);
+            }
+        };
         let logs = logs.read().await;
         let mut is_retry = false;
         loop {
@@ -3491,7 +3878,21 @@ impl RaftService {
                     Some(held_term) if held_term != prev_log_term => {
                         // The entry at prev conflicts with the leader's: it
                         // and everything after it go, in memory and on disk.
-                        let _ = logs.split_off(&prev_log_id);
+                        let removed = logs.split_off(&prev_log_id);
+                        // Removed configuration entries change the voters (C2).
+                        let new_voters = if removed.values().any(|e| config_change(e).is_some()) {
+                            Some(fold_voters(
+                                &meta.base_voters,
+                                &logs,
+                                meta.last_snapshot_index,
+                            ))
+                        } else {
+                            None
+                        };
+                        drop(logs);
+                        if let Some(voters) = new_voters {
+                            meta.voters = voters;
+                        }
                         if self.discard_durable_suffix(&meta, prev_log_id).await.is_err() {
                             return (meta.term, AppendEntriesResult::NotPersisted);
                         }
@@ -3505,6 +3906,8 @@ impl RaftService {
             // of this call -- never over a suffix the leader has not vouched
             // for.
             let mut last_new_entry = prev_log_id;
+            let mut config_touched = false;
+            let mut new_voters: Option<Voters> = None;
             {
                 let mut logs = meta.logs.write().await;
                 if let Some(ref entries) = entries {
@@ -3524,11 +3927,14 @@ impl RaftService {
                             // it would acknowledge the leader's entry while
                             // holding -- and later applying -- another one.
                             Some(_) => {
-                                let _ = logs.split_off(&entry.id);
+                                let removed = logs.split_off(&entry.id);
+                                config_touched |=
+                                    removed.values().any(|e| config_change(e).is_some());
                                 discard_from.get_or_insert(entry.id);
                             }
                             None => {}
                         }
+                        config_touched |= config_change(entry).is_some();
                         logs.insert(entry.id, entry.clone());
                     }
                     if let Some(from) = discard_from {
@@ -3539,11 +3945,24 @@ impl RaftService {
                         }
                     }
                 }
+                // The voters follow the configuration entries of the log, the
+                // moment they are held (rule C1).
+                if config_touched {
+                    new_voters = Some(fold_voters(
+                        &meta.base_voters,
+                        &logs,
+                        meta.last_snapshot_index,
+                    ));
+                }
                 // Acknowledging an entry promises it survives a crash: a
                 // failed write (or fsync) is answered as such, and the commit
                 // index does not move. The entries stay in memory; the
                 // leader's retry finds them and writes them again.
-                if let Err(e) = self.logs_post_processing(&meta, logs).await {
+                let post = self.logs_post_processing(&meta, logs).await;
+                if let Some(voters) = new_voters.take() {
+                    meta.voters = voters;
+                }
+                if let Err(e) = post {
                     error!(
                         "Plane {}: cannot persist the entries from leader {} (prev {}): {}; not acknowledging",
                         self.plane_id().raw(),
@@ -3588,12 +4007,13 @@ impl RaftService {
         if term == meta.term {
             check_commit(&mut meta).await;
             let logs = meta.logs.read().await;
-            let conf_sm = &meta.state_machine.read().await.configs;
-            let candidate_valid = conf_sm.member_existed(candidate_id);
+            // A voter does not refuse a candidate for being unknown: the
+            // candidate may hold a configuration entry that this voter has not
+            // received yet (RC2). The log check below protects the safety.
             let can_vote = meta
                 .vote_for
                 .map_or(true, |voted_for| voted_for == candidate_id);
-            if can_vote && candidate_valid {
+            if can_vote {
                 let (last_id, last_term) = get_last_log_info!(meta, logs);
                 // Raft section 5.4.1: the later last TERM wins, ties go to the
                 // longer log.
@@ -3764,6 +4184,19 @@ impl RaftService {
         meta.last_snapshot_term = last_included_term;
         meta.last_applied = last_included_index;
         meta.commit_index = max(meta.commit_index, last_included_index);
+        // The image holds the applied member list at its index: the base of
+        // the voters. A kept suffix may hold later configuration entries.
+        let base_voters: Voters = meta
+            .state_machine
+            .read()
+            .await
+            .configs
+            .members
+            .values()
+            .map(|m| (m.id, m.address.clone()))
+            .collect();
+        meta.base_voters = base_voters;
+        Self::refresh_voters(&mut meta).await;
         // A kept suffix may already be committed.
         check_commit(&mut meta).await;
 
@@ -3782,19 +4215,9 @@ impl RaftService {
             return ClientCmdResponse::ShuttingDown;
         }
         if !is_leader(&meta) {
-            let member_count = {
-                let member_sm = meta.state_machine.read().await;
-                member_sm.configs.members.len()
-            };
-            if member_count == 1 && meta.leader_id == self.id {
-                let last_log_id = {
-                    let logs = meta.logs.read().await;
-                    let (last_log_id, _last_log_term) = get_last_log_info!(meta, logs);
-                    last_log_id
-                };
-                ensure_direct_leader_term(&mut meta);
-                self.become_leader_on_plane(leader_flag, &mut meta, last_log_id)
-                    .await;
+            let sole_voter = meta.voters.len() == 1 && meta.voters.contains_key(&self.id);
+            if sole_voter && meta.leader_id == self.id {
+                self.promote_sole_voter(leader_flag, &mut meta).await;
             }
         }
         if !is_leader(&meta) {
@@ -3805,7 +4228,22 @@ impl RaftService {
             };
         }
 
-        let existing_pending_entry = if entry.id > meta.commit_index {
+        // A configuration change obeys rules C6 and C7 before it is appended.
+        let change = config_change(&entry);
+        let mut pending_same_change = None;
+        if let Some(change) = &change {
+            match self
+                .admit_config_change(plane_id, leader_flag, &mut meta, change)
+                .await
+            {
+                Err(response) => return response,
+                Ok(pending) => pending_same_change = pending,
+            }
+        }
+
+        let existing_pending_entry = if pending_same_change.is_some() {
+            pending_same_change
+        } else if entry.id > meta.commit_index {
             let logs = meta.logs.read().await;
             match logs.get(&entry.id) {
                 Some(existing)
@@ -3837,18 +4275,16 @@ impl RaftService {
         };
         entry.id = new_log_id;
         entry.term = new_log_term;
-        let outcome = match entry.sm_id {
-            CONFIG_SM_ID => SyncOutcome::Committed(
-                self.try_sync_config_to_followers_on_plane(plane_id, meta, &entry, new_log_id)
-                    .await,
-            ),
-            _ => {
-                self.try_sync_log_to_followers_on_plane(
-                    plane_id, leader_flag, meta, &entry, new_log_id,
-                )
-                .await
+        if pending_same_change.is_none() {
+            if let Some(change) = change {
+                // The change takes effect when it is appended (rule C1).
+                apply_config_change(&mut meta.voters, change);
+                self.reload_leader_followers(&mut meta, new_log_id).await;
             }
-        };
+        }
+        let outcome = self
+            .try_sync_log_to_followers_on_plane(plane_id, leader_flag, &mut meta, &entry, new_log_id)
+            .await;
 
         match outcome {
             SyncOutcome::Committed(data) => ClientCmdResponse::Success {
@@ -3861,6 +4297,123 @@ impl RaftService {
                 last_log_term: new_log_term,
             },
             SyncOutcome::StorageFailure(reason) => ClientCmdResponse::StorageFailure(reason),
+        }
+    }
+
+    /// Rules C7 and C6 for a configuration change on the leader.
+    /// `Ok(Some((id, term)))`: the same change is already in the log and not
+    /// committed; the caller waits for that entry. `Ok(None)`: append a new
+    /// entry. `Err(response)`: answer the client with it.
+    ///
+    /// C7 comes first. A new leader does not know which of the configuration
+    /// entries in its log are committed; the commit of its own no-op settles
+    /// that. Checking C6 first would refuse every change for ever after a
+    /// leader change that left a committed entry unconfirmed.
+    async fn admit_config_change(
+        &self,
+        plane_id: PlaneId,
+        leader_flag: &AtomicBool,
+        meta: &mut RwLockWriteGuard<'_, RaftMeta>,
+        change: &ConfigChange,
+    ) -> Result<Option<(u64, u64)>, ClientCmdResponse> {
+        // C7: commit an entry of this term first.
+        let own_term_committed = {
+            let ci = meta.commit_index;
+            let term_at_commit = if ci == 0 {
+                0
+            } else if ci <= meta.last_snapshot_index {
+                meta.last_snapshot_term
+            } else {
+                meta.logs.read().await.get(&ci).map(|e| e.term).unwrap_or(0)
+            };
+            term_at_commit == meta.term
+        };
+        if !own_term_committed {
+            let mut noop = noop_entry();
+            let (id, _) = match self.leader_append_log(meta, &mut noop).await {
+                Ok(position) => position,
+                Err(e) => {
+                    let reason =
+                        self.note_persist_failure(leader_flag, meta, "appending a no-op", &e);
+                    return Err(ClientCmdResponse::StorageFailure(reason));
+                }
+            };
+            match self
+                .try_sync_log_to_followers_on_plane(plane_id, leader_flag, meta, &noop, id)
+                .await
+            {
+                SyncOutcome::Committed(_) => {}
+                SyncOutcome::NotCommitted => {
+                    let (last_log_id, last_log_term) = {
+                        let logs = meta.logs.read().await;
+                        get_last_log_info!(meta, logs)
+                    };
+                    return Err(ClientCmdResponse::NotCommitted {
+                        last_log_term,
+                        last_log_id,
+                    });
+                }
+                SyncOutcome::StorageFailure(reason) => {
+                    return Err(ClientCmdResponse::StorageFailure(reason))
+                }
+            }
+        }
+        let (last_log_id, last_log_term) = {
+            let logs = meta.logs.read().await;
+            get_last_log_info!(meta, logs)
+        };
+        let not_committed = ClientCmdResponse::NotCommitted {
+            last_log_term,
+            last_log_id,
+        };
+        // C6: one change at a time.
+        let pending: Vec<(u64, u64, ConfigChange)> = {
+            let logs = meta.logs.read().await;
+            logs.range((std::ops::Bound::Excluded(meta.commit_index), Unbounded))
+                .filter_map(|(id, e)| config_change(e).map(|c| (*id, e.term, c)))
+                .collect()
+        };
+        if let Some((id, term, pending_change)) = pending.first() {
+            return if pending.len() == 1 && pending_change == change {
+                Ok(Some((*id, *term)))
+            } else {
+                Err(not_committed)
+            };
+        }
+        // A change that the voters already show needs no entry.
+        let already = match change {
+            ConfigChange::Add(address) => meta.voters.contains_key(&hash_str(address)),
+            ConfigChange::Remove(address) => !meta.voters.contains_key(&hash_str(address)),
+        };
+        if already {
+            // `true` for an add: the address is a voter and its entry is
+            // committed. A retry after a NotCommitted answer finds the change
+            // done and must see the same answer as the first call would have.
+            let data = match change {
+                ConfigChange::Add(_) => crate::utils::serde::serialize(&true),
+                ConfigChange::Remove(_) => crate::utils::serde::serialize(&()),
+            };
+            return Err(ClientCmdResponse::Success {
+                data: Ok(data),
+                last_log_term,
+                last_log_id,
+            });
+        }
+        Ok(None)
+    }
+
+    /// Make the follower table of the leader match the voters.
+    async fn reload_leader_followers(
+        &self,
+        meta: &mut RwLockWriteGuard<'_, RaftMeta>,
+        last_log_id: u64,
+    ) {
+        if let Membership::Leader(ref leader_meta) = meta.membership {
+            let mut leader_meta = leader_meta.write().await;
+            self.reload_leader_meta(&meta.voters, &mut leader_meta, last_log_id);
+            leader_meta
+                .followers
+                .retain(|id, _| meta.voters.contains_key(id));
         }
     }
 
@@ -4000,17 +4553,17 @@ impl RaftService {
         Ok(())
     }
 
-    async fn try_sync_log_to_followers_on_plane<'a>(
-        &'a self,
+    async fn try_sync_log_to_followers_on_plane(
+        &self,
         plane_id: PlaneId,
-        leader_flag: &'a AtomicBool,
-        mut meta: RwLockWriteGuard<'a, RaftMeta>,
+        leader_flag: &AtomicBool,
+        meta: &mut RwLockWriteGuard<'_, RaftMeta>,
         entry: &LogEntry,
         new_log_id: u64,
     ) -> SyncOutcome {
         debug!("Sync logs to followers on plane {}", plane_id.raw());
         if !self
-            .send_followers_heartbeat_on_plane(plane_id, &mut meta, Some(new_log_id), true)
+            .send_followers_heartbeat_on_plane(plane_id, meta, Some(new_log_id), true)
             .await
         {
             return SyncOutcome::NotCommitted;
@@ -4032,7 +4585,7 @@ impl RaftService {
                 drop(storage);
                 let reason = self.note_persist_failure(
                     leader_flag,
-                    &mut meta,
+                    meta,
                     &format!("committing log id {}", new_log_id),
                     &e,
                 );
@@ -4045,15 +4598,24 @@ impl RaftService {
             );
         }
         meta.persist_failures = 0;
-        apply_committed_prefix(&mut meta, new_log_id).await;
+        apply_committed_prefix(meta, new_log_id).await;
         meta.commit_index = new_log_id;
-        let result = apply_committed_entry(&mut meta, entry).await;
+        let result = apply_committed_entry(meta, entry).await;
         meta.last_applied = new_log_id;
+        if config_change(entry).is_some()
+            && is_leader(meta)
+            && !meta.voters.contains_key(&self.id)
+        {
+            // Rule C9: a leader that removed itself steps down once the
+            // change is committed.
+            let term = meta.term;
+            self.become_follower_on_plane(leader_flag, meta, term, 0);
+        }
 
         // Check if we should take a snapshot after committing
         let num_logs = meta.logs.read().await.len();
-        if self.should_take_snapshot(&meta, num_logs) {
-            self.take_snapshot(&mut meta).await;
+        if self.should_take_snapshot(meta, num_logs) {
+            self.take_snapshot(meta).await;
         }
 
         SyncOutcome::Committed(result)
@@ -4089,40 +4651,6 @@ impl RaftService {
             self.become_follower_on_plane(leader_flag, meta, term, 0);
         }
         reason
-    }
-
-    async fn try_sync_config_to_followers_on_plane<'a>(
-        &'a self,
-        plane_id: PlaneId,
-        mut meta: RwLockWriteGuard<'a, RaftMeta>,
-        entry: &LogEntry,
-        new_log_id: u64,
-    ) -> ExecResult {
-        // this will force followers to commit the changes
-        debug!("Sync config to followers on plane {}", plane_id.raw());
-        apply_committed_prefix(&mut meta, new_log_id).await;
-        meta.commit_index = new_log_id;
-        let data = apply_committed_entry(&meta, &entry).await;
-        // The apply just happened, so say so. This path -- every subscription
-        // and membership command -- advanced `commit_index` and applied the
-        // entry but left `last_applied` behind, which had two consequences:
-        // `check_commit` considered everything since the last data command
-        // unapplied and would re-apply it, and any reader of `last_applied`
-        // (the client-query freshness gate) concluded this member was
-        // permanently behind. On a plane whose traffic is mostly config
-        // commands the counter simply never moved: queries stalled forever at
-        // "no apply progress at log id 0" the moment the gate started telling
-        // the truth.
-        meta.last_applied = new_log_id;
-        if let Membership::Leader(ref leader_meta) = meta.membership {
-            let mut leader_meta = leader_meta.write().await;
-            let member_sm = meta.state_machine.read().await;
-            let ref members = member_sm.configs.members;
-            self.reload_leader_meta(members, &mut leader_meta, new_log_id);
-        }
-        self.send_followers_heartbeat_on_plane(plane_id, &mut meta, Some(new_log_id), true)
-            .await;
-        data
     }
 
     /// Check if we should take a snapshot based on configuration thresholds
@@ -4218,6 +4746,18 @@ impl RaftService {
                     // Update snapshot metadata FIRST so compaction can use it
                     meta.last_snapshot_index = snapshot_entity.last_included_index;
                     meta.last_snapshot_term = snapshot_entity.last_included_term;
+                    // The member list of the image is the applied list at the
+                    // snapshot index: the new base of the voters.
+                    let base_voters: Voters = meta
+                        .state_machine
+                        .read()
+                        .await
+                        .configs
+                        .members
+                        .values()
+                        .map(|m| (m.id, m.address.clone()))
+                        .collect();
+                    meta.base_voters = base_voters;
 
                     info!(
                         "Snapshot created successfully on plane {} at index={}, term={}",
@@ -4647,6 +5187,8 @@ impl RaftStateMachine {
 #[cfg(test)]
 mod compaction_tests;
 #[cfg(test)]
+mod membership_change_tests;
+#[cfg(test)]
 mod multi_member_tests;
 #[cfg(test)]
 mod persistence_tests;
@@ -4718,7 +5260,7 @@ mod test {
             match_index: 0,
         }));
         let client = crate::rpc::DEFAULT_CLIENT_POOL.get(&address).await.unwrap();
-        let rpc = super::AsyncServiceClient::new(&client);
+        let _ = client;
         let result = RaftService::send_follower_heartbeat(
             PlaneId::type1(),
             0,
@@ -4731,7 +5273,8 @@ mod test {
             state_machine,
             logs,
             follower.clone(),
-            rpc,
+            crate::raft::DEFAULT_SERVICE_ID,
+            address.clone(),
             service.id,
         )
         .await;
@@ -5669,6 +6212,9 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn server_membership() {
+        use super::{config_change, ConfigChange};
+        use std::time::Duration;
+
         let _ = env_logger::try_init();
         let s1_addr = String::from("127.0.0.1:2001");
         let s2_addr = String::from("127.0.0.1:2002");
@@ -5730,6 +6276,46 @@ mod test {
         info!("Server 3 join server 1 and server 2");
         let join_result = service3.join(&vec![s1_addr.clone(), s2_addr.clone()]).await;
         assert!(join_result.unwrap());
+        // A join commits and applies on the leader before it returns. A quorum
+        // can exclude service2, so its local membership can still lag.
+        let join_index = {
+            let meta = service1.read_meta().await;
+            let logs = meta.logs.read().await;
+            let entry = logs
+                .values()
+                .rev()
+                .find(|entry| {
+                    matches!(config_change(entry), Some(ConfigChange::Add(address)) if address == s3_addr)
+                })
+                .expect("the leader must hold the join entry");
+            assert!(
+                meta.commit_index >= entry.id,
+                "the join returned before the leader committed its entry"
+            );
+            assert!(
+                meta.last_applied >= entry.id,
+                "the join returned before the leader applied its entry"
+            );
+            entry.id
+        };
+        let expected_members = [service1.id, service2.id, service3.id];
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut all_applied = true;
+                for service in [&service1, &service2, &service3] {
+                    let meta = service.read_meta().await;
+                    all_applied &= meta.last_applied >= join_index
+                        && meta.voters.len() == expected_members.len()
+                        && expected_members.iter().all(|id| meta.voters.contains_key(id));
+                }
+                if all_applied {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("every member must apply the joined membership within 10 s");
         info!("Checking numbers of users on 3 servers");
         assert_eq!(service1.num_members().await, 3);
         assert_eq!(service2.num_members().await, 3);
@@ -5876,7 +6462,7 @@ mod test {
         assert_eq!(service2.num_logs().await, service3.num_logs().await);
         assert_eq!(service3.num_logs().await, service4.num_logs().await);
         assert_eq!(service4.num_logs().await, service5.num_logs().await);
-        assert_eq!(service5.num_logs().await, 4); // check all logs replicated
+        assert_eq!(service5.num_logs().await, 5); // check all logs replicated: the seed entry and 4 joins
 
         info!("All servers should have the same leader id on record");
         assert_eq!(service1.leader_id().await, service1.id);
@@ -6821,7 +7407,7 @@ mod test {
                 let port2 = port + 1;
                 let addr2 = format!("127.0.0.1:{}", port2);
 
-                let raft_service2 = RaftService::new(Options {
+                let opts_restore = Options {
                     storage: Storage::DISK(disk::DiskOptions {
                         path: data_path.clone(), // Same data directory!
                         take_snapshots: false,
@@ -6832,7 +7418,10 @@ mod test {
                     }),
                     address: addr2.clone(),
                     service_id: DEFAULT_SERVICE_ID,
-                });
+                };
+                // Another address on the same store: the explicit restore makes it the only voter.
+                crate::raft::restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID, false).await.unwrap();
+                let raft_service2 = RaftService::new(opts_restore);
 
                 // New SM with different initial state
                 let sm2 = SM { shots: 999 }; // Different from crashed instance
@@ -6926,6 +7515,8 @@ mod test {
                 last_snapshot_term: 0,
                 lifecycle: LifecycleState::Running,
                 persist_failures: 0,
+                voters: crate::raft::Voters::new(),
+                base_voters: crate::raft::Voters::new(),
             };
             let meta_lock = async_std::sync::RwLock::new(meta);
             let meta_guard = meta_lock.write().await;
@@ -7123,7 +7714,7 @@ mod test {
             // Phase 2: Recover from WAL
             {
                 info!("Phase 2: Recovering from WAL after crash");
-                let raft_service2 = RaftService::new(Options {
+                let opts_restore = Options {
                     storage: Storage::DISK(disk::DiskOptions {
                         path: data_path.clone(), // Same directory!
                         take_snapshots: false,
@@ -7134,7 +7725,10 @@ mod test {
                     }),
                     address: addr2.clone(), // Different port
                     service_id: DEFAULT_SERVICE_ID,
-                });
+                };
+                // Another address on the same store: the explicit restore makes it the only voter.
+                crate::raft::restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID, false).await.unwrap();
+                let raft_service2 = RaftService::new(opts_restore);
 
                 // Start with SAME initial state (WAL only replays commands, not full state)
                 let sm2 = SM { shots: 100 }; // Same as first instance
@@ -7432,7 +8026,7 @@ mod test {
 
             // ===== PHASE 2: Recover from WAL only =====
             {
-                let service2 = RaftService::new(Options {
+                let opts_restore = Options {
                     storage: Storage::DISK(disk::DiskOptions {
                         path: data_path.clone(), // Same directory
                         take_snapshots: false,
@@ -7443,7 +8037,10 @@ mod test {
                     }),
                     address: addr2.clone(),
                     service_id: DEFAULT_SERVICE_ID,
-                });
+                };
+                // Another address on the same store: the explicit restore makes it the only voter.
+                crate::raft::restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID, false).await.unwrap();
+                let service2 = RaftService::new(opts_restore);
 
                 // IMPORTANT: start with same initial state; WAL replays deltas
                 let sm2 = SM { shots: 50 };
@@ -7578,7 +8175,7 @@ mod test {
             let port2 = port1 + 50;
             let addr2 = format!("127.0.0.1:{}", port2);
             {
-                let svc2 = RaftService::new(Options {
+                let opts_restore = Options {
                     storage: Storage::DISK(disk::DiskOptions {
                         path: data_path.clone(),
                         take_snapshots: false,
@@ -7589,7 +8186,10 @@ mod test {
                     }),
                     address: addr2.clone(),
                     service_id: DEFAULT_SERVICE_ID,
-                });
+                };
+                // Another address on the same store: the explicit restore makes it the only voter.
+                crate::raft::restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID, false).await.unwrap();
+                let svc2 = RaftService::new(opts_restore);
                 let server2 = Server::new(&addr2);
                 server2.register_service(&svc2).await;
                 Server::listen_and_resume(&server2).await;
@@ -7687,6 +8287,8 @@ mod test {
                     last_snapshot_term: 0,
                     lifecycle: LifecycleState::Running,
                     persist_failures: 0,
+                    voters: crate::raft::Voters::new(),
+                    base_voters: crate::raft::Voters::new(),
                 };
                 let meta_lock = async_std::sync::RwLock::new(meta);
                 let meta_guard = meta_lock.write().await;
@@ -7839,6 +8441,8 @@ mod test {
                     last_snapshot_term: 0,
                     lifecycle: LifecycleState::Running,
                     persist_failures: 0,
+                    voters: crate::raft::Voters::new(),
+                    base_voters: crate::raft::Voters::new(),
                 };
                 let meta_lock = async_std::sync::RwLock::new(meta);
                 let meta_guard = meta_lock.write().await;
@@ -8057,7 +8661,7 @@ mod test {
             let port2 = port1 + 50;
             let addr2 = format!("127.0.0.1:{}", port2);
             {
-                let svc2 = RaftService::new(Options {
+                let opts_restore = Options {
                     storage: Storage::DISK(disk::DiskOptions {
                         path: data_path.clone(),
                         take_snapshots: true,
@@ -8068,7 +8672,10 @@ mod test {
                     }),
                     address: addr2.clone(),
                     service_id: DEFAULT_SERVICE_ID,
-                });
+                };
+                // Another address on the same store: the explicit restore makes it the only voter.
+                crate::raft::restore_sole_voter(opts_restore.storage.clone(), &addr2, DEFAULT_SERVICE_ID, false).await.unwrap();
+                let svc2 = RaftService::new(opts_restore);
                 let server2 = Server::new(&addr2);
                 server2.register_service(&svc2).await;
                 Server::listen_and_resume(&server2).await;

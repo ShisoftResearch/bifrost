@@ -1,8 +1,6 @@
 use crate::raft::state_machine::callback::server::Subscriptions;
 use crate::raft::state_machine::callback::SubKey;
 use crate::raft::state_machine::{RecoverError, StateMachineCtl};
-use crate::raft::AsyncServiceClient;
-use crate::rpc::{self, ServiceClient};
 use async_std::sync::*;
 use bifrost_hasher::hash_str;
 use futures::FutureExt;
@@ -12,9 +10,12 @@ use std::sync::Arc;
 
 pub const CONFIG_SM_ID: u64 = 1;
 
-#[derive(Clone)]
+/// A member of the configuration as the state machine applied it. The set the
+/// raft core uses for votes and quorums is `RaftMeta::voters`; this one is the
+/// applied (committed) set and feeds the snapshot only. It holds no network
+/// state, so applying a configuration entry cannot fail.
+#[derive(Clone, Debug)]
 pub struct RaftMember {
-    pub rpc: Arc<AsyncServiceClient>,
     pub address: String,
     pub id: u64,
 }
@@ -46,28 +47,12 @@ raft_state_machine! {
 impl StateMachineCmds for Configures {
     fn new_member_(&mut self, address: String) -> BoxFuture<bool> {
         async move {
-            let addr = address.clone();
-            let id = hash_str(&addr);
-            if !self.members.contains_key(&id) {
-                match rpc::DEFAULT_CLIENT_POOL.get(&address).await {
-                    Ok(client) => {
-                        self.members.insert(
-                            id,
-                            RaftMember {
-                                rpc: AsyncServiceClient::new_with_service_id(
-                                    self.service_id,
-                                    &client,
-                                ),
-                                address,
-                                id,
-                            },
-                        );
-                        return true;
-                    }
-                    Err(_) => {}
-                }
+            let id = hash_str(&address);
+            if self.members.contains_key(&id) {
+                return false;
             }
-            false
+            self.members.insert(id, RaftMember { address, id });
+            true
         }
         .boxed()
     }
@@ -617,16 +602,18 @@ mod tests {
         assert_eq!(config.members.len(), 0);
     }
 
+    /// Applying a configuration entry does not open a connection: the address
+    /// of a server that is down is added like any other (the voter set must not
+    /// depend on the network).
     #[tokio::test(flavor = "multi_thread")]
     async fn test_membership_join_unreachable_server() {
         let mut config = Configures::new(1);
 
-        // Try to add a member that's not actually running
         let unreachable_addr = String::from("127.0.0.1:9998");
         let result = config.new_member(unreachable_addr.clone()).await;
 
-        // Should fail because server is not reachable
-        assert!(!result, "Join should fail for unreachable server");
-        assert_eq!(config.members.len(), 0);
+        assert!(result, "the entry is applied whether or not the server runs");
+        assert_eq!(config.members.len(), 1);
+        assert!(config.member_existed(hash_str(&unreachable_addr)));
     }
 }

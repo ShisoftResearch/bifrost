@@ -36,6 +36,10 @@ impl std::fmt::Display for RecoverError {
 impl std::error::Error for RecoverError {}
 
 pub trait StateMachineCtl: Sync + Send + Any {
+    #[cfg(multisite_test)]
+    fn msraft_diagnostic(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
     fn id(&self) -> u64;
     fn snapshot(&self) -> Vec<u8>;
     fn recover(&mut self, data: Vec<u8>) -> ::futures::future::BoxFuture<()>;
@@ -87,6 +91,8 @@ pub trait StateMachineClient {
 
 pub const MASTER_SM_ID: u64 = 0;
 pub const CONFIG_SM_ID: u64 = 1;
+/// Entries of this state machine are kept in the log and applied as nothing.
+pub const NOOP_SM_ID: u64 = 2;
 pub const RESERVED_INTERNAL_SM_ID_END: u64 = 2;
 
 pub const fn is_reserved_internal_sm_id(sm_id: u64) -> bool {

@@ -113,9 +113,15 @@ pub struct HardState {
 /// bytes. It is replaced whole (temp file, fsync, rename, fsync of the
 /// directory), so a crash leaves the old state or the new one, never a mix;
 /// the checksum catches media damage, which is an error, not a reset.
+///
+/// The last byte of the magic is the version of the whole raft store of the
+/// plane, not only of this record: the log semantics (entry 1 adds the seed
+/// as a voter; a no-op entry form; membership entries stay in the WAL) and
+/// the snapshot payload (voters, membership roster). `RHS1` stores are not
+/// read; they give the typed version error and must be imported again.
 const HARD_STATE_FILE: &str = "hardstate.dat";
 const HARD_STATE_TEMP: &str = "hardstate.dat.tmp";
-const HARD_STATE_MAGIC: [u8; 4] = *b"RHS1";
+const HARD_STATE_MAGIC: [u8; 4] = *b"RHS2";
 const HARD_STATE_LEN: usize = 25;
 
 impl HardState {
