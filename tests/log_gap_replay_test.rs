@@ -9,8 +9,8 @@ use bifrost::raft::disk::DiskOptions;
 /// This test manufactures the hole directly: run a node, commit a handful of
 /// config commands, stop it, strip the first record AFTER the bootstrap voter
 /// entry out of log.dat while leaving commit.idx alone, and restart. The plane
-/// must come back live -- leader elected, a fresh command applied -- instead
-/// of wedging. The bootstrap entry (id 1, `add_voter(self)`) must stay: the
+/// must come back live -- leader elected -- instead of wedging. The bootstrap
+/// entry (id 1, `add_voter(self)`) must stay: the
 /// voters fold from the log (rule C1), so a hole at id 1 would leave no voter.
 use bifrost::raft::state_machine::callback::SubKey;
 use bifrost::raft::{
@@ -123,7 +123,8 @@ async fn replay_skips_holes_below_durable_entries() {
     sleep(Duration::from_millis(1000)).await;
 
     // Manufacture the hole a skipped unrecoverable entry leaves behind: strip
-    // the first command record (id 2), below the bootstrap voter entry (id 1).
+    // the first command record (id 2). The hole follows the bootstrap voter
+    // entry (id 1) and precedes the later durable entries.
     strip_log_record(
         std::path::Path::new(&data_path).join("log.dat").as_path(),
         1,
