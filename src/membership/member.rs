@@ -46,13 +46,37 @@ impl MemberService {
         raft_service.rt.spawn(async move {
             while !service_clone.closed.load(Ordering::Relaxed) {
                 let start_time = get_time();
-                let rpc_client = service_clone.raft_client.current_leader_rpc_client().await;
-                if let Ok(rpc_client) = rpc_client {
-                    let _ping_res =
-                        ImmeServiceClient::ping(DEFAULT_SERVICE_ID, &rpc_client, service_clone.id)
-                            .await;
-                } else {
-                    error!("Cannot find RPC client for membership heartbeat to leader");
+                // Ping the leader. A follower answers `NotLeader` with a hint
+                // and a dead leader answers nothing: in both cases the cache of
+                // the leader is refreshed and the ping is sent again at once.
+                let mut accepted = false;
+                for _ in 0..3 {
+                    let rpc_client = service_clone.raft_client.current_leader_rpc_client().await;
+                    let reply = match rpc_client {
+                        Ok(rpc_client) => {
+                            ImmeServiceClient::ping(DEFAULT_SERVICE_ID, &rpc_client, service_clone.id)
+                                .await
+                                .ok()
+                        }
+                        Err(_) => {
+                            error!("Cannot find RPC client for membership heartbeat to leader");
+                            None
+                        }
+                    };
+                    let hint = match reply {
+                        Some(PingReply::Accepted) => {
+                            accepted = true;
+                            break;
+                        }
+                        Some(PingReply::NotLeader { leader_hint }) => leader_hint,
+                        None => 0,
+                    };
+                    if !service_clone.raft_client.refresh_leader(hint).await {
+                        break;
+                    }
+                }
+                if !accepted {
+                    debug!("Membership heartbeat of {} was not accepted by a leader", service_clone.id);
                 }
                 let time_now = get_time();
                 let elapsed_time = time_now - start_time;

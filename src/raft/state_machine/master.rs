@@ -1,4 +1,5 @@
 use self::configs::{Configures, RaftMember, CONFIG_SM_ID};
+use super::NOOP_SM_ID;
 use super::super::*;
 use super::*;
 use std::collections::HashMap;
@@ -16,7 +17,29 @@ pub enum ExecError {
     NotCommitted,
     ShuttingDown,
     Unknown,
+    /// Generic retry exhaustion with no more specific diagnosis.
     TooManyRetry,
+    /// A query kept answering "left behind" while the serving member made no
+    /// apply progress: the client demands position `client_cursor`, the
+    /// member has applied only `server_applied` and holds a log up to
+    /// `server_last_log`.
+    ApplyStalled {
+        plane: u64,
+        sm_id: u64,
+        client_cursor: u64,
+        server_applied: u64,
+        server_last_log: u64,
+        stalled_rounds: u64,
+        elapsed: std::time::Duration,
+    },
+    /// The leader could not make the command or its commit durable: it was
+    /// not committed or applied, and it is not retried here (the outcome
+    /// is unknown -- its entry may still commit -- and the failure is the
+    /// storage's, which a retry does not fix).
+    StorageFailure(String),
+    /// A committed command does not decode. This member cannot apply it and
+    /// must not skip it: the plane stops (a typed error, not a panic).
+    CommandDoesNotDecode { sm_id: u64, fn_id: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,25 +90,47 @@ impl StateMachineCtl for MasterStateMachine {
         data
     }
     fn recover(&mut self, data: Vec<u8>) -> BoxFuture<()> {
-        match crate::utils::serde::deserialize::<SnapshotDataItems>(data.as_slice()) {
-            Some(sms) => {
-                for (sm_id, snapshot) in sms {
-                    self.snapshots.insert(sm_id, snapshot);
-                }
-            }
-            None => {
-                error!(
-                    "Failed to deserialize master state machine snapshot for plane {}. State machine recovery failed.",
-                    self.plane_id.raw()
-                );
-                // Clear snapshots to start fresh - this is safer than leaving corrupted state
-                self.snapshots.clear();
-            }
+        if let Err(e) = self.stage_snapshot(data) {
+            // Only raft recovery restores the master, through `try_recover`;
+            // this path cannot report the failure, and changes nothing.
+            error!("{}; nothing staged", e);
         }
         future::ready(()).boxed()
     }
+    fn try_recover(&mut self, data: Vec<u8>) -> BoxFuture<Result<(), RecoverError>> {
+        future::ready(self.stage_snapshot(data)).boxed()
+    }
     fn recoverable(&self) -> bool {
         true
+    }
+}
+
+/// Run a dispatch of a committed command. A command that does not decode makes
+/// the generated dispatch panic; here it becomes the typed error
+/// `CommandDoesNotDecode`, which stops the plane instead of the process. Any
+/// other panic is not touched.
+async fn decode_guard<F>(entry: &LogEntry, dispatch: F) -> Result<Option<Vec<u8>>, ExecError>
+where
+    F: std::future::Future<Output = Option<Vec<u8>>>,
+{
+    use futures::FutureExt;
+    match std::panic::AssertUnwindSafe(dispatch).catch_unwind().await {
+        Ok(out) => Ok(out),
+        Err(payload) => {
+            let text = payload
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("");
+            if text.contains("Failed to deserialize function call data") {
+                Err(ExecError::CommandDoesNotDecode {
+                    sm_id: entry.sm_id,
+                    fn_id: entry.fn_id,
+                })
+            } else {
+                std::panic::resume_unwind(payload)
+            }
+        }
     }
 }
 
@@ -99,6 +144,14 @@ pub fn parse_output<'a>(r: Option<Vec<u8>>) -> ExecResult {
 }
 
 impl MasterStateMachine {
+    #[cfg(multisite_test)]
+    pub fn msraft_diagnostic(&self) -> serde_json::Value {
+        self.subs
+            .get(&crate::membership::DEFAULT_SERVICE_ID)
+            .map(|sm| sm.msraft_diagnostic())
+            .unwrap_or(serde_json::Value::Null)
+    }
+
     pub fn new(service_id: u64) -> MasterStateMachine {
         Self::new_on_plane(service_id, PlaneId::type1())
     }
@@ -173,9 +226,32 @@ impl MasterStateMachine {
         result
     }
 
-    pub async fn recover_registered_snapshots(&mut self) {
+    /// Stage the per-state-machine images of a master snapshot: the member
+    /// list and every registered state machine take theirs in
+    /// `recover_registered_snapshots`, later registrations at registration.
+    /// An image that does not decode is an error and stages nothing.
+    pub fn stage_snapshot(&mut self, data: Vec<u8>) -> Result<(), RecoverError> {
+        let sms = crate::utils::serde::deserialize::<SnapshotDataItems>(data.as_slice())
+            .ok_or_else(|| RecoverError {
+                sm_id: 0,
+                reason: format!(
+                    "the master snapshot of plane {} ({} bytes) does not decode",
+                    self.plane_id.raw(),
+                    data.len()
+                ),
+            })?;
+        for (sm_id, snapshot) in sms {
+            self.snapshots.insert(sm_id, snapshot);
+        }
+        Ok(())
+    }
+
+    /// Apply staged images to the member list and the registered state
+    /// machines. The first image that cannot be restored stops recovery with
+    /// its error: continuing would run a member on state it does not hold.
+    pub async fn recover_registered_snapshots(&mut self) -> Result<(), RecoverError> {
         if let Some(snapshot) = self.snapshots.remove(&CONFIG_SM_ID) {
-            self.configs.recover(snapshot).await;
+            self.configs.try_recover(snapshot).await?;
         }
 
         let recoverable_ids: Vec<u64> = self
@@ -187,10 +263,11 @@ impl MasterStateMachine {
         for sm_id in recoverable_ids {
             if let Some(snapshot) = self.snapshots.remove(&sm_id) {
                 if let Some(smc) = self.subs.get_mut(&sm_id) {
-                    smc.recover(snapshot).await;
+                    smc.try_recover(snapshot).await?;
                 }
             }
         }
+        Ok(())
     }
 
     pub fn members(&self) -> &HashMap<u64, RaftMember> {
@@ -199,8 +276,13 @@ impl MasterStateMachine {
 
     pub async fn commit_cmd(&mut self, entry: &LogEntry) -> ExecResult {
         match entry.sm_id {
+            NOOP_SM_ID => Ok(crate::utils::serde::serialize(&())),
             CONFIG_SM_ID => {
-                let out = self.configs.fn_dispatch_cmd(entry.fn_id, &entry.data).await;
+                let out = decode_guard(
+                    entry,
+                    self.configs.fn_dispatch_cmd(entry.fn_id, &entry.data),
+                )
+                .await?;
                 match out {
                     Some(d) => Ok(d),
                     None => {
@@ -218,7 +300,11 @@ impl MasterStateMachine {
             _ => {
                 match self.subs.get_mut(&entry.sm_id) {
                     Some(sm) => {
-                        let out = sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data).await;
+                        let out = decode_guard(
+                            entry,
+                            sm.as_mut().fn_dispatch_cmd(entry.fn_id, &entry.data),
+                        )
+                        .await?;
                         match out {
                             Some(data) => Ok(data),
                             None => {
@@ -505,7 +591,9 @@ mod tests {
         // Snapshot is kept pending until registered snapshots are explicitly recovered.
         assert_eq!(msm.snapshots.get(&10), Some(&snapshot_data));
 
-        msm.recover_registered_snapshots().await;
+        msm.recover_registered_snapshots()
+            .await
+            .expect("staged images restore");
 
         // Snapshot should be removed after replay.
         assert!(!msm.snapshots.contains_key(&10));
@@ -537,7 +625,9 @@ mod tests {
         assert!(added, "Member should join successfully");
         msm.snapshots.insert(CONFIG_SM_ID, restored.snapshot());
 
-        msm.recover_registered_snapshots().await;
+        msm.recover_registered_snapshots()
+            .await
+            .expect("staged images restore");
 
         assert_eq!(msm.configs.members.len(), 1);
         assert!(!msm.snapshots.contains_key(&CONFIG_SM_ID));
@@ -676,12 +766,29 @@ mod tests {
         // Add some existing snapshots
         msm.snapshots.insert(100, vec![1, 2, 3]);
 
-        // Recover with invalid data
+        // An image that does not decode is a typed error and stages nothing:
+        // what was staged stays, nothing is cleared or replaced.
         let invalid_data = vec![0xFF, 0xFF, 0xFF];
-        msm.recover(invalid_data).await;
+        let err = msm
+            .try_recover(invalid_data)
+            .await
+            .expect_err("garbage must not stage");
+        assert_eq!(err.sm_id, 0);
+        assert_eq!(msm.snapshots.get(&100), Some(&vec![1, 2, 3]));
+    }
 
-        // Snapshots should be cleared on error
-        assert!(msm.snapshots.is_empty());
+    /// A staged image that cannot be restored stops
+    /// `recover_registered_snapshots` with its error instead of leaving that
+    /// state machine (here the member list) empty or stale.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_corrupt_staged_image_stops_recovery() {
+        let mut msm = MasterStateMachine::new(1);
+        msm.snapshots.insert(CONFIG_SM_ID, vec![0xFF, 0x00, 0x13]);
+        let err = msm
+            .recover_registered_snapshots()
+            .await
+            .expect_err("a member-list image that does not decode must stop recovery");
+        assert_eq!(err.sm_id, CONFIG_SM_ID);
     }
 
     #[test]
@@ -738,6 +845,15 @@ mod tests {
         let _ = ExecError::ShuttingDown;
         let _ = ExecError::Unknown;
         let _ = ExecError::TooManyRetry;
+        let _ = ExecError::ApplyStalled {
+            plane: 0,
+            sm_id: 1,
+            client_cursor: 2,
+            server_applied: 1,
+            server_last_log: 1,
+            stalled_rounds: 8,
+            elapsed: std::time::Duration::from_millis(400),
+        };
     }
 
     #[test]
@@ -991,7 +1107,9 @@ mod tests {
             data: HashMap::new(),
         });
         new_msm.register(new_kv_sm);
-        new_msm.recover_registered_snapshots().await;
+        new_msm.recover_registered_snapshots()
+            .await
+            .expect("staged images restore");
 
         // Verify data was recovered by querying
         let get_data = crate::utils::serde::serialize(&String::from("session:5"));

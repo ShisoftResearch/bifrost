@@ -114,25 +114,33 @@ load_snapshot_on_startup();
 
 **What happens**:
 1. Leader detects: `follower.next_index <= leader.last_snapshot_index`
-2. Leader generates snapshot from state machines
-3. Leader sends via `install_snapshot` RPC
-4. Follower receives snapshot
-5. Follower recovers state machine
-6. Follower persists snapshot to disk
-7. Follower compacts old logs
-8. Follower continues with normal log replication
+2. Leader reads its PERSISTED snapshot (`snapshot.dat`): image, index and term
+   were written together. Never the live state machine: it is ahead of the
+   snapshot index, and a follower would apply the entries in between twice.
+3. Leader sends it via the `install_snapshot` RPC, labelled with the
+   snapshot's own index and term
+4. Follower refuses it from a stale term, and ignores it when it has already
+   applied up to that index (a retransmitted or older snapshot changes nothing)
+5. Follower persists the snapshot (a failed write installs nothing; the
+   leader sends it again)
+6. Follower keeps its log after the snapshot index only if it holds the
+   snapshot's last entry with the same term; otherwise its whole log is
+   superseded, in memory and in `log.dat`
+7. Follower recovers its registered state machines and member list from it
+   (later registrations recover at registration)
+8. Follower continues with normal log replication from `index + 1`
 
 ```rust
 // In send_follower_heartbeat()
 if follower.next_index <= last_snapshot_index {
-    // Follower needs compacted logs - send snapshot
-    let snapshot = master_sm.snapshot().unwrap();
+    let snapshot = StorageEntity::read_snapshot_at(dir, plane_id).await?;
     rpc.install_snapshot(
+        plane_id,
         term,
         leader_id,
-        last_snapshot_index,
-        last_snapshot_term,
-        snapshot
+        snapshot.last_included_index,
+        snapshot.last_included_term,
+        snapshot.snapshot,
     ).await;
 }
 ```
@@ -186,10 +194,31 @@ When using disk storage, the following files are created:
 
 ```
 /var/lib/myapp/raft/
-├── log.dat          # Persisted Raft log entries
-├── snapshot.dat     # Latest snapshot with CRC32
-└── snapshot.dat.tmp # Temporary file during writes (atomic)
+├── log.dat           # Persisted Raft log entries
+├── commit.idx        # Commit index (replay bound after a restart)
+├── hardstate.dat     # Current term and vote (Raft's persistent state)
+├── snapshot.dat      # Latest snapshot with CRC32
+└── *.tmp             # Temporary files during atomic replacement
 ```
+
+### Hard State (`hardstate.dat`)
+
+The current term and the vote cast in it, as Raft requires them to survive a
+crash. A fixed 25-byte record -- `"RHS1"`, term (u64), vote flag (u8), vote
+(u64), CRC32 of the preceding bytes -- replaced whole: temp file, fsync,
+rename, fsync of the directory. It is written only when the term or vote
+changes, and always before anything depends on it: a vote is granted, a
+candidate sends RequestVote, a member answers in an adopted term, a leader
+appends in its term.
+
+On a restart the persisted term is authoritative; "the term is at least every
+log entry's term and the snapshot's term" is checked, and violations are
+logged and raised. A brand-new store creates `hardstate.dat` at term 0; a
+store with a log, snapshot or commit index but no hard state refuses to start
+(`MissingHardState`) -- there is no derivation for stores written before the
+hard state existed, they are reimported. A damaged file is an error at
+startup too: guessing the term or forgetting the vote is how a member votes
+twice.
 
 ### Snapshot File Format
 
@@ -233,9 +262,22 @@ service.take_snapshot(&mut meta).await;
 - If process crashes during snapshot write, old snapshot remains intact
 
 ### 2. **Corruption Detection**
-- CRC32 checksum on all snapshots
-- Corrupted snapshots are detected and ignored
-- System falls back to log-based recovery
+- CRC32 checksum on snapshots and the hard state
+- A damaged snapshot, hard state or commit index stops the plane at startup
+  instead of being ignored: each holds state the log alone cannot rebuild (an
+  installed snapshot, a vote, the replay bound). An empty `snapshot.dat`
+  means "no snapshot yet".
+
+### 2a. **Persistence Failures Are Refused, Never Acknowledged**
+- A follower whose WAL write, fsync, suffix cut or hard-state write fails
+  answers AppendEntries `NotPersisted` and does not move its commit index; a
+  failed InstallSnapshot write installs nothing.
+- A leader whose WAL append, fsync, commit-index write or hard-state write
+  fails answers the client `StorageFailure` (`ExecError::StorageFailure`) and
+  does not commit; three failures in a row make it step down.
+- A failed WAL batch is cut back off the file; if that cut fails too, the WAL
+  refuses all writes until a restart replays what is on disk.
+- A vote whose write fails is answered "not granted".
 
 ### 3. **Raft Correctness**
 - Snapshots track correct term and index
@@ -291,10 +333,14 @@ log_compaction_threshold: 1000, // Compact aggressively
 - Check follower logs for error messages
 
 ### Issue: Corrupted snapshot detected
+The plane refuses to start rather than run without it.
 **Solution**:
-- Delete corrupted file, server will recover from logs
-- Investigate disk issues
-- Check for process crashes during snapshot writes
+- Investigate disk issues first
+- Only on a member whose log still holds every entry (the WAL is never
+  trimmed on disk, but a member that received its state by InstallSnapshot
+  does not hold the entries below it) is deleting `snapshot.dat` safe: it
+  then rebuilds from the log. Otherwise restore the member from a healthy
+  replica.
 
 ## Performance Considerations
 

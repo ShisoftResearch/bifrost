@@ -91,6 +91,12 @@ impl HlcSource {
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_millis())
             .unwrap_or(0);
+        #[cfg(multisite_test)]
+        let ms = {
+            let offset: i64 = std::env::var("MULTISITE_CLOCK_OFFSET_MS")
+                .ok().map(|value| value.parse().expect("clock offset in milliseconds")).unwrap_or(0);
+            (ms as i128 + offset as i128).max(0) as u128
+        };
         Self::pack_phys_ms_checked(ms)
     }
 

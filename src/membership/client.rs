@@ -40,17 +40,23 @@ impl MemberClient {
 
 pub struct ObserverClient {
     pub sm_client: Arc<SMClient>,
+    #[cfg(feature = "c3doubt_trace")]
+    test_roster: std::sync::OnceLock<(Vec<Member>, u64)>,
 }
 
 impl ObserverClient {
     pub fn new(raft_client: &Arc<RaftClient>) -> ObserverClient {
         ObserverClient {
             sm_client: Arc::new(SMClient::new(DEFAULT_SERVICE_ID, &raft_client)),
+            #[cfg(feature = "c3doubt_trace")]
+            test_roster: std::sync::OnceLock::new(),
         }
     }
     pub fn new_from_sm(sm_client: &Arc<SMClient>) -> ObserverClient {
         ObserverClient {
             sm_client: sm_client.clone(),
+            #[cfg(feature = "c3doubt_trace")]
+            test_roster: std::sync::OnceLock::new(),
         }
     }
     pub async fn new_group(&self, name: &String) -> Result<Result<u64, u64>, ExecError> {
@@ -74,8 +80,30 @@ impl ObserverClient {
             .group_members(&hash_str(group), &online_only)
             .await
     }
+    /// Read one member through a committed command, after completed removals.
+    pub async fn ordered_member(&self, id: u64) -> Result<(Option<Member>, u64), ExecError> {
+        self.sm_client.ordered_member(&id).await
+    }
     pub async fn all_members(&self, online_only: bool) -> Result<(Vec<Member>, u64), ExecError> {
+        #[cfg(feature = "c3doubt_trace")]
+        if let Some((members, version)) = self.test_roster.get() {
+            return Ok((
+                members
+                    .iter()
+                    .filter(|member| !online_only || member.online)
+                    .cloned()
+                    .collect(),
+                *version,
+            ));
+        }
         self.sm_client.all_members(&online_only).await
+    }
+    /// Supply a captured roster to model a lagging ordinary query reader.
+    #[cfg(feature = "c3doubt_trace")]
+    pub fn set_query_roster_for_test(&self, roster: (Vec<Member>, u64)) {
+        self.test_roster
+            .set(roster)
+            .expect("the test roster is already set");
     }
     pub async fn on_group_member_offline<F>(
         &self,

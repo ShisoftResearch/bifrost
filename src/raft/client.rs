@@ -13,10 +13,11 @@ use futures::future::BoxFuture;
 use std::clone::Clone;
 use std::cmp::max;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use lightning::map::{Map as _, PtrHashMap};
 use std::iter::FromIterator;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
 const ORDERING: Ordering = Ordering::Relaxed;
@@ -164,6 +165,8 @@ impl RaftPlaneClient {
 
 pub struct RaftClient {
     members: RwLock<Members>,
+    // Keyed discovery retains addresses independently of the live RPC roster.
+    known_addresses: Arc<PtrHashMap<u64, String>>,
     type1_state: Arc<PlaneClientState>,
     plane_states: RwLock<HashMap<PlaneId, Arc<PlaneClientState>>>,
     service_id: u64,
@@ -197,6 +200,7 @@ impl RaftClient {
                 clients: BTreeMap::new(),
                 id_map: HashMap::new(),
             }),
+            known_addresses: Arc::new(PtrHashMap::with_capacity(32)),
             type1_state: Self::new_plane_state(),
             plane_states: RwLock::new(HashMap::new()),
             service_id,
@@ -457,8 +461,13 @@ impl RaftClient {
         let cluster_info = self.cluster_info(PlaneId::type1(), servers).await;
         match cluster_info {
             Some(info) => {
-                let mut members = self.members.write().await;
                 let remote_members = info.members;
+                // This response is owned here. Publish addresses without a
+                // shared roster lock or a complete dictionary copy.
+                for (id, address) in &remote_members {
+                    self.known_addresses.insert(*id, address.clone());
+                }
+                let mut members = self.members.write().await;
                 let mut remote_ids = HashSet::with_capacity(remote_members.len());
                 members.id_map.clear();
                 for (id, addr) in remote_members {
@@ -824,6 +833,7 @@ impl RaftClient {
         let mut depth = 0;
         let mut left_behind_seen_log = 0u64;
         let mut left_behind_stalls = 0usize;
+        let query_started = Instant::now();
         loop {
             if depth == 0 {
                 trace!(
@@ -864,9 +874,9 @@ impl RaftClient {
                     sm_id,
                     fn_id
                 );
-                let res = rpc_client
-                    .c_query(plane_id, &self.gen_log_entry(&state, sm_id, fn_id, &data))
-                    .await;
+                let query_entry = self.gen_log_entry(&state, sm_id, fn_id, &data);
+                let client_cursor = query_entry.id;
+                let res = rpc_client.c_query(plane_id, &query_entry).await;
                 trace!(
                     "Query for plane {} from node {} for sm_id {}, fn_id {} completed",
                     plane_id.raw(),
@@ -879,6 +889,7 @@ impl RaftClient {
                         ClientQryResponse::LeftBehind {
                             last_log_term,
                             last_log_id,
+                            last_log_index,
                         } => {
                             debug!("Found left behind record on plane {}...{}, updating client state: server has log_id={}, term={}", plane_id.raw(), depth, last_log_id, last_log_term);
                             // Update client state from server to avoid retry loop
@@ -901,10 +912,22 @@ impl RaftClient {
                             }
                             if left_behind_stalls >= stall_limit {
                                 error!(
-                                    "Too many retry on query for plane {}, num_members {}, no apply progress after {} stalled rounds at log id {}",
-                                    plane_id.raw(), num_members, left_behind_stalls, left_behind_seen_log
+                                    "Query stalled on plane {} sm {}: client cursor {}, server applied {}, server last log {}, {} members, {} stalled rounds in {:?}",
+                                    plane_id.raw(), sm_id, client_cursor, last_log_id, last_log_index,
+                                    num_members, left_behind_stalls, query_started.elapsed()
                                 );
-                                return Err(ExecError::TooManyRetry);
+                                let plane = plane_id.raw();
+                                let stalled_rounds = left_behind_stalls as u64;
+                                let elapsed = query_started.elapsed();
+                                return Err(ExecError::ApplyStalled {
+                                    plane,
+                                    sm_id,
+                                    client_cursor,
+                                    server_applied: last_log_id,
+                                    server_last_log: last_log_index,
+                                    stalled_rounds,
+                                    elapsed,
+                                });
                             }
                             sleep(Duration::from_millis(LEFT_BEHIND_STALL_DELAY_MS)).await;
                             continue;
@@ -1065,6 +1088,17 @@ impl RaftClient {
                                 FailureAction::NotCommitted
                             }
                             Ok(ClientCmdResponse::ShuttingDown) => FailureAction::ShuttingDown,
+                            Ok(ClientCmdResponse::StorageFailure(reason)) => {
+                                // Not committed, outcome unknown: retrying would
+                                // append a second copy, so the caller decides.
+                                warn!(
+                                    "Command on plane {} refused by leader {}: storage failure: {}",
+                                    plane_id.raw(),
+                                    leader_id,
+                                    reason
+                                );
+                                return Err(ExecError::StorageFailure(reason));
+                            }
                             Err(e) => {
                                 warn!(
                                     "RAFTDBG_V3 client plane_id={} transport_or_rpc_error leader_id={} depth={} error={:?}",
@@ -1147,7 +1181,14 @@ impl RaftClient {
                             plane_id.raw(), e
                         );
                     }
-                    sleep(Duration::from_millis(UPDATE_INFO_RETRY_DELAY_MS)).await;
+                    // Back off: an election takes seconds, and a tight loop
+                    // against a member that has no leader only adds load.
+                    // The delay grows from 10 ms to 250 ms.
+                    let backoff_ms = std::cmp::min(
+                        UPDATE_INFO_RETRY_DELAY_MS * (1 + update_info_depth as u64 / 4),
+                        250,
+                    );
+                    sleep(Duration::from_millis(backoff_ms)).await;
                     continue;
                 }
                 FailureAction::SwitchLeader => {
@@ -1226,8 +1267,20 @@ impl RaftClient {
         }
     }
 
+    /// Share keyed address discovery. The map is never used for iteration.
+    pub(crate) fn known_server_addresses(&self) -> Arc<PtrHashMap<u64, String>> {
+        self.known_addresses.clone()
+    }
+
     pub fn leader_id(&self) -> u64 {
         self.type1_state.leader_id.load(ORDERING)
+    }
+
+    /// Test hook: pretend this client has observed `cursor` on the plane.
+    #[cfg(test)]
+    pub(crate) async fn force_cursor_for_test(&self, plane_id: PlaneId, cursor: u64) {
+        let state = self.plane_state(plane_id).await;
+        swap_when_greater(&state.last_log_id, cursor);
     }
 
     pub async fn leader_client(&self) -> Option<(u64, Client)> {
@@ -1306,6 +1359,53 @@ impl RaftClient {
             }
         }
     }
+    #[cfg(multisite_test)]
+    pub fn msraft_cached_leader(&self) -> u64 {
+        self.type1_state.leader_id.load(Relaxed)
+    }
+
+    /// The leader this client knows is wrong or gone. Point at `hint` if the
+    /// client holds a connection to it; otherwise ask the servers again.
+    /// Returns whether a leader candidate is known afterwards.
+    pub async fn refresh_leader(&self, hint: u64) -> bool {
+        if hint != 0 && hint != self.type1_state.leader_id.load(ORDERING) {
+            let members = self.members.read().await;
+            if members.clients.contains_key(&hint) {
+                self.type1_state.leader_id.store(hint, ORDERING);
+                return true;
+            }
+        }
+        let servers = {
+            let members = self.members.read().await;
+            Vec::from_iter(members.id_map.values().cloned())
+        };
+        if self.update_plane_info(PlaneId::type1(), &servers).await.is_err() {
+            return false;
+        }
+        // `cluster_info` returns the first server that names a leader, so the
+        // cursor above may come from a follower that lags. A read that starts
+        // from this cursor may be served by such a follower. Raise the cursor
+        // to the position of the leader itself (RC8).
+        let leader_id = self.type1_state.leader_id.load(ORDERING);
+        if leader_id != 0 {
+            if let Ok(info) = self.cluster_info_on_plane(PlaneId::type1()).await {
+                if info.leader_id == leader_id {
+                    swap_when_greater(&self.type1_state.last_log_id, info.last_log_id);
+                    swap_when_greater(&self.type1_state.last_log_term, info.last_log_term);
+                }
+            }
+        }
+        true
+    }
+
+    /// The position that a query of this client must see at least.
+    pub fn read_cursor(&self) -> (u64, u64) {
+        (
+            self.type1_state.last_log_term.load(ORDERING),
+            self.type1_state.last_log_id.load(ORDERING),
+        )
+    }
+
     pub async fn current_leader_rpc_client(&self) -> Result<Arc<rpc::RPCClient>, ()> {
         let (_, client) = self
             .current_leader_client_on_plane(PlaneId::type1(), &self.type1_state)
@@ -1379,6 +1479,7 @@ mod tests {
                 clients: BTreeMap::new(),
                 id_map: HashMap::new(),
             }),
+            known_addresses: Arc::new(PtrHashMap::with_capacity(32)),
             type1_state: RaftClient::new_plane_state(),
             plane_states: RwLock::new(HashMap::new()),
             service_id: DEFAULT_SERVICE_ID,

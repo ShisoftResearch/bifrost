@@ -3,7 +3,10 @@ use bifrost::raft::disk::DiskOptions;
 ///
 /// This test verifies the fix for the bug where single-node clusters
 /// failed to elect themselves as leader after recovering from persistent storage.
-use bifrost::raft::{client::RaftClient, Options, RaftService, Storage, DEFAULT_SERVICE_ID};
+use bifrost::raft::state_machine::callback::SubKey;
+use bifrost::raft::{
+    client::RaftClient, Options, PlaneId, RaftService, Storage, DEFAULT_SERVICE_ID,
+};
 use bifrost::rpc::Server;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -13,7 +16,11 @@ async fn test_single_node_cluster_recovery_becomes_leader() {
     let _ = env_logger::try_init();
 
     // Use test-specific directory
-    let data_path = "/tmp/bifrost_test_single_node_recovery_18000".to_string();
+    // Under TMPDIR, so a run can keep its scratch data off /tmp.
+    let data_path = std::env::temp_dir()
+        .join("bifrost_test_single_node_recovery_18000")
+        .to_string_lossy()
+        .to_string();
     // Clean up any existing data from previous runs
     let _ = std::fs::remove_dir_all(&data_path);
     std::fs::create_dir_all(&data_path).unwrap();
@@ -69,27 +76,28 @@ async fn test_single_node_cluster_recovery_becomes_leader() {
             .unwrap();
         println!("Phase 1: Created Raft client");
 
-        // Generate some logs by performing state machine operations
-        // Use the config state machine to add/remove a dummy member
+        // Generate some logs by performing state machine operations.
+        // `subscribe` is a configuration-state-machine command that does not
+        // change the voters (`config_change` ignores it). A dummy member that
+        // never joins must not be added as a voter: it raises the quorum to 2
+        // and the entry cannot commit (rules C6 and C8).
         use bifrost::raft::state_machine::configs::commands;
-
-        // Add a dummy member (will generate a log entry)
-        let result1 = client
-            .execute(
+        for i in 0..2u64 {
+            let key = SubKey::new(
+                DEFAULT_SERVICE_ID,
+                PlaneId::type1(),
                 bifrost::raft::state_machine::configs::CONFIG_SM_ID,
-                commands::new_member_::new(&"dummy:9999".to_string()),
-            )
-            .await;
-        println!("Phase 1: Added dummy member: {:?}", result1.is_ok());
-
-        // Remove the dummy member (another log entry)
-        let result2 = client
-            .execute(
-                bifrost::raft::state_machine::configs::CONFIG_SM_ID,
-                commands::del_member_::new(&"dummy:9999".to_string()),
-            )
-            .await;
-        println!("Phase 1: Removed dummy member: {:?}", result2.is_ok());
+                i,
+                0,
+            );
+            let result = client
+                .execute(
+                    bifrost::raft::state_machine::configs::CONFIG_SM_ID,
+                    commands::subscribe::new(&key, &format!("dummy{}:9999", i), &i),
+                )
+                .await;
+            println!("Phase 1: Subscribed dummy{}: {:?}", i, result.is_ok());
+        }
 
         // Wait for persistence
         sleep(Duration::from_millis(1000)).await;
@@ -194,7 +202,11 @@ async fn test_single_node_cluster_recovery_becomes_leader() {
 async fn test_single_node_multiple_restart_cycles() {
     let _ = env_logger::try_init();
 
-    let data_path = "/tmp/bifrost_test_single_node_cycles_18001".to_string();
+    // Under TMPDIR, so a run can keep its scratch data off /tmp.
+    let data_path = std::env::temp_dir()
+        .join("bifrost_test_single_node_cycles_18001")
+        .to_string_lossy()
+        .to_string();
     // Clean up any existing data from previous runs
     let _ = std::fs::remove_dir_all(&data_path);
     std::fs::create_dir_all(&data_path).unwrap();
@@ -249,20 +261,24 @@ async fn test_single_node_multiple_restart_cycles() {
         let client = RaftClient::new(&vec![address.clone()], DEFAULT_SERVICE_ID).await;
         assert!(client.is_ok(), "Cycle {}: RaftClient should connect", cycle);
 
-        // Generate logs to ensure persistence
+        // Generate logs to ensure persistence. `subscribe` does not change the
+        // voters: a dummy member that never joins must not be added as a voter
+        // (it raises the quorum to 2 and the entry cannot commit, rules C6
+        // and C8).
         if let Ok(ref client) = client {
             use bifrost::raft::state_machine::configs::commands;
             let dummy_addr = format!("dummy{}:9999", cycle);
+            let key = SubKey::new(
+                DEFAULT_SERVICE_ID,
+                PlaneId::type1(),
+                bifrost::raft::state_machine::configs::CONFIG_SM_ID,
+                cycle as u64,
+                0,
+            );
             let _ = client
                 .execute(
                     bifrost::raft::state_machine::configs::CONFIG_SM_ID,
-                    commands::new_member_::new(&dummy_addr),
-                )
-                .await;
-            let _ = client
-                .execute(
-                    bifrost::raft::state_machine::configs::CONFIG_SM_ID,
-                    commands::del_member_::new(&dummy_addr),
+                    commands::subscribe::new(&key, &dummy_addr, &(cycle as u64)),
                 )
                 .await;
             sleep(Duration::from_millis(500)).await; // Wait for persistence

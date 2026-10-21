@@ -26,3 +26,14 @@ extern crate log;
 #[macro_use]
 extern crate lazy_static;
 pub extern crate bytes;
+
+/// Test diagnostics. The feature removes all trace work when it is off.
+#[macro_export]
+macro_rules! doubt_trace {
+    ($($arg:tt)*) => {{
+        #[cfg(feature = "c3doubt_trace")]
+        eprintln!("C3DOUBT {} us {}:{} {}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros(),
+            file!(), line!(), format_args!($($arg)*));
+    }};
+}

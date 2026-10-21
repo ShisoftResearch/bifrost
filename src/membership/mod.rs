@@ -18,6 +18,7 @@ pub mod raft {
         def cmd hb_online_changed(online: Vec<u64>, offline: Vec<u64>);
         def cmd join(address: String) -> Option<u64>;
         def cmd leave(id: u64) -> bool;
+        def cmd ordered_member(id: u64) -> (Option<ClientMember>, u64);
         def cmd join_group(group_name: String, id: u64) -> bool;
         def cmd leave_group(group: u64, id: u64) -> bool;
         def cmd new_group(name: String) -> Result<u64, u64>;
@@ -41,9 +42,19 @@ pub mod raft {
 // The service only responsible for receiving heartbeat and
 // Updating last updated time
 // Expired update time will trigger timeout in the raft state machine
-mod heartbeat_rpc {
+pub mod heartbeat_rpc {
+    use serde::{Deserialize, Serialize};
+
+    /// The answer of a ping. A node that is not the raft leader does not keep
+    /// liveness; it names the leader it knows.
+    #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum PingReply {
+        Accepted,
+        NotLeader { leader_hint: u64 },
+    }
+
     service! {
-        rpc ping(id: u64);
+        rpc ping(id: u64) -> PingReply;
     }
 }
 
@@ -602,5 +613,13 @@ mod test {
         // assert_eq!(group_member_left_count.load(Ordering::Relaxed), 2); // this test case is unstable
         assert_eq!(group_member_online_count.load(Ordering::Relaxed), 0);
         assert_eq!(group_member_offline_count.load(Ordering::Relaxed), 1);
+    }
+}
+
+/// Test control: deliver the unchanged heartbeat RPC to an explicit member.
+#[cfg(multisite_test)]
+pub async fn msraft_ping(address: &String, id: u64) {
+    if let Ok(client) = crate::rpc::DEFAULT_CLIENT_POOL.get(address).await {
+        let _ = heartbeat_rpc::ImmeServiceClient::ping(DEFAULT_SERVICE_ID, &client, id).await;
     }
 }
