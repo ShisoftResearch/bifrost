@@ -7,27 +7,43 @@ use bifrost::raft::disk::DiskOptions;
 /// plane wedged behind log id 1 and the ranged index lost its placements.
 ///
 /// This test manufactures the hole directly: run a node, commit a handful of
-/// config commands, stop it, strip the FIRST record out of log.dat while
-/// leaving commit.idx alone, and restart. The plane must come back live --
-/// leader elected, a fresh command applied -- instead of wedging.
-use bifrost::raft::{client::RaftClient, Options, RaftService, Storage, DEFAULT_SERVICE_ID};
+/// config commands, stop it, strip the first record AFTER the bootstrap voter
+/// entry out of log.dat while leaving commit.idx alone, and restart. The plane
+/// must come back live -- leader elected -- instead of wedging. The bootstrap
+/// entry (id 1, `add_voter(self)`) must stay: the
+/// voters fold from the log (rule C1), so a hole at id 1 would leave no voter.
+use bifrost::raft::state_machine::callback::SubKey;
+use bifrost::raft::{
+    client::RaftClient, Options, PlaneId, RaftService, Storage, DEFAULT_SERVICE_ID,
+};
 use bifrost::rpc::Server;
 use std::convert::TryFrom;
 use std::time::Duration;
 use tokio::time::sleep;
 
-fn strip_first_log_record(log_path: &std::path::Path) {
+/// Strip the record at `skip_records` (0-based) out of log.dat.
+fn strip_log_record(log_path: &std::path::Path, skip_records: usize) {
     let data = std::fs::read(log_path).expect("read log.dat");
     // Framing: [8B record_len = 4 + payload][4B crc][payload]
     assert!(data.len() > 12, "log.dat too short to hold one record");
+    let mut pos = 0usize;
+    for _ in 0..skip_records {
+        let record_len =
+            u64::from_le_bytes(<[u8; 8]>::try_from(&data[pos..pos + 8]).unwrap()) as usize;
+        pos += 8 + record_len;
+    }
     let record_len =
-        u64::from_le_bytes(<[u8; 8]>::try_from(&data[0..8]).unwrap()) as usize;
-    let first_record_total = 8 + record_len;
+        u64::from_le_bytes(<[u8; 8]>::try_from(&data[pos..pos + 8]).unwrap()) as usize;
+    let record_total = 8 + record_len;
     assert!(
-        data.len() > first_record_total,
-        "log.dat holds only one record; the test needs later entries to stay behind"
+        data.len() > pos + record_total,
+        "log.dat holds only {} records; the test needs later entries to stay behind",
+        skip_records + 1
     );
-    std::fs::write(log_path, &data[first_record_total..]).expect("rewrite log.dat");
+    let mut stripped = Vec::with_capacity(data.len() - record_total);
+    stripped.extend_from_slice(&data[..pos]);
+    stripped.extend_from_slice(&data[pos + record_total..]);
+    std::fs::write(log_path, &stripped).expect("rewrite log.dat");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -72,12 +88,23 @@ async fn replay_skips_holes_below_durable_entries() {
         let client = RaftClient::new(&vec![address.clone()], DEFAULT_SERVICE_ID)
             .await
             .unwrap();
+        // `subscribe` is a configuration-state-machine command that does not
+        // change the voters (`config_change` ignores it). A dummy member that
+        // never joins must not be added as a voter: it raises the quorum to 2
+        // and the entry cannot commit (rules C6 and C8).
         use bifrost::raft::state_machine::configs::commands;
         for i in 0..4u32 {
+            let key = SubKey::new(
+                DEFAULT_SERVICE_ID,
+                PlaneId::type1(),
+                bifrost::raft::state_machine::configs::CONFIG_SM_ID,
+                i as u64,
+                0,
+            );
             client
                 .execute(
                     bifrost::raft::state_machine::configs::CONFIG_SM_ID,
-                    commands::new_member_::new(&format!("dummy{}:9999", i)),
+                    commands::subscribe::new(&key, &format!("dummy{}:9999", i), &(i as u64)),
                 )
                 .await
                 .expect("phase 1 command");
@@ -89,22 +116,30 @@ async fn replay_skips_holes_below_durable_entries() {
             .flush_persistence()
             .await
             .expect("flush the WAL and commit progress");
+        raft_service.shutdown().await;
+        server.shutdown().await;
     }
-    // Give the tokio runtime a beat to drop file handles.
-    sleep(Duration::from_millis(300)).await;
+    // Give the tokio runtime a beat to drop file handles and free the port.
+    sleep(Duration::from_millis(1000)).await;
 
-    // Manufacture the hole a skipped unrecoverable entry leaves behind.
-    strip_first_log_record(std::path::Path::new(&data_path).join("log.dat").as_path());
+    // Manufacture the hole a skipped unrecoverable entry leaves behind: strip
+    // the first command record (id 2). The hole follows the bootstrap voter
+    // entry (id 1) and precedes the later durable entries.
+    strip_log_record(
+        std::path::Path::new(&data_path).join("log.dat").as_path(),
+        1,
+    );
 
-    // Phase 2: restart on the doctored log. The plane must be live.
+    // Phase 2: restart on the doctored log, under the same address. The
+    // address decides the identity, so a new address would make the stored
+    // voter (id 1) a different member.
     {
-        let address2 = "127.0.0.1:18021".to_string();
         let raft_service = RaftService::new(Options {
             storage: disk(&data_path),
-            address: address2.clone(),
+            address: address.clone(),
             service_id: DEFAULT_SERVICE_ID,
         });
-        let server = Server::new(&address2);
+        let server = Server::new(&address);
         Server::listen_and_resume(&server).await;
         server.register_service(&raft_service).await;
         assert!(RaftService::start(&raft_service, true).await);
@@ -121,7 +156,7 @@ async fn replay_skips_holes_below_durable_entries() {
             .await
             .expect("recover the registered state machines");
         let applied = raft_service.last_applied_index().await;
-        // Phase 1 committed ids 1..=4 and the hole is id 1: a healthy replay
+        // Phase 1 committed ids 1..=5 and the hole is id 2: a healthy replay
         // lands on the last durable id. Wedged replay reports 0.
         assert!(
             applied >= 3,
