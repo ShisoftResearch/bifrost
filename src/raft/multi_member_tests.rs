@@ -719,3 +719,59 @@ async fn a_restart_never_lowers_the_term_below_the_log() {
     );
     node.stop().await;
 }
+
+/// A leader whose log has a hole (an entry that its WAL replay did not bring
+/// back: `append_logs` skips the entries of state machines that are not
+/// recoverable, and every member skips the same ones) must still bring a
+/// lagging follower up to date. When the follower's `next_index` walks back
+/// to the hole, `send_follower_heartbeat` does not find the entry at prev and
+/// panics ("Cannot find old logs for follower"). The panic stays inside the
+/// spawned heartbeat task and repeats every round, so the follower never
+/// catches up. Ignored until BF-LT-1 is fixed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "BF-LT-1: the leader panics on a hole at the follower's prev"]
+async fn a_lagging_follower_catches_up_past_a_hole_in_the_leaders_log() {
+    let _ = env_logger::try_init();
+    let mut members = cluster("leader_hole", 3, NEVER).await;
+    for _ in 0..2 {
+        members[0].add(1).await;
+    }
+    let all: Vec<&Member> = members.iter().collect();
+    assert_eq!(wait_for_values(&all, 2).await, vec![2, 2, 2]);
+
+    // C is down while three entries commit through A and B.
+    let (c_dir, c_addr) = members.remove(2).stop().await;
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        ids.push(members[0].add(1).await.1);
+    }
+    // The middle entry is absent from A's log, as after a WAL replay that
+    // skipped it.
+    {
+        let meta = members[0].svc.read_meta().await;
+        assert!(meta.logs.write().await.remove(&ids[1]).is_some());
+    }
+    // A new term resets A's follower table: C's next_index starts after A's
+    // last entry. C comes back after it, so its next_index walks back over
+    // the hole.
+    assert!(Service::reelect(members[0].svc.as_ref(), PlaneId::type1()).await);
+    members[0].add(1).await;
+    members.push(Member::launch(&c_dir, &c_addr, NEVER).await);
+
+    let target = members[0].position().await.0;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut reached = members[2].position().await.0;
+    while reached < target && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        reached = members[2].position().await.0;
+    }
+    assert!(
+        reached >= target,
+        "C stopped at log id {}, the leader is at {}",
+        reached,
+        target
+    );
+    for member in members {
+        member.stop().await;
+    }
+}
