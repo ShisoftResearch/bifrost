@@ -1156,7 +1156,7 @@ async fn follower_commit_before_registration(tag: &str, listen_first: bool) {
     assert_eq!(
         wait_for_values(&[&b], 5).await,
         vec![5],
-        "B lost the commands committed before its registration"
+        "B does not hold the 5 commands (lost, or applied twice)"
     );
     b.stop().await;
     for member in members {
@@ -1253,5 +1253,173 @@ async fn an_undecodable_committed_entry_stops_the_start_replay_of_a_type2_plane(
         .await
         .expect("register on the plane");
     assert_undecodable(plane.recover_after_register().await);
+    a.stop().await;
+}
+
+/// A follower buffers commands for its unregistered ledger, then falls
+/// behind the leader's compaction and gets an InstallSnapshot that covers
+/// them. Registration restores the installed image; the buffered commands
+/// are in it and must not be replayed on it (review round 4, N1). With the
+/// buffer kept, B read 9, not 7 (Observed).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_installed_snapshot_drops_the_buffered_commands_it_covers() {
+    let _ = env_logger::try_init();
+    let mut members = cluster("install_after_buffer", 3, 1).await;
+    for _ in 0..3 {
+        members[0].add(1).await;
+    }
+    {
+        let all: Vec<&Member> = members.iter().collect();
+        assert_eq!(wait_for_values(&all, 3).await, vec![3, 3, 3]);
+    }
+    snapshot_and_compact(&members[1].svc).await;
+    let (b_dir, b_addr) = members.remove(1).stop().await;
+    for _ in 0..2 {
+        members[0].add(1).await;
+    }
+    async_wait_secs().await;
+    let b = start_unregistered(&b_dir, &b_addr, 1).await;
+    let leader_commit = members[0].svc.read_meta().await.commit_index;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while b.svc.read_meta().await.last_applied < leader_commit && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        b.svc.read_meta().await.last_applied >= leader_commit,
+        "B did not apply (and buffer) the leader's commit before registration"
+    );
+    // B stops listening and misses 2 more commands; A compacts past them.
+    b.server.shutdown().await;
+    for _ in 0..2 {
+        members[0].add(1).await;
+    }
+    let index = snapshot_and_compact(&members[0].svc).await;
+    let (term, snapshot_term, image) = {
+        let meta = members[0].svc.read_meta().await;
+        let image = {
+            let master = meta.state_machine.read().await;
+            crate::raft::state_machine::StateMachineCtl::snapshot(&*master)
+        };
+        (meta.term, meta.last_snapshot_term, image)
+    };
+    let b_term = b.svc.read_meta().await.term;
+    let installed = Service::install_snapshot(
+        b.svc.as_ref(),
+        PlaneId::type1(),
+        term.max(b_term),
+        members[0].svc.id,
+        index,
+        snapshot_term,
+        image,
+    )
+    .await;
+    assert!(
+        matches!(installed, InstallSnapshotResult::Installed),
+        "install: {:?}",
+        installed
+    );
+    register_and_recover(&b).await;
+    assert_eq!(b.value().await, 7, "B applied the buffered commands twice");
+    b.svc.shutdown().await;
+    for member in members {
+        member.stop().await;
+    }
+}
+
+use super::compaction_tests::StateMachineCmds as _;
+
+/// A ledger whose image never restores.
+struct UnrestorableLedger {
+    value: u64,
+}
+
+impl super::compaction_tests::StateMachineCmds for UnrestorableLedger {
+    fn add(&mut self, value: u64) -> futures::future::BoxFuture<u64> {
+        use futures::FutureExt;
+        self.value += value;
+        futures::future::ready(self.value).boxed()
+    }
+    fn get(&self) -> futures::future::BoxFuture<u64> {
+        use futures::FutureExt;
+        futures::future::ready(self.value).boxed()
+    }
+}
+
+impl crate::raft::state_machine::StateMachineCtl for UnrestorableLedger {
+    raft_sm_complete!();
+    fn id(&self) -> u64 {
+        LEDGER_SM_ID
+    }
+    fn snapshot(&self) -> Vec<u8> {
+        crate::utils::serde::serialize(&self.value)
+    }
+    fn recover(&mut self, _data: Vec<u8>) -> futures::future::BoxFuture<()> {
+        use futures::FutureExt;
+        futures::future::ready(()).boxed()
+    }
+    fn try_recover(
+        &mut self,
+        _data: Vec<u8>,
+    ) -> futures::future::BoxFuture<Result<(), crate::raft::state_machine::RecoverError>>
+    {
+        use futures::FutureExt;
+        futures::future::ready(Err(crate::raft::state_machine::RecoverError {
+            sm_id: LEDGER_SM_ID,
+            reason: "test: the image does not restore".to_string(),
+        }))
+        .boxed()
+    }
+    fn recoverable(&self) -> bool {
+        true
+    }
+}
+
+/// A sole voter with a snapshot restarts; the ledger image fails to restore
+/// at registration (review round 4, N2). The ledger must not apply commands
+/// without its image (a command is buffered: `SmNotFound`), every
+/// `recover_after_register` reports the failure, and the plane stops.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_image_restore_at_registration_stops_the_plane() {
+    let _ = env_logger::try_init();
+    let addr = addresses(1).remove(0);
+    let a = Member::launch(&scratch_dir("failed_restore"), &addr, 1).await;
+    a.svc.bootstrap().await;
+    for _ in 0..3 {
+        a.add(1).await;
+    }
+    snapshot_and_compact(&a.svc).await;
+    let (dir, addr) = a.stop().await;
+    async_wait_secs().await;
+    let a = start_unregistered(&dir, &addr, 1).await;
+    a.svc
+        .register_state_machine(Box::new(UnrestorableLedger { value: 0 }))
+        .await;
+    match a.command(1).await {
+        ClientCmdResponse::Success {
+            data: Err(ExecError::SmNotFound(LEDGER_SM_ID)),
+            ..
+        } => {}
+        other => panic!("a ledger without its image took a command: {:?}", other),
+    }
+    for attempt in ["first", "second"] {
+        assert!(
+            matches!(
+                a.svc.recover_after_register().await,
+                Err(PlaneError::Recovery(_))
+            ),
+            "the {} recover_after_register did not report the failed restore",
+            attempt
+        );
+    }
+    assert!(RaftService::lifecycle_is_stopping(
+        a.svc.read_meta().await.lifecycle
+    ));
+    assert!(
+        !matches!(
+            a.command(1).await,
+            ClientCmdResponse::Success { data: Ok(_), .. }
+        ),
+        "the stopped plane applied a command"
+    );
     a.stop().await;
 }

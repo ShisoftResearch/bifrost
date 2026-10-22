@@ -66,7 +66,8 @@ pub struct MasterStateMachine {
     /// silently diverges from replicas that had it registered.
     pending_entries: HashMap<u64, Vec<LogEntry>>,
     /// Staged images that failed to restore at registration, by state
-    /// machine. `recover_registered_snapshots` returns the first one.
+    /// machine. `recover_registered_snapshots` returns the first one, each
+    /// time it runs.
     restore_failures: HashMap<u64, RecoverError>,
     pub configs: Configures,
     plane_id: PlaneId,
@@ -210,11 +211,16 @@ impl MasterStateMachine {
         if result == RegisterResult::OK {
             if let (Some(image), Some(sm)) = (self.snapshots.remove(&id), self.subs.get_mut(&id)) {
                 if let Err(e) = sm.try_recover(image).await {
+                    // Without its image the state machine must not apply
+                    // commands: it is unregistered again, so commands stay
+                    // buffered, and the failure stays for every later
+                    // `recover_registered_snapshots`.
                     error!(
-                        "Plane {}: {}; nothing is replayed into it",
+                        "Plane {}: {}; the state machine is not registered",
                         self.plane_id.raw(),
                         e
                     );
+                    self.subs.remove(&id);
                     self.restore_failures.insert(id, e);
                     return result;
                 }
@@ -262,6 +268,11 @@ impl MasterStateMachine {
                     data.len()
                 ),
             })?;
+        // The image covers every buffered command: a snapshot is staged at
+        // the start, before any command is buffered, or by an InstallSnapshot
+        // above the apply cursor, and every buffered command is at or below
+        // it. Replayed on the image, they would be applied twice.
+        self.pending_entries.clear();
         for (sm_id, snapshot) in sms {
             self.snapshots.insert(sm_id, snapshot);
         }
@@ -272,8 +283,8 @@ impl MasterStateMachine {
     /// machines. The first image that cannot be restored stops recovery with
     /// its error: continuing would run a member on state it does not hold.
     pub async fn recover_registered_snapshots(&mut self) -> Result<(), RecoverError> {
-        if let Some(id) = self.restore_failures.keys().next().copied() {
-            return Err(self.restore_failures.remove(&id).unwrap());
+        if let Some(e) = self.restore_failures.values().next() {
+            return Err(e.clone());
         }
         if let Some(snapshot) = self.snapshots.remove(&CONFIG_SM_ID) {
             self.configs.try_recover(snapshot).await?;

@@ -928,6 +928,15 @@ macro_rules! get_last_log_info {
     }};
 }
 
+/// A start replay that cannot restore an image or apply a committed entry
+/// stops the plane, as an InstallSnapshot that cannot restore does: the
+/// member does not serve state it does not hold.
+fn stop_on_recovery_error(meta: &mut RwLockWriteGuard<'_, RaftMeta>, leader_flag: &AtomicBool) {
+    meta.lifecycle = LifecycleState::Stopping;
+    meta.membership = Membership::Offline;
+    leader_flag.store(false, Relaxed);
+}
+
 async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
     // A committed entry that does not decode already stopped the plane.
     let _ = apply_committed(meta).await;
@@ -1347,16 +1356,15 @@ impl RaftService {
 
     async fn recover_after_register_inner(&self) -> Result<(), PlaneError> {
         let mut meta = self.meta.write().await;
-        {
-            let mut master_sm = meta.state_machine.write().await;
-            if let Err(e) = master_sm.recover_registered_snapshots().await {
-                error!(
-                    "Plane {}: {}; recovery stopped",
-                    PlaneId::type1().raw(),
-                    e
-                );
-                return Err(PlaneError::Recovery(e));
-            }
+        let restored = meta.state_machine.write().await.recover_registered_snapshots().await;
+        if let Err(e) = restored {
+            error!(
+                "Plane {}: {}; recovery stopped, stopping the plane",
+                PlaneId::type1().raw(),
+                e
+            );
+            stop_on_recovery_error(&mut meta, &self._is_leader);
+            return Err(PlaneError::Recovery(e));
         }
         info!(
             "Manual apply on plane {}: applying committed logs (commit_index={}, last_applied={})",
@@ -1364,9 +1372,10 @@ impl RaftService {
             meta.commit_index,
             meta.last_applied
         );
-        apply_committed(&mut meta)
-            .await
-            .map_err(PlaneError::Recovery)?;
+        if let Err(e) = apply_committed(&mut meta).await {
+            stop_on_recovery_error(&mut meta, &self._is_leader);
+            return Err(PlaneError::Recovery(e));
+        }
         info!(
             "Manual apply on plane {}: applied logs up to last_applied={}",
             PlaneId::type1().raw(),
@@ -2303,12 +2312,15 @@ impl RaftService {
     ) -> Result<(), PlaneError> {
         if let Some(runtime) = self.runtime_for_plane(plane_id).await? {
             let mut meta = runtime.meta.write().await;
-            {
-                let mut master_sm = meta.state_machine.write().await;
-                if let Err(e) = master_sm.recover_registered_snapshots().await {
-                    error!("Plane {}: {}; recovery stopped", plane_id.raw(), e);
-                    return Err(PlaneError::Recovery(e));
-                }
+            let restored = meta.state_machine.write().await.recover_registered_snapshots().await;
+            if let Err(e) = restored {
+                error!(
+                    "Plane {}: {}; recovery stopped, stopping the plane",
+                    plane_id.raw(),
+                    e
+                );
+                stop_on_recovery_error(&mut meta, &runtime.is_leader);
+                return Err(PlaneError::Recovery(e));
             }
             info!(
                 "Manual apply on plane {}: applying committed logs (commit_index={}, last_applied={})",
@@ -2316,9 +2328,10 @@ impl RaftService {
                 meta.commit_index,
                 meta.last_applied
             );
-            apply_committed(&mut meta)
-                .await
-                .map_err(PlaneError::Recovery)?;
+            if let Err(e) = apply_committed(&mut meta).await {
+                stop_on_recovery_error(&mut meta, &runtime.is_leader);
+                return Err(PlaneError::Recovery(e));
+            }
             meta.replay_pending = false;
             return Ok(());
         }
@@ -3825,9 +3838,11 @@ impl RaftService {
                     }
                     AppendEntriesResult::NotPersisted => {
                         // The follower holds nothing it can vouch for from
-                        // this round; like a failed RPC, retry next heartbeat.
+                        // this round (a failed write, not started yet, or
+                        // shutting down); like a failed RPC, retry next
+                        // heartbeat.
                         warn!(
-                            "Follower {} on plane {} could not persist entries from next_index {}",
+                            "Follower {} on plane {} did not acknowledge entries from next_index {} (not persisted, not started, or stopping)",
                             member_id,
                             plane_id.raw(),
                             follower.next_index

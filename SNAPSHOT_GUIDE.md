@@ -98,7 +98,10 @@ if should_take_snapshot() {
 6. Compacts logs already covered by snapshot
 7. Stages the image of each state machine that is not registered yet; it is
    restored when the state machine registers, before the commands buffered
-   for it are replayed
+   for it are replayed. An installed snapshot drops the buffered commands:
+   the image covers them. If an image does not restore, the state machine
+   stays unregistered, `recover_after_register` returns
+   `PlaneError::Recovery` each time, and the plane stops
 8. Continues normal operation
 
 Until `start` loads the snapshot, the member answers no AppendEntries,
