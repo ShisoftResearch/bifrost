@@ -238,8 +238,8 @@ impl std::fmt::Display for BadHardState {
 impl std::error::Error for BadHardState {}
 
 /// Startup error: a WAL record that does not read back, with more records
-/// after it. A torn write can damage only the last record, so this is media
-/// damage. Cutting the file there would drop acknowledged entries.
+/// after it. Replay cuts only a damaged tail. The records after this one can
+/// be acknowledged entries, so the file is not cut and the start stops.
 #[derive(Debug)]
 pub struct DamagedWal {
     pub plane_id: PlaneId,
@@ -268,17 +268,52 @@ impl std::fmt::Display for DamagedWal {
 
 impl std::error::Error for DamagedWal {}
 
-/// Startup error: the log that replay and the snapshot give has a hole. The
-/// WAL has a record at every id above the snapshot (`write_batch`), so an
-/// absent id is damage. Applying past it would run the state machines on a
-/// state the other members do not have.
+/// Startup error: the WAL has a damaged tail, but the durable commit index
+/// is above the last intact record. The cut would drop committed entries,
+/// and the next append would leave a hole at their ids. The file is not cut.
+#[derive(Debug)]
+pub struct DamagedCommittedTail {
+    pub plane_id: PlaneId,
+    pub path: PathBuf,
+    /// Byte offset of the damaged tail.
+    pub offset: u64,
+    /// Log id of the last intact record (0: none), or the snapshot index
+    /// when that is higher.
+    pub intact_through: u64,
+    /// The durable commit index (`commit.idx`).
+    pub commit_index: u64,
+    pub reason: String,
+}
+
+impl std::fmt::Display for DamagedCommittedTail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "WAL {} of plane {} is damaged from byte {} ({}): the intact log ends at log id {}, but log ids up to {} are committed",
+            self.path.display(),
+            self.plane_id.raw(),
+            self.offset,
+            self.reason,
+            self.intact_through,
+            self.commit_index
+        )
+    }
+}
+
+impl std::error::Error for DamagedCommittedTail {}
+
+/// Startup error: the log that replay and the snapshot give has a hole, or
+/// it ends below the commit index. The WAL has a record at every id above
+/// the snapshot (`write_batch`), so an absent id is damage. Applying past
+/// it would run the state machines on a state the other members do not
+/// have.
 #[derive(Debug)]
 pub struct LogHole {
     pub plane_id: PlaneId,
     /// The first absent log id.
-    pub missing: u64,
-    /// The next log id that is present.
-    pub next: u64,
+    pub first_missing: u64,
+    /// The last absent log id.
+    pub last_missing: u64,
 }
 
 impl std::fmt::Display for LogHole {
@@ -287,42 +322,55 @@ impl std::fmt::Display for LogHole {
             f,
             "the log of plane {} has a hole: log ids {} to {} are absent",
             self.plane_id.raw(),
-            self.missing,
-            self.next - 1
+            self.first_missing,
+            self.last_missing
         )
     }
 }
 
 impl std::error::Error for LogHole {}
 
-/// Check that the entries above `snapshot_index` start right after it and
-/// have no hole.
+/// Check that the entries above `snapshot_index` start right after it, have
+/// no hole and reach `commit_index`. Pass a `commit_index` of 0 when the
+/// store keeps no WAL (`append_logs` off): then the log is not durable.
 pub fn check_log_contiguous(
     plane_id: PlaneId,
     snapshot_index: u64,
+    commit_index: u64,
     logs: &LogsMap,
 ) -> io::Result<()> {
+    let hole = |first_missing, last_missing| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            LogHole {
+                plane_id,
+                first_missing,
+                last_missing,
+            },
+        )
+    };
     let mut expected = snapshot_index + 1;
-    for id in logs.range((Excluded(snapshot_index), Unbounded)).map(|(id, _)| *id) {
+    for id in logs
+        .range((Excluded(snapshot_index), Unbounded))
+        .map(|(id, _)| *id)
+    {
         if id != expected {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                LogHole {
-                    plane_id,
-                    missing: expected,
-                    next: id,
-                },
-            ));
+            return Err(hole(expected, id - 1));
         }
         expected += 1;
+    }
+    if commit_index >= expected {
+        return Err(hole(expected, commit_index));
     }
     Ok(())
 }
 
-/// Decide what a WAL record that does not read back is. `Ok(())`: a torn
-/// tail, which replay cuts. That is a record that ends at the file end, or a
-/// zero-filled tail (the file was extended but the bytes were not written).
-/// Any other bad record has records after it: a typed `DamagedWal` error.
+/// Decide what a WAL record that does not read back is. `Ok(())`: a damaged
+/// tail, which replay cuts if it is above the durable commit index
+/// (`refuse_committed_cut`). That is a record that ends at the file end, or
+/// a zero-filled tail (the file was extended but the bytes were not
+/// written). Any other bad record has records after it: a typed
+/// `DamagedWal` error.
 fn check_torn_tail(
     log_file: &mut std::fs::File,
     plane_id: PlaneId,
@@ -333,12 +381,6 @@ fn check_torn_tail(
     reason: String,
 ) -> io::Result<()> {
     if record_end >= file_len || zero_from(log_file, offset)? {
-        warn!(
-            "WAL torn tail of plane {} at pos {} ({}), truncating",
-            plane_id.raw(),
-            offset,
-            reason
-        );
         return Ok(());
     }
     Err(io::Error::new(
@@ -350,6 +392,42 @@ fn check_torn_tail(
             record_end,
             file_len,
             reason,
+        },
+    ))
+}
+
+/// Refuse to cut a damaged WAL tail that holds committed entries. The records
+/// at or below the durable commit index are acknowledged, so their bytes are
+/// synced; damage there is not a torn write. The intact log reaches the
+/// last intact record, or the snapshot index when that is higher (the
+/// snapshot is read only on this path).
+fn refuse_committed_cut(
+    plane_id: PlaneId,
+    base_path: &Path,
+    log_path: &Path,
+    offset: u64,
+    last_intact_id: u64,
+    commit_index: u64,
+    reason: &str,
+) -> io::Result<()> {
+    if commit_index <= last_intact_id {
+        return Ok(());
+    }
+    let snapshot_index = StorageEntity::read_snapshot_now(base_path, plane_id)?
+        .map_or(0, |snapshot| snapshot.last_included_index);
+    let intact_through = last_intact_id.max(snapshot_index);
+    if commit_index <= intact_through {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        DamagedCommittedTail {
+            plane_id,
+            path: log_path.to_path_buf(),
+            offset,
+            intact_through,
+            commit_index,
+            reason: reason.to_string(),
         },
     ))
 }
@@ -367,6 +445,31 @@ fn zero_from(file: &mut std::fs::File, offset: u64) -> io::Result<bool> {
             return Ok(false);
         }
     }
+}
+
+/// The commit progress (commit index, last applied) under `base_path`, `None`
+/// if there is none yet.
+fn read_commit_progress_at(base_path: &Path, plane_id: PlaneId) -> io::Result<Option<(u64, u64)>> {
+    let commit_path = base_path.join("commit.idx");
+    if !commit_path.exists() {
+        return Ok(None);
+    }
+    // Written by rename, so it is whole or absent; anything else is
+    // damage, and guessing 0 would hide acknowledged commits from replay.
+    let bytes = std::fs::read(&commit_path)?;
+    let buf: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "commit.idx of plane {} holds {} bytes, expected 16",
+                plane_id.raw(),
+                bytes.len()
+            ),
+        )
+    })?;
+    let commit_index = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+    let last_applied = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+    Ok(Some((commit_index, last_applied)))
 }
 
 /// Durably replace the hard state under `base_path`. Returns only once the
@@ -548,13 +651,39 @@ impl StorageEntity {
                     .create(true)
                     .read(true)
                     .truncate(false);
+                // The store version and the durable commit index come first:
+                // nothing of the WAL is read or cut before they are known.
+                let persisted_hard_state = read_hard_state(base_path)?;
+                if persisted_hard_state.is_none() {
+                    // A brand-new store starts at term 0 with no vote. A
+                    // store with any history but no hard state cannot say
+                    // which term it is in or whom it voted for, and
+                    // guessing is how a member votes twice: refuse it.
+                    let non_empty =
+                        |path: &Path| std::fs::metadata(path).map_or(false, |m| m.len() > 0);
+                    let has_history = non_empty(&log_path)
+                        || non_empty(&snapshot_path)
+                        || base_path.join("commit.idx").exists();
+                    if has_history {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            MissingHardState {
+                                plane_id,
+                                path: base_path.join(HARD_STATE_FILE),
+                            },
+                        ));
+                    }
+                }
+                // A damaged commit.idx is an error, not a 0: replay stops at
+                // the commit index, and 0 would hide acknowledged commits.
+                let durable_commit =
+                    read_commit_progress_at(base_path, plane_id)?.map_or(0, |(commit, _)| commit);
                 let mut last_log_id = 0;
                 let mut wal_index = WalIndex::default();
                 // The highest entry term: a member never holds an entry from a
                 // term beyond its own, so the persisted term is checked
                 // against it.
                 let mut entry_term_floor = 0u64;
-                let mut wal_records = 0u64;
                 let mut storage = Self {
                     logs: if options.append_logs {
                         let mut log_file = open_opts.open(log_path.as_path())?;
@@ -563,15 +692,16 @@ impl StorageEntity {
                         let mut crc_buf = [0u8; 4];
                         let mut counter = 0;
                         let mut last_valid_pos: u64 = 0;
+                        // Where the damaged tail starts, and why it is bad.
+                        let mut torn: Option<String> = None;
                         loop {
                             let pos_before = last_valid_pos;
                             if file_len - pos_before < 8 {
                                 if file_len > pos_before {
-                                    warn!(
-                                        "WAL truncated: {} bytes of a record length at pos {}, truncating",
-                                        file_len - pos_before,
-                                        pos_before
-                                    );
+                                    torn = Some(format!(
+                                        "{} bytes of a record length",
+                                        file_len - pos_before
+                                    ));
                                 }
                                 break;
                             }
@@ -586,14 +716,15 @@ impl StorageEntity {
                                 .checked_add(8)
                                 .and_then(|end| end.checked_add(record_len));
                             if record_end.map_or(true, |end| end > file_len) {
-                                warn!(
-                                    "WAL truncated: record at pos {} has length {} past the file end {}, truncating",
-                                    pos_before, record_len, file_len
-                                );
+                                torn = Some(format!(
+                                    "record length {} past the file end {}",
+                                    record_len, file_len
+                                ));
                                 break;
                             }
                             let record_end = record_end.unwrap();
                             if record_len < 4 {
+                                let reason = format!("invalid record length {}", record_len);
                                 check_torn_tail(
                                     &mut log_file,
                                     plane_id,
@@ -601,8 +732,9 @@ impl StorageEntity {
                                     pos_before,
                                     record_end,
                                     file_len,
-                                    format!("invalid record length {}", record_len),
+                                    reason.clone(),
                                 )?;
+                                torn = Some(reason);
                                 break;
                             }
                             let payload_len = record_len - 4;
@@ -629,12 +761,12 @@ impl StorageEntity {
                                         pos_before,
                                         record_end,
                                         file_len,
-                                        reason,
+                                        reason.clone(),
                                     )?;
+                                    torn = Some(reason);
                                     break;
                                 }
                             };
-                            wal_records += 1;
                             entry_term_floor = entry_term_floor.max(entry.log.term);
                             // Do not trust commit/last_applied embedded in WAL for SM reconstruction
                             // We'll derive commit_index from commit.idx and force replay from last_applied=0
@@ -667,15 +799,28 @@ impl StorageEntity {
                             counter += 1;
                             last_valid_pos = record_end;
                         }
-                        // Truncate WAL at last valid entry to remove any corrupt tail,
-                        // then seek to end so appends start at the correct position
-                        let current_len = log_file.seek(SeekFrom::End(0)).unwrap_or(last_valid_pos);
-                        if current_len > last_valid_pos {
-                            info!(
-                                "WAL has corrupt tail ({} extra bytes), truncating to {}",
-                                current_len - last_valid_pos,
-                                last_valid_pos
+                        if let Some(reason) = torn {
+                            refuse_committed_cut(
+                                plane_id,
+                                base_path,
+                                &log_path,
+                                last_valid_pos,
+                                last_log_id,
+                                durable_commit,
+                                &reason,
+                            )?;
+                            warn!(
+                                "WAL of plane {} has a damaged tail at pos {} ({}) above the commit index {}: cutting {} bytes",
+                                plane_id.raw(),
+                                last_valid_pos,
+                                reason,
+                                durable_commit,
+                                file_len - last_valid_pos
                             );
+                        }
+                        // Cut the damaged tail, then seek to the end so
+                        // appends start at the correct position.
+                        if file_len > last_valid_pos {
                             // Appends must start right after the last valid
                             // record: written after a torn tail, they would sit
                             // beyond bytes the next replay stops at.
@@ -716,7 +861,7 @@ impl StorageEntity {
                 };
                 storage.last_term = last_log_id;
 
-                let hard_state = match read_hard_state(base_path)? {
+                let hard_state = match persisted_hard_state {
                     Some(persisted) if persisted.term >= entry_term_floor => persisted,
                     Some(persisted) => {
                         // Cannot happen if every term was persisted before
@@ -736,22 +881,6 @@ impl StorageEntity {
                         raised
                     }
                     None => {
-                        // A brand-new store starts at term 0 with no vote. A
-                        // store with any history but no hard state cannot say
-                        // which term it is in or whom it voted for, and
-                        // guessing is how a member votes twice: refuse it.
-                        let has_history = wal_records > 0
-                            || std::fs::metadata(&snapshot_path).map_or(false, |m| m.len() > 0)
-                            || base_path.join("commit.idx").exists();
-                        if has_history {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                MissingHardState {
-                                    plane_id,
-                                    path: base_path.join(HARD_STATE_FILE),
-                                },
-                            ));
-                        }
                         let fresh = HardState::default();
                         write_hard_state(base_path, &fresh)?;
                         fresh
@@ -760,24 +889,10 @@ impl StorageEntity {
                 *term = hard_state.term;
                 storage.hard_state = hard_state;
 
-                // If commit progress side file exists, load it to ensure accurate indices
-                // Force full replay by resetting last_applied to 0 on startup
+                // Replay rebuilds the state from the start (or the snapshot)
+                // up to the durable commit index; 0 if nothing committed yet.
                 *last_applied = 0;
-                // A damaged commit.idx is an error, not a 0: replay stops at
-                // the commit index, and 0 would hide acknowledged commits.
-                if let Some((ci, _la)) =
-                    futures::executor::block_on(storage.read_commit_progress())?
-                {
-                    *commit_index = ci;
-                    debug!(
-                        "Recovered commit progress for plane {}: commit_index={} (will replay to rebuild state)",
-                        plane_id.raw(),
-                        ci
-                    );
-                } else {
-                    // No commit progress yet: nothing was committed here.
-                    *commit_index = 0;
-                }
+                *commit_index = durable_commit;
 
                 Some(storage)
             }
@@ -1059,26 +1174,7 @@ impl StorageEntity {
 
     /// Read commit progress if available
     pub async fn read_commit_progress(&self) -> io::Result<Option<(u64, u64)>> {
-        let commit_path = self.base_path.join("commit.idx");
-        if !commit_path.exists() {
-            return Ok(None);
-        }
-        // Written by rename, so it is whole or absent; anything else is
-        // damage, and guessing 0 would hide acknowledged commits from replay.
-        let bytes = std::fs::read(&commit_path)?;
-        let buf: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "commit.idx of plane {} holds {} bytes, expected 16",
-                    self.plane_id.raw(),
-                    bytes.len()
-                ),
-            )
-        })?;
-        let commit_index = u64::from_le_bytes(buf[0..8].try_into().unwrap());
-        let last_applied = u64::from_le_bytes(buf[8..16].try_into().unwrap());
-        Ok(Some((commit_index, last_applied)))
+        read_commit_progress_at(&self.base_path, self.plane_id)
     }
 
     /// Write snapshot to disk using atomic write pattern (temp file + rename)
@@ -1149,6 +1245,24 @@ impl StorageEntity {
         }
 
         let bytes = tokio::fs::read(&snapshot_path).await?;
+        Self::decode_snapshot_file(&bytes, plane_id)
+    }
+
+    /// The snapshot under `base_path`, read without a runtime (the start of
+    /// a store, before any task runs).
+    fn read_snapshot_now(
+        base_path: &Path,
+        plane_id: PlaneId,
+    ) -> io::Result<Option<SnapshotEntity>> {
+        match std::fs::read(base_path.join("snapshot.dat")) {
+            Ok(bytes) => Self::decode_snapshot_file(&bytes, plane_id),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Decode the bytes of `snapshot.dat`; `None` for an empty file.
+    fn decode_snapshot_file(bytes: &[u8], plane_id: PlaneId) -> io::Result<Option<SnapshotEntity>> {
         // Storage creates an empty snapshot.dat up front; empty is "none yet".
         if bytes.is_empty() {
             return Ok(None);

@@ -1511,9 +1511,19 @@ impl RaftService {
 
         let recovered_from_disk = Self::load_snapshot_into_meta(plane_id, meta).await?;
         {
+            // The commit index bounds the log only when the log is durable.
+            let durable_commit = match &meta.storage {
+                Some(storage) if storage.lock().await.logs.is_some() => meta.commit_index,
+                _ => 0,
+            };
             let logs = meta.logs.read().await;
-            disk::check_log_contiguous(plane_id, meta.last_snapshot_index, &logs)
-                .map_err(PlaneError::StorageInit)?;
+            disk::check_log_contiguous(
+                plane_id,
+                meta.last_snapshot_index,
+                durable_commit,
+                &logs,
+            )
+            .map_err(PlaneError::StorageInit)?;
         }
         Self::refresh_voters(meta).await;
         #[cfg(multisite_test)]
@@ -8480,10 +8490,10 @@ mod test {
         }
 
         /// Write N WAL entries, then flip bytes in the CRC field of entry K,
-        /// which more records follow. A torn write damages only the last
-        /// record, so this is media damage: the start stops with a typed
-        /// `DamagedWal` error and the file is not cut (cutting it would drop
-        /// the acknowledged entries after K).
+        /// which more records follow. Replay cuts only a damaged tail: the
+        /// start stops with a typed `DamagedWal` error and the file is not
+        /// cut (cutting it would drop the entries after K, which can be
+        /// acknowledged).
         #[tokio::test(flavor = "multi_thread")]
         async fn test_wal_crc_corruption_in_the_middle_stops_the_start() {
             let _ = env_logger::try_init();

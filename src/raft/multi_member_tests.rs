@@ -821,7 +821,8 @@ async fn a_lagging_follower_catches_up_past_a_dropped_command_in_the_leaders_log
         assert_eq!(placeholder.sm_id, NOOP_SM_ID);
         assert!(placeholder.data.is_empty());
         assert!(
-            disk::check_log_contiguous(PlaneId::type1(), meta.last_snapshot_index, &logs).is_ok()
+            disk::check_log_contiguous(PlaneId::type1(), meta.last_snapshot_index, 0, &logs)
+                .is_ok()
         );
     }
     // A new term resets A's follower table: C's next_index starts after A's
