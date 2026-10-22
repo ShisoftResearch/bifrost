@@ -291,6 +291,11 @@ pub struct RaftMeta {
     voters: Voters,
     /// The voters at `last_snapshot_index`, from the snapshot image.
     base_voters: Voters,
+    /// The plane started with persisted state (a snapshot or log), and the
+    /// application has not yet called `recover_after_register`. Until then
+    /// its state machines can be unregistered and their snapshot images not
+    /// yet restored, so the leader commits nothing on its own.
+    replay_pending: bool,
 }
 
 /// Voters by id (the hash of the address) with their addresses.
@@ -591,6 +596,7 @@ impl RaftPlaneRuntime {
                 persist_failures: 0,
                 voters: crate::raft::Voters::new(),
                 base_voters: crate::raft::Voters::new(),
+                replay_pending: false,
             }),
             is_leader: AtomicBool::new(false),
             checker_task: TokioMutex::new(None),
@@ -1353,6 +1359,7 @@ impl RaftService {
             PlaneId::type1().raw(),
             meta.last_applied
         );
+        meta.replay_pending = false;
         Ok(())
     }
 }
@@ -1516,14 +1523,20 @@ impl RaftService {
                 Some(storage) if storage.lock().await.logs.is_some() => meta.commit_index,
                 _ => 0,
             };
-            let logs = meta.logs.read().await;
-            disk::check_log_contiguous(
-                plane_id,
-                meta.last_snapshot_index,
-                durable_commit,
-                &logs,
-            )
-            .map_err(PlaneError::StorageInit)?;
+            let has_logs = {
+                let logs = meta.logs.read().await;
+                disk::check_log_contiguous(
+                    plane_id,
+                    meta.last_snapshot_index,
+                    durable_commit,
+                    &logs,
+                )
+                .map_err(PlaneError::StorageInit)?;
+                !logs.is_empty()
+            };
+            // State to replay waits for `recover_after_register`. Until then
+            // no commit is automatic (`commit_own_term_tail`).
+            meta.replay_pending = recovered_from_disk || meta.commit_index > 0 || has_logs;
         }
         Self::refresh_voters(meta).await;
         #[cfg(multisite_test)]
@@ -2298,6 +2311,16 @@ impl RaftService {
                 meta.last_applied
             );
             check_commit(&mut meta).await;
+            if Self::lifecycle_is_stopping(meta.lifecycle) {
+                return Err(PlaneError::Recovery(RecoverError {
+                    sm_id: 0,
+                    reason: format!(
+                        "a committed log entry above {} does not decode",
+                        meta.last_applied
+                    ),
+                }));
+            }
+            meta.replay_pending = false;
             return Ok(());
         }
 
@@ -2587,6 +2610,7 @@ impl RaftService {
                 persist_failures: 0,
                 voters: crate::raft::Voters::new(),
                 base_voters: crate::raft::Voters::new(),
+                replay_pending: false,
             }),
             planes: RwLock::new(BTreeMap::new()),
             id: server_id,
@@ -4608,17 +4632,18 @@ impl RaftService {
     /// the commit index, so without this they wait for the next command.
     /// Returns whether a replication round ran.
     ///
-    /// Nothing is committed while the apply cursor is below the commit index:
-    /// at startup, the replay of the committed log waits for the state
-    /// machines to register (`recover_after_register`), and a commit here
-    /// would apply the log before them.
+    /// Nothing is committed before the start replay (`replay_pending`).
+    /// Before `recover_after_register` the state machines can be
+    /// unregistered: a commit would buffer their commands, registration
+    /// would replay them, and the snapshot restore after it would erase them.
+    /// Nothing is committed either while apply is behind the commit index.
     async fn commit_own_term_tail(
         &self,
         plane_id: PlaneId,
         leader_flag: &AtomicBool,
         meta: &mut RwLockWriteGuard<'_, RaftMeta>,
     ) -> bool {
-        if !is_leader(meta) || meta.last_applied != meta.commit_index {
+        if !is_leader(meta) || meta.replay_pending || meta.last_applied != meta.commit_index {
             return false;
         }
         let tail = {
@@ -7625,6 +7650,7 @@ mod test {
                 persist_failures: 0,
                 voters: crate::raft::Voters::new(),
                 base_voters: crate::raft::Voters::new(),
+                replay_pending: false,
             };
             let meta_lock = async_std::sync::RwLock::new(meta);
             let meta_guard = meta_lock.write().await;
@@ -8397,6 +8423,7 @@ mod test {
                     persist_failures: 0,
                     voters: crate::raft::Voters::new(),
                     base_voters: crate::raft::Voters::new(),
+                    replay_pending: false,
                 };
                 let meta_lock = async_std::sync::RwLock::new(meta);
                 let meta_guard = meta_lock.write().await;
@@ -8553,6 +8580,7 @@ mod test {
                     persist_failures: 0,
                     voters: crate::raft::Voters::new(),
                     base_voters: crate::raft::Voters::new(),
+                    replay_pending: false,
                 };
                 let meta_lock = async_std::sync::RwLock::new(meta);
                 let meta_guard = meta_lock.write().await;

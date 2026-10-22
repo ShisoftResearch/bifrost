@@ -917,3 +917,100 @@ async fn a_new_leader_commits_the_entries_of_earlier_terms() {
         member.stop().await;
     }
 }
+
+/// A command answered `NotCommitted` stays in the leader's log. The heartbeat
+/// timer commits it (`commit_own_term_tail`) with no new command, and every
+/// member applies it. This isolates the heartbeat path from the commit at
+/// election time.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_uncommitted_entry_of_the_leaders_term_commits_without_a_new_command() {
+    let _ = env_logger::try_init();
+    let members = cluster("tail_heartbeat", 3, NEVER).await;
+    members[0].add(1).await;
+    let all: Vec<&Member> = members.iter().collect();
+    assert_eq!(wait_for_values(&all, 1).await, vec![1, 1, 1]);
+    {
+        // The state a NotCommitted answer leaves behind: appended, not
+        // replicated to a majority, not applied.
+        let meta = members[0].svc.write_meta().await;
+        let mut entry = add_entry(0, 0, 10);
+        members[0]
+            .svc
+            .leader_append_log(&meta, &mut entry)
+            .await
+            .expect("append to the leader's log");
+    }
+    assert_eq!(
+        wait_for_values(&all, 11).await,
+        vec![11, 11, 11],
+        "the entry did not commit without a new command"
+    );
+    for member in members {
+        member.stop().await;
+    }
+}
+
+/// A restart from a snapshot whose commit index is the snapshot index, with
+/// an uncommitted suffix, and the application registers its state machines
+/// after the start. The sole voter leads at once and appends its no-op, but
+/// commits nothing before `recover_after_register`. A commit before it would
+/// buffer the suffix for the unregistered ledger; registration would replay
+/// it, the snapshot restore after it would erase it, and the apply cursor
+/// would stay past it, so the command would be lost.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_commits_nothing_before_the_state_machines_are_recovered() {
+    let _ = env_logger::try_init();
+    let addr = addresses(1).remove(0);
+    let a = Member::launch(&scratch_dir("replay_gate"), &addr, 1).await;
+    a.svc.bootstrap().await;
+    for _ in 0..3 {
+        a.add(1).await;
+    }
+    let snapshot_index = snapshot_and_compact(&a.svc).await;
+    {
+        let meta = a.svc.write_meta().await;
+        let mut entry = add_entry(0, 0, 100);
+        a.svc
+            .leader_append_log(&meta, &mut entry)
+            .await
+            .expect("append the uncommitted suffix");
+    }
+    let (dir, addr) = a.stop().await;
+    async_wait_secs().await;
+
+    let mut opts = disk_options(&dir, NEVER, 1);
+    opts.address = addr.clone();
+    let svc = RaftService::new(opts);
+    let server = Server::new(&addr);
+    server.register_service(&svc).await;
+    Server::listen_and_resume(&server).await;
+    assert!(RaftService::start(&svc, false).await);
+    // The sole voter leads now. Let heartbeat rounds pass before the
+    // application registers.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    {
+        let meta = svc.read_meta().await;
+        assert!(matches!(meta.membership, Membership::Leader(_)));
+        assert_eq!(
+            meta.last_applied, snapshot_index,
+            "the leader committed before the start replay"
+        );
+    }
+    svc.register_state_machine(Box::new(Ledger { value: 0 }))
+        .await;
+    svc.recover_after_register()
+        .await
+        .expect("recover the registered state machines");
+    let a = Member {
+        svc,
+        server,
+        addr,
+        dir,
+    };
+    assert_eq!(
+        wait_for_values(&[&a], 103).await,
+        vec![103],
+        "the suffix was lost or not committed after the replay"
+    );
+    a.stop().await;
+}
