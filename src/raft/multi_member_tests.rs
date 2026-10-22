@@ -1360,8 +1360,7 @@ impl crate::raft::state_machine::StateMachineCtl for UnrestorableLedger {
     fn try_recover(
         &mut self,
         _data: Vec<u8>,
-    ) -> futures::future::BoxFuture<Result<(), crate::raft::state_machine::RecoverError>>
-    {
+    ) -> futures::future::BoxFuture<Result<(), crate::raft::state_machine::RecoverError>> {
         use futures::FutureExt;
         futures::future::ready(Err(crate::raft::state_machine::RecoverError {
             sm_id: LEDGER_SM_ID,

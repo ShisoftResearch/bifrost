@@ -1356,7 +1356,12 @@ impl RaftService {
 
     async fn recover_after_register_inner(&self) -> Result<(), PlaneError> {
         let mut meta = self.meta.write().await;
-        let restored = meta.state_machine.write().await.recover_registered_snapshots().await;
+        let restored = meta
+            .state_machine
+            .write()
+            .await
+            .recover_registered_snapshots()
+            .await;
         if let Err(e) = restored {
             error!(
                 "Plane {}: {}; recovery stopped, stopping the plane",
@@ -2312,7 +2317,12 @@ impl RaftService {
     ) -> Result<(), PlaneError> {
         if let Some(runtime) = self.runtime_for_plane(plane_id).await? {
             let mut meta = runtime.meta.write().await;
-            let restored = meta.state_machine.write().await.recover_registered_snapshots().await;
+            let restored = meta
+                .state_machine
+                .write()
+                .await
+                .recover_registered_snapshots()
+                .await;
             if let Err(e) = restored {
                 error!(
                     "Plane {}: {}; recovery stopped, stopping the plane",
