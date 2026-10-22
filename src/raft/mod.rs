@@ -928,25 +928,17 @@ async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
             )
         };
         let Some(entry) = entry else {
-            // An absent entry with LATER entries present is a hole that can
-            // never be filled: the disk WAL only skips entries whose state
-            // machine is not recoverable (`is_recoverable` in append_logs),
-            // a torn tail truncates the suffix -- never the middle -- and
-            // live replication installs windows contiguously. Waiting here
-            // wedged every state machine on the plane behind log id 1 after
-            // a kill-restart (single node: nothing will ever re-send it),
-            // which lost the ranged index's tree placements wholesale. Skip
-            // it, loudly; the state machine that owned it never recovers
-            // its state by design.
-            if last_log_id.map_or(false, |last| last > next_log_id) {
-                warn!(
-                    "Committed log entry {} is absent while later entries are durable (last={}, commit_index={}): an unrecoverable state machine's slot; skipping it",
-                    next_log_id,
-                    last_log_id.unwrap(),
-                    meta.commit_index
+            // The log has no holes: the WAL keeps a no-op in place of each
+            // command it does not keep (`write_batch`), a torn tail cuts only
+            // the suffix, and replication installs windows contiguously. An
+            // absent entry below later ones is a defect; applying past it
+            // would run the state machines on a state the others do not have.
+            if let Some(last) = last_log_id.filter(|last| *last > next_log_id) {
+                error!(
+                    "Committed log entry {} is absent while later entries are present (last={}, commit_index={}); apply stops",
+                    next_log_id, last, meta.commit_index
                 );
-                meta.last_applied = next_log_id;
-                continue;
+                break;
             }
             warn!(
                 "Committed log entry {} is missing during apply (commit_index={}, last_applied={}); deferring replay",
@@ -1507,6 +1499,11 @@ impl RaftService {
         meta.last_checked = get_time() + (CHECKER_MS * 10);
 
         let recovered_from_disk = Self::load_snapshot_into_meta(plane_id, meta).await?;
+        {
+            let logs = meta.logs.read().await;
+            disk::check_log_contiguous(plane_id, meta.last_snapshot_index, &logs)
+                .map_err(PlaneError::StorageInit)?;
+        }
         Self::refresh_voters(meta).await;
         #[cfg(multisite_test)]
         {
@@ -3704,11 +3701,28 @@ impl RaftService {
                         }
                         return HeartbeatReplicationResult::Matched(follower.match_index);
                     }
-                    let follower_last_entry = logs.get(&follower_last_log_id);
-                    match follower_last_entry {
+                    match logs.get(&follower_last_log_id) {
                         Some(entry) => (entry.id, entry.term),
                         None => {
-                            panic!("Cannot find old logs for follower, first_id: {}, follower_last: {}", first_log_id, follower_last_log_id);
+                            // The log has no holes (see `check_commit`), so
+                            // the entry at prev exists. Without its term no
+                            // safe message exists: report, do not panic the
+                            // task every round.
+                            debug_assert!(
+                                false,
+                                "no entry at follower {}'s prev {} in the leader's log (first id {}): the log has a hole",
+                                member_id,
+                                follower_last_log_id,
+                                first_log_id
+                            );
+                            error!(
+                                "Plane {}: no entry at follower {}'s prev {} in the leader's log (first id {}): the log has a hole",
+                                plane_id.raw(),
+                                member_id,
+                                follower_last_log_id,
+                                first_log_id
+                            );
+                            return HeartbeatReplicationResult::Matched(follower.match_index);
                         }
                     }
                 }

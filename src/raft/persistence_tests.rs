@@ -349,6 +349,11 @@ fn a_damaged_hard_state_refuses_to_start() {
     other_version[3] = b'1';
     std::fs::write(&path, &other_version).unwrap();
     assert_eq!(problem(&dir), disk::HardStateProblem::Version(b'1'));
+    // `RHS2` is the store whose WAL has holes at the commands of state
+    // machines that are not recoverable: refused.
+    other_version[3] = b'2';
+    std::fs::write(&path, &other_version).unwrap();
+    assert_eq!(problem(&dir), disk::HardStateProblem::Version(b'2'));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -630,6 +635,31 @@ fn a_zero_filled_tail_is_a_torn_tail() {
     let valid_len = wal.len() as u64;
     wal.extend_from_slice(&[0u8; 300]);
     assert_eq!(replay_wal("wal_zero_tail", &wal), (vec![1], valid_len));
+}
+
+/// A WAL with a hole (a record removed from the middle) stops the start with
+/// a typed `LogHole` error. Applying past the hole would run the state
+/// machines on a state the other members do not have.
+#[test]
+fn a_hole_in_the_log_is_a_typed_error() {
+    let mut logs = LogsMap::new();
+    for id in [1, 2, 4] {
+        logs.insert(id, add_entry(id, 1, 1));
+    }
+    let error = disk::check_log_contiguous(PlaneId::type1(), 0, &logs)
+        .expect_err("a log with a hole was accepted");
+    let hole = error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<disk::LogHole>())
+        .expect("a typed LogHole error");
+    assert_eq!((hole.missing, hole.next), (3, 4));
+    // Entries at or below the snapshot index are not checked; above it the
+    // log starts right after the snapshot index.
+    assert!(disk::check_log_contiguous(PlaneId::type1(), 3, &logs).is_ok());
+    logs.remove(&1);
+    assert!(disk::check_log_contiguous(PlaneId::type1(), 1, &logs).is_err());
+    logs.remove(&2);
+    assert!(disk::check_log_contiguous(PlaneId::type1(), 2, &logs).is_err());
 }
 
 /// Replace the persisted snapshot of the store at `dir` with `image` (a valid

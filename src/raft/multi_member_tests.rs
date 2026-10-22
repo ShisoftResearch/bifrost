@@ -720,40 +720,113 @@ async fn a_restart_never_lowers_the_term_below_the_log() {
     node.stop().await;
 }
 
-/// A leader whose log has a hole (an entry that its WAL replay did not bring
-/// back: `append_logs` skips the entries of state machines that are not
-/// recoverable, and every member skips the same ones) must still bring a
-/// lagging follower up to date. When the follower's `next_index` walks back
-/// to the hole, `send_follower_heartbeat` does not find the entry at prev and
-/// panics ("Cannot find old logs for follower"). The panic stays inside the
-/// spawned heartbeat task and repeats every round, so the follower never
-/// catches up. Ignored until BF-LT-1 is fixed.
+/// A state machine that is not recoverable: the WAL keeps a no-op in place
+/// of each of its commands.
+mod volatile {
+    use super::*;
+    use futures::FutureExt;
+
+    pub(super) const VOLATILE_SM_ID: u64 = 4343;
+
+    pub(super) struct Volatile {
+        pub(super) count: u64,
+    }
+
+    raft_state_machine! {
+        def cmd bump() -> u64;
+    }
+
+    impl StateMachineCmds for Volatile {
+        fn bump(&mut self) -> BoxFuture<u64> {
+            self.count += 1;
+            futures::future::ready(self.count).boxed()
+        }
+    }
+
+    impl StateMachineCtl for Volatile {
+        raft_sm_complete!();
+        fn id(&self) -> u64 {
+            VOLATILE_SM_ID
+        }
+        fn snapshot(&self) -> Vec<u8> {
+            crate::utils::serde::serialize(&self.count)
+        }
+        fn recover(&mut self, _: Vec<u8>) -> BoxFuture<()> {
+            futures::future::ready(()).boxed()
+        }
+        fn recoverable(&self) -> bool {
+            false
+        }
+    }
+
+    pub(super) fn bump_entry() -> LogEntry {
+        let (fn_id, _, data) = commands::bump::new().encode();
+        LogEntry {
+            id: 0,
+            term: 0,
+            sm_id: VOLATILE_SM_ID,
+            fn_id,
+            data,
+        }
+    }
+}
+
+/// The WAL keeps a no-op (same id and term) in place of each command of a
+/// state machine that is not recoverable, so a restarted leader's log has no
+/// hole. A lagging follower whose `next_index` walks back over that id finds
+/// the entry at prev and catches up. With a hole the leader panicked in the
+/// heartbeat task at each round ("Cannot find old logs for follower").
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "BF-LT-1: the leader panics on a hole at the follower's prev"]
-async fn a_lagging_follower_catches_up_past_a_hole_in_the_leaders_log() {
+async fn a_lagging_follower_catches_up_past_a_dropped_command_in_the_leaders_log() {
+    use volatile::{bump_entry, Volatile};
     let _ = env_logger::try_init();
     let mut members = cluster("leader_hole", 3, NEVER).await;
+    for member in &members {
+        member
+            .svc
+            .register_state_machine(Box::new(Volatile { count: 0 }))
+            .await;
+    }
     for _ in 0..2 {
         members[0].add(1).await;
     }
-    let all: Vec<&Member> = members.iter().collect();
-    assert_eq!(wait_for_values(&all, 2).await, vec![2, 2, 2]);
-
-    // C is down while three entries commit through A and B.
-    let (c_dir, c_addr) = members.remove(2).stop().await;
-    let mut ids = Vec::new();
-    for _ in 0..3 {
-        ids.push(members[0].add(1).await.1);
+    {
+        let all: Vec<&Member> = members.iter().collect();
+        assert_eq!(wait_for_values(&all, 2).await, vec![2, 2, 2]);
     }
-    // The middle entry is absent from A's log, as after a WAL replay that
-    // skipped it.
+
+    // C is down while three entries commit through A and B. The middle one
+    // is a command of the state machine that is not recoverable.
+    let (c_dir, c_addr) = members.remove(2).stop().await;
+    members[0].add(1).await;
+    let dropped_id =
+        match Service::c_command(members[0].svc.as_ref(), PlaneId::type1(), bump_entry()).await {
+            ClientCmdResponse::Success { last_log_id, .. } => last_log_id,
+            other => panic!("bump on A failed: {:?}", other),
+        };
+    members[0].add(1).await;
+
+    // A restarts: its log is what the WAL replay gives.
+    let (a_dir, a_addr) = members.remove(0).stop().await;
+    async_wait_secs().await;
+    let a = Member::launch(&a_dir, &a_addr, NEVER).await;
+    a.svc
+        .register_state_machine(Box::new(Volatile { count: 0 }))
+        .await;
+    members.insert(0, a);
     {
         let meta = members[0].svc.read_meta().await;
-        assert!(meta.logs.write().await.remove(&ids[1]).is_some());
+        let logs = meta.logs.read().await;
+        let placeholder = logs.get(&dropped_id).expect("the replayed log has a hole");
+        assert_eq!(placeholder.sm_id, NOOP_SM_ID);
+        assert!(placeholder.data.is_empty());
+        assert!(
+            disk::check_log_contiguous(PlaneId::type1(), meta.last_snapshot_index, &logs).is_ok()
+        );
     }
     // A new term resets A's follower table: C's next_index starts after A's
     // last entry. C comes back after it, so its next_index walks back over
-    // the hole.
+    // the id of the dropped command.
     assert!(Service::reelect(members[0].svc.as_ref(), PlaneId::type1()).await);
     members[0].add(1).await;
     members.push(Member::launch(&c_dir, &c_addr, NEVER).await);
@@ -771,6 +844,13 @@ async fn a_lagging_follower_catches_up_past_a_hole_in_the_leaders_log() {
         reached,
         target
     );
+    {
+        let all: Vec<&Member> = members.iter().collect();
+        assert_eq!(wait_for_values(&all, 5).await, vec![5, 5, 5]);
+    }
+    // C got the entry from the restarted A, which holds the no-op.
+    let c_entry = members[2].svc.read_meta().await.logs.read().await[&dropped_id].clone();
+    assert_eq!(c_entry.sm_id, NOOP_SM_ID);
     for member in members {
         member.stop().await;
     }

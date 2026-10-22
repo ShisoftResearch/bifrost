@@ -1,5 +1,6 @@
 // Now only offers log persistent
 
+use crate::raft::state_machine::NOOP_SM_ID;
 use crate::raft::{LogEntry, LogsMap, Options, PlaneId, RaftMeta, SnapshotEntity, Storage};
 use async_std::sync::*;
 
@@ -116,12 +117,14 @@ pub struct HardState {
 ///
 /// The last byte of the magic is the version of the whole raft store of the
 /// plane, not only of this record: the log semantics (entry 1 adds the seed
-/// as a voter; a no-op entry form; membership entries stay in the WAL) and
-/// the snapshot payload (voters, membership roster). `RHS1` stores are not
+/// as a voter; a no-op entry form; membership entries stay in the WAL; the
+/// WAL has a record at every id, a no-op in place of each command of a state
+/// machine that is not recoverable) and the snapshot payload (voters,
+/// membership roster). Stores of an older version (`RHS1`, `RHS2`) are not
 /// read; they give the typed version error and must be imported again.
 const HARD_STATE_FILE: &str = "hardstate.dat";
 const HARD_STATE_TEMP: &str = "hardstate.dat.tmp";
-const HARD_STATE_MAGIC: [u8; 4] = *b"RHS2";
+const HARD_STATE_MAGIC: [u8; 4] = *b"RHS3";
 const HARD_STATE_LEN: usize = 25;
 
 impl HardState {
@@ -264,6 +267,57 @@ impl std::fmt::Display for DamagedWal {
 }
 
 impl std::error::Error for DamagedWal {}
+
+/// Startup error: the log that replay and the snapshot give has a hole. The
+/// WAL has a record at every id above the snapshot (`write_batch`), so an
+/// absent id is damage. Applying past it would run the state machines on a
+/// state the other members do not have.
+#[derive(Debug)]
+pub struct LogHole {
+    pub plane_id: PlaneId,
+    /// The first absent log id.
+    pub missing: u64,
+    /// The next log id that is present.
+    pub next: u64,
+}
+
+impl std::fmt::Display for LogHole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the log of plane {} has a hole: log ids {} to {} are absent",
+            self.plane_id.raw(),
+            self.missing,
+            self.next - 1
+        )
+    }
+}
+
+impl std::error::Error for LogHole {}
+
+/// Check that the entries above `snapshot_index` start right after it and
+/// have no hole.
+pub fn check_log_contiguous(
+    plane_id: PlaneId,
+    snapshot_index: u64,
+    logs: &LogsMap,
+) -> io::Result<()> {
+    let mut expected = snapshot_index + 1;
+    for id in logs.range((Excluded(snapshot_index), Unbounded)).map(|(id, _)| *id) {
+        if id != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                LogHole {
+                    plane_id,
+                    missing: expected,
+                    next: id,
+                },
+            ));
+        }
+        expected += 1;
+    }
+    Ok(())
+}
 
 /// Decide what a WAL record that does not read back is. `Ok(())`: a torn
 /// tail, which replay cuts. That is a record that ends at the file end, or a
@@ -797,15 +851,26 @@ impl StorageEntity {
             let mut terms_appended = vec![];
             let master = meta.state_machine.read().await;
             for (term, log) in logs.range((Excluded(self.last_term), Unbounded)) {
-                // Skip non-recoverable state machines
-                if !master.is_recoverable(log.sm_id) {
-                    continue;
-                }
+                // The command of a state machine that is not recoverable is
+                // not kept. A no-op takes its place, with the same id and
+                // term: replay must give a log without holes, because the
+                // leader's Log Matching check needs the term at every id.
+                let log = if master.is_recoverable(log.sm_id) {
+                    log.clone()
+                } else {
+                    LogEntry {
+                        id: log.id,
+                        term: log.term,
+                        sm_id: NOOP_SM_ID,
+                        fn_id: 0,
+                        data: Vec::new(),
+                    }
+                };
                 let entry = DiskLogEntry {
                     term: *term,
                     commit_index: meta.commit_index,
                     last_applied: meta.last_applied,
-                    log: log.clone(),
+                    log,
                 };
                 let entry_data = entry.encode();
                 let checksum = crc32fast::hash(&entry_data);
