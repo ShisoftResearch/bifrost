@@ -855,3 +855,64 @@ async fn a_lagging_follower_catches_up_past_a_dropped_command_in_the_leaders_log
         member.stop().await;
     }
 }
+
+/// Raft section 8: a new leader commits the entries of earlier terms through
+/// a no-op of its own term. The old leader A commits entry k (B and C hold
+/// it) and stops before a heartbeat carries the commit index k. B wins the
+/// next term and must serve a read at cursor k with no further write. Without
+/// the no-op, B applies k only when a client command commits, and the read
+/// is answered `LeftBehind` until then.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_leader_commits_the_entries_of_earlier_terms() {
+    let _ = env_logger::try_init();
+    let mut members = cluster("new_term_noop", 3, NEVER).await;
+    members[0].add(1).await;
+    {
+        let all: Vec<&Member> = members.iter().collect();
+        assert_eq!(wait_for_values(&all, 1).await, vec![1, 1, 1]);
+    }
+    let (n, t) = members[0].position().await;
+    members.remove(0).stop().await;
+    // Entry k = n + 1 of term t: replicated to B and C (a majority), so A
+    // committed it, but no heartbeat carried the commit index.
+    let k = n + 1;
+    for member in &members {
+        hold_unreplicated(member, vec![add_entry(k, t, 100)]).await;
+    }
+    {
+        let meta = members[0].svc.read_meta().await;
+        assert!(
+            meta.last_applied < k,
+            "B applied entry {} before the test",
+            k
+        );
+    }
+    assert!(
+        Service::reelect(members[0].svc.as_ref(), PlaneId::type1()).await,
+        "B must win the next term with C's vote"
+    );
+    let (fn_id, _, data) = get::new().encode();
+    let read = LogEntry {
+        id: k,
+        term: t,
+        sm_id: LEDGER_SM_ID,
+        fn_id,
+        data,
+    };
+    match Service::c_query(members[0].svc.as_ref(), PlaneId::type1(), &read).await {
+        ClientQryResponse::Success { data: Ok(data), .. } => {
+            assert_eq!(get::decode_return(&data), 101);
+        }
+        other => panic!(
+            "the new leader did not serve the read at cursor {}: {:?}",
+            k, other
+        ),
+    }
+    {
+        let all: Vec<&Member> = members.iter().collect();
+        assert_eq!(wait_for_values(&all, 101).await, vec![101, 101]);
+    }
+    for member in members {
+        member.stop().await;
+    }
+}

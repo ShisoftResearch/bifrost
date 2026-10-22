@@ -1132,14 +1132,25 @@ impl RaftService {
                     }
                     match action {
                         CheckerAction::SendHeartbeat => {
-                            server
-                                .send_followers_heartbeat_on_plane(
-                                    plane_id,
-                                    &mut meta,
-                                    None,
-                                    false,
-                                )
-                                .await;
+                            let leader_flag = runtime_ref
+                                .as_ref()
+                                .map(|runtime| &runtime.is_leader)
+                                .unwrap_or(&server._is_leader);
+                            // A round that commits the own-term tail also
+                            // serves as the heartbeat.
+                            if !server
+                                .commit_own_term_tail(plane_id, leader_flag, &mut meta)
+                                .await
+                            {
+                                server
+                                    .send_followers_heartbeat_on_plane(
+                                        plane_id,
+                                        &mut meta,
+                                        None,
+                                        false,
+                                    )
+                                    .await;
+                            }
                             meta.last_checked = get_time();
                         }
                         CheckerAction::BecomeCandidate => {
@@ -1539,7 +1550,7 @@ impl RaftService {
                 meta.term,
                 has_logs
             );
-            if self.promote_sole_voter(leader_flag, meta).await {
+            if self.promote_sole_voter(plane_id, leader_flag, meta).await {
                 info!("Plane {} became leader of its one voter", plane_id.raw());
             }
         } else if bootstrap_if_fresh && fresh {
@@ -1640,7 +1651,7 @@ impl RaftService {
         let had_self = meta.voters.contains_key(&self.id);
         meta.voters.clear();
         meta.voters.insert(self.id, me.clone());
-        if !self.promote_sole_voter(leader_flag, meta).await {
+        if !self.promote_sole_voter(plane_id, leader_flag, meta).await {
             return Err(PlaneError::InitializationFailed(plane_id));
         }
         let mut changes = Vec::new();
@@ -1694,6 +1705,7 @@ impl RaftService {
     /// before (RC1): that term may already have a leader.
     async fn promote_sole_voter(
         &self,
+        plane_id: PlaneId,
         leader_flag: &AtomicBool,
         meta: &mut RwLockWriteGuard<'_, RaftMeta>,
     ) -> bool {
@@ -1714,7 +1726,7 @@ impl RaftService {
             let logs = meta.logs.read().await;
             get_last_log_info!(meta, logs)
         };
-        self.become_leader_on_plane(leader_flag, meta, last_log_id)
+        self.become_leader_on_plane(plane_id, leader_flag, meta, last_log_id)
             .await;
         true
     }
@@ -1729,7 +1741,7 @@ impl RaftService {
         meta: &mut RwLockWriteGuard<'_, RaftMeta>,
     ) -> bool {
         meta.voters.insert(self.id, self.options.address.clone());
-        if !self.promote_sole_voter(leader_flag, meta).await {
+        if !self.promote_sole_voter(plane_id, leader_flag, meta).await {
             meta.voters.clear();
             return false;
         }
@@ -3245,7 +3257,7 @@ impl RaftService {
                                 plane_id.raw(),
                                 server_id
                             );
-                            self.become_leader_on_plane(leader_flag, meta, last_log_id)
+                            self.become_leader_on_plane(plane_id, leader_flag, meta, last_log_id)
                                 .await;
                             break;
                         }
@@ -3288,6 +3300,7 @@ impl RaftService {
 
     async fn become_leader_on_plane(
         &self,
+        plane_id: PlaneId,
         leader_flag: &AtomicBool,
         meta: &mut RwLockWriteGuard<'_, RaftMeta>,
         last_log_id: u64,
@@ -3318,11 +3331,22 @@ impl RaftService {
         meta.leader_id = self.id;
         self.switch_membership(meta, Membership::Leader(leader_meta));
         leader_flag.store(true, Relaxed);
-    }
-
-    async fn become_leader(&self, meta: &mut RwLockWriteGuard<'_, RaftMeta>, last_log_id: u64) {
-        self.become_leader_on_plane(&self._is_leader, meta, last_log_id)
-            .await;
+        // Raft section 8: a leader commits the entries of earlier terms only
+        // through an entry of its own term. Without a no-op they wait for the
+        // next client command, and a read at their position waits with them.
+        if last_log_id > meta.commit_index {
+            let mut noop = noop_entry();
+            if let Err(e) = self.leader_append_log(meta, &mut noop).await {
+                self.note_persist_failure(
+                    leader_flag,
+                    meta,
+                    "appending the no-op of a new term",
+                    &e,
+                );
+                return;
+            }
+            self.commit_own_term_tail(plane_id, leader_flag, meta).await;
+        }
     }
 
     async fn send_followers_heartbeat_on_plane<'a>(
@@ -4231,7 +4255,8 @@ impl RaftService {
         if !is_leader(&meta) {
             let sole_voter = meta.voters.len() == 1 && meta.voters.contains_key(&self.id);
             if sole_voter && meta.leader_id == self.id {
-                self.promote_sole_voter(leader_flag, &mut meta).await;
+                self.promote_sole_voter(plane_id, leader_flag, &mut meta)
+                    .await;
             }
         }
         if !is_leader(&meta) {
@@ -4565,6 +4590,65 @@ impl RaftService {
             }
         }
         Ok(())
+    }
+
+    /// Commit the entries of the leader's log above the commit index when
+    /// the last of them is of the leader's term: the no-op of a new term, or
+    /// a command answered `NotCommitted`. The heartbeat round does not move
+    /// the commit index, so without this they wait for the next command.
+    /// Returns whether a replication round ran.
+    ///
+    /// Nothing is committed while the apply cursor is below the commit index:
+    /// at startup, the replay of the committed log waits for the state
+    /// machines to register (`recover_after_register`), and a commit here
+    /// would apply the log before them.
+    async fn commit_own_term_tail(
+        &self,
+        plane_id: PlaneId,
+        leader_flag: &AtomicBool,
+        meta: &mut RwLockWriteGuard<'_, RaftMeta>,
+    ) -> bool {
+        if !is_leader(meta) || meta.last_applied != meta.commit_index {
+            return false;
+        }
+        let tail = {
+            let logs = meta.logs.read().await;
+            logs.values()
+                .next_back()
+                .filter(|last| last.id > meta.commit_index && last.term == meta.term)
+                .cloned()
+        };
+        let Some(last) = tail else {
+            return false;
+        };
+        match self
+            .try_sync_log_to_followers_on_plane(plane_id, leader_flag, meta, &last, last.id)
+            .await
+        {
+            SyncOutcome::Committed(_) => {
+                debug!(
+                    "Plane {}: committed the own-term tail up to log id {}",
+                    plane_id.raw(),
+                    last.id
+                );
+            }
+            SyncOutcome::NotCommitted => {
+                debug!(
+                    "Plane {}: the own-term tail up to log id {} is not replicated to a majority yet",
+                    plane_id.raw(),
+                    last.id
+                );
+            }
+            SyncOutcome::StorageFailure(reason) => {
+                warn!(
+                    "Plane {}: the own-term tail up to log id {} did not commit: {}",
+                    plane_id.raw(),
+                    last.id,
+                    reason
+                );
+            }
+        }
+        true
     }
 
     async fn try_sync_log_to_followers_on_plane(
