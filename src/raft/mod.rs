@@ -296,6 +296,11 @@ pub struct RaftMeta {
     /// its state machines can be unregistered and their snapshot images not
     /// yet restored, so the leader commits nothing on its own.
     replay_pending: bool,
+    /// `initialize_runtime_meta` loaded the snapshot and checked the log.
+    /// Before it, the member answers no AppendEntries, InstallSnapshot or
+    /// RequestVote: the type 1 server can listen before `start`, and an
+    /// entry applied then is applied again above the snapshot loaded later.
+    initialized: bool,
 }
 
 /// Voters by id (the hash of the address) with their addresses.
@@ -597,6 +602,7 @@ impl RaftPlaneRuntime {
                 voters: crate::raft::Voters::new(),
                 base_voters: crate::raft::Voters::new(),
                 replay_pending: false,
+                initialized: false,
             }),
             is_leader: AtomicBool::new(false),
             checker_task: TokioMutex::new(None),
@@ -923,6 +929,13 @@ macro_rules! get_last_log_info {
 }
 
 async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
+    // A committed entry that does not decode already stopped the plane.
+    let _ = apply_committed(meta).await;
+}
+
+/// Apply the committed entries above the apply cursor. A committed entry that
+/// does not decode stops the plane and is the returned error.
+async fn apply_committed(meta: &mut RwLockWriteGuard<'_, RaftMeta>) -> Result<(), RecoverError> {
     while meta.commit_index > meta.last_applied {
         let next_log_id = meta.last_applied + 1;
         let (entry, last_log_id) = {
@@ -981,7 +994,13 @@ async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
                 );
                 meta.lifecycle = LifecycleState::Stopping;
                 meta.membership = Membership::Offline;
-                break;
+                return Err(RecoverError {
+                    sm_id,
+                    reason: format!(
+                        "committed log entry {} (fn {}) does not decode",
+                        next_log_id, fn_id
+                    ),
+                });
             }
             Err(e) => {
                 error!(
@@ -993,6 +1012,7 @@ async fn check_commit(meta: &mut RwLockWriteGuard<'_, RaftMeta>) {
             }
         }
     }
+    Ok(())
 }
 
 impl RaftService {
@@ -1344,16 +1364,9 @@ impl RaftService {
             meta.commit_index,
             meta.last_applied
         );
-        check_commit(&mut meta).await;
-        if Self::lifecycle_is_stopping(meta.lifecycle) {
-            return Err(PlaneError::Recovery(RecoverError {
-                sm_id: 0,
-                reason: format!(
-                    "a committed log entry above {} does not decode",
-                    meta.last_applied
-                ),
-            }));
-        }
+        apply_committed(&mut meta)
+            .await
+            .map_err(PlaneError::Recovery)?;
         info!(
             "Manual apply on plane {}: applied logs up to last_applied={}",
             PlaneId::type1().raw(),
@@ -1517,27 +1530,21 @@ impl RaftService {
         meta.last_checked = get_time() + (CHECKER_MS * 10);
 
         let recovered_from_disk = Self::load_snapshot_into_meta(plane_id, meta).await?;
-        {
-            // The commit index bounds the log only when the log is durable.
-            let durable_commit = match &meta.storage {
-                Some(storage) if storage.lock().await.logs.is_some() => meta.commit_index,
-                _ => 0,
-            };
-            let has_logs = {
-                let logs = meta.logs.read().await;
-                disk::check_log_contiguous(
-                    plane_id,
-                    meta.last_snapshot_index,
-                    durable_commit,
-                    &logs,
-                )
+        // The commit index bounds the log only when the log is durable.
+        let durable_commit = match &meta.storage {
+            Some(storage) if storage.lock().await.logs.is_some() => meta.commit_index,
+            _ => 0,
+        };
+        let has_logs = {
+            let logs = meta.logs.read().await;
+            disk::check_log_contiguous(plane_id, meta.last_snapshot_index, durable_commit, &logs)
                 .map_err(PlaneError::StorageInit)?;
-                !logs.is_empty()
-            };
-            // State to replay waits for `recover_after_register`. Until then
-            // no commit is automatic (`commit_own_term_tail`).
-            meta.replay_pending = recovered_from_disk || meta.commit_index > 0 || has_logs;
-        }
+            !logs.is_empty()
+        };
+        // State to replay waits for `recover_after_register`. Until then no
+        // commit is automatic (`commit_own_term_tail`).
+        meta.replay_pending = recovered_from_disk || meta.commit_index > 0 || has_logs;
+        meta.initialized = true;
         Self::refresh_voters(meta).await;
         #[cfg(multisite_test)]
         {
@@ -1550,7 +1557,6 @@ impl RaftService {
                 meta.voters.keys().collect::<Vec<_>>()
             );
         }
-        let has_logs = !meta.logs.read().await.is_empty();
         let has_term = meta.term > 0;
         let sole_voter = meta.voters.len() == 1 && meta.voters.contains_key(&self.id);
         let fresh = meta.voters.is_empty() && !recovered_from_disk && !has_logs && !has_term;
@@ -2310,16 +2316,9 @@ impl RaftService {
                 meta.commit_index,
                 meta.last_applied
             );
-            check_commit(&mut meta).await;
-            if Self::lifecycle_is_stopping(meta.lifecycle) {
-                return Err(PlaneError::Recovery(RecoverError {
-                    sm_id: 0,
-                    reason: format!(
-                        "a committed log entry above {} does not decode",
-                        meta.last_applied
-                    ),
-                }));
-            }
+            apply_committed(&mut meta)
+                .await
+                .map_err(PlaneError::Recovery)?;
             meta.replay_pending = false;
             return Ok(());
         }
@@ -2611,6 +2610,7 @@ impl RaftService {
                 voters: crate::raft::Voters::new(),
                 base_voters: crate::raft::Voters::new(),
                 replay_pending: false,
+                initialized: false,
             }),
             planes: RwLock::new(BTreeMap::new()),
             id: server_id,
@@ -3905,9 +3905,10 @@ impl RaftService {
         entries: &'a Option<LogEntries>,
         leader_commit: u64,
     ) -> (u64, AppendEntriesResult) {
-        if Self::lifecycle_is_stopping(meta.lifecycle) {
-            // Shutting down, or stopped on an unrestorable snapshot: this
-            // member acknowledges nothing more.
+        if Self::lifecycle_is_stopping(meta.lifecycle) || !meta.initialized {
+            // Shutting down, stopped on an unrestorable snapshot, or not
+            // started yet: this member acknowledges nothing. The leader
+            // retries at the next heartbeat.
             return (meta.term, AppendEntriesResult::NotPersisted);
         }
         self.reset_last_checked(&mut meta);
@@ -4067,7 +4068,7 @@ impl RaftService {
         last_log_id: u64,
         last_log_term: u64,
     ) -> ((u64, u64), bool) {
-        if Self::lifecycle_is_stopping(meta.lifecycle) {
+        if Self::lifecycle_is_stopping(meta.lifecycle) || !meta.initialized {
             return ((meta.term, meta.leader_id), false);
         }
         // Figure 2, all servers: a request from a later term moves this member
@@ -4128,7 +4129,7 @@ impl RaftService {
         last_included_term: u64,
         data: Vec<u8>,
     ) -> InstallSnapshotResult {
-        if Self::lifecycle_is_stopping(meta.lifecycle) {
+        if Self::lifecycle_is_stopping(meta.lifecycle) || !meta.initialized {
             return InstallSnapshotResult::Rejected;
         }
         if !self.check_term_on_plane(leader_flag, &mut meta, term, leader_id) {
@@ -7651,6 +7652,7 @@ mod test {
                 voters: crate::raft::Voters::new(),
                 base_voters: crate::raft::Voters::new(),
                 replay_pending: false,
+                initialized: false,
             };
             let meta_lock = async_std::sync::RwLock::new(meta);
             let meta_guard = meta_lock.write().await;
@@ -8424,6 +8426,7 @@ mod test {
                     voters: crate::raft::Voters::new(),
                     base_voters: crate::raft::Voters::new(),
                     replay_pending: false,
+                    initialized: false,
                 };
                 let meta_lock = async_std::sync::RwLock::new(meta);
                 let meta_guard = meta_lock.write().await;
@@ -8581,6 +8584,7 @@ mod test {
                     voters: crate::raft::Voters::new(),
                     base_voters: crate::raft::Voters::new(),
                     replay_pending: false,
+                    initialized: false,
                 };
                 let meta_lock = async_std::sync::RwLock::new(meta);
                 let meta_guard = meta_lock.write().await;
