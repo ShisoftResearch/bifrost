@@ -5365,6 +5365,8 @@ mod test {
         let server = Server::new(&address);
         server.register_service(&service).await;
         Server::listen_and_resume(&server).await;
+        // A member answers AppendEntries only after its start.
+        assert!(RaftService::start(&service, false).await);
         let entry = LogEntry {
             id: 3,
             term: 1,
@@ -7282,12 +7284,16 @@ mod test {
             {
                 let meta = raft_service.read_meta().await;
                 let mut logs = meta.logs.write().await;
+                // Term 0, below the leader's term 1: entries of the
+                // leader's own term above its commit index would be
+                // committed by the next heartbeat (`commit_own_term_tail`)
+                // before the install, a race with this test.
                 for i in 1..=15u64 {
                     logs.insert(
                         i,
                         LogEntry {
                             id: i,
-                            term: 1,
+                            term: 0,
                             sm_id: 15,
                             fn_id: 1,
                             data: vec![],
@@ -7322,7 +7328,7 @@ mod test {
                     1,     // term
                     12345, // leader_id
                     10,    // last_included_index
-                    1,     // last_included_term
+                    0,     // last_included_term: entry 10 has term 0
                     snapshot_data,
                 )
                 .await;
@@ -7382,7 +7388,7 @@ mod test {
             // Verify snapshot metadata was updated
             let meta = raft_service.read_meta().await;
             assert_eq!(meta.last_snapshot_index, 10);
-            assert_eq!(meta.last_snapshot_term, 1);
+            assert_eq!(meta.last_snapshot_term, 0);
 
             // Clean up
             std::fs::remove_dir_all(&temp_dir).unwrap();
