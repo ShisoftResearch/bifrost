@@ -8381,13 +8381,15 @@ mod test {
             info!("=== PASS: partial write truncation ===");
         }
 
-        /// Write N WAL entries, then flip bytes in the CRC field of entry K.
-        /// Recovery must stop at entry K (recovering K entries, not K+1..N)
-        /// and the file must be truncated at the corruption boundary.
+        /// Write N WAL entries, then flip bytes in the CRC field of entry K,
+        /// which more records follow. A torn write damages only the last
+        /// record, so this is media damage: the start stops with a typed
+        /// `DamagedWal` error and the file is not cut (cutting it would drop
+        /// the acknowledged entries after K).
         #[tokio::test(flavor = "multi_thread")]
-        async fn test_wal_crc_corruption_stops_at_bad_entry() {
+        async fn test_wal_crc_corruption_in_the_middle_stops_the_start() {
             let _ = env_logger::try_init();
-            info!("=== TEST: CRC corruption → partial recovery stops at bad entry ===");
+            info!("=== TEST: CRC corruption in the middle of the WAL stops the start ===");
 
             let temp_dir = std::env::temp_dir().join(format!("raft_crc_{}", rand::random::<u64>()));
             std::fs::create_dir_all(&temp_dir).unwrap();
@@ -8503,59 +8505,29 @@ mod test {
                 address: "127.0.0.1:0".to_string(),
                 service_id: DEFAULT_SERVICE_ID,
             };
-            let _storage = disk::StorageEntity::new_with_options(
+            let error = match disk::StorageEntity::new_with_options(
                 &opts,
                 &mut term,
                 &mut commit_index,
                 &mut last_applied,
                 &mut recovered_logs,
-            )
-            .unwrap();
-
-            // Only the CORRUPT_IDX entries before the corruption survive
+            ) {
+                Err(e) => e,
+                Ok(_) => panic!("a damaged record in the middle of the WAL was accepted"),
+            };
+            let damaged = error
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<disk::DamagedWal>())
+                .expect("a typed DamagedWal error");
+            assert_eq!(damaged.offset, (CORRUPT_IDX * RECORD_SIZE) as u64);
+            assert_eq!(damaged.record_end, ((CORRUPT_IDX + 1) * RECORD_SIZE) as u64);
+            assert_eq!(damaged.file_len, size_before);
             assert_eq!(
-                recovered_logs.len(),
-                CORRUPT_IDX,
-                "Should recover exactly {} entries before corruption; got {}",
-                CORRUPT_IDX,
-                recovered_logs.len()
-            );
-
-            // Verify the recovered entries are the correct ones (ids 1..CORRUPT_IDX)
-            for id in 1..=CORRUPT_IDX as u64 {
-                assert!(
-                    recovered_logs.contains_key(&id),
-                    "Entry id={} should be present",
-                    id
-                );
-            }
-            for id in (CORRUPT_IDX + 1) as u64..=N as u64 {
-                assert!(
-                    !recovered_logs.contains_key(&id),
-                    "Entry id={} should have been dropped (after corruption)",
-                    id
-                );
-            }
-
-            // File truncated at the corruption boundary
-            let expected_truncated_size = (CORRUPT_IDX * RECORD_SIZE) as u64;
-            let actual_size = std::fs::metadata(&log_path).unwrap().len();
-            assert_eq!(
-                actual_size, expected_truncated_size,
-                "WAL must be truncated to {} bytes at corruption; got {}",
-                expected_truncated_size, actual_size
-            );
-
-            info!(
-                "CRC corruption test: {} good entries recovered, {} corrupt entries dropped, \
-                file truncated from {} to {} bytes",
-                CORRUPT_IDX,
-                N - CORRUPT_IDX,
+                std::fs::metadata(&log_path).unwrap().len(),
                 size_before,
-                actual_size
+                "the WAL must not be cut at a damaged record that more records follow"
             );
             std::fs::remove_dir_all(&temp_dir).unwrap();
-            info!("=== PASS: CRC corruption stops recovery at bad entry ===");
         }
 
         /// Crash after snapshot + additional WAL entries.

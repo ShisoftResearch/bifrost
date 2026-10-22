@@ -234,6 +234,87 @@ impl std::fmt::Display for BadHardState {
 
 impl std::error::Error for BadHardState {}
 
+/// Startup error: a WAL record that does not read back, with more records
+/// after it. A torn write can damage only the last record, so this is media
+/// damage. Cutting the file there would drop acknowledged entries.
+#[derive(Debug)]
+pub struct DamagedWal {
+    pub plane_id: PlaneId,
+    pub path: PathBuf,
+    /// Byte offset of the damaged record.
+    pub offset: u64,
+    /// Byte offset where the damaged record ends and the next record starts.
+    pub record_end: u64,
+    pub file_len: u64,
+    pub reason: String,
+}
+
+impl std::fmt::Display for DamagedWal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "WAL {} of plane {} is damaged: the record at byte {} does not read ({}), and {} bytes follow it",
+            self.path.display(),
+            self.plane_id.raw(),
+            self.offset,
+            self.reason,
+            self.file_len - self.record_end
+        )
+    }
+}
+
+impl std::error::Error for DamagedWal {}
+
+/// Decide what a WAL record that does not read back is. `Ok(())`: a torn
+/// tail, which replay cuts. That is a record that ends at the file end, or a
+/// zero-filled tail (the file was extended but the bytes were not written).
+/// Any other bad record has records after it: a typed `DamagedWal` error.
+fn check_torn_tail(
+    log_file: &mut std::fs::File,
+    plane_id: PlaneId,
+    log_path: &Path,
+    offset: u64,
+    record_end: u64,
+    file_len: u64,
+    reason: String,
+) -> io::Result<()> {
+    if record_end >= file_len || zero_from(log_file, offset)? {
+        warn!(
+            "WAL torn tail of plane {} at pos {} ({}), truncating",
+            plane_id.raw(),
+            offset,
+            reason
+        );
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        DamagedWal {
+            plane_id,
+            path: log_path.to_path_buf(),
+            offset,
+            record_end,
+            file_len,
+            reason,
+        },
+    ))
+}
+
+/// Whether every byte of the file from `offset` to its end is zero.
+fn zero_from(file: &mut std::fs::File, offset: u64) -> io::Result<bool> {
+    file.seek(SeekFrom::Start(offset))?;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buf)?;
+        if read == 0 {
+            return Ok(true);
+        }
+        if buf[..read].iter().any(|byte| *byte != 0) {
+            return Ok(false);
+        }
+    }
+}
+
 /// Durably replace the hard state under `base_path`. Returns only once the
 /// new state is what a restart reads.
 pub fn write_hard_state(base_path: &Path, state: &HardState) -> io::Result<()> {
@@ -429,24 +510,24 @@ impl StorageEntity {
                         let mut counter = 0;
                         let mut last_valid_pos: u64 = 0;
                         loop {
-                            let pos_before = log_file
-                                .seek(SeekFrom::Current(0))
-                                .unwrap_or(last_valid_pos);
-                            if log_file.read_exact(&mut len_buf).is_err() {
+                            let pos_before = last_valid_pos;
+                            if file_len - pos_before < 8 {
+                                if file_len > pos_before {
+                                    warn!(
+                                        "WAL truncated: {} bytes of a record length at pos {}, truncating",
+                                        file_len - pos_before,
+                                        pos_before
+                                    );
+                                }
                                 break;
                             }
+                            log_file.read_exact(&mut len_buf)?;
                             let record_len = u64::from_le_bytes(len_buf);
-                            // record_len = 4 (CRC) + payload_len
-                            if record_len < 4 {
-                                warn!(
-                                    "WAL corrupt: invalid record length {} at pos {}, truncating",
-                                    record_len, pos_before
-                                );
-                                break;
-                            }
-                            // A torn or damaged length field can name any size.
-                            // A record that ends past the file is a torn tail;
-                            // allocating its buffer first would abort the start.
+                            // record_len = 4 (CRC) + payload_len. A torn or
+                            // damaged length field can name any size: a
+                            // record that ends past the file is a torn tail,
+                            // and allocating its buffer first would abort
+                            // the start.
                             let record_end = pos_before
                                 .checked_add(8)
                                 .and_then(|end| end.checked_add(record_len));
@@ -457,76 +538,80 @@ impl StorageEntity {
                                 );
                                 break;
                             }
-                            let payload_len = record_len - 4;
-                            if log_file.read_exact(&mut crc_buf).is_err() {
-                                warn!(
-                                    "WAL truncated: missing CRC at pos {}, truncating",
-                                    pos_before
-                                );
+                            let record_end = record_end.unwrap();
+                            if record_len < 4 {
+                                check_torn_tail(
+                                    &mut log_file,
+                                    plane_id,
+                                    &log_path,
+                                    pos_before,
+                                    record_end,
+                                    file_len,
+                                    format!("invalid record length {}", record_len),
+                                )?;
                                 break;
                             }
+                            let payload_len = record_len - 4;
+                            log_file.read_exact(&mut crc_buf)?;
                             let expected_crc = u32::from_le_bytes(crc_buf);
                             let mut data_buf = vec![0u8; payload_len as usize];
-                            if log_file.read_exact(&mut data_buf).is_err() {
-                                warn!(
-                                    "WAL truncated: missing payload at pos {}, truncating",
-                                    pos_before
-                                );
-                                break;
-                            }
+                            log_file.read_exact(&mut data_buf)?;
                             let actual_crc = crc32fast::hash(&data_buf);
-                            if actual_crc != expected_crc {
-                                warn!(
-                                    "WAL CRC mismatch at pos {}: expected {:#010x}, got {:#010x}, truncating",
-                                    pos_before, expected_crc, actual_crc
-                                );
-                                break;
-                            }
-                            match DiskLogEntry::decode(&data_buf) {
-                                Ok(entry) => {
-                                    wal_records += 1;
-                                    entry_term_floor = entry_term_floor.max(entry.log.term);
-                                    // Do not trust commit/last_applied embedded in WAL for SM reconstruction
-                                    // We'll derive commit_index from commit.idx and force replay from last_applied=0
-                                    let id = entry.log.id;
-                                    if counter > 0 && id <= last_log_id {
-                                        // Records are appended in log order, and a
-                                        // discarded suffix is cut off the file
-                                        // (`truncate_from`) before its replacement
-                                        // is written. A record at or below its
-                                        // predecessor is a replacement whose cut
-                                        // did not reach the disk: it supersedes
-                                        // the record it repeats and all after it,
-                                        // exactly as it did in memory.
-                                        warn!(
-                                            "WAL record {} follows record {} on plane {}: replacing the suffix from {} on",
-                                            id,
-                                            last_log_id,
-                                            plane_id.raw(),
-                                            id
-                                        );
-                                        let _ = logs.split_off(&id);
-                                        let kept = wal_index
-                                            .records
-                                            .partition_point(|(indexed, _)| *indexed < id);
-                                        wal_index.records.truncate(kept);
-                                    }
-                                    last_log_id = id;
-                                    wal_index.records.push_back((id, pos_before));
-                                    logs.insert(entry.log.id, entry.log);
-                                    counter += 1;
-                                    last_valid_pos = log_file
-                                        .seek(SeekFrom::Current(0))
-                                        .unwrap_or(last_valid_pos);
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        "WAL decode error at pos {}: {:?}, truncating",
-                                        pos_before, e
-                                    );
+                            let decoded = if actual_crc != expected_crc {
+                                Err(format!(
+                                    "CRC mismatch: expected {:#010x}, got {:#010x}",
+                                    expected_crc, actual_crc
+                                ))
+                            } else {
+                                DiskLogEntry::decode(&data_buf).map_err(|e| e.to_string())
+                            };
+                            let entry = match decoded {
+                                Ok(entry) => entry,
+                                Err(reason) => {
+                                    check_torn_tail(
+                                        &mut log_file,
+                                        plane_id,
+                                        &log_path,
+                                        pos_before,
+                                        record_end,
+                                        file_len,
+                                        reason,
+                                    )?;
                                     break;
                                 }
+                            };
+                            wal_records += 1;
+                            entry_term_floor = entry_term_floor.max(entry.log.term);
+                            // Do not trust commit/last_applied embedded in WAL for SM reconstruction
+                            // We'll derive commit_index from commit.idx and force replay from last_applied=0
+                            let id = entry.log.id;
+                            if counter > 0 && id <= last_log_id {
+                                // Records are appended in log order, and a
+                                // discarded suffix is cut off the file
+                                // (`truncate_from`) before its replacement
+                                // is written. A record at or below its
+                                // predecessor is a replacement whose cut
+                                // did not reach the disk: it supersedes
+                                // the record it repeats and all after it,
+                                // exactly as it did in memory.
+                                warn!(
+                                    "WAL record {} follows record {} on plane {}: replacing the suffix from {} on",
+                                    id,
+                                    last_log_id,
+                                    plane_id.raw(),
+                                    id
+                                );
+                                let _ = logs.split_off(&id);
+                                let kept = wal_index
+                                    .records
+                                    .partition_point(|(indexed, _)| *indexed < id);
+                                wal_index.records.truncate(kept);
                             }
+                            last_log_id = id;
+                            wal_index.records.push_back((id, pos_before));
+                            logs.insert(entry.log.id, entry.log);
+                            counter += 1;
+                            last_valid_pos = record_end;
                         }
                         // Truncate WAL at last valid entry to remove any corrupt tail,
                         // then seek to end so appends start at the correct position

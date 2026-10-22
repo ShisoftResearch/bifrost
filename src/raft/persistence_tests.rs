@@ -565,6 +565,73 @@ fn a_record_length_past_the_file_end_is_a_torn_tail() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// One encoded WAL record (length, CRC, payload) of an `add` entry.
+fn wal_record(id: u64) -> Vec<u8> {
+    let payload = disk::DiskLogEntry {
+        term: id,
+        commit_index: 0,
+        last_applied: 0,
+        log: add_entry(id, 1, 1),
+    }
+    .encode();
+    let mut record = Vec::new();
+    record.extend_from_slice(&(4 + payload.len() as u64).to_le_bytes());
+    record.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());
+    record.extend_from_slice(&payload);
+    record
+}
+
+/// Open the store at `dir` whose WAL holds `wal`: the ids replay gives, and
+/// the length of `log.dat` after the start.
+fn replay_wal(tag: &str, wal: &[u8]) -> (Vec<u64>, u64) {
+    let dir = super::compaction_tests::scratch_dir(tag);
+    disk::write_hard_state(
+        &dir,
+        &HardState {
+            term: 1,
+            voted_for: None,
+        },
+    )
+    .unwrap();
+    std::fs::write(dir.join("log.dat"), wal).unwrap();
+    let opts = super::compaction_tests::disk_options(&dir, NEVER, NEVER);
+    let (mut term, mut commit, mut applied) = (0, 0, 0);
+    let mut logs = LogsMap::new();
+    let storage =
+        StorageEntity::new_with_options(&opts, &mut term, &mut commit, &mut applied, &mut logs)
+            .expect("a torn tail does not stop the start")
+            .expect("disk storage");
+    drop(storage);
+    let len = std::fs::metadata(dir.join("log.dat")).unwrap().len();
+    let _ = std::fs::remove_dir_all(&dir);
+    (logs.keys().copied().collect(), len)
+}
+
+/// A last record that does not read back (a torn write of the last append)
+/// is a torn tail: replay cuts it and keeps the records before it.
+#[test]
+fn a_damaged_last_record_is_a_torn_tail() {
+    let mut wal = wal_record(1);
+    wal.extend_from_slice(&wal_record(2));
+    let valid_len = wal.len() as u64;
+    let mut last = wal_record(3);
+    let crc_at = 8;
+    last[crc_at] ^= 0xff;
+    wal.extend_from_slice(&last);
+    assert_eq!(replay_wal("wal_bad_last", &wal), (vec![1, 2], valid_len));
+}
+
+/// A zero-filled tail (the file was extended but the bytes of the last
+/// append were not written) is a torn tail, also when it is longer than one
+/// record.
+#[test]
+fn a_zero_filled_tail_is_a_torn_tail() {
+    let mut wal = wal_record(1);
+    let valid_len = wal.len() as u64;
+    wal.extend_from_slice(&[0u8; 300]);
+    assert_eq!(replay_wal("wal_zero_tail", &wal), (vec![1], valid_len));
+}
+
 /// Replace the persisted snapshot of the store at `dir` with `image` (a valid
 /// file around it -- checksum and framing intact -- so only the image is bad).
 async fn persist_snapshot_image(dir: &std::path::Path, index: u64, image: Vec<u8>) {
