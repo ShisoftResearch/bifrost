@@ -423,6 +423,7 @@ impl StorageEntity {
                 let mut storage = Self {
                     logs: if options.append_logs {
                         let mut log_file = open_opts.open(log_path.as_path())?;
+                        let file_len = log_file.metadata()?.len();
                         let mut len_buf = [0u8; 8];
                         let mut crc_buf = [0u8; 4];
                         let mut counter = 0;
@@ -440,6 +441,19 @@ impl StorageEntity {
                                 warn!(
                                     "WAL corrupt: invalid record length {} at pos {}, truncating",
                                     record_len, pos_before
+                                );
+                                break;
+                            }
+                            // A torn or damaged length field can name any size.
+                            // A record that ends past the file is a torn tail;
+                            // allocating its buffer first would abort the start.
+                            let record_end = pos_before
+                                .checked_add(8)
+                                .and_then(|end| end.checked_add(record_len));
+                            if record_end.map_or(true, |end| end > file_len) {
+                                warn!(
+                                    "WAL truncated: record at pos {} has length {} past the file end {}, truncating",
+                                    pos_before, record_len, file_len
                                 );
                                 break;
                             }

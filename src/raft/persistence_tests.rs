@@ -516,6 +516,55 @@ fn a_new_store_creates_its_hard_state() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A torn length field can name a record far larger than the file. Replay
+/// treats that record as a torn tail: the valid prefix stays and the tail is
+/// cut. Before the bound check, replay allocated the named size first and the
+/// start panicked ("capacity overflow").
+#[test]
+fn a_record_length_past_the_file_end_is_a_torn_tail() {
+    let dir = super::compaction_tests::scratch_dir("wal_length_past_end");
+    disk::write_hard_state(
+        &dir,
+        &HardState {
+            term: 1,
+            voted_for: None,
+        },
+    )
+    .unwrap();
+    let payload = disk::DiskLogEntry {
+        term: 1,
+        commit_index: 0,
+        last_applied: 0,
+        log: add_entry(1, 1, 1),
+    }
+    .encode();
+    let mut wal = Vec::new();
+    wal.extend_from_slice(&(4 + payload.len() as u64).to_le_bytes());
+    wal.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());
+    wal.extend_from_slice(&payload);
+    let valid_len = wal.len() as u64;
+    // The torn record: a length of u64::MAX, a CRC and a few payload bytes.
+    wal.extend_from_slice(&u64::MAX.to_le_bytes());
+    wal.extend_from_slice(&[0xAB; 10]);
+    std::fs::write(dir.join("log.dat"), &wal).unwrap();
+
+    let opts = super::compaction_tests::disk_options(&dir, NEVER, NEVER);
+    let (mut term, mut commit, mut applied) = (0, 0, 0);
+    let mut logs = LogsMap::new();
+    let storage =
+        StorageEntity::new_with_options(&opts, &mut term, &mut commit, &mut applied, &mut logs)
+            .expect("a torn tail does not stop the start")
+            .expect("disk storage");
+    assert_eq!(logs.keys().copied().collect::<Vec<_>>(), vec![1]);
+    assert_eq!(
+        std::fs::metadata(dir.join("log.dat")).unwrap().len(),
+        valid_len,
+        "the torn tail is cut off the file"
+    );
+    drop(storage);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Replace the persisted snapshot of the store at `dir` with `image` (a valid
 /// file around it -- checksum and framing intact -- so only the image is bad).
 async fn persist_snapshot_image(dir: &std::path::Path, index: u64, image: Vec<u8>) {
