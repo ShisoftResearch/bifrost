@@ -96,7 +96,17 @@ if should_take_snapshot() {
 4. Calls `state_machine.recover(snapshot_data)`
 5. Updates indices and metadata
 6. Compacts logs already covered by snapshot
-7. Continues normal operation
+7. Stages the image of each state machine that is not registered yet; it is
+   restored when the state machine registers, before the commands buffered
+   for it are replayed. An installed snapshot drops the buffered commands:
+   the image covers them. If an image does not restore, the state machine
+   stays unregistered, `recover_after_register` returns
+   `PlaneError::Recovery` each time, and the plane stops
+8. Continues normal operation
+
+Until `start` loads the snapshot, the member answers no AppendEntries,
+InstallSnapshot or RequestVote. Until `recover_after_register` completes, the
+leader commits nothing on its own (the no-op of a new term waits).
 
 ```rust
 // Automatically called in RaftService::start()
@@ -204,7 +214,7 @@ When using disk storage, the following files are created:
 ### Hard State (`hardstate.dat`)
 
 The current term and the vote cast in it, as Raft requires them to survive a
-crash. A fixed 25-byte record -- `"RHS1"`, term (u64), vote flag (u8), vote
+crash. A fixed 25-byte record -- `"RHS3"`, term (u64), vote flag (u8), vote
 (u64), CRC32 of the preceding bytes -- replaced whole: temp file, fsync,
 rename, fsync of the directory. It is written only when the term or vote
 changes, and always before anything depends on it: a vote is granted, a
@@ -219,6 +229,30 @@ store with a log, snapshot or commit index but no hard state refuses to start
 hard state existed, they are reimported. A damaged file is an error at
 startup too: guessing the term or forgetting the vote is how a member votes
 twice.
+
+The last byte of the magic is the version of the whole raft store of the
+plane (`RHS3`). A store of another version (`RHS1`, `RHS2`) gives the typed
+`BadHardState` version error before the WAL is read, and its files are not
+changed. Such a store is imported again; there is no decoder for an old
+version.
+
+### WAL Start Rules (`log.dat`)
+
+A store opens in this order: the hard state (the version), the check for
+history without a hard state, the durable commit index (`commit.idx`), then
+the WAL. The WAL has a record at every log id: a command of a state machine
+that is not recoverable is kept as a no-op record with the same id and term.
+
+| WAL state at start | Result |
+|---|---|
+| A damaged record (length, CRC or decode) that more records follow | `DamagedWal`: the start stops, the file is not cut |
+| A damaged tail (the last record, a length past the file end, or a zero-filled rest), and the durable commit index is at or below the last intact record or the snapshot index | The tail is cut; the next append starts after the last intact record |
+| A damaged tail, and the durable commit index is above both the last intact record and the snapshot index | `DamagedCommittedTail`: the start stops, the file is not cut |
+| A hole in the log above the snapshot, or a log that ends below the commit index | `LogHole`: the start stops |
+
+Each error is a typed `io::Error` (`PlaneError::StorageInit` for a plane).
+Entries above the durable commit index can still be cut with a damaged tail.
+A follower writes `commit.idx` only at flush or shutdown.
 
 ### Snapshot File Format
 

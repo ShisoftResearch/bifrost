@@ -65,6 +65,10 @@ pub struct MasterStateMachine {
     /// member that registers a state machine after a command committed
     /// silently diverges from replicas that had it registered.
     pending_entries: HashMap<u64, Vec<LogEntry>>,
+    /// Staged images that failed to restore at registration, by state
+    /// machine. `recover_registered_snapshots` returns the first one, each
+    /// time it runs.
+    restore_failures: HashMap<u64, RecoverError>,
     pub configs: Configures,
     plane_id: PlaneId,
 }
@@ -161,6 +165,7 @@ impl MasterStateMachine {
             subs: HashMap::new(),
             snapshots: HashMap::new(),
             pending_entries: HashMap::new(),
+            restore_failures: HashMap::new(),
             configs: Configures::new(service_id),
             plane_id,
         };
@@ -191,13 +196,35 @@ impl MasterStateMachine {
         RegisterResult::OK
     }
 
-    /// Registers a state machine and replays, in commit order, any entries
-    /// that committed before it was registered on this replica.
+    /// Registers a state machine, restores its staged snapshot image, and
+    /// replays, in commit order, any entries that committed before it was
+    /// registered on this replica.
+    ///
+    /// The image comes first: the buffered entries are the commands above
+    /// it. Restored after them, the older image would erase them, and the
+    /// apply cursor is already past them. A failed restore replays nothing
+    /// and is returned by `recover_registered_snapshots`.
     pub async fn register_and_replay(&mut self, smc: SubStateMachine) -> RegisterResult {
         let id = smc.id();
         let accept_replay = smc.accept_buffered_replay();
         let result = self.register(smc);
         if result == RegisterResult::OK {
+            if let (Some(image), Some(sm)) = (self.snapshots.remove(&id), self.subs.get_mut(&id)) {
+                if let Err(e) = sm.try_recover(image).await {
+                    // Without its image the state machine must not apply
+                    // commands: it is unregistered again, so commands stay
+                    // buffered, and the failure stays for every later
+                    // `recover_registered_snapshots`.
+                    error!(
+                        "Plane {}: {}; the state machine is not registered",
+                        self.plane_id.raw(),
+                        e
+                    );
+                    self.subs.remove(&id);
+                    self.restore_failures.insert(id, e);
+                    return result;
+                }
+            }
             if !accept_replay {
                 if let Some(dropped) = self.pending_entries.remove(&id) {
                     info!(
@@ -228,7 +255,8 @@ impl MasterStateMachine {
 
     /// Stage the per-state-machine images of a master snapshot: the member
     /// list and every registered state machine take theirs in
-    /// `recover_registered_snapshots`, later registrations at registration.
+    /// `recover_registered_snapshots`, later registrations at registration
+    /// (`register_and_replay`).
     /// An image that does not decode is an error and stages nothing.
     pub fn stage_snapshot(&mut self, data: Vec<u8>) -> Result<(), RecoverError> {
         let sms = crate::utils::serde::deserialize::<SnapshotDataItems>(data.as_slice())
@@ -240,6 +268,11 @@ impl MasterStateMachine {
                     data.len()
                 ),
             })?;
+        // The image covers every buffered command: a snapshot is staged at
+        // the start, before any command is buffered, or by an InstallSnapshot
+        // above the apply cursor, and every buffered command is at or below
+        // it. Replayed on the image, they would be applied twice.
+        self.pending_entries.clear();
         for (sm_id, snapshot) in sms {
             self.snapshots.insert(sm_id, snapshot);
         }
@@ -250,6 +283,9 @@ impl MasterStateMachine {
     /// machines. The first image that cannot be restored stops recovery with
     /// its error: continuing would run a member on state it does not hold.
     pub async fn recover_registered_snapshots(&mut self) -> Result<(), RecoverError> {
+        if let Some(e) = self.restore_failures.values().next() {
+            return Err(e.clone());
+        }
         if let Some(snapshot) = self.snapshots.remove(&CONFIG_SM_ID) {
             self.configs.try_recover(snapshot).await?;
         }

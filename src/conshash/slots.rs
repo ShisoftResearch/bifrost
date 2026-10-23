@@ -566,9 +566,9 @@ mod tests {
         }
     }
 
-    /// Raft snapshots go through `utils::serde`: serde_json in debug, serde_cbor
-    /// in release. A snapshot that only one codec can write panics inside
-    /// `take_snapshot`, so every state machine round-trips its own.
+    /// Raft snapshots go through `utils::serde` (CBOR in every build profile).
+    /// A snapshot that the codec cannot write panics inside `take_snapshot`, so
+    /// every state machine round-trips its own.
     #[test]
     fn snapshot_round_trips_under_the_active_codec() {
         let mut sm = new_sm();

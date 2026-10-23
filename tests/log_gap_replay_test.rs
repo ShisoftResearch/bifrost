@@ -1,17 +1,13 @@
 use bifrost::raft::disk::DiskOptions;
-/// A kill can leave the on-disk raft log with holes below the commit index:
-/// `append_logs` deliberately skips entries whose state machine is not
-/// recoverable, so the ids on disk are not dense. Replay used to treat the
-/// first hole as an entry that might still arrive and deferred forever --
-/// on a single node nothing ever re-sends it, so every state machine on the
-/// plane wedged behind log id 1 and the ranged index lost its placements.
+/// The raft WAL has a record at every log id: `append_logs` writes a no-op in
+/// place of each command of a state machine that is not recoverable. So a
+/// hole in the replayed log is damage, and the start stops with a typed error
+/// (`LogHole`). It must not apply past the hole (the state machines would run
+/// on a state the other members do not have), and it must not wedge silently.
 ///
-/// This test manufactures the hole directly: run a node, commit a handful of
-/// config commands, stop it, strip the first record AFTER the bootstrap voter
-/// entry out of log.dat while leaving commit.idx alone, and restart. The plane
-/// must come back live -- leader elected -- instead of wedging. The bootstrap
-/// entry (id 1, `add_voter(self)`) must stay: the
-/// voters fold from the log (rule C1), so a hole at id 1 would leave no voter.
+/// The test makes the hole directly: run a node, commit a few configuration
+/// commands, stop it, remove the first record AFTER the bootstrap voter entry
+/// from log.dat, keep commit.idx, and restart.
 use bifrost::raft::state_machine::callback::SubKey;
 use bifrost::raft::{
     client::RaftClient, Options, PlaneId, RaftService, Storage, DEFAULT_SERVICE_ID,
@@ -47,7 +43,7 @@ fn strip_log_record(log_path: &std::path::Path, skip_records: usize) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn replay_skips_holes_below_durable_entries() {
+async fn a_hole_in_the_wal_stops_the_start() {
     let _ = env_logger::try_init();
 
     // Under TMPDIR, so a run can keep its scratch data off /tmp.
@@ -122,17 +118,15 @@ async fn replay_skips_holes_below_durable_entries() {
     // Give the tokio runtime a beat to drop file handles and free the port.
     sleep(Duration::from_millis(1000)).await;
 
-    // Manufacture the hole a skipped unrecoverable entry leaves behind: strip
-    // the first command record (id 2). The hole follows the bootstrap voter
-    // entry (id 1) and precedes the later durable entries.
+    // Make the hole: remove the first command record (id 2). The hole is
+    // after the bootstrap voter entry (id 1) and before later durable entries.
     strip_log_record(
         std::path::Path::new(&data_path).join("log.dat").as_path(),
         1,
     );
 
-    // Phase 2: restart on the doctored log, under the same address. The
-    // address decides the identity, so a new address would make the stored
-    // voter (id 1) a different member.
+    // Phase 2: restart on the changed log, at the same address (the address
+    // gives the identity).
     {
         let raft_service = RaftService::new(Options {
             storage: disk(&data_path),
@@ -142,27 +136,14 @@ async fn replay_skips_holes_below_durable_entries() {
         let server = Server::new(&address);
         Server::listen_and_resume(&server).await;
         server.register_service(&raft_service).await;
-        assert!(RaftService::start(&raft_service, true).await);
-        raft_service.bootstrap().await;
-        sleep(Duration::from_millis(500)).await;
         assert!(
-            raft_service.is_leader(),
-            "restarted node must elect itself despite the log hole"
+            !RaftService::start(&raft_service, true).await,
+            "a node whose log has a hole must not start"
         );
-
-        // The application-side replay entry point: this is what Nebuchadnezzar
-        // calls at startup, and what wedged behind the hole.
-        raft_service.recover_after_register()
-            .await
-            .expect("recover the registered state machines");
-        let applied = raft_service.last_applied_index().await;
-        // Phase 1 committed ids 1..=5 and the hole is id 2: a healthy replay
-        // lands on the last durable id. Wedged replay reports 0.
-        assert!(
-            applied >= 3,
-            "replay must walk past the hole to the durable entries (last_applied={}, expected >= 3)",
-            applied
-        );
+        assert!(!raft_service.is_leader());
+        assert_eq!(raft_service.last_applied_index().await, 0);
+        raft_service.shutdown().await;
+        server.shutdown().await;
     }
 
     let _ = std::fs::remove_dir_all(&data_path);

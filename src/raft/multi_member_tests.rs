@@ -719,3 +719,706 @@ async fn a_restart_never_lowers_the_term_below_the_log() {
     );
     node.stop().await;
 }
+
+/// A state machine that is not recoverable: the WAL keeps a no-op in place
+/// of each of its commands.
+mod volatile {
+    use super::*;
+    use futures::FutureExt;
+
+    pub(super) const VOLATILE_SM_ID: u64 = 4343;
+
+    pub(super) struct Volatile {
+        pub(super) count: u64,
+    }
+
+    raft_state_machine! {
+        def cmd bump() -> u64;
+    }
+
+    impl StateMachineCmds for Volatile {
+        fn bump(&mut self) -> BoxFuture<u64> {
+            self.count += 1;
+            futures::future::ready(self.count).boxed()
+        }
+    }
+
+    impl StateMachineCtl for Volatile {
+        raft_sm_complete!();
+        fn id(&self) -> u64 {
+            VOLATILE_SM_ID
+        }
+        fn snapshot(&self) -> Vec<u8> {
+            crate::utils::serde::serialize(&self.count)
+        }
+        fn recover(&mut self, _: Vec<u8>) -> BoxFuture<()> {
+            futures::future::ready(()).boxed()
+        }
+        fn recoverable(&self) -> bool {
+            false
+        }
+    }
+
+    pub(super) fn bump_entry() -> LogEntry {
+        let (fn_id, _, data) = commands::bump::new().encode();
+        LogEntry {
+            id: 0,
+            term: 0,
+            sm_id: VOLATILE_SM_ID,
+            fn_id,
+            data,
+        }
+    }
+}
+
+/// The WAL keeps a no-op (same id and term) in place of each command of a
+/// state machine that is not recoverable, so a restarted leader's log has no
+/// hole. A lagging follower whose `next_index` walks back over that id finds
+/// the entry at prev and catches up. With a hole the leader panicked in the
+/// heartbeat task at each round ("Cannot find old logs for follower").
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lagging_follower_catches_up_past_a_dropped_command_in_the_leaders_log() {
+    use volatile::{bump_entry, Volatile};
+    let _ = env_logger::try_init();
+    let mut members = cluster("leader_hole", 3, NEVER).await;
+    for member in &members {
+        member
+            .svc
+            .register_state_machine(Box::new(Volatile { count: 0 }))
+            .await;
+    }
+    for _ in 0..2 {
+        members[0].add(1).await;
+    }
+    {
+        let all: Vec<&Member> = members.iter().collect();
+        assert_eq!(wait_for_values(&all, 2).await, vec![2, 2, 2]);
+    }
+
+    // C is down while three entries commit through A and B. The middle one
+    // is a command of the state machine that is not recoverable.
+    let (c_dir, c_addr) = members.remove(2).stop().await;
+    members[0].add(1).await;
+    let dropped_id =
+        match Service::c_command(members[0].svc.as_ref(), PlaneId::type1(), bump_entry()).await {
+            ClientCmdResponse::Success { last_log_id, .. } => last_log_id,
+            other => panic!("bump on A failed: {:?}", other),
+        };
+    members[0].add(1).await;
+
+    // A restarts: its log is what the WAL replay gives.
+    let (a_dir, a_addr) = members.remove(0).stop().await;
+    async_wait_secs().await;
+    let a = Member::launch(&a_dir, &a_addr, NEVER).await;
+    a.svc
+        .register_state_machine(Box::new(Volatile { count: 0 }))
+        .await;
+    members.insert(0, a);
+    {
+        let meta = members[0].svc.read_meta().await;
+        let logs = meta.logs.read().await;
+        let placeholder = logs.get(&dropped_id).expect("the replayed log has a hole");
+        assert_eq!(placeholder.sm_id, NOOP_SM_ID);
+        assert!(placeholder.data.is_empty());
+        assert!(
+            disk::check_log_contiguous(PlaneId::type1(), meta.last_snapshot_index, 0, &logs)
+                .is_ok()
+        );
+    }
+    // A new term resets A's follower table: C's next_index starts after A's
+    // last entry. C comes back after it, so its next_index walks back over
+    // the id of the dropped command.
+    assert!(Service::reelect(members[0].svc.as_ref(), PlaneId::type1()).await);
+    members[0].add(1).await;
+    members.push(Member::launch(&c_dir, &c_addr, NEVER).await);
+
+    let target = members[0].position().await.0;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut reached = members[2].position().await.0;
+    while reached < target && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        reached = members[2].position().await.0;
+    }
+    assert!(
+        reached >= target,
+        "C stopped at log id {}, the leader is at {}",
+        reached,
+        target
+    );
+    {
+        let all: Vec<&Member> = members.iter().collect();
+        assert_eq!(wait_for_values(&all, 5).await, vec![5, 5, 5]);
+    }
+    // C got the entry from the restarted A, which holds the no-op.
+    let c_entry = members[2].svc.read_meta().await.logs.read().await[&dropped_id].clone();
+    assert_eq!(c_entry.sm_id, NOOP_SM_ID);
+    for member in members {
+        member.stop().await;
+    }
+}
+
+/// Raft section 8: a new leader commits the entries of earlier terms through
+/// a no-op of its own term. The old leader A commits entry k (B and C hold
+/// it) and stops before a heartbeat carries the commit index k. B wins the
+/// next term and must serve a read at cursor k with no further write. Without
+/// the no-op, B applies k only when a client command commits, and the read
+/// is answered `LeftBehind` until then.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_leader_commits_the_entries_of_earlier_terms() {
+    let _ = env_logger::try_init();
+    let mut members = cluster("new_term_noop", 3, NEVER).await;
+    members[0].add(1).await;
+    {
+        let all: Vec<&Member> = members.iter().collect();
+        assert_eq!(wait_for_values(&all, 1).await, vec![1, 1, 1]);
+    }
+    let (n, t) = members[0].position().await;
+    members.remove(0).stop().await;
+    // Entry k = n + 1 of term t: replicated to B and C (a majority), so A
+    // committed it, but no heartbeat carried the commit index.
+    let k = n + 1;
+    for member in &members {
+        hold_unreplicated(member, vec![add_entry(k, t, 100)]).await;
+    }
+    {
+        let meta = members[0].svc.read_meta().await;
+        assert!(
+            meta.last_applied < k,
+            "B applied entry {} before the test",
+            k
+        );
+    }
+    assert!(
+        Service::reelect(members[0].svc.as_ref(), PlaneId::type1()).await,
+        "B must win the next term with C's vote"
+    );
+    let (fn_id, _, data) = get::new().encode();
+    let read = LogEntry {
+        id: k,
+        term: t,
+        sm_id: LEDGER_SM_ID,
+        fn_id,
+        data,
+    };
+    match Service::c_query(members[0].svc.as_ref(), PlaneId::type1(), &read).await {
+        ClientQryResponse::Success { data: Ok(data), .. } => {
+            assert_eq!(get::decode_return(&data), 101);
+        }
+        other => panic!(
+            "the new leader did not serve the read at cursor {}: {:?}",
+            k, other
+        ),
+    }
+    {
+        let all: Vec<&Member> = members.iter().collect();
+        assert_eq!(wait_for_values(&all, 101).await, vec![101, 101]);
+    }
+    for member in members {
+        member.stop().await;
+    }
+}
+
+/// A command answered `NotCommitted` stays in the leader's log. The heartbeat
+/// timer commits it (`commit_own_term_tail`) with no new command, and every
+/// member applies it. This isolates the heartbeat path from the commit at
+/// election time.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_uncommitted_entry_of_the_leaders_term_commits_without_a_new_command() {
+    let _ = env_logger::try_init();
+    let members = cluster("tail_heartbeat", 3, NEVER).await;
+    members[0].add(1).await;
+    let all: Vec<&Member> = members.iter().collect();
+    assert_eq!(wait_for_values(&all, 1).await, vec![1, 1, 1]);
+    {
+        // The state a NotCommitted answer leaves behind: appended, not
+        // replicated to a majority, not applied.
+        let meta = members[0].svc.write_meta().await;
+        let mut entry = add_entry(0, 0, 10);
+        members[0]
+            .svc
+            .leader_append_log(&meta, &mut entry)
+            .await
+            .expect("append to the leader's log");
+    }
+    assert_eq!(
+        wait_for_values(&all, 11).await,
+        vec![11, 11, 11],
+        "the entry did not commit without a new command"
+    );
+    for member in members {
+        member.stop().await;
+    }
+}
+
+/// A restart from a snapshot whose commit index is the snapshot index, with
+/// an uncommitted suffix, and the application registers its state machines
+/// after the start. The sole voter leads at once and appends its no-op, but
+/// commits nothing before `recover_after_register`. A commit before it would
+/// buffer the suffix for the unregistered ledger; registration would replay
+/// it, the snapshot restore after it would erase it, and the apply cursor
+/// would stay past it, so the command would be lost.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_commits_nothing_before_the_state_machines_are_recovered() {
+    let _ = env_logger::try_init();
+    let addr = addresses(1).remove(0);
+    let a = Member::launch(&scratch_dir("replay_gate"), &addr, 1).await;
+    a.svc.bootstrap().await;
+    for _ in 0..3 {
+        a.add(1).await;
+    }
+    let snapshot_index = snapshot_and_compact(&a.svc).await;
+    {
+        let meta = a.svc.write_meta().await;
+        let mut entry = add_entry(0, 0, 100);
+        a.svc
+            .leader_append_log(&meta, &mut entry)
+            .await
+            .expect("append the uncommitted suffix");
+    }
+    let (dir, addr) = a.stop().await;
+    async_wait_secs().await;
+
+    let mut opts = disk_options(&dir, NEVER, 1);
+    opts.address = addr.clone();
+    let svc = RaftService::new(opts);
+    let server = Server::new(&addr);
+    server.register_service(&svc).await;
+    Server::listen_and_resume(&server).await;
+    assert!(RaftService::start(&svc, false).await);
+    // The sole voter leads now. Let heartbeat rounds pass before the
+    // application registers.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    {
+        let meta = svc.read_meta().await;
+        assert!(matches!(meta.membership, Membership::Leader(_)));
+        assert_eq!(
+            meta.last_applied, snapshot_index,
+            "the leader committed before the start replay"
+        );
+    }
+    svc.register_state_machine(Box::new(Ledger { value: 0 }))
+        .await;
+    svc.recover_after_register()
+        .await
+        .expect("recover the registered state machines");
+    let a = Member {
+        svc,
+        server,
+        addr,
+        dir,
+    };
+    assert_eq!(
+        wait_for_values(&[&a], 103).await,
+        vec![103],
+        "the suffix was lost or not committed after the replay"
+    );
+    a.stop().await;
+}
+
+/// Start a member at `dir` and `addr` without registering a state machine.
+/// With `listen_first` the server listens before the raft service starts,
+/// as `RaftService::new_server` and `Member::launch` do.
+async fn start_unregistered_with(
+    dir: &Path,
+    addr: &str,
+    compaction_threshold: u64,
+    listen_first: bool,
+) -> Member {
+    let mut opts = disk_options(dir, NEVER, compaction_threshold);
+    opts.address = addr.to_string();
+    let svc = RaftService::new(opts);
+    let server = Server::new(&addr.to_string());
+    if listen_first {
+        server.register_service(&svc).await;
+        Server::listen_and_resume(&server).await;
+        // Let a leader's heartbeat arrive before the start.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+    }
+    assert!(RaftService::start(&svc, false).await);
+    if !listen_first {
+        server.register_service(&svc).await;
+        Server::listen_and_resume(&server).await;
+    }
+    Member {
+        svc,
+        server,
+        addr: addr.to_string(),
+        dir: dir.to_path_buf(),
+    }
+}
+
+async fn start_unregistered(dir: &Path, addr: &str, compaction_threshold: u64) -> Member {
+    start_unregistered_with(dir, addr, compaction_threshold, false).await
+}
+
+/// Register the ledger late and run the start replay.
+async fn register_and_recover(member: &Member) {
+    member
+        .svc
+        .register_state_machine(Box::new(Ledger { value: 0 }))
+        .await;
+    member
+        .svc
+        .recover_after_register()
+        .await
+        .expect("recover the registered state machines");
+}
+
+/// A client command can commit on a restarted leader before the application
+/// registers its state machines. The commands above the snapshot are then
+/// buffered for the unregistered ledger. Registration must restore the
+/// staged snapshot image first and replay the buffered commands after it.
+/// Restored later (in `recover_after_register`), the older image erased
+/// them, and the apply cursor was already past them (review R1 of round 3).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_committed_before_registration_survives_the_snapshot_restore() {
+    let _ = env_logger::try_init();
+    let addr = addresses(1).remove(0);
+    let a = Member::launch(&scratch_dir("cmd_before_register"), &addr, 1).await;
+    a.svc.bootstrap().await;
+    for _ in 0..3 {
+        a.add(1).await;
+    }
+    snapshot_and_compact(&a.svc).await;
+    {
+        let meta = a.svc.write_meta().await;
+        let mut entry = add_entry(0, 0, 100);
+        a.svc
+            .leader_append_log(&meta, &mut entry)
+            .await
+            .expect("append the uncommitted suffix");
+    }
+    let (dir, addr) = a.stop().await;
+    async_wait_secs().await;
+
+    let a = start_unregistered(&dir, &addr, 1).await;
+    // This command commits the suffix and itself before registration.
+    match a.command(1).await {
+        ClientCmdResponse::Success { .. } => {}
+        other => panic!("the early command did not commit: {:?}", other),
+    }
+    register_and_recover(&a).await;
+    assert_eq!(
+        wait_for_values(&[&a], 104).await,
+        vec![104],
+        "commands committed before registration were lost"
+    );
+    a.stop().await;
+}
+
+/// The same loss on the follower path: a restarted follower with a snapshot
+/// gets a heartbeat that commits the entries above its snapshot before its
+/// application registers.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_follower_commit_before_registration_survives_the_snapshot_restore() {
+    follower_commit_before_registration("follower_before_register", false).await;
+}
+
+/// A heartbeat that reaches a restarted follower before `start` is refused.
+/// Applied then, from apply cursor 0 and before the snapshot loads, the
+/// entries were buffered once below the snapshot and once above it: B read
+/// 10, not 5 (Observed).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_heartbeat_before_the_start_is_refused() {
+    follower_commit_before_registration("heartbeat_before_start", true).await;
+}
+
+/// B, a follower with a snapshot at 3 commands, misses 2 commands, restarts
+/// and applies the leader's commit before its ledger registers.
+async fn follower_commit_before_registration(tag: &str, listen_first: bool) {
+    let _ = env_logger::try_init();
+    let mut members = cluster(tag, 3, 1).await;
+    for _ in 0..3 {
+        members[0].add(1).await;
+    }
+    {
+        let all: Vec<&Member> = members.iter().collect();
+        assert_eq!(wait_for_values(&all, 3).await, vec![3, 3, 3]);
+    }
+    snapshot_and_compact(&members[1].svc).await;
+    let (b_dir, b_addr) = members.remove(1).stop().await;
+    // Two commands commit through A and C while B is down.
+    for _ in 0..2 {
+        members[0].add(1).await;
+    }
+    async_wait_secs().await;
+    let b = start_unregistered_with(&b_dir, &b_addr, 1, listen_first).await;
+    let leader_commit = members[0].svc.read_meta().await.commit_index;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while b.svc.read_meta().await.last_applied < leader_commit && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        b.svc.read_meta().await.last_applied >= leader_commit,
+        "B did not apply the leader's commit before registration"
+    );
+    register_and_recover(&b).await;
+    assert_eq!(
+        wait_for_values(&[&b], 5).await,
+        vec![5],
+        "B does not hold the 5 commands (lost, or applied twice)"
+    );
+    b.stop().await;
+    for member in members {
+        member.stop().await;
+    }
+}
+
+/// Write a store at `dir` for a sole voter at `addr`: entry 1 adds the voter,
+/// entry 2 is a ledger command that does not decode, both committed.
+fn write_store_with_an_undecodable_entry(dir: &Path, addr: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    let mut wal = std::fs::File::create(dir.join("log.dat")).unwrap();
+    let (fn_id, _, data) =
+        super::state_machine::configs::commands::new_member_::new(&addr.to_string()).encode();
+    let voter = LogEntry {
+        id: 1,
+        term: 1,
+        sm_id: super::state_machine::configs::CONFIG_SM_ID,
+        fn_id,
+        data,
+    };
+    let mut bad = add_entry(2, 1, 1);
+    bad.data = vec![0xff, 0xff, 0xff];
+    for log in [voter, bad] {
+        let record = DiskLogEntry {
+            term: log.id,
+            commit_index: log.id,
+            last_applied: log.id,
+            log,
+        }
+        .encode();
+        wal.write_all(&(4u64 + record.len() as u64).to_le_bytes())
+            .unwrap();
+        wal.write_all(&crc32fast::hash(&record).to_le_bytes())
+            .unwrap();
+        wal.write_all(&record).unwrap();
+    }
+    let mut commit = std::fs::File::create(dir.join("commit.idx")).unwrap();
+    commit.write_all(&2u64.to_le_bytes()).unwrap();
+    commit.write_all(&2u64.to_le_bytes()).unwrap();
+    super::disk::write_hard_state(
+        dir,
+        &super::disk::HardState {
+            term: 1,
+            voted_for: None,
+        },
+    )
+    .unwrap();
+}
+
+/// The recovery error names the entry that does not decode.
+fn assert_undecodable(result: Result<(), PlaneError>) {
+    match result {
+        Err(PlaneError::Recovery(e)) => {
+            assert_eq!(e.sm_id, LEDGER_SM_ID);
+            assert!(e.reason.contains("log entry 2"), "{}", e.reason);
+        }
+        other => panic!("expected PlaneError::Recovery, got {:?}", other),
+    }
+}
+
+/// A committed entry that does not decode stops the start replay with
+/// `PlaneError::Recovery` (review R2 of round 3), on the type 1 plane.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_undecodable_committed_entry_stops_the_start_replay() {
+    let _ = env_logger::try_init();
+    let dir = scratch_dir("undecodable_type1");
+    let addr = addresses(1).remove(0);
+    write_store_with_an_undecodable_entry(&dir, &addr);
+    let a = start_unregistered(&dir, &addr, NEVER).await;
+    a.svc
+        .register_state_machine(Box::new(Ledger { value: 0 }))
+        .await;
+    assert_undecodable(a.svc.recover_after_register().await);
+    a.stop().await;
+}
+
+/// Same, on a type-2 plane.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_undecodable_committed_entry_stops_the_start_replay_of_a_type2_plane() {
+    let _ = env_logger::try_init();
+    let dir = scratch_dir("undecodable_type2");
+    let addr = addresses(1).remove(0);
+    let plane_id = PlaneId::type2(77).unwrap();
+    write_store_with_an_undecodable_entry(&dir.join("planes").join("77"), &addr);
+    let a = start_unregistered(&dir, &addr, NEVER).await;
+    let plane = a
+        .svc
+        .plane(plane_id)
+        .await
+        .expect("open the persisted plane");
+    plane
+        .register_state_machine(Box::new(Ledger { value: 0 }))
+        .await
+        .expect("register on the plane");
+    assert_undecodable(plane.recover_after_register().await);
+    a.stop().await;
+}
+
+/// A follower buffers commands for its unregistered ledger, then falls
+/// behind the leader's compaction and gets an InstallSnapshot that covers
+/// them. Registration restores the installed image; the buffered commands
+/// are in it and must not be replayed on it (review round 4, N1). With the
+/// buffer kept, B read 9, not 7 (Observed).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_installed_snapshot_drops_the_buffered_commands_it_covers() {
+    let _ = env_logger::try_init();
+    let mut members = cluster("install_after_buffer", 3, 1).await;
+    for _ in 0..3 {
+        members[0].add(1).await;
+    }
+    {
+        let all: Vec<&Member> = members.iter().collect();
+        assert_eq!(wait_for_values(&all, 3).await, vec![3, 3, 3]);
+    }
+    snapshot_and_compact(&members[1].svc).await;
+    let (b_dir, b_addr) = members.remove(1).stop().await;
+    for _ in 0..2 {
+        members[0].add(1).await;
+    }
+    async_wait_secs().await;
+    let b = start_unregistered(&b_dir, &b_addr, 1).await;
+    let leader_commit = members[0].svc.read_meta().await.commit_index;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while b.svc.read_meta().await.last_applied < leader_commit && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        b.svc.read_meta().await.last_applied >= leader_commit,
+        "B did not apply (and buffer) the leader's commit before registration"
+    );
+    // B stops listening and misses 2 more commands; A compacts past them.
+    b.server.shutdown().await;
+    for _ in 0..2 {
+        members[0].add(1).await;
+    }
+    let index = snapshot_and_compact(&members[0].svc).await;
+    let (term, snapshot_term, image) = {
+        let meta = members[0].svc.read_meta().await;
+        let image = {
+            let master = meta.state_machine.read().await;
+            crate::raft::state_machine::StateMachineCtl::snapshot(&*master)
+        };
+        (meta.term, meta.last_snapshot_term, image)
+    };
+    let b_term = b.svc.read_meta().await.term;
+    let installed = Service::install_snapshot(
+        b.svc.as_ref(),
+        PlaneId::type1(),
+        term.max(b_term),
+        members[0].svc.id,
+        index,
+        snapshot_term,
+        image,
+    )
+    .await;
+    assert!(
+        matches!(installed, InstallSnapshotResult::Installed),
+        "install: {:?}",
+        installed
+    );
+    register_and_recover(&b).await;
+    assert_eq!(b.value().await, 7, "B applied the buffered commands twice");
+    b.svc.shutdown().await;
+    for member in members {
+        member.stop().await;
+    }
+}
+
+use super::compaction_tests::StateMachineCmds as _;
+
+/// A ledger whose image never restores.
+struct UnrestorableLedger {
+    value: u64,
+}
+
+impl super::compaction_tests::StateMachineCmds for UnrestorableLedger {
+    fn add(&mut self, value: u64) -> futures::future::BoxFuture<u64> {
+        use futures::FutureExt;
+        self.value += value;
+        futures::future::ready(self.value).boxed()
+    }
+    fn get(&self) -> futures::future::BoxFuture<u64> {
+        use futures::FutureExt;
+        futures::future::ready(self.value).boxed()
+    }
+}
+
+impl crate::raft::state_machine::StateMachineCtl for UnrestorableLedger {
+    raft_sm_complete!();
+    fn id(&self) -> u64 {
+        LEDGER_SM_ID
+    }
+    fn snapshot(&self) -> Vec<u8> {
+        crate::utils::serde::serialize(&self.value)
+    }
+    fn recover(&mut self, _data: Vec<u8>) -> futures::future::BoxFuture<()> {
+        use futures::FutureExt;
+        futures::future::ready(()).boxed()
+    }
+    fn try_recover(
+        &mut self,
+        _data: Vec<u8>,
+    ) -> futures::future::BoxFuture<Result<(), crate::raft::state_machine::RecoverError>> {
+        use futures::FutureExt;
+        futures::future::ready(Err(crate::raft::state_machine::RecoverError {
+            sm_id: LEDGER_SM_ID,
+            reason: "test: the image does not restore".to_string(),
+        }))
+        .boxed()
+    }
+    fn recoverable(&self) -> bool {
+        true
+    }
+}
+
+/// A sole voter with a snapshot restarts; the ledger image fails to restore
+/// at registration (review round 4, N2). The ledger must not apply commands
+/// without its image (a command is buffered: `SmNotFound`), every
+/// `recover_after_register` reports the failure, and the plane stops.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_image_restore_at_registration_stops_the_plane() {
+    let _ = env_logger::try_init();
+    let addr = addresses(1).remove(0);
+    let a = Member::launch(&scratch_dir("failed_restore"), &addr, 1).await;
+    a.svc.bootstrap().await;
+    for _ in 0..3 {
+        a.add(1).await;
+    }
+    snapshot_and_compact(&a.svc).await;
+    let (dir, addr) = a.stop().await;
+    async_wait_secs().await;
+    let a = start_unregistered(&dir, &addr, 1).await;
+    a.svc
+        .register_state_machine(Box::new(UnrestorableLedger { value: 0 }))
+        .await;
+    match a.command(1).await {
+        ClientCmdResponse::Success {
+            data: Err(ExecError::SmNotFound(LEDGER_SM_ID)),
+            ..
+        } => {}
+        other => panic!("a ledger without its image took a command: {:?}", other),
+    }
+    for attempt in ["first", "second"] {
+        assert!(
+            matches!(
+                a.svc.recover_after_register().await,
+                Err(PlaneError::Recovery(_))
+            ),
+            "the {} recover_after_register did not report the failed restore",
+            attempt
+        );
+    }
+    assert!(RaftService::lifecycle_is_stopping(
+        a.svc.read_meta().await.lifecycle
+    ));
+    assert!(
+        !matches!(
+            a.command(1).await,
+            ClientCmdResponse::Success { data: Ok(_), .. }
+        ),
+        "the stopped plane applied a command"
+    );
+    a.stop().await;
+}

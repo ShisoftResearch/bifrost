@@ -349,6 +349,11 @@ fn a_damaged_hard_state_refuses_to_start() {
     other_version[3] = b'1';
     std::fs::write(&path, &other_version).unwrap();
     assert_eq!(problem(&dir), disk::HardStateProblem::Version(b'1'));
+    // `RHS2` is the store whose WAL has holes at the commands of state
+    // machines that are not recoverable: refused.
+    other_version[3] = b'2';
+    std::fs::write(&path, &other_version).unwrap();
+    assert_eq!(problem(&dir), disk::HardStateProblem::Version(b'2'));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -514,6 +519,236 @@ fn a_new_store_creates_its_hard_state() {
     assert_eq!(disk::read_hard_state(&dir).unwrap(), Some(HardState::default()));
     drop(storage);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A torn length field can name a record far larger than the file. Replay
+/// treats that record as a torn tail: the valid prefix stays and the tail is
+/// cut. Before the bound check, replay allocated the named size first and the
+/// start panicked ("capacity overflow").
+#[test]
+fn a_record_length_past_the_file_end_is_a_torn_tail() {
+    let dir = super::compaction_tests::scratch_dir("wal_length_past_end");
+    disk::write_hard_state(
+        &dir,
+        &HardState {
+            term: 1,
+            voted_for: None,
+        },
+    )
+    .unwrap();
+    let payload = disk::DiskLogEntry {
+        term: 1,
+        commit_index: 0,
+        last_applied: 0,
+        log: add_entry(1, 1, 1),
+    }
+    .encode();
+    let mut wal = Vec::new();
+    wal.extend_from_slice(&(4 + payload.len() as u64).to_le_bytes());
+    wal.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());
+    wal.extend_from_slice(&payload);
+    let valid_len = wal.len() as u64;
+    // The torn record: a length of u64::MAX, a CRC and a few payload bytes.
+    wal.extend_from_slice(&u64::MAX.to_le_bytes());
+    wal.extend_from_slice(&[0xAB; 10]);
+    std::fs::write(dir.join("log.dat"), &wal).unwrap();
+
+    let opts = super::compaction_tests::disk_options(&dir, NEVER, NEVER);
+    let (mut term, mut commit, mut applied) = (0, 0, 0);
+    let mut logs = LogsMap::new();
+    let storage =
+        StorageEntity::new_with_options(&opts, &mut term, &mut commit, &mut applied, &mut logs)
+            .expect("a torn tail does not stop the start")
+            .expect("disk storage");
+    assert_eq!(logs.keys().copied().collect::<Vec<_>>(), vec![1]);
+    assert_eq!(
+        std::fs::metadata(dir.join("log.dat")).unwrap().len(),
+        valid_len,
+        "the torn tail is cut off the file"
+    );
+    drop(storage);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// One encoded WAL record (length, CRC, payload) of an `add` entry.
+fn wal_record(id: u64) -> Vec<u8> {
+    let payload = disk::DiskLogEntry {
+        term: id,
+        commit_index: 0,
+        last_applied: 0,
+        log: add_entry(id, 1, 1),
+    }
+    .encode();
+    let mut record = Vec::new();
+    record.extend_from_slice(&(4 + payload.len() as u64).to_le_bytes());
+    record.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());
+    record.extend_from_slice(&payload);
+    record
+}
+
+/// Open a store whose WAL holds `wal` and whose `commit.idx` holds `commit`
+/// (none if `None`). Returns the start result (the ids replay gives, or the
+/// error) and the bytes of `log.dat` after the start.
+fn open_store(
+    tag: &str,
+    wal: &[u8],
+    commit: Option<u64>,
+    version: u8,
+) -> (std::io::Result<Vec<u64>>, Vec<u8>) {
+    let dir = super::compaction_tests::scratch_dir(tag);
+    disk::write_hard_state(
+        &dir,
+        &HardState {
+            term: 1,
+            voted_for: None,
+        },
+    )
+    .unwrap();
+    let hard_state = dir.join("hardstate.dat");
+    let mut bytes = std::fs::read(&hard_state).unwrap();
+    bytes[3] = version;
+    std::fs::write(&hard_state, &bytes).unwrap();
+    std::fs::write(dir.join("log.dat"), wal).unwrap();
+    if let Some(commit) = commit {
+        let mut progress = commit.to_le_bytes().to_vec();
+        progress.extend_from_slice(&commit.to_le_bytes());
+        std::fs::write(dir.join("commit.idx"), progress).unwrap();
+    }
+    let opts = super::compaction_tests::disk_options(&dir, NEVER, NEVER);
+    let (mut term, mut applied) = (0, 0);
+    let mut commit_index = 0;
+    let mut logs = LogsMap::new();
+    let started = StorageEntity::new_with_options(
+        &opts,
+        &mut term,
+        &mut commit_index,
+        &mut applied,
+        &mut logs,
+    )
+    .map(|storage| {
+        drop(storage);
+        logs.keys().copied().collect()
+    });
+    let after = std::fs::read(dir.join("log.dat")).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    (started, after)
+}
+
+/// The WAL of records 1 to `n`.
+fn wal_of(n: u64) -> Vec<u8> {
+    (1..=n).flat_map(wal_record).collect()
+}
+
+/// The typed error inside a start error.
+fn start_error<E: std::error::Error + 'static>(started: &std::io::Result<Vec<u64>>) -> &E {
+    started
+        .as_ref()
+        .expect_err("the start must fail")
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<E>())
+        .expect("a typed start error")
+}
+
+/// A damaged last record above the durable commit index is a torn tail (the
+/// last append was not synced): replay cuts it and keeps the records before
+/// it. Control for the committed case below.
+#[test]
+fn a_damaged_last_record_is_a_torn_tail() {
+    let mut wal = wal_of(3);
+    let valid_len = wal_of(2).len();
+    wal[valid_len + 8] ^= 0xff; // the CRC of record 3
+    let (started, after) = open_store("wal_bad_last", &wal, Some(2), b'3');
+    assert_eq!(started.unwrap(), vec![1, 2]);
+    assert_eq!(after, wal_of(2), "the torn tail is cut off the file");
+}
+
+/// A damaged last record at or below the durable commit index was synced:
+/// it is not a torn write. The start stops with `DamagedCommittedTail` and
+/// the file is not cut. A cut would drop committed entry 3, and the next
+/// append would leave a hole at its id.
+#[test]
+fn a_damaged_committed_last_record_stops_the_start() {
+    let mut wal = wal_of(3);
+    wal[wal_of(2).len() + 8] ^= 0xff;
+    let (started, after) = open_store("wal_bad_committed_last", &wal, Some(3), b'3');
+    let damaged = start_error::<disk::DamagedCommittedTail>(&started);
+    assert_eq!((damaged.intact_through, damaged.commit_index), (2, 3));
+    assert_eq!(damaged.offset, wal_of(2).len() as u64);
+    assert_eq!(after, wal, "the WAL must not be cut");
+}
+
+/// A damaged length field in the middle can name a size past the file end,
+/// so the record looks like a torn tail. Below the durable commit index it
+/// stops the start and the file is not cut. Above it (control), the tail is
+/// cut: an entry that is not committed can be lost.
+#[test]
+fn a_damaged_middle_length_below_the_commit_stops_the_start() {
+    let mut wal = wal_of(5);
+    let at = wal_of(2).len();
+    wal[at..at + 8].copy_from_slice(&(u64::MAX / 2).to_le_bytes()); // record 3
+    let (started, after) = open_store("wal_bad_middle_length", &wal, Some(5), b'3');
+    let damaged = start_error::<disk::DamagedCommittedTail>(&started);
+    assert_eq!((damaged.intact_through, damaged.commit_index), (2, 5));
+    assert_eq!(after, wal, "the WAL must not be cut");
+
+    let (started, after) = open_store("wal_bad_middle_length_above", &wal, Some(2), b'3');
+    assert_eq!(started.unwrap(), vec![1, 2]);
+    assert_eq!(after, wal_of(2));
+}
+
+/// The store version is checked before the WAL is read: an `RHS2` store with
+/// a damaged tail gives the version error, and its WAL is not cut.
+#[test]
+fn an_old_store_version_is_refused_before_the_wal_is_read() {
+    let mut wal = wal_of(3);
+    wal[wal_of(2).len() + 8] ^= 0xff;
+    let (started, after) = open_store("wal_old_version", &wal, None, b'2');
+    let bad = start_error::<disk::BadHardState>(&started);
+    assert_eq!(bad.problem, disk::HardStateProblem::Version(b'2'));
+    assert_eq!(after, wal, "an old store must not be changed");
+}
+
+/// A zero-filled tail (the file was extended but the bytes of the last
+/// append were not written) is a torn tail, also when it is longer than one
+/// record.
+#[test]
+fn a_zero_filled_tail_is_a_torn_tail() {
+    let mut wal = wal_of(1);
+    wal.extend_from_slice(&[0u8; 300]);
+    let (started, after) = open_store("wal_zero_tail", &wal, Some(1), b'3');
+    assert_eq!(started.unwrap(), vec![1]);
+    assert_eq!(after, wal_of(1));
+}
+
+/// A log with a hole, or one that ends below the commit index, stops the
+/// start with a typed `LogHole` error. Applying past the hole would run the
+/// state machines on a state the other members do not have.
+#[test]
+fn a_hole_in_the_log_is_a_typed_error() {
+    let hole_of = |snapshot_index, commit_index, logs: &LogsMap| {
+        let error =
+            disk::check_log_contiguous(PlaneId::type1(), snapshot_index, commit_index, logs)
+                .expect_err("a log with a hole was accepted");
+        let hole = error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<disk::LogHole>())
+            .expect("a typed LogHole error");
+        (hole.first_missing, hole.last_missing)
+    };
+    let mut logs = LogsMap::new();
+    for id in [1, 2, 4] {
+        logs.insert(id, add_entry(id, 1, 1));
+    }
+    assert_eq!(hole_of(0, 0, &logs), (3, 3));
+    // Entries at or below the snapshot index are not checked; above it the
+    // log starts right after the snapshot index.
+    assert!(disk::check_log_contiguous(PlaneId::type1(), 3, 4, &logs).is_ok());
+    logs.remove(&1);
+    assert_eq!(hole_of(1, 0, &logs), (3, 3));
+    logs.remove(&2);
+    assert_eq!(hole_of(2, 0, &logs), (3, 3));
+    // Committed ids above the last entry are absent.
+    assert_eq!(hole_of(3, 6, &logs), (5, 6));
 }
 
 /// Replace the persisted snapshot of the store at `dir` with `image` (a valid
