@@ -509,3 +509,36 @@ CAUTION: Delete build caches only. Do not delete data dirs, WAL, backup or raft 
 or any other file that a build cannot make again.
 
 CAUTION: Do not delete a target dir that a running build or test of another worker uses.
+
+## 10.4 Cleanup of Work Files
+
+When you are done with a work file, delete it. Do not leave it behind for the user.
+
+This rule applies to the items that you made:
+
+* Work and scratch directories.
+* Test files: test stores, test data and test output.
+* Dumps.
+* Profiling and benchmark results: perf data, flame graphs, `nsys` and `ncu` reports,
+  benchmark stores and their logs.
+* Git worktrees and their temporary branches.
+
+You are done with an item when all of these are true:
+
+1. No running process uses it.
+2. Its result is in your report, in a commit, or in a record that the user can read.
+3. No open failure needs it. Keep the corpse of a failure until the failure is fixed.
+
+Procedure:
+
+1. Make a list of the items that you made for the task, on every host (dev box, Genoa, CT 130, CT 131).
+2. For a worktree: make sure that every change is merged, pushed, or kept in an archive branch.
+   Then remove the worktree with `git worktree remove`. Delete its branch only if the branch is merged.
+3. Delete the items.
+4. Write in your report what you deleted, and what you kept and why.
+
+WARNING: Do not delete an item that you did not make or that the user asked you to keep.
+Do not delete the data dirs, WAL, backup or raft stores of a live service.
+
+CAUTION: Before you delete the source of an archive, prove that the archive is complete:
+compare the file count and the total bytes with the source.
