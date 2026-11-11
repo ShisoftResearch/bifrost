@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Mutex as StdMutex;
 use std::sync::Weak as StdWeak;
@@ -553,6 +553,9 @@ struct RaftPlaneRuntime {
     plane_id: PlaneId,
     meta: RwLock<RaftMeta>,
     is_leader: AtomicBool,
+    /// Replays that run on this plane. A replay of one plane must not stop
+    /// the notifications of the other planes of the same service.
+    replaying: AtomicU32,
     checker_task: TokioMutex<Option<tokio::task::JoinHandle<()>>>,
     shutdown_tx: watch::Sender<LifecycleState>,
 }
@@ -605,6 +608,7 @@ impl RaftPlaneRuntime {
                 initialized: false,
             }),
             is_leader: AtomicBool::new(false),
+            replaying: AtomicU32::new(0),
             checker_task: TokioMutex::new(None),
             shutdown_tx,
         })
@@ -2305,17 +2309,21 @@ impl RaftService {
         &self,
         plane_id: PlaneId,
     ) -> Result<(), PlaneError> {
-        self.replaying.fetch_add(1, Relaxed);
-        let result = self.recover_after_register_on_plane_inner(plane_id).await;
-        self.replaying.fetch_sub(1, Relaxed);
-        result
+        if let Some(runtime) = self.runtime_for_plane(plane_id).await? {
+            runtime.replaying.fetch_add(1, Relaxed);
+            let result = Self::recover_plane_runtime_after_register(plane_id, &runtime).await;
+            runtime.replaying.fetch_sub(1, Relaxed);
+            return result;
+        }
+
+        self.recover_after_register().await
     }
 
-    async fn recover_after_register_on_plane_inner(
-        &self,
+    async fn recover_plane_runtime_after_register(
         plane_id: PlaneId,
+        runtime: &RaftPlaneRuntime,
     ) -> Result<(), PlaneError> {
-        if let Some(runtime) = self.runtime_for_plane(plane_id).await? {
+        {
             let mut meta = runtime.meta.write().await;
             let restored = meta
                 .state_machine
@@ -2343,10 +2351,8 @@ impl RaftService {
                 return Err(PlaneError::Recovery(e));
             }
             meta.replay_pending = false;
-            return Ok(());
         }
-
-        self.recover_after_register().await
+        Ok(())
     }
 
     pub async fn register_state_machine_on_plane(
@@ -3015,6 +3021,13 @@ impl RaftService {
     /// notification then: nobody subscribed to a replayed entry.
     pub fn is_replaying(&self) -> bool {
         self.replaying.load(Relaxed) > 0
+    }
+    /// Whether a replay runs on this plane. Type-1 uses the service counter.
+    pub async fn is_replaying_on_plane(&self, plane_id: PlaneId) -> Result<bool, PlaneError> {
+        if let Some(runtime) = self.runtime_for_plane(plane_id).await? {
+            return Ok(runtime.replaying.load(Relaxed) > 0);
+        }
+        Ok(self.is_replaying())
     }
     pub fn get_server_id(&self) -> u64 {
         self.id

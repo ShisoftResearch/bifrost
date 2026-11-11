@@ -214,7 +214,11 @@ impl SMCallback {
                 return Err(NotifyError::IsNotLeader);
             }
         };
-        let is_leader = !raft_service.is_replaying()
+        let replaying = raft_service
+            .is_replaying_on_plane(self.plane_id)
+            .await
+            .unwrap_or(true);
+        let is_leader = !replaying
             && raft_service
                 .is_leader_on_plane(self.plane_id)
                 .await

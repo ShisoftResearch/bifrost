@@ -256,6 +256,96 @@ mod test {
         assert_eq!(sumer.load(Ordering::Relaxed), expected_sum);
     }
 
+    /// A replay on one plane must not stop the notifications of another plane.
+    /// Before the fix, the replay counter was per service: a database created
+    /// next to another database's replay failed its first schema write with
+    /// `NotifyError::IsNotLeader`, after the schema had committed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_replay_on_one_plane_does_not_stop_notifications_on_another() {
+        use crate::raft::state_machine::callback::server::NotifyError;
+        let _callback_guard = crate::raft::client::callback_test_support::CALLBACK_TEST_GUARD
+            .write()
+            .await;
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reserved.local_addr().unwrap().to_string();
+        drop(reserved);
+        let raft_service = RaftService::new(Options {
+            storage: Storage::default(),
+            address: address.clone(),
+            service_id: DEFAULT_SERVICE_ID,
+        });
+        let server = Server::new(&address);
+        server.register_service(&raft_service).await;
+        Server::listen_and_resume(&server).await;
+        assert!(RaftService::start(&raft_service, false).await);
+        raft_service.bootstrap().await;
+
+        let replaying_plane_id = PlaneId::type2(13).unwrap();
+        let live_plane_id = PlaneId::type2(14).unwrap();
+        for plane_id in [replaying_plane_id, live_plane_id] {
+            raft_service
+                .ensure_plane(PlaneSpec { plane_id })
+                .await
+                .expect("type-2 plane should be created")
+                .recover_after_register()
+                .await
+                .expect("type-2 plane should finish its replay");
+        }
+        let live_callback = SMCallback::new_on_plane(10, live_plane_id, raft_service.clone())
+            .await
+            .expect("callback should bind to the live plane");
+        let replaying_runtime = raft_service
+            .runtime_for_plane(replaying_plane_id)
+            .await
+            .unwrap()
+            .expect("replaying plane runtime");
+
+        // Hold the meta lock, so the replay of the other plane stays in progress.
+        let held_meta = replaying_runtime.meta.read().await;
+        let service = raft_service.clone();
+        let replay = tokio::spawn(async move {
+            service
+                .recover_after_register_on_plane(replaying_plane_id)
+                .await
+        });
+        while !raft_service
+            .is_replaying_on_plane(replaying_plane_id)
+            .await
+            .unwrap()
+        {
+            tokio::task::yield_now().await;
+        }
+        assert!(!raft_service.is_replaying_on_plane(live_plane_id).await.unwrap());
+        // No client subscribed, so a leader that sends reports the missing subscription.
+        let result = live_callback.notify(commands::on_trigged::new(), 1).await;
+        assert!(
+            matches!(result, Err(NotifyError::CannotFindSubscription)),
+            "the live plane leader must send its notification: {result:?}"
+        );
+        drop(held_meta);
+        replay
+            .await
+            .unwrap()
+            .expect("the held replay should finish");
+
+        // A replay of the plane itself still stops its notifications.
+        let live_runtime = raft_service
+            .runtime_for_plane(live_plane_id)
+            .await
+            .unwrap()
+            .expect("live plane runtime");
+        live_runtime.replaying.fetch_add(1, Ordering::Relaxed);
+        let result = live_callback.notify(commands::on_trigged::new(), 2).await;
+        assert!(
+            matches!(result, Err(NotifyError::IsNotLeader)),
+            "a replaying plane must not notify: {result:?}"
+        );
+        live_runtime.replaying.fetch_sub(1, Ordering::Relaxed);
+
+        raft_service.shutdown().await;
+        server.shutdown().await;
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn dummy_type2_plane() {
         let _callback_guard = crate::raft::client::callback_test_support::CALLBACK_TEST_GUARD
