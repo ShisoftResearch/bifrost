@@ -41,10 +41,17 @@ pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_DHT_SLOTS) as u64;
 /// authoritative for the whole transfer: the step to `Stable { owner: to }` is
 /// a migration's single commit point, so there is no instant at which a slot is
 /// owned by neither member or by both.
+///
+/// `Sealed` is the last step before that commit point. The donor still owns
+/// the slot, but it must take no more writes for it, so the caller can copy
+/// the last changes and know that the two copies are equal at the flip. A
+/// migration can commit only from `Sealed`. This is the shape of a
+/// CockroachDB lease transfer and of the TiKV `PrepareMerge` step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SlotState {
     Stable { owner: u64 },
     Migrating { from: u64, to: u64 },
+    Sealed { from: u64, to: u64 },
 }
 
 impl SlotState {
@@ -52,15 +59,36 @@ impl SlotState {
     ///
     /// During a migration that is still the donor — which is what makes an
     /// interrupted transfer leave the group correct rather than ambiguous.
+    /// A sealed slot also names its donor: the donor holds the only complete
+    /// copy, and it refuses writes by its own seal.
     pub fn serving_owner(&self) -> u64 {
         match self {
             SlotState::Stable { owner } => *owner,
-            SlotState::Migrating { from, .. } => *from,
+            SlotState::Migrating { from, .. } | SlotState::Sealed { from, .. } => *from,
         }
     }
 
+    /// Tells if a transfer is in flight for this slot, sealed or not.
     pub fn is_migrating(&self) -> bool {
-        matches!(self, SlotState::Migrating { .. })
+        matches!(
+            self,
+            SlotState::Migrating { .. } | SlotState::Sealed { .. }
+        )
+    }
+
+    /// Tells if the donor must refuse writes for this slot.
+    pub fn is_sealed(&self) -> bool {
+        matches!(self, SlotState::Sealed { .. })
+    }
+
+    /// The donor and the recipient of the transfer in flight, if there is one.
+    pub fn transfer(&self) -> Option<(u64, u64)> {
+        match self {
+            SlotState::Stable { .. } => None,
+            SlotState::Migrating { from, to } | SlotState::Sealed { from, to } => {
+                Some((*from, *to))
+            }
+        }
     }
 }
 
@@ -118,9 +146,11 @@ raft_state_machine! {
     def cmd reassign_slots(group: u64, assignments: Vec<(u32, u64)>, from: u64) -> usize;
     def cmd begin_slot_migration(group: u64, slot: u32, from: u64, to: u64) -> Result<(), String>;
     def cmd begin_slot_migrations(group: u64, moves: Vec<(u32, u64, u64)>) -> Vec<(u32, String)>;
+    def cmd seal_slot_migrations(group: u64, slots: Vec<u32>) -> Vec<u32>;
     def cmd complete_slot_migrations(group: u64, slots: Vec<u32>) -> Vec<(u32, u64)>;
     def cmd complete_slot_migration(group: u64, slot: u32) -> Result<u64, String>;
     def cmd abort_slot_migration(group: u64, slot: u32) -> Result<u64, String>;
+    def cmd abort_slot_migrations_from(group: u64, slots: Vec<u32>, from: u64) -> Vec<(u32, Option<SlotState>)>;
     def cmd all_slots_consistent(group: u64) -> Option<HashMap<u32, SlotState>>;
     def cmd set_migration_budget(group: u64, budget: u32);
     def cmd set_migration_freeze(group: u64, frozen: bool);
@@ -148,6 +178,28 @@ impl client::SMClient {
     ) -> Result<(Result<u64, String>, u64), crate::raft::state_machine::master::ExecError> {
         self.execute_command_with_index(commands::complete_slot_migration::new(group, slot))
             .await
+    }
+
+    pub async fn seal_slot_migrations_with_index(
+        &self,
+        group: &u64,
+        slots: &Vec<u32>,
+    ) -> Result<(Vec<u32>, u64), crate::raft::state_machine::master::ExecError> {
+        self.execute_command_with_index(commands::seal_slot_migrations::new(group, slots))
+            .await
+    }
+
+    pub async fn abort_slot_migrations_from_with_index(
+        &self,
+        group: &u64,
+        slots: &Vec<u32>,
+        from: &u64,
+    ) -> Result<(Vec<(u32, Option<SlotState>)>, u64), crate::raft::state_machine::master::ExecError>
+    {
+        self.execute_command_with_index(commands::abort_slot_migrations_from::new(
+            group, slots, from,
+        ))
+        .await
     }
 
     pub async fn complete_slot_migrations_with_index(
@@ -299,6 +351,11 @@ impl StateMachineCmds for Slots {
                     ))
                 }
             }
+            // A sealed slot is past the point where a begin can join it: the
+            // caller that sealed it owns the last copy and the flip.
+            Some(SlotState::Sealed { from, to }) => Err(format!(
+                "slot {slot} is sealed for its handover {from} -> {to}"
+            )),
             None => Err(format!("slot {slot} has no owner to migrate from")),
         };
         future::ready(result).boxed()
@@ -350,6 +407,9 @@ impl StateMachineCmds for Slots {
                         ))
                     }
                 }
+                Some(SlotState::Sealed { from, to }) => Err(format!(
+                    "slot {slot} is sealed for its handover {from} -> {to}"
+                )),
                 None => Err(format!("slot {slot} has no owner to migrate from")),
             };
             if let Err(reason) = outcome {
@@ -359,7 +419,36 @@ impl StateMachineCmds for Slots {
         future::ready(refused).boxed()
     }
 
+    /// Seal many migrations in one command; report the slots that are sealed.
+    ///
+    /// A slot in the result is `Sealed` after this command, also when an
+    /// earlier call sealed it: a retry after a lost response must be safe. A
+    /// slot absent from the result is not migrating, and the caller must not
+    /// copy or commit it.
+    ///
+    /// The seal is recorded here before the donor is told, so a donor that
+    /// restarts reads it and does not serve writes again behind the caller's
+    /// last copy.
+    fn seal_slot_migrations(&mut self, group: u64, slots: Vec<u32>) -> BoxFuture<Vec<u32>> {
+        let table = self.groups.entry(group).or_insert_with(HashMap::new);
+        let mut sealed = Vec::new();
+        for slot in slots {
+            match table.get(&slot).copied() {
+                Some(SlotState::Migrating { from, to }) => {
+                    table.insert(slot, SlotState::Sealed { from, to });
+                    sealed.push(slot);
+                }
+                Some(SlotState::Sealed { .. }) => sealed.push(slot),
+                Some(SlotState::Stable { .. }) | None => {}
+            }
+        }
+        future::ready(sealed).boxed()
+    }
+
     /// Commit many migrations in one command; report each slot's new owner.
+    ///
+    /// Only a sealed slot commits. A slot that is still `Migrating` has a
+    /// donor that takes writes, so its two copies can differ.
     ///
     /// A slot absent from the result did not commit, and the caller must treat it
     /// as still the donor's. Because this is a *command*, its return value is
@@ -374,7 +463,7 @@ impl StateMachineCmds for Slots {
         let table = self.groups.entry(group).or_insert_with(HashMap::new);
         let mut committed = Vec::new();
         for slot in slots {
-            if let Some(SlotState::Migrating { to, .. }) = table.get(&slot) {
+            if let Some(SlotState::Sealed { to, .. }) = table.get(&slot) {
                 let owner = *to;
                 table.insert(slot, SlotState::Stable { owner });
                 committed.push((slot, owner));
@@ -383,15 +472,19 @@ impl StateMachineCmds for Slots {
         future::ready(committed).boxed()
     }
 
-    /// A migration's commit point. Returns the new owner.
+    /// A migration's commit point. Returns the new owner. Only a sealed slot
+    /// commits.
     fn complete_slot_migration(&mut self, group: u64, slot: u32) -> BoxFuture<Result<u64, String>> {
         let slots = self.groups.entry(group).or_insert_with(HashMap::new);
         let result = match slots.get(&slot) {
-            Some(SlotState::Migrating { to, .. }) => {
+            Some(SlotState::Sealed { to, .. }) => {
                 let owner = *to;
                 slots.insert(slot, SlotState::Stable { owner });
                 Ok(owner)
             }
+            Some(SlotState::Migrating { from, to }) => Err(format!(
+                "slot {slot} is migrating {from} -> {to} but is not sealed"
+            )),
             Some(SlotState::Stable { owner }) => Err(format!(
                 "slot {slot} is not migrating; it is stable on {owner}"
             )),
@@ -401,11 +494,11 @@ impl StateMachineCmds for Slots {
     }
 
     /// Give up on a transfer and leave the slot with its donor. Safe precisely
-    /// because the donor never stopped being authoritative.
+    /// because the donor never stopped being authoritative, sealed or not.
     fn abort_slot_migration(&mut self, group: u64, slot: u32) -> BoxFuture<Result<u64, String>> {
         let slots = self.groups.entry(group).or_insert_with(HashMap::new);
         let result = match slots.get(&slot) {
-            Some(SlotState::Migrating { from, .. }) => {
+            Some(SlotState::Migrating { from, .. }) | Some(SlotState::Sealed { from, .. }) => {
                 let owner = *from;
                 slots.insert(slot, SlotState::Stable { owner });
                 Ok(owner)
@@ -416,6 +509,32 @@ impl StateMachineCmds for Slots {
             None => Err(format!("slot {slot} has no placement")),
         };
         future::ready(result).boxed()
+    }
+
+    /// Abort the transfers of these slots whose donor is `from`; report the
+    /// state of each slot after the command.
+    ///
+    /// This is the donor's own way out of a seal whose caller stopped. The
+    /// answer comes from the apply of this command, so the donor can act on
+    /// it: `Stable` on itself means that it serves the slot again, `Stable`
+    /// on another member means that the handover committed first.
+    fn abort_slot_migrations_from(
+        &mut self,
+        group: u64,
+        slots: Vec<u32>,
+        from: u64,
+    ) -> BoxFuture<Vec<(u32, Option<SlotState>)>> {
+        let table = self.groups.entry(group).or_insert_with(HashMap::new);
+        let mut states = Vec::with_capacity(slots.len());
+        for slot in slots {
+            if let Some((donor, _)) = table.get(&slot).and_then(SlotState::transfer) {
+                if donor == from {
+                    table.insert(slot, SlotState::Stable { owner: from });
+                }
+            }
+            states.push((slot, table.get(&slot).copied()));
+        }
+        future::ready(states).boxed()
     }
 
     fn set_migration_budget(&mut self, group: u64, budget: u32) -> BoxFuture<()> {
@@ -662,6 +781,16 @@ mod tests {
         assert_eq!(block_on(sm.slots_owned_by(G, A)), vec![5]);
         assert!(block_on(sm.slots_owned_by(G, B)).is_empty());
 
+        assert!(
+            block_on(sm.complete_slot_migration(G, 5)).is_err(),
+            "a slot whose donor still takes writes must not commit"
+        );
+        assert_eq!(block_on(sm.seal_slot_migrations(G, vec![5])), vec![5]);
+        assert_eq!(
+            block_on(sm.slot_state(G, 5)).unwrap().serving_owner(),
+            A,
+            "a sealed slot still names its donor"
+        );
         assert_eq!(block_on(sm.complete_slot_migration(G, 5)), Ok(B));
         assert_eq!(block_on(sm.slot_state(G, 5)).unwrap().serving_owner(), B);
         assert!(block_on(sm.slots_owned_by(G, A)).is_empty());
@@ -738,7 +867,14 @@ mod tests {
             "a refused entry must not disturb the slot"
         );
 
-        // Only the slot that actually began commits, and the command reports it.
+        // Only the slot that actually began seals and commits, and each
+        // command reports it.
+        assert_eq!(
+            block_on(sm.complete_slot_migrations(G, vec![1, 2, 3, 9])),
+            Vec::new(),
+            "a bulk complete must not commit a slot that is not sealed"
+        );
+        assert_eq!(block_on(sm.seal_slot_migrations(G, vec![1, 2, 3, 9])), vec![1]);
         let committed = block_on(sm.complete_slot_migrations(G, vec![1, 2, 3, 9]));
         assert_eq!(committed, vec![(1, B)]);
         assert_eq!(
@@ -801,6 +937,68 @@ mod tests {
         assert_eq!(block_on(sm.reassign_slots(G, assignments, A)), 64);
         assert!(block_on(sm.slots_owned_by(G, A)).is_empty());
         assert_eq!(block_on(sm.slots_owned_by(G, B)).len(), 64);
+    }
+
+    #[test]
+    fn a_sealed_slot_aborts_back_to_its_donor_and_refuses_a_new_begin() {
+        let mut sm = new_sm();
+        block_on(sm.set_slot_owner(G, 5, A));
+        block_on(sm.begin_slot_migration(G, 5, A, B)).expect("begin");
+        assert_eq!(block_on(sm.seal_slot_migrations(G, vec![5])), vec![5]);
+        assert_eq!(
+            block_on(sm.seal_slot_migrations(G, vec![5])),
+            vec![5],
+            "a repeated seal after a lost response must report the slot again"
+        );
+        assert_eq!(
+            block_on(sm.slot_state(G, 5)),
+            Some(SlotState::Sealed { from: A, to: B })
+        );
+        assert!(block_on(sm.slot_state(G, 5)).unwrap().is_migrating());
+        assert!(
+            block_on(sm.begin_slot_migration(G, 5, A, B)).is_err(),
+            "a begin must not join a sealed handover"
+        );
+        assert_eq!(
+            block_on(sm.migration_control(G)).in_flight,
+            1,
+            "a sealed slot still counts against the migration budget"
+        );
+
+        assert_eq!(block_on(sm.abort_slot_migration(G, 5)), Ok(A));
+        assert_eq!(
+            block_on(sm.slot_state(G, 5)),
+            Some(SlotState::Stable { owner: A })
+        );
+    }
+
+    #[test]
+    fn a_donor_abort_reports_the_state_that_it_left() {
+        let mut sm = new_sm();
+        for slot in 0..4 {
+            block_on(sm.set_slot_owner(G, slot, A));
+        }
+        // Slot 0 is sealed, slot 1 is migrating, slot 2 committed before the
+        // donor asked, slot 3 has another donor, slot 9 has no placement.
+        block_on(sm.begin_slot_migration(G, 0, A, B)).expect("begin 0");
+        block_on(sm.begin_slot_migration(G, 1, A, B)).expect("begin 1");
+        block_on(sm.begin_slot_migration(G, 2, A, B)).expect("begin 2");
+        assert_eq!(block_on(sm.seal_slot_migrations(G, vec![0, 2])), vec![0, 2]);
+        block_on(sm.complete_slot_migration(G, 2)).expect("commit 2");
+        block_on(sm.set_slot_owner(G, 3, C));
+        block_on(sm.begin_slot_migration(G, 3, C, B)).expect("begin 3");
+
+        let states = block_on(sm.abort_slot_migrations_from(G, vec![0, 1, 2, 3, 9], A));
+        assert_eq!(
+            states,
+            vec![
+                (0, Some(SlotState::Stable { owner: A })),
+                (1, Some(SlotState::Stable { owner: A })),
+                (2, Some(SlotState::Stable { owner: B })),
+                (3, Some(SlotState::Migrating { from: C, to: B })),
+                (9, None),
+            ]
+        );
     }
 
     #[test]
@@ -908,6 +1106,7 @@ mod control_tests {
             .expect("retrying an in-flight migration is not a new one");
 
         // Finishing one frees its budget slot.
+        assert_eq!(block_on(sm.seal_slot_migrations(G, vec![0])), vec![0]);
         block_on(sm.complete_slot_migration(G, 0)).expect("commit");
         block_on(sm.begin_slot_migration(G, 2, A, B)).expect("room again after a commit");
 
@@ -953,6 +1152,11 @@ mod control_tests {
         // all still function, because a freeze should empty the cluster of
         // moving slots, not strand them mid-transfer.
         block_on(sm.begin_slot_migration(G, 0, A, B)).expect("retry survives the freeze");
+        assert_eq!(
+            block_on(sm.seal_slot_migrations(G, vec![0])),
+            vec![0],
+            "seal survives the freeze"
+        );
         block_on(sm.complete_slot_migration(G, 0)).expect("commit survives the freeze");
 
         block_on(sm.set_migration_freeze(G, false));
