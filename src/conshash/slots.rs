@@ -47,11 +47,16 @@ pub static DEFAULT_SERVICE_ID: u64 = hash_ident!(BIFROST_DHT_SLOTS) as u64;
 /// the last changes and know that the two copies are equal at the flip. A
 /// migration can commit only from `Sealed`. This is the shape of a
 /// CockroachDB lease transfer and of the TiKV `PrepareMerge` step.
+///
+/// `token` names the handover that sealed the slot. Only that handover can
+/// commit it. A caller that was delayed past its own abort must not commit
+/// the seal of a later handover of the same slot, which has not made its
+/// last copy yet. This is the role of the region epoch in TiKV.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SlotState {
     Stable { owner: u64 },
     Migrating { from: u64, to: u64 },
-    Sealed { from: u64, to: u64 },
+    Sealed { from: u64, to: u64, token: u64 },
 }
 
 impl SlotState {
@@ -85,7 +90,7 @@ impl SlotState {
     pub fn transfer(&self) -> Option<(u64, u64)> {
         match self {
             SlotState::Stable { .. } => None,
-            SlotState::Migrating { from, to } | SlotState::Sealed { from, to } => {
+            SlotState::Migrating { from, to } | SlotState::Sealed { from, to, .. } => {
                 Some((*from, *to))
             }
         }
@@ -146,9 +151,9 @@ raft_state_machine! {
     def cmd reassign_slots(group: u64, assignments: Vec<(u32, u64)>, from: u64) -> usize;
     def cmd begin_slot_migration(group: u64, slot: u32, from: u64, to: u64) -> Result<(), String>;
     def cmd begin_slot_migrations(group: u64, moves: Vec<(u32, u64, u64)>) -> Vec<(u32, String)>;
-    def cmd seal_slot_migrations(group: u64, slots: Vec<u32>) -> Vec<u32>;
-    def cmd complete_slot_migrations(group: u64, slots: Vec<u32>) -> Vec<(u32, u64)>;
-    def cmd complete_slot_migration(group: u64, slot: u32) -> Result<u64, String>;
+    def cmd seal_slot_migrations(group: u64, slots: Vec<u32>, token: u64) -> Vec<u32>;
+    def cmd complete_slot_migrations(group: u64, slots: Vec<u32>, token: u64) -> Vec<(u32, u64)>;
+    def cmd complete_slot_migration(group: u64, slot: u32, token: u64) -> Result<u64, String>;
     def cmd abort_slot_migration(group: u64, slot: u32) -> Result<u64, String>;
     def cmd abort_slot_migrations_from(group: u64, slots: Vec<u32>, from: u64) -> Vec<(u32, Option<SlotState>)>;
     def cmd all_slots_consistent(group: u64) -> Option<HashMap<u32, SlotState>>;
@@ -175,8 +180,9 @@ impl client::SMClient {
         &self,
         group: &u64,
         slot: &u32,
+        token: &u64,
     ) -> Result<(Result<u64, String>, u64), crate::raft::state_machine::master::ExecError> {
-        self.execute_command_with_index(commands::complete_slot_migration::new(group, slot))
+        self.execute_command_with_index(commands::complete_slot_migration::new(group, slot, token))
             .await
     }
 
@@ -184,8 +190,9 @@ impl client::SMClient {
         &self,
         group: &u64,
         slots: &Vec<u32>,
+        token: &u64,
     ) -> Result<(Vec<u32>, u64), crate::raft::state_machine::master::ExecError> {
-        self.execute_command_with_index(commands::seal_slot_migrations::new(group, slots))
+        self.execute_command_with_index(commands::seal_slot_migrations::new(group, slots, token))
             .await
     }
 
@@ -206,8 +213,9 @@ impl client::SMClient {
         &self,
         group: &u64,
         slots: &Vec<u32>,
+        token: &u64,
     ) -> Result<(Vec<(u32, u64)>, u64), crate::raft::state_machine::master::ExecError> {
-        self.execute_command_with_index(commands::complete_slot_migrations::new(group, slots))
+        self.execute_command_with_index(commands::complete_slot_migrations::new(group, slots, token))
             .await
     }
 }
@@ -353,7 +361,7 @@ impl StateMachineCmds for Slots {
             }
             // A sealed slot is past the point where a begin can join it: the
             // caller that sealed it owns the last copy and the flip.
-            Some(SlotState::Sealed { from, to }) => Err(format!(
+            Some(SlotState::Sealed { from, to, .. }) => Err(format!(
                 "slot {slot} is sealed for its handover {from} -> {to}"
             )),
             None => Err(format!("slot {slot} has no owner to migrate from")),
@@ -407,7 +415,7 @@ impl StateMachineCmds for Slots {
                         ))
                     }
                 }
-                Some(SlotState::Sealed { from, to }) => Err(format!(
+                Some(SlotState::Sealed { from, to, .. }) => Err(format!(
                     "slot {slot} is sealed for its handover {from} -> {to}"
                 )),
                 None => Err(format!("slot {slot} has no owner to migrate from")),
@@ -421,25 +429,31 @@ impl StateMachineCmds for Slots {
 
     /// Seal many migrations in one command; report the slots that are sealed.
     ///
-    /// A slot in the result is `Sealed` after this command, also when an
-    /// earlier call sealed it: a retry after a lost response must be safe. A
-    /// slot absent from the result is not migrating, and the caller must not
-    /// copy or commit it.
+    /// A slot in the result is `Sealed` by `token` after this command, also
+    /// when an earlier call with the same token sealed it: a retry after a
+    /// lost response must be safe. A slot absent from the result is not
+    /// migrating, or another handover sealed it. The caller must not copy or
+    /// commit it.
     ///
     /// The seal is recorded here before the donor is told, so a donor that
     /// restarts reads it and does not serve writes again behind the caller's
     /// last copy.
-    fn seal_slot_migrations(&mut self, group: u64, slots: Vec<u32>) -> BoxFuture<Vec<u32>> {
+    fn seal_slot_migrations(
+        &mut self,
+        group: u64,
+        slots: Vec<u32>,
+        token: u64,
+    ) -> BoxFuture<Vec<u32>> {
         let table = self.groups.entry(group).or_insert_with(HashMap::new);
         let mut sealed = Vec::new();
         for slot in slots {
             match table.get(&slot).copied() {
                 Some(SlotState::Migrating { from, to }) => {
-                    table.insert(slot, SlotState::Sealed { from, to });
+                    table.insert(slot, SlotState::Sealed { from, to, token });
                     sealed.push(slot);
                 }
-                Some(SlotState::Sealed { .. }) => sealed.push(slot),
-                Some(SlotState::Stable { .. }) | None => {}
+                Some(SlotState::Sealed { token: by, .. }) if by == token => sealed.push(slot),
+                Some(SlotState::Sealed { .. }) | Some(SlotState::Stable { .. }) | None => {}
             }
         }
         future::ready(sealed).boxed()
@@ -459,11 +473,15 @@ impl StateMachineCmds for Slots {
         &mut self,
         group: u64,
         slots: Vec<u32>,
+        token: u64,
     ) -> BoxFuture<Vec<(u32, u64)>> {
         let table = self.groups.entry(group).or_insert_with(HashMap::new);
         let mut committed = Vec::new();
         for slot in slots {
-            if let Some(SlotState::Sealed { to, .. }) = table.get(&slot) {
+            if let Some(SlotState::Sealed { to, token: by, .. }) = table.get(&slot) {
+                if *by != token {
+                    continue;
+                }
                 let owner = *to;
                 table.insert(slot, SlotState::Stable { owner });
                 committed.push((slot, owner));
@@ -472,16 +490,24 @@ impl StateMachineCmds for Slots {
         future::ready(committed).boxed()
     }
 
-    /// A migration's commit point. Returns the new owner. Only a sealed slot
-    /// commits.
-    fn complete_slot_migration(&mut self, group: u64, slot: u32) -> BoxFuture<Result<u64, String>> {
+    /// A migration's commit point. Returns the new owner. Only a slot that
+    /// the handover `token` sealed commits.
+    fn complete_slot_migration(
+        &mut self,
+        group: u64,
+        slot: u32,
+        token: u64,
+    ) -> BoxFuture<Result<u64, String>> {
         let slots = self.groups.entry(group).or_insert_with(HashMap::new);
         let result = match slots.get(&slot) {
-            Some(SlotState::Sealed { to, .. }) => {
+            Some(SlotState::Sealed { to, token: by, .. }) if *by == token => {
                 let owner = *to;
                 slots.insert(slot, SlotState::Stable { owner });
                 Ok(owner)
             }
+            Some(SlotState::Sealed { from, to, .. }) => Err(format!(
+                "slot {slot} is sealed {from} -> {to} by another handover"
+            )),
             Some(SlotState::Migrating { from, to }) => Err(format!(
                 "slot {slot} is migrating {from} -> {to} but is not sealed"
             )),
@@ -675,6 +701,8 @@ mod tests {
     const OTHER: u64 = 8;
     const A: u64 = 100;
     const B: u64 = 200;
+    /// The token of the handover in these tests.
+    const T: u64 = 11;
     const C: u64 = 300;
 
     fn new_sm() -> Slots {
@@ -782,16 +810,16 @@ mod tests {
         assert!(block_on(sm.slots_owned_by(G, B)).is_empty());
 
         assert!(
-            block_on(sm.complete_slot_migration(G, 5)).is_err(),
+            block_on(sm.complete_slot_migration(G, 5, T)).is_err(),
             "a slot whose donor still takes writes must not commit"
         );
-        assert_eq!(block_on(sm.seal_slot_migrations(G, vec![5])), vec![5]);
+        assert_eq!(block_on(sm.seal_slot_migrations(G, vec![5], T)), vec![5]);
         assert_eq!(
             block_on(sm.slot_state(G, 5)).unwrap().serving_owner(),
             A,
             "a sealed slot still names its donor"
         );
-        assert_eq!(block_on(sm.complete_slot_migration(G, 5)), Ok(B));
+        assert_eq!(block_on(sm.complete_slot_migration(G, 5, T)), Ok(B));
         assert_eq!(block_on(sm.slot_state(G, 5)).unwrap().serving_owner(), B);
         assert!(block_on(sm.slots_owned_by(G, A)).is_empty());
         assert_eq!(block_on(sm.slots_owned_by(G, B)), vec![5]);
@@ -870,12 +898,12 @@ mod tests {
         // Only the slot that actually began seals and commits, and each
         // command reports it.
         assert_eq!(
-            block_on(sm.complete_slot_migrations(G, vec![1, 2, 3, 9])),
+            block_on(sm.complete_slot_migrations(G, vec![1, 2, 3, 9], T)),
             Vec::new(),
             "a bulk complete must not commit a slot that is not sealed"
         );
-        assert_eq!(block_on(sm.seal_slot_migrations(G, vec![1, 2, 3, 9])), vec![1]);
-        let committed = block_on(sm.complete_slot_migrations(G, vec![1, 2, 3, 9]));
+        assert_eq!(block_on(sm.seal_slot_migrations(G, vec![1, 2, 3, 9], T)), vec![1]);
+        let committed = block_on(sm.complete_slot_migrations(G, vec![1, 2, 3, 9], T));
         assert_eq!(committed, vec![(1, B)]);
         assert_eq!(
             block_on(sm.slot_state(G, 1)),
@@ -939,20 +967,46 @@ mod tests {
         assert_eq!(block_on(sm.slots_owned_by(G, B)).len(), 64);
     }
 
+    /// A caller that was delayed past its own abort must not commit the seal
+    /// of a later handover of the same slot.
+    #[test]
+    fn only_the_handover_that_sealed_a_slot_commits_it() {
+        const LATER: u64 = T + 1;
+        let mut sm = new_sm();
+        block_on(sm.set_slot_owner(G, 5, A));
+        block_on(sm.begin_slot_migration(G, 5, A, B)).expect("begin");
+        assert_eq!(block_on(sm.seal_slot_migrations(G, vec![5], T)), vec![5]);
+        block_on(sm.abort_slot_migration(G, 5)).expect("the donor ends the first handover");
+
+        block_on(sm.begin_slot_migration(G, 5, A, B)).expect("a later handover begins");
+        assert_eq!(block_on(sm.seal_slot_migrations(G, vec![5], LATER)), vec![5]);
+        assert!(
+            block_on(sm.seal_slot_migrations(G, vec![5], T)).is_empty(),
+            "the first handover must not take the seal of the later one as its own"
+        );
+        assert!(block_on(sm.complete_slot_migration(G, 5, T)).is_err());
+        assert!(block_on(sm.complete_slot_migrations(G, vec![5], T)).is_empty());
+        assert_eq!(
+            block_on(sm.slot_state(G, 5)),
+            Some(SlotState::Sealed { from: A, to: B, token: LATER })
+        );
+        assert_eq!(block_on(sm.complete_slot_migration(G, 5, LATER)), Ok(B));
+    }
+
     #[test]
     fn a_sealed_slot_aborts_back_to_its_donor_and_refuses_a_new_begin() {
         let mut sm = new_sm();
         block_on(sm.set_slot_owner(G, 5, A));
         block_on(sm.begin_slot_migration(G, 5, A, B)).expect("begin");
-        assert_eq!(block_on(sm.seal_slot_migrations(G, vec![5])), vec![5]);
+        assert_eq!(block_on(sm.seal_slot_migrations(G, vec![5], T)), vec![5]);
         assert_eq!(
-            block_on(sm.seal_slot_migrations(G, vec![5])),
+            block_on(sm.seal_slot_migrations(G, vec![5], T)),
             vec![5],
             "a repeated seal after a lost response must report the slot again"
         );
         assert_eq!(
             block_on(sm.slot_state(G, 5)),
-            Some(SlotState::Sealed { from: A, to: B })
+            Some(SlotState::Sealed { from: A, to: B, token: T })
         );
         assert!(block_on(sm.slot_state(G, 5)).unwrap().is_migrating());
         assert!(
@@ -983,8 +1037,8 @@ mod tests {
         block_on(sm.begin_slot_migration(G, 0, A, B)).expect("begin 0");
         block_on(sm.begin_slot_migration(G, 1, A, B)).expect("begin 1");
         block_on(sm.begin_slot_migration(G, 2, A, B)).expect("begin 2");
-        assert_eq!(block_on(sm.seal_slot_migrations(G, vec![0, 2])), vec![0, 2]);
-        block_on(sm.complete_slot_migration(G, 2)).expect("commit 2");
+        assert_eq!(block_on(sm.seal_slot_migrations(G, vec![0, 2], T)), vec![0, 2]);
+        block_on(sm.complete_slot_migration(G, 2, T)).expect("commit 2");
         block_on(sm.set_slot_owner(G, 3, C));
         block_on(sm.begin_slot_migration(G, 3, C, B)).expect("begin 3");
 
@@ -1005,9 +1059,9 @@ mod tests {
     fn completing_or_aborting_a_settled_slot_is_an_error() {
         let mut sm = new_sm();
         block_on(sm.set_slot_owner(G, 5, A));
-        assert!(block_on(sm.complete_slot_migration(G, 5)).is_err());
+        assert!(block_on(sm.complete_slot_migration(G, 5, T)).is_err());
         assert!(block_on(sm.abort_slot_migration(G, 5)).is_err());
-        assert!(block_on(sm.complete_slot_migration(G, 9)).is_err());
+        assert!(block_on(sm.complete_slot_migration(G, 9, T)).is_err());
     }
 
     #[test]
@@ -1074,6 +1128,8 @@ mod control_tests {
     const G: u64 = 7;
     const A: u64 = 100;
     const B: u64 = 200;
+    /// The token of the handover in these tests.
+    const T: u64 = 11;
     const C: u64 = 300;
 
     fn placed_sm(slots: u32) -> Slots {
@@ -1106,8 +1162,8 @@ mod control_tests {
             .expect("retrying an in-flight migration is not a new one");
 
         // Finishing one frees its budget slot.
-        assert_eq!(block_on(sm.seal_slot_migrations(G, vec![0])), vec![0]);
-        block_on(sm.complete_slot_migration(G, 0)).expect("commit");
+        assert_eq!(block_on(sm.seal_slot_migrations(G, vec![0], T)), vec![0]);
+        block_on(sm.complete_slot_migration(G, 0, T)).expect("commit");
         block_on(sm.begin_slot_migration(G, 2, A, B)).expect("room again after a commit");
 
         assert_eq!(
@@ -1153,11 +1209,11 @@ mod control_tests {
         // moving slots, not strand them mid-transfer.
         block_on(sm.begin_slot_migration(G, 0, A, B)).expect("retry survives the freeze");
         assert_eq!(
-            block_on(sm.seal_slot_migrations(G, vec![0])),
+            block_on(sm.seal_slot_migrations(G, vec![0], T)),
             vec![0],
             "seal survives the freeze"
         );
-        block_on(sm.complete_slot_migration(G, 0)).expect("commit survives the freeze");
+        block_on(sm.complete_slot_migration(G, 0, T)).expect("commit survives the freeze");
 
         block_on(sm.set_migration_freeze(G, false));
         block_on(sm.begin_slot_migration(G, 1, A, B)).expect("unfrozen works again");
